@@ -696,7 +696,7 @@ namespace
 				alias->executingScript = true;
 				m_active               = true;
 				runtime->markAliasRuntimeStateChanged(m_pluginId, m_runtimeLocationHandle, m_ruleRuntimeId,
-				                                      m_indexHint);
+				                                      m_indexHint, LuaCallbackRuleSnapshotPart::RuntimeState);
 			}
 
 			~AliasExecutionScope()
@@ -712,7 +712,8 @@ namespace
 					if (m_countInvocation)
 						resolved->invocationCount++;
 					m_runtime->markAliasRuntimeStateChanged(m_pluginId, m_runtimeLocationHandle,
-					                                        m_ruleRuntimeId, m_indexHint);
+					                                        m_ruleRuntimeId, m_indexHint,
+					                                        LuaCallbackRuleSnapshotPart::RuntimeState);
 				}
 			}
 
@@ -749,7 +750,8 @@ namespace
 				trigger->executingScript = true;
 				m_active                 = true;
 				runtime->markTriggerRuntimeStateChanged(m_pluginId, m_runtimeLocationHandle, m_ruleRuntimeId,
-				                                        m_indexHint);
+				                                        m_indexHint,
+				                                        LuaCallbackRuleSnapshotPart::RuntimeState);
 			}
 
 			~TriggerExecutionScope()
@@ -765,7 +767,8 @@ namespace
 					if (m_countInvocation)
 						resolved->invocationCount++;
 					m_runtime->markTriggerRuntimeStateChanged(m_pluginId, m_runtimeLocationHandle,
-					                                          m_ruleRuntimeId, m_indexHint);
+					                                          m_ruleRuntimeId, m_indexHint,
+					                                          LuaCallbackRuleSnapshotPart::RuntimeState);
 				}
 			}
 
@@ -802,7 +805,7 @@ namespace
 				timer->executingScript = true;
 				m_active               = true;
 				runtime->markTimerRuntimeStateChanged(m_pluginId, m_runtimeLocationHandle, m_ruleRuntimeId,
-				                                      m_indexHint);
+				                                      m_indexHint, LuaCallbackRuleSnapshotPart::RuntimeState);
 			}
 
 			~TimerExecutionScope()
@@ -818,7 +821,8 @@ namespace
 					if (m_countInvocation)
 						resolved->invocationCount++;
 					m_runtime->markTimerRuntimeStateChanged(m_pluginId, m_runtimeLocationHandle,
-					                                        m_ruleRuntimeId, m_indexHint);
+					                                        m_ruleRuntimeId, m_indexHint,
+					                                        LuaCallbackRuleSnapshotPart::RuntimeState);
 				}
 			}
 
@@ -1202,38 +1206,38 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 			AliasRoutine
 		};
 
-		QPointer<WorldCommandProcessor>                   processor;
-		QPointer<WorldRuntime>                            runtime;
-		QString                                           line;
-		bool                                              echoInput{false};
-		bool                                              echoAlias{false};
-		bool                                              omitFromLog{false};
-		bool                                              omitFromHistory{false};
-		QVector<Scope>                                    scopes;
-		qsizetype                                         scopeIndex{0};
-		QVector<AliasEvaluationPlanEntry>                 plan;
-		qsizetype                                         planIndex{0};
-		bool                                              scopeMatched{false};
-		bool                                              anyAliasMatched{false};
-		QVector<AliasRef>                                 matchedAliases;
-		QVector<AliasRef>                                 oneShotAliases;
-		QVector<quint64>                                  reservedOneShotRuntimeIds;
-		qsizetype                                         routineIndex{0};
-		QHash<QString, bool>                              worldFunctionPresence;
-		Phase                                             phase{Phase::Aliases};
-		PendingAction                                     pendingAction{PendingAction::None};
-		quint64                                           pendingAliasRuntimeId{0};
-		quint64                                           pendingAliasRuntimeLocationHandle{0};
-		QString                                           pendingPluginId;
-		int                                               pendingIndexHint{-1};
-		bool                                              pendingKeepEvaluating{false};
-		std::unique_ptr<AliasExecutionScope>              executionScope;
-		QHash<quint64, std::tuple<quint64, quint64, int>> changedAliasRuntimeLocations;
-		bool                                              fullAliasRuntimeStatePublicationRequired{false};
-		quint64                                           generation{0};
-		CallerContextRunner                               callerContext;
-		bool                                              advancing{false};
-		bool                                              advanceRequested{false};
+		QPointer<WorldCommandProcessor>        processor;
+		QPointer<WorldRuntime>                 runtime;
+		QString                                line;
+		bool                                   echoInput{false};
+		bool                                   echoAlias{false};
+		bool                                   omitFromLog{false};
+		bool                                   omitFromHistory{false};
+		QVector<Scope>                         scopes;
+		qsizetype                              scopeIndex{0};
+		QVector<AliasEvaluationPlanEntry>      plan;
+		qsizetype                              planIndex{0};
+		bool                                   scopeMatched{false};
+		bool                                   anyAliasMatched{false};
+		QVector<AliasRef>                      matchedAliases;
+		QVector<AliasRef>                      oneShotAliases;
+		QVector<quint64>                       reservedOneShotRuntimeIds;
+		qsizetype                              routineIndex{0};
+		QHash<QString, bool>                   worldFunctionPresence;
+		Phase                                  phase{Phase::Aliases};
+		PendingAction                          pendingAction{PendingAction::None};
+		quint64                                pendingAliasRuntimeId{0};
+		quint64                                pendingAliasRuntimeLocationHandle{0};
+		QString                                pendingPluginId;
+		int                                    pendingIndexHint{-1};
+		bool                                   pendingKeepEvaluating{false};
+		std::unique_ptr<AliasExecutionScope>   executionScope;
+		QVector<LuaCallbackRuleSnapshotChange> changedAliasRuntimeLocations;
+		bool                                   fullAliasRuntimeStatePublicationRequired{false};
+		quint64                                generation{0};
+		CallerContextRunner                    callerContext;
+		bool                                   advancing{false};
+		bool                                   advanceRequested{false};
 
 		~AliasEvaluationSequence()
 		{
@@ -1286,13 +1290,22 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 		}
 
 		void recordRuntimeStateChange(const quint64 runtimeLocationHandle, const quint64 runtimeId,
-		                              const int indexHint)
+		                              const int indexHint, const LuaCallbackRuleSnapshotParts parts)
 		{
 			if (runtimeLocationHandle == 0 || runtimeId == 0)
 				fullAliasRuntimeStatePublicationRequired = true;
+			else if (!changedAliasRuntimeLocations.isEmpty() &&
+			         changedAliasRuntimeLocations.constLast().runtimeLocationHandle ==
+			             runtimeLocationHandle &&
+			         changedAliasRuntimeLocations.constLast().runtimeId == runtimeId)
+			{
+				changedAliasRuntimeLocations.last().indexHint = indexHint;
+				changedAliasRuntimeLocations.last().parts |= parts;
+			}
 			else
-				changedAliasRuntimeLocations.insert(runtimeLocationHandle,
-				                                    {runtimeLocationHandle, runtimeId, indexHint});
+			{
+				changedAliasRuntimeLocations.push_back({runtimeLocationHandle, runtimeId, indexHint, parts});
+			}
 		}
 
 		void publishRuntimeStateChanges()
@@ -1304,13 +1317,7 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 			if (fullAliasRuntimeStatePublicationRequired)
 				runtime->markAliasRuntimeStateChanged(pluginId);
 			else
-			{
-				QVector<std::tuple<quint64, quint64, int>> runtimeLocations;
-				runtimeLocations.reserve(changedAliasRuntimeLocations.size());
-				for (const auto &location : std::as_const(changedAliasRuntimeLocations))
-					runtimeLocations.push_back(location);
-				runtime->markAliasRuntimeStatesChanged(pluginId, runtimeLocations);
-			}
+				runtime->markAliasRuntimeStatesChanged(pluginId, changedAliasRuntimeLocations);
 			changedAliasRuntimeLocations.clear();
 			fullAliasRuntimeStatePublicationRequired = false;
 		}
@@ -1470,7 +1477,7 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 				{
 					alias->lastMatchWildcards.clear();
 					recordRuntimeStateChange(planned.runtimeLocationHandle, planned.runtimeId,
-					                         planned.decoded.index);
+					                         planned.decoded.index, LuaCallbackRuleSnapshotPart::DetailState);
 				}
 				const QString          pattern = decoded.isRegexp
 				                                     ? decoded.matchText
@@ -1491,7 +1498,8 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 						alias->matchCount      = matchCount;
 						alias->matchAttempts   = matchAttempts;
 						recordRuntimeStateChange(planned.runtimeLocationHandle, planned.runtimeId,
-						                         planned.decoded.index);
+						                         planned.decoded.index,
+						                         LuaCallbackRuleSnapshotPart::RuntimeState);
 					}
 					continue;
 				}
@@ -1514,8 +1522,9 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 				alias->lastMatchTarget    = line;
 				alias->lastMatchWildcards = fixedWildcards;
 				alias->lastMatched        = QDateTime::currentDateTime();
-				recordRuntimeStateChange(planned.runtimeLocationHandle, planned.runtimeId,
-				                         planned.decoded.index);
+				recordRuntimeStateChange(
+				    planned.runtimeLocationHandle, planned.runtimeId, planned.decoded.index,
+				    LuaCallbackRuleSnapshotPart::RuntimeState | LuaCallbackRuleSnapshotPart::DetailState);
 				if (!scope.pluginId.isEmpty())
 					runtime->setPluginAliasWildcards(scope.pluginId, decoded.scriptLabel, fixedWildcards,
 					                                 fixedNamed);
@@ -1893,7 +1902,7 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 			nextIndex = 0;
 			QList<WorldRuntime::Timer> &timers =
 			    plugin ? plugin->timers : WorldCommandProcessorMutationAccess::timers(*runtime);
-			QVector<std::tuple<quint64, quint64, int>> changedRuntimeLocations;
+			QVector<LuaCallbackRuleSnapshotChange> changedRuntimeLocations;
 			for (int index = 0; index < timers.size(); ++index)
 			{
 				WorldRuntime::Timer &timer = timers[index];
@@ -1901,7 +1910,8 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 				    QMudTimerScheduling::evaluateTimerDue(timer, evaluationTime, connected);
 				if (evaluation.runtimeStateChanged)
 				{
-					changedRuntimeLocations.push_back({timer.runtimeLocationHandle, timer.runtimeId, index});
+					changedRuntimeLocations.push_back({timer.runtimeLocationHandle, timer.runtimeId, index,
+					                                   LuaCallbackRuleSnapshotPart::DetailState});
 				}
 				if (!evaluation.due || timer.runtimeId == 0)
 					continue;
@@ -2013,11 +2023,15 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 			const QString                label        = attrs.value(QStringLiteral("name")).trimmed();
 			const bool omitFromOutput = isEnabledValue(attrs.value(QStringLiteral("omit_from_output")));
 			const bool omitFromLog    = isEnabledValue(attrs.value(QStringLiteral("omit_from_log")));
-			if (isEnabledValue(attrs.value(QStringLiteral("one_shot"))))
+			const bool oneShot        = isEnabledValue(attrs.value(QStringLiteral("one_shot")));
+			if (oneShot)
 				timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 			QMudTimerScheduling::applyTimerFiredState(timer, evaluationTime);
 			runtime->markTimerRuntimeStateChanged(current.pluginId, current.runtimeLocationHandle,
-			                                      current.runtimeId, current.indexHint);
+			                                      current.runtimeId, current.indexHint,
+			                                      oneShot ? luaCallbackAllRuleSnapshotParts()
+			                                              : LuaCallbackRuleSnapshotPart::RuntimeState |
+			                                                    LuaCallbackRuleSnapshotPart::DetailState);
 			runtime->incrementTimersFired();
 			processor->emitTrace(label.isEmpty() ? QStringLiteral("Fired unlabelled timer ")
 			                                     : QStringLiteral("Fired timer %1").arg(label));
@@ -2444,12 +2458,12 @@ const QVector<int> &WorldCommandProcessor::sortedPluginIndices()
 	return m_pluginOrderCache.indices;
 }
 
-const WorldCommandProcessor::TriggerEvaluationCacheEntry &
-WorldCommandProcessor::decodedTriggerEvaluationCache(const QList<WorldRuntime::Trigger> &triggers)
+QSharedPointer<const WorldCommandProcessor::TriggerEvaluationCacheEntry>
+WorldCommandProcessor::decodedTriggerEvaluationCache(QList<WorldRuntime::Trigger> &triggers,
+                                                     WorldRuntime::Plugin         *plugin)
 {
-	static const TriggerEvaluationCacheEntry kEmpty;
 	if (!m_runtime)
-		return kEmpty;
+		return {};
 
 	const quint64 generation = m_runtime->triggerRuleGeneration();
 	if (m_triggerEvaluationCacheGeneration != generation)
@@ -2461,16 +2475,28 @@ WorldCommandProcessor::decodedTriggerEvaluationCache(const QList<WorldRuntime::T
 	const auto cacheKey = reinterpret_cast<quintptr>(&triggers);
 	const int  count    = safeQSizeToInt(triggers.size());
 	if (auto cacheIt = m_triggerEvaluationCache.constFind(cacheKey);
-	    cacheIt != m_triggerEvaluationCache.constEnd() && cacheIt->generation == generation &&
-	    cacheIt->count == count)
+	    cacheIt != m_triggerEvaluationCache.constEnd() && (*cacheIt)->generation == generation &&
+	    (*cacheIt)->count == count)
 	{
-		return cacheIt.value();
+		return *cacheIt;
+	}
+	if (std::ranges::any_of(triggers,
+	                        [](const WorldRuntime::Trigger &trigger) { return trigger.runtimeId == 0; }))
+	{
+		m_runtime->ensureAllTriggerRuntimeIds();
+	}
+	if (std::ranges::any_of(triggers, [](const WorldRuntime::Trigger &trigger)
+	                        { return trigger.runtimeLocationHandle == 0; }))
+	{
+		WorldCommandProcessorMutationAccess::synchronizeTriggers(*m_runtime, plugin, 0);
 	}
 
-	TriggerEvaluationCacheEntry rebuilt;
-	rebuilt.generation = generation;
-	rebuilt.count      = count;
-	rebuilt.triggers.reserve(count);
+	auto rebuilt        = QSharedPointer<TriggerEvaluationCacheEntry>::create();
+	rebuilt->generation = generation;
+	rebuilt->count      = count;
+	rebuilt->triggers.reserve(count);
+	QHash<QString, int> matcherIndexByKey;
+	matcherIndexByKey.reserve(count);
 	for (int i = 0; i < count; ++i)
 	{
 		const WorldRuntime::Trigger  &trigger = triggers.at(i);
@@ -2515,17 +2541,44 @@ WorldCommandProcessor::decodedTriggerEvaluationCache(const QList<WorldRuntime::T
 		decoded.makeUnderline = isEnabledValue(attrs.value(QStringLiteral("make_underline")));
 		decoded.changeType    = attrs.value(QStringLiteral("colour_change_type")).toInt();
 		decoded.repeatMatches = decoded.isRegexp && isEnabledValue(attrs.value(QStringLiteral("repeat")));
-		decoded.keepEvaluating  = isEnabledValue(attrs.value(QStringLiteral("keep_evaluating")));
-		decoded.soundIfInactive = isEnabledValue(attrs.value(QStringLiteral("sound_if_inactive")));
-		decoded.otherTextColour = attrs.value(QStringLiteral("other_text_colour"));
-		decoded.otherBackColour = attrs.value(QStringLiteral("other_back_colour"));
-		decoded.clipboardArg    = attrs.value(QStringLiteral("clipboard_arg")).toInt();
-		if (decoded.enabled)
-			++rebuilt.enabledCount;
-		rebuilt.triggers.push_back(decoded);
+		decoded.keepEvaluating        = isEnabledValue(attrs.value(QStringLiteral("keep_evaluating")));
+		decoded.soundIfInactive       = isEnabledValue(attrs.value(QStringLiteral("sound_if_inactive")));
+		decoded.otherTextColour       = attrs.value(QStringLiteral("other_text_colour"));
+		decoded.otherBackColour       = attrs.value(QStringLiteral("other_back_colour"));
+		decoded.clipboardArg          = attrs.value(QStringLiteral("clipboard_arg")).toInt();
+		decoded.runtimeId             = trigger.runtimeId;
+		decoded.runtimeLocationHandle = trigger.runtimeLocationHandle;
+		decoded.executionTimeNs       = trigger.executionTimeNs;
+		decoded.matchCount            = trigger.matchCount;
+		decoded.matchAttempts         = trigger.matchAttempts;
+		decoded.dynamicPattern = decoded.expandVariables && decoded.matchText.contains(QLatin1Char('@'));
+		if (!decoded.dynamicPattern && !decoded.matchText.isEmpty())
+		{
+			const QString pattern =
+			    decoded.isRegexp ? decoded.matchText : wildcardToRegexCached(decoded.matchText);
+			QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
+			if (decoded.ignoreCase)
+				options |= QRegularExpression::CaseInsensitiveOption;
+			if (decoded.multiLine)
+				options |= QRegularExpression::MultilineOption;
+			QString warningKey = pattern;
+			warningKey += QChar(0x1F);
+			warningKey += decoded.ignoreCase ? QLatin1Char('1') : QLatin1Char('0');
+			warningKey += decoded.multiLine ? QLatin1Char('1') : QLatin1Char('0');
+			const auto existingMatcher = matcherIndexByKey.constFind(warningKey);
+			if (existingMatcher != matcherIndexByKey.cend())
+				decoded.matcherIndex = *existingMatcher;
+			else
+			{
+				decoded.matcherIndex = safeQSizeToInt(rebuilt->matchers.size());
+				matcherIndexByKey.insert(warningKey, decoded.matcherIndex);
+				rebuilt->matchers.push_back({std::move(warningKey), QRegularExpression(pattern, options)});
+			}
+		}
+		rebuilt->triggers.push_back(std::move(decoded));
 	}
 
-	std::ranges::stable_sort(rebuilt.triggers,
+	std::ranges::stable_sort(rebuilt->triggers,
 	                         [](const DecodedTrigger &left, const DecodedTrigger &right)
 	                         {
 		                         if (left.sequence != right.sequence)
@@ -2535,8 +2588,9 @@ WorldCommandProcessor::decodedTriggerEvaluationCache(const QList<WorldRuntime::T
 
 	if (m_triggerEvaluationCache.size() > 2048)
 		m_triggerEvaluationCache.clear();
-	m_triggerEvaluationCache.insert(cacheKey, rebuilt);
-	return m_triggerEvaluationCache[cacheKey];
+	const QSharedPointer<const TriggerEvaluationCacheEntry> immutable = rebuilt;
+	m_triggerEvaluationCache.insert(cacheKey, immutable);
+	return immutable;
 }
 
 const WorldCommandProcessor::AliasEvaluationCacheEntry &
@@ -5399,7 +5453,8 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
                                        QStringList &wildcards, QMap<QString, QString> &namedWildcards,
                                        int *startCol, int *endCol, const int startOffset,
                                        const bool multiLine, qint64 *executionTimeNs, int *matchCount,
-                                       int *matchAttempts) const
+                                       int                                   *matchAttempts,
+                                       const QRegularExpression::MatchOptions matchOptions) const
 {
 	QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
 	if (ignoreCase)
@@ -5412,14 +5467,10 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 	cacheKey += ignoreCase ? QLatin1Char('1') : QLatin1Char('0');
 	cacheKey += multiLine ? QLatin1Char('1') : QLatin1Char('0');
 
-	QRegularExpression regex;
-	if (const auto cached = m_regexCache.constFind(cacheKey); cached != m_regexCache.constEnd())
+	auto cached = m_regexCache.constFind(cacheKey);
+	if (cached == m_regexCache.constEnd())
 	{
-		regex = cached.value();
-	}
-	else
-	{
-		regex = QRegularExpression(pattern, options);
+		QRegularExpression regex(pattern, options);
 		// Keep cache bounded; clear all on overflow to avoid unbounded growth
 		// from variable-expanded dynamic patterns.
 		if (constexpr int kRegexCacheLimit = 4096; m_regexCache.size() >= kRegexCacheLimit)
@@ -5428,13 +5479,24 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 			m_invalidRegexWarnings.clear();
 		}
 		m_regexCache.insert(cacheKey, regex);
+		cached = m_regexCache.constFind(cacheKey);
 	}
+	return compiledRegexMatch(cached.value(), cacheKey, subject, wildcards, namedWildcards, startCol, endCol,
+	                          startOffset, executionTimeNs, matchCount, matchAttempts, matchOptions);
+}
 
+bool WorldCommandProcessor::compiledRegexMatch(const QRegularExpression &regex, const QString &warningKey,
+                                               const QString &subject, QStringList &wildcards,
+                                               QMap<QString, QString> &namedWildcards, int *startCol,
+                                               int *endCol, const int startOffset, qint64 *executionTimeNs,
+                                               int *matchCount, int *matchAttempts,
+                                               const QRegularExpression::MatchOptions matchOptions) const
+{
 	if (!regex.isValid())
 	{
-		if (!m_invalidRegexWarnings.contains(cacheKey))
+		if (!m_invalidRegexWarnings.contains(warningKey))
 		{
-			m_invalidRegexWarnings.insert(cacheKey);
+			m_invalidRegexWarnings.insert(warningKey);
 			QMessageBox::warning(m_view, QStringLiteral("QMud"),
 			                     QStringLiteral("Failed: %1 at offset %2")
 			                         .arg(regex.errorString())
@@ -5444,7 +5506,7 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 	}
 
 	const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchWithCaptures(
-	    regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs, matchAttempts);
+	    regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs, matchAttempts, matchOptions);
 	if (!result.matched)
 		return false;
 
@@ -5573,20 +5635,27 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		const quint64 scopePluginRuntimeLocationHandle = plugin ? plugin->runtimeLocationHandle : 0;
 		const quint64 scopePluginRuntimeInstanceId     = plugin ? plugin->runtimeInstanceId : 0;
 		const quint64 scopePluginEngineInstanceId = plugin && plugin->lua ? plugin->lua->instanceId() : 0;
-		QVector<std::tuple<quint64, quint64, int>> changedRuntimeLocations;
-		auto recordRuntimeStateChange = [&changedRuntimeLocations](const quint64 locationHandle,
-		                                                           const quint64 runtimeId,
-		                                                           const int     indexHint)
+		QVector<LuaCallbackRuleSnapshotChange> changedRuntimeLocations;
+		auto                                   recordRuntimeStateChange =
+		    [&changedRuntimeLocations](const quint64 locationHandle, const quint64 runtimeId,
+		                               const int indexHint, const LuaCallbackRuleSnapshotParts parts)
 		{
 			if (!changedRuntimeLocations.isEmpty() &&
-			    std::get<0>(changedRuntimeLocations.constLast()) == locationHandle)
-				return;
-			changedRuntimeLocations.push_back({locationHandle, runtimeId, indexHint});
+			    changedRuntimeLocations.constLast().runtimeLocationHandle == locationHandle &&
+			    changedRuntimeLocations.constLast().runtimeId == runtimeId)
+			{
+				changedRuntimeLocations.last().indexHint = indexHint;
+				changedRuntimeLocations.last().parts |= parts;
+			}
+			else
+			{
+				changedRuntimeLocations.push_back({locationHandle, runtimeId, indexHint, parts});
+			}
 		};
 		auto publishChangedRuntimeState =
 		    [runtime = QPointer<WorldRuntime>(m_runtime), &changedRuntimeLocations, scopePluginId]
 		{
-			if (runtime && !changedRuntimeLocations.isEmpty())
+			if (runtime)
 			{
 				runtime->markTriggerRuntimeStatesChanged(scopePluginId, changedRuntimeLocations);
 				changedRuntimeLocations.clear();
@@ -5594,32 +5663,20 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		};
 		const auto publishRuntimeState =
 		    qScopeGuard([&publishChangedRuntimeState] { publishChangedRuntimeState(); });
-		const TriggerEvaluationCacheEntry  &cacheEntry           = decodedTriggerEvaluationCache(triggers);
-		const quint64                       evaluationGeneration = m_runtime->triggerRuleGeneration();
-		QVector<TriggerEvaluationPlanEntry> evaluationPlan;
-		evaluationPlan.reserve(cacheEntry.enabledCount);
-		for (const DecodedTrigger &decoded : cacheEntry.triggers)
+		const QSharedPointer<const TriggerEvaluationCacheEntry> cacheEntry =
+		    decodedTriggerEvaluationCache(triggers, plugin);
+		if (!cacheEntry)
+			return;
+		const quint64 evaluationGeneration = m_runtime->triggerRuleGeneration();
+		for (const DecodedTrigger &decoded : cacheEntry->triggers)
 		{
 			if (!decoded.enabled)
 				continue;
-			if (decoded.index < 0 || decoded.index >= triggers.size())
-				continue;
-			if (triggers.at(decoded.index).runtimeId == 0)
-				m_runtime->ensureAllTriggerRuntimeIds();
-			if (triggers.at(decoded.index).runtimeLocationHandle == 0)
-				WorldCommandProcessorMutationAccess::synchronizeTriggers(*m_runtime, plugin, decoded.index);
-			const WorldRuntime::Trigger &trigger = triggers.at(decoded.index);
-			evaluationPlan.push_back({decoded, trigger.runtimeId, trigger.runtimeLocationHandle,
-			                          trigger.executionTimeNs, trigger.matchCount, trigger.matchAttempts});
-		}
-		for (const TriggerEvaluationPlanEntry &planned : std::as_const(evaluationPlan))
-		{
-			const DecodedTrigger &decoded = planned.decoded;
 			if (m_runtime->stopTriggerEvaluation() != WorldRuntime::KeepEvaluating)
 				break;
 
-			const quint64          triggerRuntimeId             = planned.runtimeId;
-			const quint64          triggerRuntimeLocationHandle = planned.runtimeLocationHandle;
+			const quint64          triggerRuntimeId             = decoded.runtimeId;
+			const quint64          triggerRuntimeLocationHandle = decoded.runtimeLocationHandle;
 			WorldRuntime::Trigger *trigger                      = nullptr;
 			if (m_runtime->triggerRuleGeneration() == evaluationGeneration && decoded.index >= 0 &&
 			    decoded.index < triggers.size() && triggers.at(decoded.index).runtimeId == triggerRuntimeId &&
@@ -5635,40 +5692,65 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 			m_runtime->incrementTriggersEvaluated();
 
-			QString matchText = decoded.matchText;
-			if (matchText.isEmpty())
+			if (decoded.matchText.isEmpty())
 				continue;
 
-			const bool preserveTrailingWhitespace = decoded.isRegexp;
-			QString    target = decoded.multiLine
-			                        ? buildTarget(decoded.linesToMatch, preserveTrailingWhitespace)
-			                        : (preserveTrailingWhitespace ? matchInputLine : trimmedTriggerLine);
-
-			if (decoded.expandVariables && matchText.contains(QLatin1Char('@')))
+			const bool     preserveTrailingWhitespace = decoded.isRegexp;
+			QString        multiLineTarget;
+			const QString *target = preserveTrailingWhitespace ? &matchInputLine : &trimmedTriggerLine;
+			if (decoded.multiLine)
 			{
-				matchText = fixSendText(matchText, decoded.sendToValue, QStringList(),
-				                        QMap<QString, QString>(), language, false, true, false, true,
-				                        decoded.isRegexp, false, QString(), scopePluginId, nullptr);
+				multiLineTarget = buildTarget(decoded.linesToMatch, preserveTrailingWhitespace);
+				target          = &multiLineTarget;
 			}
 
-			const QString          pattern = decoded.isRegexp ? matchText : wildcardToRegexCached(matchText);
+			QString        expandedMatchText;
+			const QString *effectiveMatchText = &decoded.matchText;
+			if (decoded.dynamicPattern)
+			{
+				expandedMatchText  = fixSendText(decoded.matchText, decoded.sendToValue, QStringList(),
+				                                 QMap<QString, QString>(), language, false, true, false, true,
+				                                 decoded.isRegexp, false, QString(), scopePluginId, nullptr);
+				effectiveMatchText = &expandedMatchText;
+			}
+
+			QString dynamicPattern;
+			if (decoded.dynamicPattern)
+				dynamicPattern =
+				    decoded.isRegexp ? *effectiveMatchText : wildcardToRegexCached(*effectiveMatchText);
 			QStringList            wildcards;
 			QMap<QString, QString> namedWildcards;
 			int                    startCol = 0;
 			int                    endCol   = 0;
-			qint64    executionTimeNs       = trigger ? trigger->executionTimeNs : planned.executionTimeNs;
-			int       matchCount            = trigger ? trigger->matchCount : planned.matchCount;
-			int       matchAttempts         = trigger ? trigger->matchAttempts : planned.matchAttempts;
-			const int previousMatchAttempts = matchAttempts;
-			if (!regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards, &startCol,
-			                &endCol, 0, decoded.multiLine, &executionTimeNs, &matchCount, &matchAttempts))
+			qint64         executionTimeNs  = trigger ? trigger->executionTimeNs : decoded.executionTimeNs;
+			int            matchCount       = trigger ? trigger->matchCount : decoded.matchCount;
+			int            matchAttempts    = trigger ? trigger->matchAttempts : decoded.matchAttempts;
+			const int      previousMatchAttempts = matchAttempts;
+			constexpr auto trustedTriggerSubject = QRegularExpression::DontCheckSubjectStringMatchOption;
+			auto           matchPattern          = [&](const int startOffset)
+			{
+				if (decoded.dynamicPattern)
+				{
+					return regexMatch(dynamicPattern, *target, decoded.ignoreCase, wildcards, namedWildcards,
+					                  &startCol, &endCol, startOffset, decoded.multiLine, &executionTimeNs,
+					                  &matchCount, &matchAttempts, trustedTriggerSubject);
+				}
+				if (decoded.matcherIndex < 0 || decoded.matcherIndex >= cacheEntry->matchers.size())
+					return false;
+				const CompiledTriggerMatcher &matcher = cacheEntry->matchers.at(decoded.matcherIndex);
+				return compiledRegexMatch(matcher.regex, matcher.warningKey, *target, wildcards,
+				                          namedWildcards, &startCol, &endCol, startOffset, &executionTimeNs,
+				                          &matchCount, &matchAttempts, trustedTriggerSubject);
+			};
+			if (!matchPattern(0))
 			{
 				if (trigger && matchAttempts != previousMatchAttempts)
 				{
 					trigger->executionTimeNs = executionTimeNs;
 					trigger->matchCount      = matchCount;
 					trigger->matchAttempts   = matchAttempts;
-					recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId, decoded.index);
+					recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId, decoded.index,
+					                         LuaCallbackRuleSnapshotPart::RuntimeState);
 				}
 				continue;
 			}
@@ -5677,8 +5759,10 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				trigger->executionTimeNs = executionTimeNs;
 				trigger->matchCount      = matchCount;
 				trigger->matchAttempts   = matchAttempts;
-				trigger->lastMatchTarget = target;
-				recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId, decoded.index);
+				trigger->lastMatchTarget = *target;
+				recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId, decoded.index,
+				                         LuaCallbackRuleSnapshotPart::RuntimeState |
+				                             LuaCallbackRuleSnapshotPart::DetailState);
 			}
 			QStringList fixedWildcards = wildcards;
 			for (QString &fixed : fixedWildcards)
@@ -5697,7 +5781,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			if (trigger)
 			{
 				trigger->lastMatchWildcards = fixedWildcards;
-				recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId, decoded.index);
+				recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId, decoded.index,
+				                         LuaCallbackRuleSnapshotPart::DetailState);
 			}
 
 			if (!decoded.multiLine)
@@ -5917,9 +6002,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 					int          offset                     = endCol;
 					while (true)
 					{
-						if (!regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards,
-						                &startCol, &endCol, offset, decoded.multiLine, &executionTimeNs,
-						                &matchCount, &matchAttempts))
+						if (!matchPattern(offset))
 							break;
 						repeatedMatchSucceeded = true;
 						if (endCol <= offset)
@@ -5941,7 +6024,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 								resolved->matchCount = matchCount;
 							}
 							recordRuntimeStateChange(triggerRuntimeLocationHandle, triggerRuntimeId,
-							                         decoded.index);
+							                         decoded.index,
+							                         LuaCallbackRuleSnapshotPart::RuntimeState);
 						}
 					}
 					if (repeatedMatchSucceeded)

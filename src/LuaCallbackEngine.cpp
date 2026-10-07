@@ -11507,17 +11507,27 @@ namespace
 		return runtimeIds;
 	}
 
+	/**
+	 * @brief Captures stable identities for rules selected by a predicate.
+	 * @tparam Rule Trigger, alias, or timer type.
+	 * @tparam Predicate Selection predicate type.
+	 * @param rules Rules to inspect.
+	 * @param parts Snapshot components changed by the pending mutation.
+	 * @param predicate Predicate selecting affected rules.
+	 * @return Component-qualified stable rule identities.
+	 */
 	template <typename Rule, typename Predicate>
-	QVector<std::tuple<quint64, quint64, int>> matchingRuleRuntimeLocations(const QList<Rule> &rules,
-	                                                                        Predicate          predicate)
+	QVector<LuaCallbackRuleSnapshotChange>
+	matchingRuleRuntimeLocations(const QList<Rule> &rules, const LuaCallbackRuleSnapshotParts parts,
+	                             Predicate predicate)
 	{
-		QVector<std::tuple<quint64, quint64, int>> locations;
+		QVector<LuaCallbackRuleSnapshotChange> locations;
 		locations.reserve(rules.size());
 		for (int index = 0; index < rules.size(); ++index)
 		{
 			const Rule &rule = rules.at(index);
 			if (predicate(rule))
-				locations.push_back({rule.runtimeLocationHandle, rule.runtimeId, index});
+				locations.push_back({rule.runtimeLocationHandle, rule.runtimeId, index, parts});
 		}
 		return locations;
 	}
@@ -11564,43 +11574,65 @@ namespace
 		return result;
 	}
 
+	/**
+	 * @brief Applies one deferred mutation to generation-checked trigger identities.
+	 * @tparam Mutation Trigger mutation type.
+	 * @param runtime Runtime containing the triggers.
+	 * @param capturedLocations Captured identities and component masks.
+	 * @param mutationDependencies Deferred identity remapping state.
+	 * @param mutation Mutation to apply to each surviving trigger.
+	 * @return Resolved identities retaining their original component masks.
+	 */
 	template <typename Mutation>
-	QVector<std::tuple<quint64, quint64, int>> mutateTriggersByRuntimeLocation(
-	    WorldRuntime &runtime, const QVector<std::tuple<quint64, quint64, int>> &capturedLocations,
+	QVector<LuaCallbackRuleSnapshotChange> mutateTriggersByRuntimeLocation(
+	    WorldRuntime &runtime, const QVector<LuaCallbackRuleSnapshotChange> &capturedLocations,
 	    const std::shared_ptr<LuaCallbackMutationDependencyState> &mutationDependencies,
 	    const Mutation                                            &mutation)
 	{
-		QVector<std::tuple<quint64, quint64, int>> changedLocations;
+		QVector<LuaCallbackRuleSnapshotChange> changedLocations;
 		changedLocations.reserve(capturedLocations.size());
-		for (const auto &[capturedLocation, runtimeId, indexHint] : capturedLocations)
+		for (const LuaCallbackRuleSnapshotChange &captured : capturedLocations)
 		{
-			const quint64 location =
-			    resolvedDeferredRuleLocation(capturedLocation, runtimeId, mutationDependencies);
-			int                    resolvedIndex = -1;
-			WorldRuntime::Trigger *trigger       = LuaCallbackRuntimeMutationAccess::triggerForLocation(
-			    runtime, location, runtimeId, indexHint, &resolvedIndex);
+			const quint64 location = resolvedDeferredRuleLocation(captured.runtimeLocationHandle,
+			                                                      captured.runtimeId, mutationDependencies);
+			int           resolvedIndex    = -1;
+			WorldRuntime::Trigger *trigger = LuaCallbackRuntimeMutationAccess::triggerForLocation(
+			    runtime, location, captured.runtimeId, captured.indexHint, &resolvedIndex);
 			if (!trigger)
 				continue;
 			mutation(*trigger);
-			changedLocations.push_back({location, runtimeId, resolvedIndex});
+			changedLocations.push_back({location, captured.runtimeId, resolvedIndex, captured.parts});
 		}
 		return changedLocations;
 	}
 
+	/**
+	 * @brief Applies one deferred mutation to generation-checked rule identities.
+	 * @tparam Rule Alias or timer type.
+	 * @tparam Resolver Runtime-location resolver type.
+	 * @tparam Mutation Rule mutation type.
+	 * @param runtime Runtime containing the rules.
+	 * @param capturedLocations Captured identities and component masks.
+	 * @param mutationDependencies Deferred identity remapping state.
+	 * @param resolver Resolver for the requested rule domain.
+	 * @param mutation Mutation to apply to each surviving rule.
+	 * @return Resolved identities retaining their original component masks.
+	 */
 	template <typename Rule, typename Resolver, typename Mutation>
-	QVector<std::tuple<quint64, quint64, int>> mutateRulesByRuntimeLocation(
-	    WorldRuntime &runtime, const QVector<std::tuple<quint64, quint64, int>> &capturedLocations,
+	QVector<LuaCallbackRuleSnapshotChange> mutateRulesByRuntimeLocation(
+	    WorldRuntime &runtime, const QVector<LuaCallbackRuleSnapshotChange> &capturedLocations,
 	    const std::shared_ptr<LuaCallbackMutationDependencyState> &mutationDependencies,
 	    const Resolver &resolver, const Mutation &mutation)
 	{
-		QVector<std::tuple<quint64, quint64, int>> changedLocations;
+		QVector<LuaCallbackRuleSnapshotChange> changedLocations;
 		changedLocations.reserve(capturedLocations.size());
-		for (const auto &[capturedLocation, runtimeId, indexHint] : capturedLocations)
+		for (const LuaCallbackRuleSnapshotChange &captured : capturedLocations)
 		{
-			const quint64 location =
-			    resolvedDeferredRuleLocation(capturedLocation, runtimeId, mutationDependencies);
-			int   resolvedIndex = -1;
-			Rule *rule = std::invoke(resolver, runtime, location, runtimeId, indexHint, &resolvedIndex);
+			const quint64 location = resolvedDeferredRuleLocation(captured.runtimeLocationHandle,
+			                                                      captured.runtimeId, mutationDependencies);
+			int           resolvedIndex = -1;
+			Rule *rule = std::invoke(resolver, runtime, location, captured.runtimeId, captured.indexHint,
+			                         &resolvedIndex);
 			if (!rule)
 				continue;
 			if constexpr (std::is_same_v<std::invoke_result_t<Mutation, Rule &>, bool>)
@@ -11612,7 +11644,7 @@ namespace
 			{
 				std::invoke(mutation, *rule);
 			}
-			changedLocations.push_back({location, runtimeId, resolvedIndex});
+			changedLocations.push_back({location, captured.runtimeId, resolvedIndex, captured.parts});
 		}
 		return changedLocations;
 	}
@@ -17536,33 +17568,60 @@ static bool    resetTimerFields(WorldRuntime::Timer                           &t
 static QList<WorldRuntime::Trigger> &mutableTriggerList(WorldRuntime *runtime, WorldRuntime::Plugin *plugin);
 static QList<WorldRuntime::Alias>   &mutableAliasList(WorldRuntime *runtime, WorldRuntime::Plugin *plugin);
 static QList<WorldRuntime::Timer>   &mutableTimerList(WorldRuntime *runtime, WorldRuntime::Plugin *plugin);
-static void commitTriggerListMutation(WorldRuntime *runtime, WorldRuntime::Plugin *plugin,
-                                      bool structureChanged = false, int firstChangedIndex = -1,
-                                      quint64 runtimeLocationHandle = 0, quint64 runtimeId = 0,
-                                      int indexHint = -1);
-static void commitTriggerRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                       const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations);
-static void commitAliasStructureMutation(WorldRuntime *runtime, WorldRuntime::Plugin *plugin,
-                                         int firstChangedIndex);
-static void commitAliasRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                     const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations);
-static void commitTimerStructureMutation(WorldRuntime *runtime, WorldRuntime::Plugin *plugin,
-                                         int firstChangedIndex);
-static void commitTimerRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                     const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations);
-static void commitTimerRuntimeStateMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                            quint64 runtimeLocationHandle, quint64 runtimeId, int indexHint);
-static bool fetchTriggerListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                       const QString &pluginId, QList<WorldRuntime::Trigger> &triggers,
-                                       bool *pluginMissing = nullptr);
-static bool fetchAliasListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                     const QString &pluginId, QList<WorldRuntime::Alias> &aliases,
-                                     bool *pluginMissing = nullptr);
-static bool fetchTimerListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                     const QString &pluginId, QList<WorldRuntime::Timer> &timers,
-                                     bool *pluginMissing = nullptr);
-static bool resolveVariableEntriesSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                                 QList<WorldRuntime::Variable> &entries);
+
+static void    commitTriggerListMutation(WorldRuntime *runtime, WorldRuntime::Plugin *plugin,
+                                         bool structureChanged = false, int firstChangedIndex = -1,
+                                         quint64 runtimeLocationHandle = 0, quint64 runtimeId = 0,
+                                         int indexHint = -1);
+/**
+ * @brief Publishes component-qualified changes to existing trigger definitions and state.
+ * @param runtime Runtime containing the triggers.
+ * @param plugin Owning plugin, or null for world triggers.
+ * @param changes Stable trigger identities and changed components.
+ */
+static void    commitTriggerRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                          const QVector<LuaCallbackRuleSnapshotChange> &changes);
+static void    commitAliasStructureMutation(WorldRuntime *runtime, WorldRuntime::Plugin *plugin,
+                                            int firstChangedIndex);
+/**
+ * @brief Publishes component-qualified changes to existing aliases.
+ * @param runtime Runtime containing the aliases.
+ * @param plugin Owning plugin, or null for world aliases.
+ * @param changes Stable alias identities and changed components.
+ */
+static void    commitAliasRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                        const QVector<LuaCallbackRuleSnapshotChange> &changes);
+static void    commitTimerStructureMutation(WorldRuntime *runtime, WorldRuntime::Plugin *plugin,
+                                            int firstChangedIndex);
+/**
+ * @brief Publishes component-qualified changes to existing timers.
+ * @param runtime Runtime containing the timers.
+ * @param plugin Owning plugin, or null for world timers.
+ * @param changes Stable timer identities and changed components.
+ */
+static void    commitTimerRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                        const QVector<LuaCallbackRuleSnapshotChange> &changes);
+/**
+ * @brief Publishes a timer schedule reset as a detail-state mutation.
+ * @param runtime Runtime containing the timer.
+ * @param plugin Owning plugin, or null for a world timer.
+ * @param runtimeLocationHandle Generation-checked timer location.
+ * @param runtimeId Stable timer identity.
+ * @param indexHint Current timer index hint.
+ */
+static void    commitTimerScheduleMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                           quint64 runtimeLocationHandle, quint64 runtimeId, int indexHint);
+static bool    fetchTriggerListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                          const QString &pluginId, QList<WorldRuntime::Trigger> &triggers,
+                                          bool *pluginMissing = nullptr);
+static bool    fetchAliasListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                        const QString &pluginId, QList<WorldRuntime::Alias> &aliases,
+                                        bool *pluginMissing = nullptr);
+static bool    fetchTimerListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                        const QString &pluginId, QList<WorldRuntime::Timer> &timers,
+                                        bool *pluginMissing = nullptr);
+static bool    resolveVariableEntriesSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                                    QList<WorldRuntime::Variable> &entries);
 static QString pluginIdFromLua(lua_State *L);
 static QString pluginIdArgumentFromLua(lua_State *L, int index);
 static bool    resolvePluginContextById(WorldRuntime *runtime, const QString &pluginId,
@@ -20746,9 +20805,12 @@ static int luaEnableGroup(lua_State *L)
 		}
 		const auto matchesGroup = [&groupName](const auto &rule)
 		{ return groupMatches(rule.attributes.value(QStringLiteral("group")), groupName); };
-		const auto triggerRuntimeLocations   = matchingRuleRuntimeLocations(triggers, matchesGroup);
-		const auto aliasRuntimeLocations     = matchingRuleRuntimeLocations(aliases, matchesGroup);
-		const auto timerRuntimeLocations     = matchingRuleRuntimeLocations(timers, matchesGroup);
+		const auto triggerRuntimeLocations =
+		    matchingRuleRuntimeLocations(triggers, luaCallbackAllRuleSnapshotParts(), matchesGroup);
+		const auto aliasRuntimeLocations =
+		    matchingRuleRuntimeLocations(aliases, luaCallbackAllRuleSnapshotParts(), matchesGroup);
+		const auto timerRuntimeLocations =
+		    matchingRuleRuntimeLocations(timers, luaCallbackAllRuleSnapshotParts(), matchesGroup);
 		const auto originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 		const auto mutationDependencies      = callbackMutationDependencies(engine, false);
 
@@ -20830,7 +20892,7 @@ static int luaEnableGroup(lua_State *L)
 		    const auto                    matchesRuntimeGroup = [&groupName](const auto &rule)
 		    { return groupMatches(rule.attributes.value(QStringLiteral("group")), groupName); };
 
-		    QVector<std::tuple<quint64, quint64, int>> changedTriggerLocations;
+		    QVector<LuaCallbackRuleSnapshotChange> changedTriggerLocations;
 		    changedTriggerLocations.reserve(triggers.size());
 		    for (int index = 0; index < triggers.size(); ++index)
 		    {
@@ -20838,15 +20900,18 @@ static int luaEnableGroup(lua_State *L)
 			    if (!groupMatches(trigger.attributes.value(QStringLiteral("group")), groupName))
 				    continue;
 			    trigger.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
-			    changedTriggerLocations.push_back({trigger.runtimeLocationHandle, trigger.runtimeId, index});
+			    changedTriggerLocations.push_back({trigger.runtimeLocationHandle, trigger.runtimeId, index,
+			                                       luaCallbackAllRuleSnapshotParts()});
 		    }
-		    const auto changedAliasLocations = matchingRuleRuntimeLocations(aliases, matchesRuntimeGroup);
-		    const auto changedTimerLocations = matchingRuleRuntimeLocations(timers, matchesRuntimeGroup);
-		    const int  aliasChanged          = setEnabled(aliases);
-		    const int  timerChanged          = setEnabled(timers);
-		    const qsizetype changedCount     = changedTriggerLocations.size() +
-		                                       static_cast<qsizetype>(aliasChanged) +
-		                                       static_cast<qsizetype>(timerChanged);
+		    const auto changedAliasLocations =
+		        matchingRuleRuntimeLocations(aliases, luaCallbackAllRuleSnapshotParts(), matchesRuntimeGroup);
+		    const auto changedTimerLocations =
+		        matchingRuleRuntimeLocations(timers, luaCallbackAllRuleSnapshotParts(), matchesRuntimeGroup);
+		    const int       aliasChanged = setEnabled(aliases);
+		    const int       timerChanged = setEnabled(timers);
+		    const qsizetype changedCount = changedTriggerLocations.size() +
+		                                   static_cast<qsizetype>(aliasChanged) +
+		                                   static_cast<qsizetype>(timerChanged);
 
 		    commitTriggerRuleMutations(runtime, plugin, changedTriggerLocations);
 		    commitAliasRuleMutations(runtime, plugin, changedAliasLocations);
@@ -38658,9 +38723,10 @@ static void commitTriggerListMutation(WorldRuntime *runtime, WorldRuntime::Plugi
 	}
 	else if (runtimeLocationHandle != 0 && runtimeId != 0)
 	{
-		commitTriggerRuleMutations(runtime, plugin,
-		                           {
-		                               {runtimeLocationHandle, runtimeId, indexHint}
+		commitTriggerRuleMutations(
+		    runtime, plugin,
+		    {
+		        {runtimeLocationHandle, runtimeId, indexHint, luaCallbackAllRuleSnapshotParts()}
         });
 		return;
 	}
@@ -38671,14 +38737,14 @@ static void commitTriggerListMutation(WorldRuntime *runtime, WorldRuntime::Plugi
 }
 
 static void commitTriggerRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                       const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations)
+                                       const QVector<LuaCallbackRuleSnapshotChange> &changes)
 {
-	if (!runtime || runtimeLocations.isEmpty())
+	if (!runtime || changes.isEmpty())
 		return;
 	if (!plugin)
 		runtime->setWorldFileModified(true);
 	runtime->markTriggerRuntimeStatesChanged(
-	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, runtimeLocations);
+	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, changes);
 	runtime->markTriggerRulesChanged();
 }
 
@@ -38697,14 +38763,14 @@ static void commitAliasStructureMutation(WorldRuntime *runtime, WorldRuntime::Pl
 }
 
 static void commitAliasRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                     const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations)
+                                     const QVector<LuaCallbackRuleSnapshotChange> &changes)
 {
-	if (!runtime || runtimeLocations.isEmpty())
+	if (!runtime || changes.isEmpty())
 		return;
 	if (!plugin)
 		runtime->setWorldFileModified(true);
 	runtime->markAliasRuntimeStatesChanged(
-	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, runtimeLocations);
+	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, changes);
 	runtime->markAliasRulesChanged();
 }
 
@@ -38723,24 +38789,25 @@ static void commitTimerStructureMutation(WorldRuntime *runtime, WorldRuntime::Pl
 }
 
 static void commitTimerRuleMutations(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                     const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations)
+                                     const QVector<LuaCallbackRuleSnapshotChange> &changes)
 {
-	if (!runtime || runtimeLocations.isEmpty())
+	if (!runtime || changes.isEmpty())
 		return;
 	if (!plugin)
 		runtime->setWorldFileModified(true);
 	runtime->markTimerRuntimeStatesChanged(
-	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, runtimeLocations);
+	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, changes);
 }
 
-static void commitTimerRuntimeStateMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
-                                            const quint64 runtimeLocationHandle, const quint64 runtimeId,
-                                            const int indexHint)
+static void commitTimerScheduleMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                        const quint64 runtimeLocationHandle, const quint64 runtimeId,
+                                        const int indexHint)
 {
 	if (!runtime)
 		return;
 	const QString pluginId = plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{};
-	runtime->markTimerRuntimeStateChanged(pluginId, runtimeLocationHandle, runtimeId, indexHint);
+	runtime->markTimerRuntimeStateChanged(pluginId, runtimeLocationHandle, runtimeId, indexHint,
+	                                      LuaCallbackRuleSnapshotPart::DetailState);
 }
 
 static bool resolvePluginContextById(WorldRuntime *runtime, const QString &pluginId,
@@ -40809,9 +40876,10 @@ static int luaEnableAlias(lua_State *L)
 			    if (!runtimeAlias)
 				    return;
 			    runtimeAlias->attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
-			    commitAliasRuleMutations(&targetRuntime, plugin,
-			                             {
-			                                 {resolvedLocation, runtimeId, resolvedIndex}
+			    commitAliasRuleMutations(
+			        &targetRuntime, plugin,
+			        {
+			            {resolvedLocation, runtimeId, resolvedIndex, luaCallbackAllRuleSnapshotParts()}
                 });
 		    });
 		lua_pushnumber(L, eOK);
@@ -40832,7 +40900,8 @@ static int luaEnableAlias(lua_State *L)
 		    commitAliasRuleMutations(
 		        runtime, plugin,
 		        {
-		            {aliases.at(index).runtimeLocationHandle, aliases.at(index).runtimeId, index}
+		            {aliases.at(index).runtimeLocationHandle, aliases.at(index).runtimeId, index,
+		             luaCallbackAllRuleSnapshotParts()}
             });
 		    return eOK;
 	    },
@@ -40894,9 +40963,10 @@ static int luaEnableTimer(lua_State *L)
 			    if (!runtimeTimer)
 				    return;
 			    runtimeTimer->attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
-			    commitTimerRuleMutations(&targetRuntime, plugin,
-			                             {
-			                                 {resolvedLocation, runtimeId, resolvedIndex}
+			    commitTimerRuleMutations(
+			        &targetRuntime, plugin,
+			        {
+			            {resolvedLocation, runtimeId, resolvedIndex, luaCallbackAllRuleSnapshotParts()}
                 });
 		    });
 		lua_pushnumber(L, eOK);
@@ -40914,10 +40984,10 @@ static int luaEnableTimer(lua_State *L)
 		    if (index < 0)
 			    return eTimerNotFound;
 		    timers[index].attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
-		    commitTimerRuleMutations(
-		        runtime, plugin,
-		        {
-		            {timers.at(index).runtimeLocationHandle, timers.at(index).runtimeId, index}
+		    commitTimerRuleMutations(runtime, plugin,
+		                             {
+		                                 {timers.at(index).runtimeLocationHandle, timers.at(index).runtimeId,
+		                                  index, luaCallbackAllRuleSnapshotParts()}
             });
 		    return eOK;
 	    },
@@ -40953,7 +41023,7 @@ static int luaEnableTriggerGroup(lua_State *L)
 			return 1;
 		}
 		const auto runtimeLocations = matchingRuleRuntimeLocations(
-		    triggers, [&groupName](const WorldRuntime::Trigger &trigger)
+		    triggers, luaCallbackAllRuleSnapshotParts(), [&groupName](const WorldRuntime::Trigger &trigger)
 		    { return groupMatches(trigger.attributes.value(QStringLiteral("group")), groupName); });
 		const auto originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 		const auto mutationDependencies      = callbackMutationDependencies(engine, false);
@@ -40998,8 +41068,8 @@ static int luaEnableTriggerGroup(lua_State *L)
 		    WorldRuntime::Plugin *plugin = nullptr;
 		    if (int errorCode = eOK; !resolvePluginContextById(runtime, pluginId, plugin, errorCode))
 			    return 0;
-		    QList<WorldRuntime::Trigger>              &triggers = mutableTriggerList(runtime, plugin);
-		    QVector<std::tuple<quint64, quint64, int>> changedLocations;
+		    QList<WorldRuntime::Trigger>          &triggers = mutableTriggerList(runtime, plugin);
+		    QVector<LuaCallbackRuleSnapshotChange> changedLocations;
 		    changedLocations.reserve(triggers.size());
 		    for (int index = 0; index < triggers.size(); ++index)
 		    {
@@ -41007,7 +41077,8 @@ static int luaEnableTriggerGroup(lua_State *L)
 			    if (groupMatches(trigger.attributes.value(QStringLiteral("group")), groupName))
 			    {
 				    trigger.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
-				    changedLocations.push_back({trigger.runtimeLocationHandle, trigger.runtimeId, index});
+				    changedLocations.push_back({trigger.runtimeLocationHandle, trigger.runtimeId, index,
+				                                luaCallbackAllRuleSnapshotParts()});
 			    }
 		    }
 		    commitTriggerRuleMutations(runtime, plugin, changedLocations);
@@ -41045,7 +41116,7 @@ static int luaEnableAliasGroup(lua_State *L)
 			return 1;
 		}
 		const auto runtimeLocations = matchingRuleRuntimeLocations(
-		    aliases, [&groupName](const WorldRuntime::Alias &alias)
+		    aliases, luaCallbackAllRuleSnapshotParts(), [&groupName](const WorldRuntime::Alias &alias)
 		    { return groupMatches(alias.attributes.value(QStringLiteral("group")), groupName); });
 		const auto originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 		const auto mutationDependencies      = callbackMutationDependencies(engine, false);
@@ -41098,7 +41169,7 @@ static int luaEnableAliasGroup(lua_State *L)
 			    return 0;
 		    QList<WorldRuntime::Alias> &aliases          = mutableAliasList(runtime, plugin);
 		    const auto                  runtimeLocations = matchingRuleRuntimeLocations(
-		        aliases, [&groupName](const WorldRuntime::Alias &alias)
+		        aliases, luaCallbackAllRuleSnapshotParts(), [&groupName](const WorldRuntime::Alias &alias)
 		        { return groupMatches(alias.attributes.value(QStringLiteral("group")), groupName); });
 		    int changed = 0;
 		    for (auto &alias : aliases)
@@ -41144,7 +41215,7 @@ static int luaEnableTimerGroup(lua_State *L)
 			return 1;
 		}
 		const auto runtimeLocations = matchingRuleRuntimeLocations(
-		    timers, [&groupName](const WorldRuntime::Timer &timer)
+		    timers, luaCallbackAllRuleSnapshotParts(), [&groupName](const WorldRuntime::Timer &timer)
 		    { return groupMatches(timer.attributes.value(QStringLiteral("group")), groupName); });
 		const auto originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 		const auto mutationDependencies      = callbackMutationDependencies(engine, false);
@@ -41197,7 +41268,7 @@ static int luaEnableTimerGroup(lua_State *L)
 			    return 0;
 		    QList<WorldRuntime::Timer> &timers           = mutableTimerList(runtime, plugin);
 		    const auto                  runtimeLocations = matchingRuleRuntimeLocations(
-		        timers, [&groupName](const WorldRuntime::Timer &timer)
+		        timers, luaCallbackAllRuleSnapshotParts(), [&groupName](const WorldRuntime::Timer &timer)
 		        { return groupMatches(timer.attributes.value(QStringLiteral("group")), groupName); });
 		    int changed = 0;
 		    for (auto &timer : timers)
@@ -42446,9 +42517,10 @@ static int luaSetAliasOption(lua_State *L)
 					    return;
 				    if (mutate(*runtimeAlias) != eOK)
 					    return;
-				    commitAliasRuleMutations(&targetRuntime, plugin,
-				                             {
-				                                 {resolvedLocation, runtimeId, resolvedIndex}
+				    commitAliasRuleMutations(
+				        &targetRuntime, plugin,
+				        {
+				            {resolvedLocation, runtimeId, resolvedIndex, luaCallbackAllRuleSnapshotParts()}
                     });
 			    });
 			return eOK;
@@ -42470,7 +42542,8 @@ static int luaSetAliasOption(lua_State *L)
 			    commitAliasRuleMutations(
 			        runtime, plugin,
 			        {
-			            {aliases.at(index).runtimeLocationHandle, aliases.at(index).runtimeId, index}
+			            {aliases.at(index).runtimeLocationHandle, aliases.at(index).runtimeId, index,
+			             luaCallbackAllRuleSnapshotParts()}
                 });
 			    return eOK;
 		    },
@@ -42728,9 +42801,10 @@ static int luaSetTimerOption(lua_State *L)
 					    return;
 				    if (applyMutation(*runtimeTimer) != eOK)
 					    return;
-				    commitTimerRuleMutations(&targetRuntime, plugin,
-				                             {
-				                                 {resolvedLocation, runtimeId, resolvedIndex}
+				    commitTimerRuleMutations(
+				        &targetRuntime, plugin,
+				        {
+				            {resolvedLocation, runtimeId, resolvedIndex, luaCallbackAllRuleSnapshotParts()}
                     });
 			    });
 			return eOK;
@@ -42752,7 +42826,8 @@ static int luaSetTimerOption(lua_State *L)
 			    commitTimerRuleMutations(
 			        runtime, plugin,
 			        {
-			            {timers.at(index).runtimeLocationHandle, timers.at(index).runtimeId, index}
+			            {timers.at(index).runtimeLocationHandle, timers.at(index).runtimeId, index,
+			             luaCallbackAllRuleSnapshotParts()}
                 });
 			    return eOK;
 		    },
@@ -43020,7 +43095,6 @@ static int luaResetTimer(lua_State *L)
 		const quint64 runtimeLocationHandle     = timers.at(index).runtimeLocationHandle;
 		const auto    originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 		const auto    mutationDependencies      = callbackMutationDependencies(engine, false);
-		applyTimerDefaults(timers[index]);
 		static_cast<void>(resetTimerFields(timers[index], scheduleReset));
 		cacheCallbackTimerList(engine, pluginId, true, timers, false,
 		                       CallbackCollectionCacheWriteKind::RuntimeMutation);
@@ -43041,10 +43115,8 @@ static int luaResetTimer(lua_State *L)
 			        targetRuntime, resolvedLocation, runtimeId, index, nullptr);
 			    if (!runtimeTimer)
 				    return;
-			    applyTimerDefaults(*runtimeTimer);
 			    if (resetTimerFields(*runtimeTimer, scheduleReset))
-				    commitTimerRuntimeStateMutation(&targetRuntime, plugin, resolvedLocation, runtimeId,
-				                                    index);
+				    commitTimerScheduleMutation(&targetRuntime, plugin, resolvedLocation, runtimeId, index);
 		    });
 		lua_pushnumber(L, eOK);
 		return 1;
@@ -43064,10 +43136,9 @@ static int luaResetTimer(lua_State *L)
 		    const int                   index  = findTimerIndex(timers, name);
 		    if (index < 0)
 			    return eTimerNotFound;
-		    applyTimerDefaults(timers[index]);
 		    if (resetTimerFields(timers[index], scheduleReset))
-			    commitTimerRuntimeStateMutation(runtime, plugin, timers[index].runtimeLocationHandle,
-			                                    timers[index].runtimeId, index);
+			    commitTimerScheduleMutation(runtime, plugin, timers[index].runtimeLocationHandle,
+			                                timers[index].runtimeId, index);
 		    return eOK;
 	    },
 	    eWorldClosed);
@@ -43091,13 +43162,11 @@ static int luaResetTimers(lua_State *L)
 		if (fetchTimerListForContext(engine, runtime, pluginId, timers, &pluginMissing))
 		{
 			const auto runtimeLocations =
-			    matchingRuleRuntimeLocations(timers, [](const WorldRuntime::Timer &) { return true; });
+			    matchingRuleRuntimeLocations(timers, LuaCallbackRuleSnapshotPart::DetailState,
+			                                 [](const WorldRuntime::Timer &) { return true; });
 			const auto mutationDependencies = callbackMutationDependencies(engine, false);
 			for (auto &timer : timers)
-			{
-				applyTimerDefaults(timer);
 				static_cast<void>(resetTimerFields(timer, scheduleReset));
-			}
 			cacheCallbackTimerList(engine, pluginId, true, timers, false,
 			                       CallbackCollectionCacheWriteKind::RuntimeMutation);
 			invalidateCallbackTimerSnapshotCacheForPlugin(engine, pluginId);
@@ -43120,10 +43189,7 @@ static int luaResetTimers(lua_State *L)
 					            runtime, location, runtimeId, indexHint, resolvedIndex);
 				        },
 				        [scheduleReset](WorldRuntime::Timer &timer)
-				        {
-					        applyTimerDefaults(timer);
-					        return resetTimerFields(timer, scheduleReset);
-				        });
+				        { return resetTimerFields(timer, scheduleReset); });
 				    targetRuntime.markTimerRuntimeStatesChanged(
 				        plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{},
 				        changedLocations);
@@ -43142,16 +43208,16 @@ static int luaResetTimers(lua_State *L)
 			    if (!plugin)
 				    return;
 		    }
-		    QVector<std::tuple<quint64, quint64, int>> changedLocations;
-		    QList<WorldRuntime::Timer>                &timers = mutableTimerList(&targetRuntime, plugin);
+		    QVector<LuaCallbackRuleSnapshotChange> changedLocations;
+		    QList<WorldRuntime::Timer>            &timers = mutableTimerList(&targetRuntime, plugin);
 		    changedLocations.reserve(timers.size());
 		    for (int index = 0; index < timers.size(); ++index)
 		    {
 			    WorldRuntime::Timer &timer = timers[index];
-			    applyTimerDefaults(timer);
 			    if (resetTimerFields(timer, scheduleReset))
 			    {
-				    changedLocations.push_back({timer.runtimeLocationHandle, timer.runtimeId, index});
+				    changedLocations.push_back({timer.runtimeLocationHandle, timer.runtimeId, index,
+				                                LuaCallbackRuleSnapshotPart::DetailState});
 			    }
 		    }
 		    targetRuntime.markTimerRuntimeStatesChanged(

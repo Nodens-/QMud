@@ -495,13 +495,37 @@ class WorldCommandProcessor : public QObject
 		 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
 		 * @param matchCount Optional successful-match capture count.
 		 * @param matchAttempts Optional valid-regex execution counter.
+		 * @param matchOptions Match-time regular-expression options.
 		 * @return `true` when pattern matches.
 		 */
-		bool regexMatch(const QString &pattern, const QString &subject, bool ignoreCase,
-		                QStringList &wildcards, QMap<QString, QString> &namedWildcards,
-		                int *startCol = nullptr, int *endCol = nullptr, int startOffset = 0,
-		                bool multiLine = false, qint64 *executionTimeNs = nullptr, int *matchCount = nullptr,
-		                int *matchAttempts = nullptr) const;
+		bool
+		regexMatch(const QString &pattern, const QString &subject, bool ignoreCase, QStringList &wildcards,
+		           QMap<QString, QString> &namedWildcards, int *startCol = nullptr, int *endCol = nullptr,
+		           int startOffset = 0, bool multiLine = false, qint64 *executionTimeNs = nullptr,
+		           int *matchCount = nullptr, int *matchAttempts = nullptr,
+		           QRegularExpression::MatchOptions matchOptions = QRegularExpression::NoMatchOption) const;
+		/**
+		 * @brief Matches subject text with an already compiled regex.
+		 * @param regex Compiled regex.
+		 * @param warningKey Stable key used to coalesce invalid-regex warnings.
+		 * @param subject Subject text.
+		 * @param wildcards Output positional wildcard captures.
+		 * @param namedWildcards Output named wildcard captures.
+		 * @param startCol Optional output start column.
+		 * @param endCol Optional output end column.
+		 * @param startOffset Start offset in subject.
+		 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
+		 * @param matchCount Optional successful-match capture count.
+		 * @param matchAttempts Optional valid-regex execution counter.
+		 * @param matchOptions Qt match options applied to this execution.
+		 * @return `true` when the regex matches.
+		 */
+		bool compiledRegexMatch(
+		    const QRegularExpression &regex, const QString &warningKey, const QString &subject,
+		    QStringList &wildcards, QMap<QString, QString> &namedWildcards, int *startCol = nullptr,
+		    int *endCol = nullptr, int startOffset = 0, qint64 *executionTimeNs = nullptr,
+		    int *matchCount = nullptr, int *matchAttempts = nullptr,
+		    QRegularExpression::MatchOptions matchOptions = QRegularExpression::NoMatchOption) const;
 		struct TriggerScript
 		{
 				quint64                runtimeId{0};
@@ -734,22 +758,25 @@ class WorldCommandProcessor : public QObject
 				int     colourChange{-1};
 				int     changeType{0};
 				int     clipboardArg{0};
+				quint64 runtimeId{0};
+				quint64 runtimeLocationHandle{0};
+				qint64  executionTimeNs{0};
+				int     matchCount{0};
+				int     matchAttempts{0};
+				bool    dynamicPattern{false};
+				int     matcherIndex{-1};
 		};
-		struct TriggerEvaluationPlanEntry
+		struct CompiledTriggerMatcher
 		{
-				DecodedTrigger decoded;
-				quint64        runtimeId{0};
-				quint64        runtimeLocationHandle{0};
-				qint64         executionTimeNs{0};
-				int            matchCount{0};
-				int            matchAttempts{0};
+				QString            warningKey;
+				QRegularExpression regex;
 		};
 		struct TriggerEvaluationCacheEntry
 		{
-				quint64                 generation{0};
-				int                     count{0};
-				int                     enabledCount{0};
-				QVector<DecodedTrigger> triggers;
+				quint64                         generation{0};
+				int                             count{0};
+				QVector<DecodedTrigger>         triggers;
+				QVector<CompiledTriggerMatcher> matchers;
 		};
 		struct DecodedAlias
 		{
@@ -803,10 +830,11 @@ class WorldCommandProcessor : public QObject
 		/**
 		 * @brief Returns decoded trigger evaluation data for a trigger list.
 		 * @param triggers Trigger list.
+		 * @param plugin Owning plugin, or null for world triggers.
 		 * @return Cached decoded trigger data.
 		 */
-		const TriggerEvaluationCacheEntry &
-		decodedTriggerEvaluationCache(const QList<WorldRuntime::Trigger> &triggers);
+		QSharedPointer<const TriggerEvaluationCacheEntry>
+		decodedTriggerEvaluationCache(QList<WorldRuntime::Trigger> &triggers, WorldRuntime::Plugin *plugin);
 		/**
 		 * @brief Returns decoded alias evaluation data for an alias list.
 		 * @param aliases Alias list.
@@ -1158,25 +1186,25 @@ class WorldCommandProcessor : public QObject
 		QSharedPointer<PendingIncomingLineOperation> m_activeIncomingLineOperation;
 		QQueue<PendingIncomingStreamItem>            m_pendingIncomingStreamItems;
 		QSharedPointer<WorldRuntime::IncomingStreamPresentationBatch>
-		                                             m_incomingStreamBacklogPresentationBatch;
-		bool                                         m_runtimeAutomationOwner{true};
-		int                                          m_executionDepth{0};
-		mutable QHash<QString, QRegularExpression>   m_regexCache;
-		QHash<QString, QString>                      m_wildcardRegexCache;
-		mutable QSet<QString>                        m_invalidRegexWarnings;
-		QHash<quintptr, TriggerEvaluationCacheEntry> m_triggerEvaluationCache;
-		quint64                                      m_triggerEvaluationCacheGeneration{0};
-		QHash<quintptr, AliasEvaluationCacheEntry>   m_aliasEvaluationCache;
-		quint64                                      m_aliasEvaluationCacheGeneration{0};
-		PluginOrderCacheEntry                        m_pluginOrderCache;
-		mutable bool                                 m_paletteCacheValid{false};
-		mutable quint64                              m_paletteCacheSignature{0};
-		mutable QVector<QColor>                      m_paletteCacheNormal;
-		mutable QVector<QColor>                      m_paletteCacheBold;
-		mutable QVector<QColor>                      m_paletteCacheCustomText;
-		mutable QVector<QColor>                      m_paletteCacheCustomBack;
-		mutable QColor                               m_paletteCacheDefaultFore;
-		mutable QColor                               m_paletteCacheDefaultBack;
+		                                           m_incomingStreamBacklogPresentationBatch;
+		bool                                       m_runtimeAutomationOwner{true};
+		int                                        m_executionDepth{0};
+		mutable QHash<QString, QRegularExpression> m_regexCache;
+		QHash<QString, QString>                    m_wildcardRegexCache;
+		mutable QSet<QString>                      m_invalidRegexWarnings;
+		QHash<quintptr, QSharedPointer<const TriggerEvaluationCacheEntry>> m_triggerEvaluationCache;
+		quint64                                    m_triggerEvaluationCacheGeneration{0};
+		QHash<quintptr, AliasEvaluationCacheEntry> m_aliasEvaluationCache;
+		quint64                                    m_aliasEvaluationCacheGeneration{0};
+		PluginOrderCacheEntry                      m_pluginOrderCache;
+		mutable bool                               m_paletteCacheValid{false};
+		mutable quint64                            m_paletteCacheSignature{0};
+		mutable QVector<QColor>                    m_paletteCacheNormal;
+		mutable QVector<QColor>                    m_paletteCacheBold;
+		mutable QVector<QColor>                    m_paletteCacheCustomText;
+		mutable QVector<QColor>                    m_paletteCacheCustomBack;
+		mutable QColor                             m_paletteCacheDefaultFore;
+		mutable QColor                             m_paletteCacheDefaultBack;
 };
 
 #endif // QMUD_WORLDCOMMANDPROCESSOR_H

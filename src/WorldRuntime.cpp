@@ -884,6 +884,66 @@ namespace
 		                              after.executingScriptDepth);
 	}
 
+	/**
+	 * @brief Applies one field-level causal delta to compact rule runtime state.
+	 * @param target State being rebased.
+	 * @param before State before the causal mutation.
+	 * @param after State after the causal mutation.
+	 */
+	void applyCausalSnapshotValueDelta(LuaCallbackRuleRuntimeStateSnapshot       &target,
+	                                   const LuaCallbackRuleRuntimeStateSnapshot &before,
+	                                   const LuaCallbackRuleRuntimeStateSnapshot &after)
+	{
+		applyCausalSnapshotValueDelta(target.runtimeId, before.runtimeId, after.runtimeId);
+		applyCausalSnapshotValueDelta(target.runtimeLocationHandle, before.runtimeLocationHandle,
+		                              after.runtimeLocationHandle);
+		applyCausalSnapshotValueDelta(target.executionTimeNs, before.executionTimeNs, after.executionTimeNs);
+		applyCausalSnapshotValueDelta(target.matched, before.matched, after.matched);
+		applyCausalSnapshotValueDelta(target.invocationCount, before.invocationCount, after.invocationCount);
+		applyCausalSnapshotValueDelta(target.matchCount, before.matchCount, after.matchCount);
+		applyCausalSnapshotValueDelta(target.matchAttempts, before.matchAttempts, after.matchAttempts);
+		applyCausalSnapshotValueDelta(target.firedCount, before.firedCount, after.firedCount);
+		applyCausalSnapshotValueDelta(target.executingScriptDepth, before.executingScriptDepth,
+		                              after.executingScriptDepth);
+		applyCausalSnapshotValueDelta(target.executingScript, before.executingScript, after.executingScript);
+	}
+
+	/**
+	 * @brief Applies one field-level causal delta to infrequent rule detail state.
+	 * @param target State being rebased.
+	 * @param before State before the causal mutation.
+	 * @param after State after the causal mutation.
+	 */
+	void applyCausalSnapshotValueDelta(LuaCallbackRuleDetailStateSnapshot       &target,
+	                                   const LuaCallbackRuleDetailStateSnapshot &before,
+	                                   const LuaCallbackRuleDetailStateSnapshot &after)
+	{
+		applyCausalSnapshotValueDelta(target.runtimeId, before.runtimeId, after.runtimeId);
+		applyCausalSnapshotValueDelta(target.runtimeLocationHandle, before.runtimeLocationHandle,
+		                              after.runtimeLocationHandle);
+		applyCausalSnapshotValueDelta(target.lastMatchTarget, before.lastMatchTarget, after.lastMatchTarget);
+		applyCausalSnapshotValueDelta(target.lastMatchWildcards, before.lastMatchWildcards,
+		                              after.lastMatchWildcards);
+		applyCausalSnapshotValueDelta(target.lastMatched, before.lastMatched, after.lastMatched);
+		applyCausalSnapshotValueDelta(target.lastFired, before.lastFired, after.lastFired);
+		applyCausalSnapshotValueDelta(target.nextFireTime, before.nextFireTime, after.nextFireTime);
+	}
+
+	/**
+	 * @brief Applies the definition component of one causal rule-row mutation.
+	 * @tparam Row Trigger, alias, or timer snapshot row.
+	 * @param target Definition being rebased.
+	 * @param before Definition before the causal mutation.
+	 * @param after Definition after the causal mutation.
+	 */
+	template <typename Row>
+	void applyCausalRuleDefinitionDelta(Row &target, const Row &before, const Row &after)
+	{
+		applyCausalSnapshotValueDelta(target.attributes, before.attributes, after.attributes);
+		applyCausalSnapshotValueDelta(target.children, before.children, after.children);
+		applyCausalSnapshotValueDelta(target.included, before.included, after.included);
+	}
+
 	void applyCausalSnapshotValueDelta(LuaCallbackAcceleratorSnapshot       &target,
 	                                   const LuaCallbackAcceleratorSnapshot &before,
 	                                   const LuaCallbackAcceleratorSnapshot &after)
@@ -1447,23 +1507,29 @@ namespace
 	                                    const QList<Row> &rows)
 	{
 		using Store                  = LuaCallbackRuleSnapshotStore<Row>;
-		using RowMap                 = LuaCallbackPersistentSlotMap<Row>;
-		using OwnerMap               = LuaCallbackPersistentSlotMap<typename Store::Owner>;
+		using RowMap                 = Store::RowMap;
+		using RuntimeStateMap        = Store::RuntimeStateMap;
+		using DetailStateMap         = Store::DetailStateMap;
+		using OwnerMap               = Store::OwnerMap;
 		auto owner                   = QSharedPointer<typename Store::Owner>::create();
 		owner->runtimeLocationHandle = ownerHandle;
 		owner->orderedRuleLocationHandles.reserve(rows.size());
-		QVector<typename RowMap::Update> rowUpdates;
-		const auto previousOwner = store.owners.value(luaCallbackRuntimeLocationSlotKey(ownerHandle));
+		QVector<typename RowMap::Update>          rowUpdates;
+		QVector<typename RuntimeStateMap::Update> runtimeStateUpdates;
+		QVector<typename DetailStateMap::Update>  detailStateUpdates;
+		const auto                                previousOwner = store.owners.value(ownerHandle);
 		rowUpdates.reserve(rows.size() +
 		                   (previousOwner ? previousOwner->orderedRuleLocationHandles.size() : 0));
 		if (previousOwner && previousOwner->runtimeLocationHandle == ownerHandle)
 		{
 			for (const quint64 previousHandle : previousOwner->orderedRuleLocationHandles)
 			{
-				const quint32 key        = luaCallbackRuntimeLocationSlotKey(previousHandle);
-				const auto    currentRow = store.rows.value(key);
-				if (currentRow && currentRow->runtimeLocationHandle == previousHandle)
-					rowUpdates.push_back({key, {}});
+				if (const auto currentRow = store.rows.value(previousHandle); currentRow)
+				{
+					rowUpdates.push_back({previousHandle, {}});
+					runtimeStateUpdates.push_back({previousHandle, {}});
+					detailStateUpdates.push_back({previousHandle, {}});
+				}
 			}
 		}
 		for (const Row &row : rows)
@@ -1471,36 +1537,49 @@ namespace
 			if (row.runtimeLocationHandle == 0)
 				continue;
 			owner->orderedRuleLocationHandles.push_back(row.runtimeLocationHandle);
-			rowUpdates.push_back({luaCallbackRuntimeLocationSlotKey(row.runtimeLocationHandle),
-			                      QSharedPointer<const Row>::create(row)});
+			rowUpdates.push_back({row.runtimeLocationHandle, QSharedPointer<const Row>::create(row)});
+			runtimeStateUpdates.push_back({row.runtimeLocationHandle, luaCallbackRuleRuntimeState(row)});
+			detailStateUpdates.push_back(
+			    {row.runtimeLocationHandle, QSharedPointer<const LuaCallbackRuleDetailStateSnapshot>::create(
+			                                    luaCallbackRuleDetailState(row))});
 		}
-		store.rows   = store.rows.withUpdates(rowUpdates);
-		store.owners = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
-		    {luaCallbackRuntimeLocationSlotKey(ownerHandle), std::move(owner)}
+		store.rows          = store.rows.withUpdates(rowUpdates);
+		store.runtimeStates = store.runtimeStates.withUpdates(runtimeStateUpdates);
+		store.detailStates  = store.detailStates.withUpdates(detailStateUpdates);
+		store.owners        = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
+		    {ownerHandle, std::move(owner)}
         });
 	}
 
 	template <typename Row>
 	void removeCausalRuleSnapshotOwner(LuaCallbackRuleSnapshotStore<Row> &store, const quint64 ownerHandle)
 	{
-		using Store      = LuaCallbackRuleSnapshotStore<Row>;
-		using RowMap     = LuaCallbackPersistentSlotMap<Row>;
-		using OwnerMap   = LuaCallbackPersistentSlotMap<typename Store::Owner>;
-		const auto owner = store.owners.value(luaCallbackRuntimeLocationSlotKey(ownerHandle));
-		if (!owner || owner->runtimeLocationHandle != ownerHandle)
+		using Store           = LuaCallbackRuleSnapshotStore<Row>;
+		using RowMap          = Store::RowMap;
+		using RuntimeStateMap = Store::RuntimeStateMap;
+		using DetailStateMap  = Store::DetailStateMap;
+		using OwnerMap        = Store::OwnerMap;
+		const auto owner      = store.owners.value(ownerHandle);
+		if (!owner)
 			return;
-		QVector<typename RowMap::Update> rowUpdates;
+		QVector<typename RowMap::Update>          rowUpdates;
+		QVector<typename RuntimeStateMap::Update> runtimeStateUpdates;
+		QVector<typename DetailStateMap::Update>  detailStateUpdates;
 		rowUpdates.reserve(owner->orderedRuleLocationHandles.size());
 		for (const quint64 ruleHandle : owner->orderedRuleLocationHandles)
 		{
-			const quint32 key        = luaCallbackRuntimeLocationSlotKey(ruleHandle);
-			const auto    currentRow = store.rows.value(key);
-			if (currentRow && currentRow->runtimeLocationHandle == ruleHandle)
-				rowUpdates.push_back({key, {}});
+			if (const auto currentRow = store.rows.value(ruleHandle); currentRow)
+			{
+				rowUpdates.push_back({ruleHandle, {}});
+				runtimeStateUpdates.push_back({ruleHandle, {}});
+				detailStateUpdates.push_back({ruleHandle, {}});
+			}
 		}
-		store.rows   = store.rows.withUpdates(rowUpdates);
-		store.owners = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
-		    {luaCallbackRuntimeLocationSlotKey(ownerHandle), {}}
+		store.rows          = store.rows.withUpdates(rowUpdates);
+		store.runtimeStates = store.runtimeStates.withUpdates(runtimeStateUpdates);
+		store.detailStates  = store.detailStates.withUpdates(detailStateUpdates);
+		store.owners        = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
+		    {ownerHandle, {}}
         });
 	}
 
@@ -1520,10 +1599,8 @@ namespace
 	[[nodiscard]] qsizetype callbackRuleSnapshotOwnerCount(const LuaCallbackRuleSnapshotStore<Row> &store,
 	                                                       const quint64 ownerRuntimeLocationHandle)
 	{
-		const auto owner = store.owners.value(luaCallbackRuntimeLocationSlotKey(ownerRuntimeLocationHandle));
-		return owner && owner->runtimeLocationHandle == ownerRuntimeLocationHandle
-		           ? owner->orderedRuleLocationHandles.size()
-		           : 0;
+		const auto owner = store.owners.value(ownerRuntimeLocationHandle);
+		return owner ? owner->orderedRuleLocationHandles.size() : 0;
 	}
 
 	template <typename Row>
@@ -1560,30 +1637,80 @@ namespace
 		replaceCausalRuleSnapshotOwner(targetStore, targetOwnerHandle, targetRows);
 	}
 
+	/**
+	 * @brief Builds one generation-checked targeted rule update for a causal snapshot revision.
+	 * @param targetStore Rule store being rebased.
+	 * @param beforeStore Rule store captured before the causal mutation.
+	 * @param afterStore Rule store captured after the causal mutation.
+	 * @param targetOwnerHandle Owner identity in the snapshot being rebased.
+	 * @param beforeOwnerHandle Owner identity before the causal mutation.
+	 * @param afterOwnerHandle Owner identity after the causal mutation.
+	 * @param ruleHandle Generation-checked rule location identity.
+	 * @param runtimeId Stable rule identity.
+	 * @param parts Rule-store components changed by the causal mutation.
+	 * @return Component updates, or no update when any identity no longer matches.
+	 */
+	template <typename Row> struct CausalTargetedRuleUpdates
+	{
+			std::optional<typename LuaCallbackRuleSnapshotStore<Row>::RowMap::Update>          definition;
+			std::optional<typename LuaCallbackRuleSnapshotStore<Row>::RuntimeStateMap::Update> runtimeState;
+			std::optional<typename LuaCallbackRuleSnapshotStore<Row>::DetailStateMap::Update>  detailState;
+	};
+
 	template <typename Row>
-	void applyCausalTargetedRuleDelta(LuaCallbackRuleSnapshotStore<Row>       &targetStore,
-	                                  const LuaCallbackRuleSnapshotStore<Row> &beforeStore,
-	                                  const LuaCallbackRuleSnapshotStore<Row> &afterStore,
-	                                  const quint64 targetOwnerHandle, const quint64 beforeOwnerHandle,
-	                                  const quint64 afterOwnerHandle, const quint64 ruleHandle)
+	[[nodiscard]] std::optional<CausalTargetedRuleUpdates<Row>>
+	causalTargetedRuleUpdate(const LuaCallbackRuleSnapshotStore<Row> &targetStore,
+	                         const LuaCallbackRuleSnapshotStore<Row> &beforeStore,
+	                         const LuaCallbackRuleSnapshotStore<Row> &afterStore,
+	                         const quint64 targetOwnerHandle, const quint64 beforeOwnerHandle,
+	                         const quint64 afterOwnerHandle, const quint64 ruleHandle,
+	                         const quint64 runtimeId, const LuaCallbackRuleSnapshotParts parts)
 	{
 		if (targetOwnerHandle != beforeOwnerHandle || afterOwnerHandle != beforeOwnerHandle)
-			return;
-		const quint32 key       = luaCallbackRuntimeLocationSlotKey(ruleHandle);
-		const auto    beforeRow = beforeStore.rows.value(key);
-		const auto    afterRow  = afterStore.rows.value(key);
-		const auto    targetRow = targetStore.rows.value(key);
-		if (!beforeRow || !afterRow || !targetRow || beforeRow->runtimeLocationHandle != ruleHandle ||
-		    afterRow->runtimeLocationHandle != ruleHandle || targetRow->runtimeLocationHandle != ruleHandle)
+			return std::nullopt;
+		const auto beforeDefinition = beforeStore.rows.value(ruleHandle);
+		const auto afterDefinition  = afterStore.rows.value(ruleHandle);
+		const auto targetDefinition = targetStore.rows.value(ruleHandle);
+		const auto beforeRuntime    = beforeStore.runtimeStates.value(ruleHandle);
+		const auto afterRuntime     = afterStore.runtimeStates.value(ruleHandle);
+		const auto targetRuntime    = targetStore.runtimeStates.value(ruleHandle);
+		const auto beforeDetail     = beforeStore.detailStates.value(ruleHandle);
+		const auto afterDetail      = afterStore.detailStates.value(ruleHandle);
+		const auto targetDetail     = targetStore.detailStates.value(ruleHandle);
+		if (!beforeDefinition || !afterDefinition || !targetDefinition || !beforeRuntime || !afterRuntime ||
+		    !targetRuntime || !beforeDetail || !afterDetail || !targetDetail ||
+		    beforeDefinition->runtimeId != runtimeId || afterDefinition->runtimeId != runtimeId ||
+		    targetDefinition->runtimeId != runtimeId || beforeRuntime->runtimeId != runtimeId ||
+		    afterRuntime->runtimeId != runtimeId || targetRuntime->runtimeId != runtimeId ||
+		    beforeDetail->runtimeId != runtimeId || afterDetail->runtimeId != runtimeId ||
+		    targetDetail->runtimeId != runtimeId)
 		{
-			return;
+			return std::nullopt;
 		}
-		Row merged = *targetRow;
-		applyCausalSnapshotValueDelta(merged, *beforeRow, *afterRow);
-		using RowMap     = LuaCallbackPersistentSlotMap<Row>;
-		targetStore.rows = targetStore.rows.withUpdates(QVector<typename RowMap::Update>{
-		    {key, QSharedPointer<const Row>::create(std::move(merged))}
-        });
+		CausalTargetedRuleUpdates<Row> result;
+		if (parts.testFlag(LuaCallbackRuleSnapshotPart::Definition))
+		{
+			Row merged = *targetDefinition;
+			applyCausalRuleDefinitionDelta(merged, *beforeDefinition, *afterDefinition);
+			result.definition = typename LuaCallbackRuleSnapshotStore<Row>::RowMap::Update{
+			    ruleHandle, QSharedPointer<const Row>::create(merged)};
+		}
+		if (parts.testFlag(LuaCallbackRuleSnapshotPart::RuntimeState))
+		{
+			LuaCallbackRuleRuntimeStateSnapshot merged = *targetRuntime;
+			applyCausalSnapshotValueDelta(merged, *beforeRuntime, *afterRuntime);
+			result.runtimeState =
+			    typename LuaCallbackRuleSnapshotStore<Row>::RuntimeStateMap::Update{ruleHandle, merged};
+		}
+		if (parts.testFlag(LuaCallbackRuleSnapshotPart::DetailState))
+		{
+			LuaCallbackRuleDetailStateSnapshot merged = *targetDetail;
+			applyCausalSnapshotValueDelta(merged, *beforeDetail, *afterDetail);
+			result.detailState = typename LuaCallbackRuleSnapshotStore<Row>::DetailStateMap::Update{
+			    ruleHandle,
+			    QSharedPointer<const LuaCallbackRuleDetailStateSnapshot>::create(std::move(merged))};
+		}
+		return result;
 	}
 
 	template <typename Row>
@@ -1592,7 +1719,8 @@ namespace
 	    LuaCallbackRuleSnapshotStore<Row> &targetStore, const LuaCallbackRuleSnapshotStore<Row> &beforeStore,
 	    const LuaCallbackRuleSnapshotStore<Row> &afterStore, const LuaCallbackStableSnapshotDomain domain,
 	    const quint32                                                                     fullDomainMask,
-	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches)
+	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches,
+	    const QHash<LuaCallbackStableSnapshotDomain, LuaCallbackTargetedRulePatches>     &targetedRulePatches)
 	{
 		if ((fullDomainMask & luaCallbackStableSnapshotDomainBit(domain)) != 0U)
 		{
@@ -1648,31 +1776,72 @@ namespace
 		}
 
 		const auto patches = scopedPatches.constFind(domain);
-		if (patches == scopedPatches.constEnd())
-			return;
-		for (const LuaCallbackStableCausalPatch &scope : *patches)
+		if (patches != scopedPatches.constEnd())
 		{
-			LuaCallbackStableCausalPatch ownerScope;
-			ownerScope.pluginId = scope.pluginId;
-			ownerScope.kind     = LuaCallbackStableSnapshotPatchKind::Owner;
-			if (scope.kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-			    scope.runtimeLocationHandle != 0 && scope.runtimeId != 0 && patches->contains(ownerScope))
+			for (const LuaCallbackStableCausalPatch &scope : *patches)
 			{
-				continue;
-			}
-			const auto beforeOwner = callbackRuleOwnerHandle(before, scope.pluginId);
-			const auto afterOwner  = callbackRuleOwnerHandle(after, scope.pluginId);
-			const auto targetOwner = callbackRuleOwnerHandle(target, scope.pluginId);
-			if (!beforeOwner || !afterOwner || !targetOwner)
-				continue;
-			if (scope.kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-			    scope.runtimeLocationHandle != 0 && scope.runtimeId != 0)
-				applyCausalTargetedRuleDelta(targetStore, beforeStore, afterStore, *targetOwner, *beforeOwner,
-				                             *afterOwner, scope.runtimeLocationHandle);
-			else
+				const auto beforeOwner = callbackRuleOwnerHandle(before, scope.pluginId);
+				const auto afterOwner  = callbackRuleOwnerHandle(after, scope.pluginId);
+				const auto targetOwner = callbackRuleOwnerHandle(target, scope.pluginId);
+				if (!beforeOwner || !afterOwner || !targetOwner)
+					continue;
 				applyCausalRuleOwnerDelta(targetStore, beforeStore, afterStore, *targetOwner, *beforeOwner,
 				                          *afterOwner);
+			}
 		}
+
+		const auto targeted = targetedRulePatches.constFind(domain);
+		if (targeted == targetedRulePatches.constEnd())
+			return;
+		using Store           = LuaCallbackRuleSnapshotStore<Row>;
+		using RowMap          = Store::RowMap;
+		using RuntimeStateMap = Store::RuntimeStateMap;
+		using DetailStateMap  = Store::DetailStateMap;
+		QVector<typename RowMap::Update>          rowUpdates;
+		QVector<typename RuntimeStateMap::Update> runtimeStateUpdates;
+		QVector<typename DetailStateMap::Update>  detailStateUpdates;
+		for (const LuaCallbackTargetedRulePatch &patch : *targeted)
+		{
+			LuaCallbackStableCausalPatch ownerScope;
+			ownerScope.pluginId = patch.pluginId;
+			ownerScope.kind     = LuaCallbackStableSnapshotPatchKind::Owner;
+			if (patches != scopedPatches.constEnd() && patches->contains(ownerScope))
+				continue;
+			const auto beforeOwner = callbackRuleOwnerHandle(before, patch.pluginId);
+			const auto afterOwner  = callbackRuleOwnerHandle(after, patch.pluginId);
+			const auto targetOwner = callbackRuleOwnerHandle(target, patch.pluginId);
+			if (!beforeOwner || !afterOwner || !targetOwner)
+				continue;
+			if (auto update = causalTargetedRuleUpdate(targetStore, beforeStore, afterStore, *targetOwner,
+			                                           *beforeOwner, *afterOwner, patch.runtimeLocationHandle,
+			                                           patch.runtimeId, patch.parts))
+			{
+				if (update->definition)
+				{
+					if (rowUpdates.isEmpty())
+						rowUpdates.reserve(targeted->size());
+					rowUpdates.push_back(std::move(*update->definition));
+				}
+				if (update->runtimeState)
+				{
+					if (runtimeStateUpdates.isEmpty())
+						runtimeStateUpdates.reserve(targeted->size());
+					runtimeStateUpdates.push_back(std::move(*update->runtimeState));
+				}
+				if (update->detailState)
+				{
+					if (detailStateUpdates.isEmpty())
+						detailStateUpdates.reserve(targeted->size());
+					detailStateUpdates.push_back(std::move(*update->detailState));
+				}
+			}
+		}
+		if (!rowUpdates.isEmpty())
+			targetStore.rows = targetStore.rows.withUpdates(rowUpdates);
+		if (!runtimeStateUpdates.isEmpty())
+			targetStore.runtimeStates = targetStore.runtimeStates.withUpdates(runtimeStateUpdates);
+		if (!detailStateUpdates.isEmpty())
+			targetStore.detailStates = targetStore.detailStates.withUpdates(detailStateUpdates);
 	}
 
 	void applyCausalStableSnapshotRevisionUnchecked(
@@ -1683,7 +1852,8 @@ namespace
 	    const LuaCallbackRuntimeCounterUpdates     &runtimeCounterUpdates,
 	    const LuaCallbackEntityMutations           &entityMutations,
 	    const LuaCallbackEntityResetSlots &entityResetSlots, const quint32 fullDomainMask,
-	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches)
+	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches,
+	    const QHash<LuaCallbackStableSnapshotDomain, LuaCallbackTargetedRulePatches>     &targetedRulePatches)
 	{
 #define QMUD_CAUSAL_DOMAIN(name)                                                                             \
 	if ((domainMask & luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::name)) != 0U)
@@ -1717,7 +1887,7 @@ namespace
 			applyCausalRuleSnapshotDomain(target, before, after, target.triggerSnapshotStore,
 			                              before.triggerSnapshotStore, after.triggerSnapshotStore,
 			                              LuaCallbackStableSnapshotDomain::Triggers, fullDomainMask,
-			                              scopedPatches);
+			                              scopedPatches, targetedRulePatches);
 			QMUD_CAUSAL_FIELD(triggerListOverridesByPluginId);
 			QMUD_CAUSAL_FIELD(missingTriggerListPluginIds);
 			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::TriggerCount,
@@ -1728,7 +1898,7 @@ namespace
 			applyCausalRuleSnapshotDomain(target, before, after, target.aliasSnapshotStore,
 			                              before.aliasSnapshotStore, after.aliasSnapshotStore,
 			                              LuaCallbackStableSnapshotDomain::Aliases, fullDomainMask,
-			                              scopedPatches);
+			                              scopedPatches, targetedRulePatches);
 			QMUD_CAUSAL_FIELD(aliasListOverridesByPluginId);
 			QMUD_CAUSAL_FIELD(missingAliasListPluginIds);
 			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::AliasCount,
@@ -1739,7 +1909,7 @@ namespace
 			applyCausalRuleSnapshotDomain(target, before, after, target.timerSnapshotStore,
 			                              before.timerSnapshotStore, after.timerSnapshotStore,
 			                              LuaCallbackStableSnapshotDomain::Timers, fullDomainMask,
-			                              scopedPatches);
+			                              scopedPatches, targetedRulePatches);
 			QMUD_CAUSAL_FIELD(timerListOverridesByPluginId);
 			QMUD_CAUSAL_FIELD(missingTimerListPluginIds);
 			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::TimerCount,
@@ -1912,16 +2082,19 @@ namespace
 	    const LuaCallbackRuntimeCounterUpdates     &runtimeCounterUpdates,
 	    const LuaCallbackEntityMutations           &entityMutations,
 	    const LuaCallbackEntityResetSlots &entityResetSlots, const quint32 fullDomainMask,
-	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches)
+	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches,
+	    const QHash<LuaCallbackStableSnapshotDomain, LuaCallbackTargetedRulePatches>     &targetedRulePatches)
 	{
-		applyCausalStableSnapshotRevisionUnchecked(
-		    target, before, after, domainMask, mapperOperations, arrayMutations, miniWindowMutations,
-		    runtimeCounterUpdates, entityMutations, entityResetSlots, fullDomainMask, scopedPatches);
+		applyCausalStableSnapshotRevisionUnchecked(target, before, after, domainMask, mapperOperations,
+		                                           arrayMutations, miniWindowMutations, runtimeCounterUpdates,
+		                                           entityMutations, entityResetSlots, fullDomainMask,
+		                                           scopedPatches, targetedRulePatches);
 #ifndef NDEBUG
 		LuaCallbackSnapshot verification = before;
-		applyCausalStableSnapshotRevisionUnchecked(
-		    verification, before, after, domainMask, mapperOperations, arrayMutations, miniWindowMutations,
-		    runtimeCounterUpdates, entityMutations, entityResetSlots, fullDomainMask, scopedPatches);
+		applyCausalStableSnapshotRevisionUnchecked(verification, before, after, domainMask, mapperOperations,
+		                                           arrayMutations, miniWindowMutations, runtimeCounterUpdates,
+		                                           entityMutations, entityResetSlots, fullDomainMask,
+		                                           scopedPatches, targetedRulePatches);
 		const quint32 verificationMask =
 		    domainMask & ~luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::MiniWindows);
 		Q_ASSERT(luaCallbackStableSnapshotDomainsEqual(verification, after, verificationMask));
@@ -14619,24 +14792,86 @@ void WorldRuntime::reconcileIncomingLineAfterOutputReplacement()
 
 namespace
 {
+	LuaCallbackRuleRuntimeStateSnapshot ruleRuntimeStateFromRule(const WorldRuntime::Trigger &trigger)
+	{
+		return {trigger.runtimeId,
+		        trigger.runtimeLocationHandle,
+		        trigger.executionTimeNs,
+		        trigger.matched,
+		        trigger.invocationCount,
+		        trigger.matchCount,
+		        trigger.matchAttempts,
+		        0,
+		        trigger.executingScriptDepth,
+		        trigger.executingScript};
+	}
+
+	LuaCallbackRuleRuntimeStateSnapshot ruleRuntimeStateFromRule(const WorldRuntime::Alias &alias)
+	{
+		return {alias.runtimeId,
+		        alias.runtimeLocationHandle,
+		        alias.executionTimeNs,
+		        alias.matched,
+		        alias.invocationCount,
+		        alias.matchCount,
+		        alias.matchAttempts,
+		        0,
+		        alias.executingScriptDepth,
+		        alias.executingScript};
+	}
+
+	LuaCallbackRuleRuntimeStateSnapshot ruleRuntimeStateFromRule(const WorldRuntime::Timer &timer)
+	{
+		return {timer.runtimeId,
+		        timer.runtimeLocationHandle,
+		        0,
+		        0,
+		        timer.invocationCount,
+		        0,
+		        0,
+		        timer.firedCount,
+		        timer.executingScriptDepth,
+		        timer.executingScript};
+	}
+
+	LuaCallbackRuleDetailStateSnapshot ruleDetailStateFromRule(const WorldRuntime::Trigger &trigger)
+	{
+		return {trigger.runtimeId,
+		        trigger.runtimeLocationHandle,
+		        trigger.lastMatchTarget,
+		        trigger.lastMatchWildcards,
+		        trigger.lastMatched,
+		        {},
+		        {}};
+	}
+
+	LuaCallbackRuleDetailStateSnapshot ruleDetailStateFromRule(const WorldRuntime::Alias &alias)
+	{
+		return {alias.runtimeId,
+		        alias.runtimeLocationHandle,
+		        alias.lastMatchTarget,
+		        alias.lastMatchWildcards,
+		        alias.lastMatched,
+		        {},
+		        {}};
+	}
+
+	LuaCallbackRuleDetailStateSnapshot ruleDetailStateFromRule(const WorldRuntime::Timer &timer)
+	{
+		return {timer.runtimeId, timer.runtimeLocationHandle, {}, {}, {},
+		        timer.lastFired, timer.nextFireTime};
+	}
+
 	LuaCallbackTriggerSnapshot triggerSnapshotFromRule(const WorldRuntime::Trigger &trigger)
 	{
 		LuaCallbackTriggerSnapshot row;
 		row.attributes            = trigger.attributes;
 		row.children              = trigger.children;
 		row.included              = trigger.included;
-		row.matched               = trigger.matched;
-		row.invocationCount       = trigger.invocationCount;
-		row.matchCount            = trigger.matchCount;
-		row.matchAttempts         = trigger.matchAttempts;
-		row.executionTimeNs       = trigger.executionTimeNs;
-		row.lastMatchTarget       = trigger.lastMatchTarget;
-		row.lastMatchWildcards    = trigger.lastMatchWildcards;
-		row.lastMatched           = trigger.lastMatched;
 		row.runtimeId             = trigger.runtimeId;
 		row.runtimeLocationHandle = trigger.runtimeLocationHandle;
-		row.executingScriptDepth  = trigger.executingScriptDepth;
-		row.executingScript       = trigger.executingScript;
+		luaCallbackApplyRuleRuntimeState(row, ruleRuntimeStateFromRule(trigger));
+		luaCallbackApplyRuleDetailState(row, ruleDetailStateFromRule(trigger));
 		return row;
 	}
 
@@ -14646,14 +14881,10 @@ namespace
 		row.attributes            = timer.attributes;
 		row.children              = timer.children;
 		row.included              = timer.included;
-		row.lastFired             = timer.lastFired;
-		row.nextFireTime          = timer.nextFireTime;
-		row.firedCount            = timer.firedCount;
-		row.invocationCount       = timer.invocationCount;
-		row.executingScript       = timer.executingScript;
 		row.runtimeId             = timer.runtimeId;
 		row.runtimeLocationHandle = timer.runtimeLocationHandle;
-		row.executingScriptDepth  = timer.executingScriptDepth;
+		luaCallbackApplyRuleRuntimeState(row, ruleRuntimeStateFromRule(timer));
+		luaCallbackApplyRuleDetailState(row, ruleDetailStateFromRule(timer));
 		return row;
 	}
 } // namespace
@@ -14677,18 +14908,10 @@ namespace QMudLuaCallbackRuleSnapshot
 		row.attributes            = alias.attributes;
 		row.children              = alias.children;
 		row.included              = alias.included;
-		row.matched               = alias.matched;
-		row.invocationCount       = alias.invocationCount;
-		row.matchCount            = alias.matchCount;
-		row.matchAttempts         = alias.matchAttempts;
-		row.executionTimeNs       = alias.executionTimeNs;
-		row.lastMatchTarget       = alias.lastMatchTarget;
-		row.lastMatchWildcards    = alias.lastMatchWildcards;
-		row.lastMatched           = alias.lastMatched;
 		row.runtimeId             = alias.runtimeId;
 		row.runtimeLocationHandle = alias.runtimeLocationHandle;
-		row.executingScriptDepth  = alias.executingScriptDepth;
-		row.executingScript       = alias.executingScript;
+		luaCallbackApplyRuleRuntimeState(row, ruleRuntimeStateFromRule(alias));
+		luaCallbackApplyRuleDetailState(row, ruleDetailStateFromRule(alias));
 		return row;
 	}
 
@@ -14718,22 +14941,27 @@ namespace
 	                                         const quint64                      ownerRuntimeLocationHandle,
 	                                         const QList<Rule> &rules, Converter &&converter)
 	{
-		using Store    = LuaCallbackRuleSnapshotStore<Row>;
-		using RowMap   = LuaCallbackPersistentSlotMap<Row>;
-		using OwnerMap = LuaCallbackPersistentSlotMap<typename Store::Owner>;
+		using Store           = LuaCallbackRuleSnapshotStore<Row>;
+		using RowMap          = Store::RowMap;
+		using RuntimeStateMap = Store::RuntimeStateMap;
+		using DetailStateMap  = Store::DetailStateMap;
+		using OwnerMap        = Store::OwnerMap;
 
-		const quint32 ownerKey = luaCallbackRuntimeLocationSlotKey(ownerRuntimeLocationHandle);
-		const auto    previous = store.owners.value(ownerKey);
-		QVector<typename RowMap::Update> rowUpdates;
+		const auto                                previous = store.owners.value(ownerRuntimeLocationHandle);
+		QVector<typename RowMap::Update>          rowUpdates;
+		QVector<typename RuntimeStateMap::Update> runtimeStateUpdates;
+		QVector<typename DetailStateMap::Update>  detailStateUpdates;
 		rowUpdates.reserve(rules.size() + (previous ? previous->orderedRuleLocationHandles.size() : 0));
-		if (previous && previous->runtimeLocationHandle == ownerRuntimeLocationHandle)
+		if (previous)
 		{
 			for (const quint64 oldHandle : previous->orderedRuleLocationHandles)
 			{
-				const quint32 key        = luaCallbackRuntimeLocationSlotKey(oldHandle);
-				const auto    currentRow = store.rows.value(key);
-				if (currentRow && currentRow->runtimeLocationHandle == oldHandle)
-					rowUpdates.push_back({key, {}});
+				if (const auto currentRow = store.rows.value(oldHandle); currentRow)
+				{
+					rowUpdates.push_back({oldHandle, {}});
+					runtimeStateUpdates.push_back({oldHandle, {}});
+					detailStateUpdates.push_back({oldHandle, {}});
+				}
 			}
 		}
 
@@ -14745,13 +14973,18 @@ namespace
 			if (rule.runtimeLocationHandle == 0)
 				continue;
 			owner->orderedRuleLocationHandles.push_back(rule.runtimeLocationHandle);
-			rowUpdates.push_back(
-			    {luaCallbackRuntimeLocationSlotKey(rule.runtimeLocationHandle),
-			     QSharedPointer<const Row>::create(std::invoke(std::forward<Converter>(converter), rule))});
+			const Row row = std::invoke(std::forward<Converter>(converter), rule);
+			rowUpdates.push_back({rule.runtimeLocationHandle, QSharedPointer<const Row>::create(row)});
+			runtimeStateUpdates.push_back({rule.runtimeLocationHandle, luaCallbackRuleRuntimeState(row)});
+			detailStateUpdates.push_back(
+			    {rule.runtimeLocationHandle, QSharedPointer<const LuaCallbackRuleDetailStateSnapshot>::create(
+			                                     luaCallbackRuleDetailState(row))});
 		}
-		store.rows   = store.rows.withUpdates(rowUpdates);
-		store.owners = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
-		    {ownerKey, std::move(owner)}
+		store.rows          = store.rows.withUpdates(rowUpdates);
+		store.runtimeStates = store.runtimeStates.withUpdates(runtimeStateUpdates);
+		store.detailStates  = store.detailStates.withUpdates(detailStateUpdates);
+		store.owners        = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
+		    {ownerRuntimeLocationHandle, std::move(owner)}
         });
 	}
 
@@ -14759,45 +14992,35 @@ namespace
 	void removeLuaCallbackRuleSnapshotOwner(LuaCallbackRuleSnapshotStore<Row> &store,
 	                                        const quint64                      ownerRuntimeLocationHandle)
 	{
-		using Store            = LuaCallbackRuleSnapshotStore<Row>;
-		using RowMap           = LuaCallbackPersistentSlotMap<Row>;
-		using OwnerMap         = LuaCallbackPersistentSlotMap<typename Store::Owner>;
-		const quint32 ownerKey = luaCallbackRuntimeLocationSlotKey(ownerRuntimeLocationHandle);
-		const auto    previous = store.owners.value(ownerKey);
-		if (!previous || previous->runtimeLocationHandle != ownerRuntimeLocationHandle)
+		using Store           = LuaCallbackRuleSnapshotStore<Row>;
+		using RowMap          = Store::RowMap;
+		using RuntimeStateMap = Store::RuntimeStateMap;
+		using DetailStateMap  = Store::DetailStateMap;
+		using OwnerMap        = Store::OwnerMap;
+		const auto previous   = store.owners.value(ownerRuntimeLocationHandle);
+		if (!previous)
 			return;
-		QVector<typename RowMap::Update> rowUpdates;
+		QVector<typename RowMap::Update>          rowUpdates;
+		QVector<typename RuntimeStateMap::Update> runtimeStateUpdates;
+		QVector<typename DetailStateMap::Update>  detailStateUpdates;
 		rowUpdates.reserve(previous->orderedRuleLocationHandles.size());
 		for (const quint64 handle : previous->orderedRuleLocationHandles)
 		{
-			const quint32 key        = luaCallbackRuntimeLocationSlotKey(handle);
-			const auto    currentRow = store.rows.value(key);
-			if (currentRow && currentRow->runtimeLocationHandle == handle)
-				rowUpdates.push_back({key, {}});
+			if (const auto currentRow = store.rows.value(handle); currentRow)
+			{
+				rowUpdates.push_back({handle, {}});
+				runtimeStateUpdates.push_back({handle, {}});
+				detailStateUpdates.push_back({handle, {}});
+			}
 		}
-		store.rows   = store.rows.withUpdates(rowUpdates);
-		store.owners = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
-		    {ownerKey, {}}
+		store.rows          = store.rows.withUpdates(rowUpdates);
+		store.runtimeStates = store.runtimeStates.withUpdates(runtimeStateUpdates);
+		store.detailStates  = store.detailStates.withUpdates(detailStateUpdates);
+		store.owners        = store.owners.withUpdates(QVector<typename OwnerMap::Update>{
+		    {ownerRuntimeLocationHandle, {}}
         });
 	}
 
-	template <typename Row>
-	[[nodiscard]] bool patchLuaCallbackRuleSnapshotRow(LuaCallbackRuleSnapshotStore<Row> &store,
-	                                                   const quint64 ownerRuntimeLocationHandle,
-	                                                   const quint64 ruleRuntimeLocationHandle, Row row)
-	{
-		using RowMap     = LuaCallbackPersistentSlotMap<Row>;
-		const auto owner = store.owners.value(luaCallbackRuntimeLocationSlotKey(ownerRuntimeLocationHandle));
-		if (!owner || owner->runtimeLocationHandle != ownerRuntimeLocationHandle)
-		{
-			return false;
-		}
-		store.rows = store.rows.withUpdates(QVector<typename RowMap::Update>{
-		    {luaCallbackRuntimeLocationSlotKey(ruleRuntimeLocationHandle),
-		     QSharedPointer<const Row>::create(std::move(row))}
-        });
-		return true;
-	}
 } // namespace
 
 void WorldRuntime::invalidateLuaCallbackDispatchSnapshot() const
@@ -14808,6 +15031,7 @@ void WorldRuntime::invalidateLuaCallbackDispatchSnapshot() const
 		    luaCallbackAllStableSnapshotDomainsMask();
 		m_causalPluginCallbackSnapshotCaptureStack.last()->fullStableDomainMask |=
 		    luaCallbackAllStableSnapshotDomainsMask();
+		m_causalPluginCallbackSnapshotCaptureStack.last()->targetedRulePatches.clear();
 	}
 	++m_luaCallbackDispatchSnapshotGeneration;
 	m_luaCallbackDispatchSnapshotBaseCache.clear();
@@ -14833,27 +15057,52 @@ void WorldRuntime::endLuaCallbackSnapshotMutationBatch() const
 	if (m_luaCallbackSnapshotMutationBatchDepth == 0)
 	{
 		m_luaCallbackTurnVolatileSnapshotCache.reset();
-		applyPendingLuaCallbackSnapshotPatches();
+		applyPendingLuaCallbackSnapshotPatches(false);
 	}
 }
 
-void WorldRuntime::applyPendingLuaCallbackSnapshotPatches() const
+void WorldRuntime::applyPendingLuaCallbackSnapshotPatches(const bool publishTargetedRulePatches) const
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::applyPendingLuaCallbackSnapshotPatches");
 	const quint32 stableDomainMask = luaCallbackExpandedStableSnapshotDomainMask(
 	    std::exchange(m_pendingLuaCallbackStableSnapshotPatchMask, 0U));
-	auto scopedPatchIdsByDomain = std::exchange(m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain, {});
+	QHash<LuaCallbackStableSnapshotDomain, PendingLuaCallbackStableSnapshotPatches> extractedPatches;
 	for (quint32 domainIndex = 0U; domainIndex < static_cast<quint32>(LuaCallbackStableSnapshotDomain::Count);
 	     ++domainIndex)
 	{
 		const auto domain = static_cast<LuaCallbackStableSnapshotDomain>(domainIndex);
 		if ((stableDomainMask & luaCallbackStableSnapshotDomainBit(domain)) != 0U)
 		{
-			scopedPatchIdsByDomain.remove(domain);
+			m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.remove(domain);
 			continue;
 		}
-		const PendingLuaCallbackStableSnapshotPatches pending = scopedPatchIdsByDomain.take(domain);
-		const auto                                   &scopes  = pending.scopes;
+		auto live = m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.find(domain);
+		if (live == m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.end())
+			continue;
+		PendingLuaCallbackStableSnapshotPatches pending;
+		pending.scopes             = std::exchange(live->scopes, {});
+		pending.arrayPatchesByName = std::exchange(live->arrayPatchesByName, {});
+		if (publishTargetedRulePatches)
+			pending.targetedRulePatches = std::exchange(live->targetedRulePatches, {});
+		if (live->scopes.isEmpty() && live->arrayPatchesByName.isEmpty() &&
+		    live->targetedRulePatches.isEmpty())
+		{
+			m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.erase(live);
+		}
+		if (!pending.scopes.isEmpty() || !pending.arrayPatchesByName.isEmpty() ||
+		    !pending.targetedRulePatches.isEmpty())
+		{
+			extractedPatches.insert(domain, std::move(pending));
+		}
+	}
+
+	applyLuaCallbackStableSnapshotPatches(stableDomainMask);
+
+	for (auto extracted = extractedPatches.begin(); extracted != extractedPatches.end(); ++extracted)
+	{
+		const LuaCallbackStableSnapshotDomain          domain  = extracted.key();
+		const PendingLuaCallbackStableSnapshotPatches &pending = extracted.value();
+		const auto                                    &scopes  = pending.scopes;
 		if (domain == LuaCallbackStableSnapshotDomain::Arrays)
 		{
 			for (const LuaCallbackStableSnapshotPatchScope &scope : scopes)
@@ -14867,31 +15116,11 @@ void WorldRuntime::applyPendingLuaCallbackSnapshotPatches() const
 			}
 			continue;
 		}
-		const bool targetedRuleDomain    = domain == LuaCallbackStableSnapshotDomain::Triggers ||
-		                                   domain == LuaCallbackStableSnapshotDomain::Aliases ||
-		                                   domain == LuaCallbackStableSnapshotDomain::Timers;
-		bool       hasTargetedRuleScopes = false;
 		for (const LuaCallbackStableSnapshotPatchScope &scope : scopes)
-		{
-			const bool targetedRuleScope =
-			    targetedRuleDomain && scope.kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-			    scope.runtimeLocationHandle != 0 && scope.runtimeId != 0;
-			if (targetedRuleScope)
-			{
-				hasTargetedRuleScopes = true;
-				continue;
-			}
 			applyLuaCallbackStableSnapshotPatch(domain, scope);
-		}
-		if (hasTargetedRuleScopes)
-		{
-			publishTargetedLuaCallbackRuleSnapshotPatches(
-			    domain, scopes, [](const LuaCallbackStableSnapshotPatchScope &scope) { return scope; });
-		}
+		if (!pending.targetedRulePatches.isEmpty())
+			publishTargetedLuaCallbackRuleSnapshotPatches(domain, pending.targetedRulePatches);
 	}
-	Q_ASSERT(scopedPatchIdsByDomain.isEmpty());
-
-	applyLuaCallbackStableSnapshotPatches(stableDomainMask);
 }
 
 void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapshotDomain domain) const
@@ -14904,6 +15133,7 @@ void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapsho
 		m_causalPluginCallbackSnapshotCaptureStack.last()->stableDomainMask |= causalMask;
 		m_causalPluginCallbackSnapshotCaptureStack.last()->fullStableDomainMask |= causalMask;
 	}
+	supersedeLuaCallbackTargetedRulePatches(domain, std::nullopt);
 	if (!m_luaCallbackDispatchSnapshotBaseCache ||
 	    m_luaCallbackDispatchSnapshotCacheGeneration != m_luaCallbackDispatchSnapshotGeneration)
 	{
@@ -14937,25 +15167,17 @@ void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapsho
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::patchLuaCallbackStableSnapshot");
 	if (!m_causalPluginCallbackSnapshotCaptureStack.isEmpty())
 	{
-		auto         &revision          = *m_causalPluginCallbackSnapshotCaptureStack.last();
-		const quint32 domainBit         = luaCallbackStableSnapshotDomainBit(domain);
-		const bool    targetedRuleState = scope.kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-		                                  scope.runtimeLocationHandle != 0 && scope.runtimeId != 0 &&
-		                                  (domain == LuaCallbackStableSnapshotDomain::Triggers ||
-		                                   domain == LuaCallbackStableSnapshotDomain::Aliases ||
-		                                   domain == LuaCallbackStableSnapshotDomain::Timers);
-		const quint32 causalMask =
-		    targetedRuleState ? domainBit : luaCallbackCausalStableSnapshotDomainMask(domainBit);
+		auto         &revision   = *m_causalPluginCallbackSnapshotCaptureStack.last();
+		const quint32 domainBit  = luaCallbackStableSnapshotDomainBit(domain);
+		const quint32 causalMask = luaCallbackCausalStableSnapshotDomainMask(domainBit);
 		revision.stableDomainMask |= causalMask;
 		auto                        &patches = revision.scopedStableSnapshotPatches[domain];
 		LuaCallbackStableCausalPatch patch;
-		patch.pluginId              = scope.pluginId;
-		patch.runtimeLocationHandle = scope.runtimeLocationHandle;
-		patch.runtimeId             = scope.runtimeId;
-		patch.itemName              = scope.itemName;
-		patch.memberName            = scope.memberName;
-		patch.topologyMayChange     = scope.topologyMayChange;
-		patch.kind                  = scope.kind;
+		patch.pluginId          = scope.pluginId;
+		patch.itemName          = scope.itemName;
+		patch.memberName        = scope.memberName;
+		patch.topologyMayChange = scope.topologyMayChange;
+		patch.kind              = scope.kind;
 		if (const auto existing = patches.find(patch); existing != patches.end())
 		{
 			patch.topologyMayChange |= existing->topologyMayChange;
@@ -14963,6 +15185,8 @@ void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapsho
 		}
 		patches.insert(std::move(patch));
 	}
+	if (scope.kind == LuaCallbackStableSnapshotPatchKind::Owner)
+		supersedeLuaCallbackTargetedRulePatches(domain, scope.pluginId);
 	if (!m_luaCallbackDispatchSnapshotBaseCache ||
 	    m_luaCallbackDispatchSnapshotCacheGeneration != m_luaCallbackDispatchSnapshotGeneration)
 	{
@@ -15117,7 +15341,6 @@ void WorldRuntime::queueLuaCallbackStableSnapshotPatch(const LuaCallbackStableSn
 		    {
 			    return pending.pluginId == scope.pluginId && pending.itemName == scope.itemName &&
 			           pending.memberName == scope.memberName && pending.kind == scope.kind &&
-			           pending.runtimeLocationHandle == scope.runtimeLocationHandle &&
 			           pending.runtimeId == scope.runtimeId;
 		    });
 		if (compatible != pendingScopes.end())
@@ -15133,12 +15356,99 @@ void WorldRuntime::queueLuaCallbackStableSnapshotPatch(const LuaCallbackStableSn
 	{
 		LuaCallbackStableSnapshotPatchScope merged = *existingScope;
 		pendingScopes.erase(existingScope);
-		merged.indexHint = scope.indexHint;
 		merged.miniWindowChanges |= scope.miniWindowChanges;
 		pendingScopes.insert(std::move(merged));
 		return;
 	}
 	pendingScopes.insert(scope);
+}
+
+void WorldRuntime::supersedeLuaCallbackTargetedRulePatches(const LuaCallbackStableSnapshotDomain domain,
+                                                           const std::optional<QString> &pluginId) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::supersedeLuaCallbackTargetedRulePatches");
+	const quint32 affectedDomains =
+	    luaCallbackExpandedStableSnapshotDomainMask(luaCallbackStableSnapshotDomainBit(domain));
+	for (const LuaCallbackStableSnapshotDomain ruleDomain :
+	     {LuaCallbackStableSnapshotDomain::Triggers, LuaCallbackStableSnapshotDomain::Aliases,
+	      LuaCallbackStableSnapshotDomain::Timers})
+	{
+		if ((affectedDomains & luaCallbackStableSnapshotDomainBit(ruleDomain)) == 0U)
+			continue;
+		if (!m_causalPluginCallbackSnapshotCaptureStack.isEmpty())
+		{
+			auto &targetedByDomain = m_causalPluginCallbackSnapshotCaptureStack.last()->targetedRulePatches;
+			auto  targeted         = targetedByDomain.find(ruleDomain);
+			if (targeted != targetedByDomain.end())
+			{
+				if (!pluginId)
+				{
+					targetedByDomain.erase(targeted);
+				}
+				else
+				{
+					for (auto patch = targeted->begin(); patch != targeted->end();)
+					{
+						if (patch->pluginId == *pluginId)
+							patch = targeted->erase(patch);
+						else
+							++patch;
+					}
+					if (targeted->isEmpty())
+						targetedByDomain.erase(targeted);
+				}
+			}
+		}
+		auto pending = m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.find(ruleDomain);
+		if (pending == m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.end())
+			continue;
+		if (!pluginId)
+		{
+			pending->targetedRulePatches.clear();
+		}
+		else
+		{
+			for (auto patch = pending->targetedRulePatches.begin();
+			     patch != pending->targetedRulePatches.end();)
+			{
+				if (patch->pluginId == *pluginId)
+					patch = pending->targetedRulePatches.erase(patch);
+				else
+					++patch;
+			}
+		}
+		if (pending->scopes.isEmpty() && pending->arrayPatchesByName.isEmpty() &&
+		    pending->targetedRulePatches.isEmpty())
+		{
+			m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.erase(pending);
+		}
+	}
+}
+
+void WorldRuntime::queueLuaCallbackTargetedRuleSnapshotPatch(const LuaCallbackStableSnapshotDomain domain,
+                                                             const LuaCallbackTargetedRulePatch &patch) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::queueLuaCallbackTargetedRuleSnapshotPatch");
+	const quint32 pendingMask =
+	    luaCallbackExpandedStableSnapshotDomainMask(m_pendingLuaCallbackStableSnapshotPatchMask);
+	if ((pendingMask & luaCallbackStableSnapshotDomainBit(domain)) != 0U)
+		return;
+
+	auto &pending = m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain[domain];
+	if (pending.scopes.contains(LuaCallbackStableSnapshotPatchScope::owner(patch.pluginId)))
+		return;
+	const quint64 slotKey  = luaCallbackRuntimeLocationSlotKey(patch.runtimeLocationHandle);
+	auto          existing = pending.targetedRulePatches.find(slotKey);
+	if (existing == pending.targetedRulePatches.end())
+		pending.targetedRulePatches.insert(slotKey, patch);
+	else if (existing->runtimeLocationHandle != patch.runtimeLocationHandle ||
+	         existing->runtimeId != patch.runtimeId)
+		*existing = patch;
+	else
+	{
+		existing->indexHint = patch.indexHint;
+		existing->parts |= patch.parts;
+	}
 }
 
 void WorldRuntime::applyLuaCallbackStableSnapshotPatch(
@@ -15221,10 +15531,9 @@ void WorldRuntime::applyLuaCallbackArrayMemberSnapshotPatches(
 	++m_luaCallbackDispatchSnapshotBasePatchCount;
 }
 
-template <typename Range, typename ScopeAdapter>
+template <typename Range>
 void WorldRuntime::publishTargetedLuaCallbackRuleSnapshotPatches(const LuaCallbackStableSnapshotDomain domain,
-                                                                 const Range                          &values,
-                                                                 ScopeAdapter scopeAdapter) const
+                                                                 const Range &patches) const
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::publishTargetedLuaCallbackRuleSnapshotPatches");
 	const bool hasCausalConsumer = !m_causalPluginCallbackSnapshotCaptureStack.isEmpty();
@@ -15238,50 +15547,90 @@ void WorldRuntime::publishTargetedLuaCallbackRuleSnapshotPatches(const LuaCallba
 	auto  publish = [&]<typename Rule, typename Row>(const auto &resolve, Row (*convert)(const Rule &),
 	                                                 const auto &selectStore)
 	{
-		using RowMap = LuaCallbackPersistentSlotMap<Row>;
-		QVector<typename RowMap::Update> updates;
-		if (hasCurrentBase)
-			updates.reserve(values.size());
-		bool causalStateChanged = false;
-
-		for (const auto &value : values)
+		using Store           = LuaCallbackRuleSnapshotStore<Row>;
+		using RowMap          = Store::RowMap;
+		using RuntimeStateMap = Store::RuntimeStateMap;
+		using DetailStateMap  = Store::DetailStateMap;
+		struct ResolvedPatch
 		{
-			const LuaCallbackStableSnapshotPatchScope scope = std::invoke(scopeAdapter, value);
-			if (scope.kind != LuaCallbackStableSnapshotPatchKind::RuntimeLocation ||
-			    scope.runtimeLocationHandle == 0 || scope.runtimeId == 0)
+				quint64                      ownerHandle{0};
+				const Rule                  *rule{nullptr};
+				LuaCallbackTargetedRulePatch patch;
+		};
+		QVector<ResolvedPatch> resolvedPatches;
+		if (hasCurrentBase)
+			resolvedPatches.reserve(patches.size());
+		QHash<quint64, QString> fallbackOwners;
+		QSet<QString>           fallbackPluginIds;
+		bool                    causalStateChanged = false;
+
+		for (const LuaCallbackTargetedRulePatch &patch : patches)
+		{
+			if (patch.runtimeLocationHandle == 0 || patch.runtimeId == 0)
 				continue;
 			RuleRuntimeLocationResolution resolution;
-			const Rule *rule = std::invoke(resolve, scope.runtimeLocationHandle, scope.runtimeId,
-			                               scope.indexHint, &resolution);
+			const Rule *rule = std::invoke(resolve, patch.runtimeLocationHandle, patch.runtimeId,
+			                               patch.indexHint, &resolution);
 			if (!rule)
 				continue;
 			const quint64 ownerHandle = resolution.ownerRuntimeLocationHandle;
 			const Plugin *plugin      = resolution.plugin;
-			if ((!scope.pluginId.isEmpty() &&
-			     (!plugin || plugin->attributes.value(QStringLiteral("id")) != scope.pluginId)) ||
-			    (scope.pluginId.isEmpty() && plugin))
+			if ((!patch.pluginId.isEmpty() &&
+			     (!plugin || plugin->attributes.value(QStringLiteral("id")) != patch.pluginId)) ||
+			    (patch.pluginId.isEmpty() && plugin))
 			{
 				continue;
 			}
 			if (hasCausalConsumer)
 			{
-				auto                        &revision = *m_causalPluginCallbackSnapshotCaptureStack.last();
-				LuaCallbackStableCausalPatch patch;
-				patch.pluginId              = scope.pluginId;
-				patch.runtimeLocationHandle = scope.runtimeLocationHandle;
-				patch.runtimeId             = scope.runtimeId;
-				patch.kind                  = LuaCallbackStableSnapshotPatchKind::RuntimeLocation;
-				revision.scopedStableSnapshotPatches[domain].insert(std::move(patch));
+				auto &revision = *m_causalPluginCallbackSnapshotCaptureStack.last();
+				auto &targeted = revision.targetedRulePatches[domain];
+				auto  existing = targeted.find(patch.runtimeLocationHandle);
+				if (existing == targeted.end())
+					targeted.insert(patch.runtimeLocationHandle, patch);
+				else
+				{
+					existing->indexHint = patch.indexHint;
+					existing->parts |= patch.parts;
+				}
 				causalStateChanged = true;
 			}
 			if (!hasCurrentBase)
 				continue;
-			auto      &store = std::invoke(selectStore, *m_luaCallbackDispatchSnapshotBaseCache);
-			const auto owner = store.owners.value(luaCallbackRuntimeLocationSlotKey(ownerHandle));
-			if (!owner || owner->runtimeLocationHandle != ownerHandle)
+			auto      &store        = std::invoke(selectStore, *m_luaCallbackDispatchSnapshotBaseCache);
+			const auto definition   = store.rows.value(patch.runtimeLocationHandle);
+			const auto runtimeState = store.runtimeStates.value(patch.runtimeLocationHandle);
+			const auto detailState  = store.detailStates.value(patch.runtimeLocationHandle);
+			if (!definition || !runtimeState || !detailState || definition->runtimeId != patch.runtimeId ||
+			    runtimeState->runtimeId != patch.runtimeId || detailState->runtimeId != patch.runtimeId)
+			{
+				fallbackOwners.insert(ownerHandle, patch.pluginId);
+				fallbackPluginIds.insert(patch.pluginId);
 				continue;
-			updates.push_back({luaCallbackRuntimeLocationSlotKey(scope.runtimeLocationHandle),
-			                   QSharedPointer<const Row>::create(std::invoke(convert, *rule))});
+			}
+			resolvedPatches.push_back({ownerHandle, rule, patch});
+		}
+
+		if (!fallbackOwners.isEmpty() && hasCausalConsumer)
+		{
+			auto &revision = *m_causalPluginCallbackSnapshotCaptureStack.last();
+			for (auto it = fallbackOwners.cbegin(); it != fallbackOwners.cend(); ++it)
+			{
+				LuaCallbackStableCausalPatch ownerPatch;
+				ownerPatch.pluginId = it.value();
+				ownerPatch.kind     = LuaCallbackStableSnapshotPatchKind::Owner;
+				revision.scopedStableSnapshotPatches[domain].insert(std::move(ownerPatch));
+			}
+			auto &targeted = revision.targetedRulePatches[domain];
+			for (auto it = targeted.begin(); it != targeted.end();)
+			{
+				if (fallbackPluginIds.contains(it->pluginId))
+					it = targeted.erase(it);
+				else
+					++it;
+			}
+			if (targeted.isEmpty())
+				revision.targetedRulePatches.remove(domain);
 		}
 
 		if (causalStateChanged)
@@ -15289,11 +15638,52 @@ void WorldRuntime::publishTargetedLuaCallbackRuleSnapshotPatches(const LuaCallba
 			m_causalPluginCallbackSnapshotCaptureStack.last()->stableDomainMask |=
 			    luaCallbackStableSnapshotDomainBit(domain);
 		}
-		if (updates.isEmpty())
-			return;
-		auto &store = std::invoke(selectStore, *m_luaCallbackDispatchSnapshotBaseCache);
-		store.rows  = store.rows.withUpdates(updates);
-		++m_luaCallbackDispatchSnapshotBasePatchCount;
+		if (hasCurrentBase)
+		{
+			auto &store = std::invoke(selectStore, *m_luaCallbackDispatchSnapshotBaseCache);
+			QVector<typename RowMap::Update>          updates;
+			QVector<typename RuntimeStateMap::Update> runtimeStateUpdates;
+			QVector<typename DetailStateMap::Update>  detailStateUpdates;
+			for (const ResolvedPatch &resolved : std::as_const(resolvedPatches))
+			{
+				if (fallbackOwners.contains(resolved.ownerHandle))
+					continue;
+				if (resolved.patch.parts.testFlag(LuaCallbackRuleSnapshotPart::Definition))
+				{
+					if (updates.isEmpty())
+						updates.reserve(resolvedPatches.size());
+					updates.push_back(
+					    {resolved.patch.runtimeLocationHandle,
+					     QSharedPointer<const Row>::create(std::invoke(convert, *resolved.rule))});
+				}
+				if (resolved.patch.parts.testFlag(LuaCallbackRuleSnapshotPart::RuntimeState))
+				{
+					if (runtimeStateUpdates.isEmpty())
+						runtimeStateUpdates.reserve(resolvedPatches.size());
+					runtimeStateUpdates.push_back(
+					    {resolved.patch.runtimeLocationHandle, ruleRuntimeStateFromRule(*resolved.rule)});
+				}
+				if (resolved.patch.parts.testFlag(LuaCallbackRuleSnapshotPart::DetailState))
+				{
+					if (detailStateUpdates.isEmpty())
+						detailStateUpdates.reserve(resolvedPatches.size());
+					detailStateUpdates.push_back(
+					    {resolved.patch.runtimeLocationHandle,
+					     QSharedPointer<const LuaCallbackRuleDetailStateSnapshot>::create(
+					         ruleDetailStateFromRule(*resolved.rule))});
+				}
+			}
+			if (!updates.isEmpty() || !runtimeStateUpdates.isEmpty() || !detailStateUpdates.isEmpty())
+			{
+				store.rows          = store.rows.withUpdates(updates);
+				store.runtimeStates = store.runtimeStates.withUpdates(runtimeStateUpdates);
+				store.detailStates  = store.detailStates.withUpdates(detailStateUpdates);
+				++m_luaCallbackDispatchSnapshotBasePatchCount;
+			}
+			for (auto it = fallbackOwners.cbegin(); it != fallbackOwners.cend(); ++it)
+				applyLuaCallbackStableSnapshotPatch(domain,
+				                                    LuaCallbackStableSnapshotPatchScope::owner(it.value()));
+		}
 	};
 
 	switch (domain)
@@ -15327,11 +15717,11 @@ void WorldRuntime::publishTargetedLuaCallbackRuleSnapshotPatches(const LuaCallba
 	}
 }
 
-void WorldRuntime::markRuleRuntimeStatesChanged(
-    const LuaCallbackStableSnapshotDomain domain, const QString &pluginId,
-    const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations) const
+void WorldRuntime::markRuleRuntimeStatesChanged(const LuaCallbackStableSnapshotDomain         domain,
+                                                const QString                                &pluginId,
+                                                const QVector<LuaCallbackRuleSnapshotChange> &changes) const
 {
-	if (runtimeLocations.isEmpty())
+	if (changes.isEmpty())
 		return;
 	const bool hasCausalConsumer = !m_causalPluginCallbackSnapshotCaptureStack.isEmpty();
 	const bool hasCurrentBase =
@@ -15339,23 +15729,13 @@ void WorldRuntime::markRuleRuntimeStatesChanged(
 	    m_luaCallbackDispatchSnapshotCacheGeneration == m_luaCallbackDispatchSnapshotGeneration;
 	if (!hasCausalConsumer && !hasCurrentBase)
 		return;
-	if (m_luaCallbackSnapshotMutationBatchDepth > 0)
+	for (const LuaCallbackRuleSnapshotChange &change : changes)
 	{
-		for (const auto &[locationHandle, runtimeId, indexHint] : runtimeLocations)
-		{
-			queueLuaCallbackStableSnapshotPatch(domain, LuaCallbackStableSnapshotPatchScope::runtimeLocation(
-			                                                pluginId, locationHandle, runtimeId, indexHint));
-		}
-		return;
+		if (change.parts == LuaCallbackRuleSnapshotParts{})
+			continue;
+		queueLuaCallbackTargetedRuleSnapshotPatch(domain, {pluginId, change.runtimeLocationHandle,
+		                                                   change.runtimeId, change.indexHint, change.parts});
 	}
-	publishTargetedLuaCallbackRuleSnapshotPatches(
-	    domain, runtimeLocations,
-	    [&pluginId](const std::tuple<quint64, quint64, int> &location)
-	    {
-		    const auto &[locationHandle, runtimeId, indexHint] = location;
-		    return LuaCallbackStableSnapshotPatchScope::runtimeLocation(pluginId, locationHandle, runtimeId,
-		                                                                indexHint);
-	    });
 }
 
 void WorldRuntime::applyLuaCallbackStableSnapshotPatches(const quint32 domainMask) const
@@ -16085,30 +16465,7 @@ void WorldRuntime::populateLuaCallbackTriggerSnapshots(
 	}
 
 	const QString &scopeId = scope->pluginId;
-	if (scope->kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-	    scope->runtimeLocationHandle != 0 && scope->runtimeId != 0)
-	{
-		auto                         *runtime = const_cast<WorldRuntime *>(this);
-		RuleRuntimeLocationResolution resolution;
-		const Trigger                *resolvedTrigger = runtime->triggerForRuntimeLocation(
-		    scope->runtimeLocationHandle, scope->runtimeId, scope->indexHint, nullptr, &resolution);
-		if (!resolvedTrigger)
-			return;
-		const quint64 ownerHandle = resolution.ownerRuntimeLocationHandle;
-		const Plugin *plugin      = resolution.plugin;
-		if ((!scopeId.isEmpty() && (!plugin || plugin->attributes.value(QStringLiteral("id")) != scopeId)) ||
-		    (scopeId.isEmpty() && plugin))
-		{
-			return;
-		}
-		static_cast<void>(patchLuaCallbackRuleSnapshotRow(snapshot.triggerSnapshotStore, ownerHandle,
-		                                                  scope->runtimeLocationHandle,
-		                                                  triggerSnapshotFromRule(*resolvedTrigger)));
-		snapshot.missingTriggerListPluginIds.remove(scopeId);
-		return;
-	}
-
-	const Plugin *plugin = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
+	const Plugin  *plugin  = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
 	if (!scopeId.isEmpty() && !plugin)
 	{
 		if (const auto identity = snapshot.pluginRuntimeIdentitiesById.constFind(scopeId);
@@ -16155,30 +16512,7 @@ void WorldRuntime::populateLuaCallbackAliasSnapshots(
 	}
 
 	const QString &scopeId = scope->pluginId;
-	if (scope->kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-	    scope->runtimeLocationHandle != 0 && scope->runtimeId != 0)
-	{
-		auto                         *runtime = const_cast<WorldRuntime *>(this);
-		RuleRuntimeLocationResolution resolution;
-		const Alias                  *resolvedAlias = runtime->aliasForRuntimeLocation(
-		    scope->runtimeLocationHandle, scope->runtimeId, scope->indexHint, nullptr, &resolution);
-		if (!resolvedAlias)
-			return;
-		const Plugin *plugin = resolution.plugin;
-		if ((!scopeId.isEmpty() && (!plugin || plugin->attributes.value(QStringLiteral("id")) != scopeId)) ||
-		    (scopeId.isEmpty() && plugin))
-		{
-			return;
-		}
-		const quint64 ownerHandle = resolution.ownerRuntimeLocationHandle;
-		static_cast<void>(patchLuaCallbackRuleSnapshotRow(
-		    snapshot.aliasSnapshotStore, ownerHandle, scope->runtimeLocationHandle,
-		    QMudLuaCallbackRuleSnapshot::fromAlias(*resolvedAlias)));
-		snapshot.missingAliasListPluginIds.remove(scopeId);
-		return;
-	}
-
-	const Plugin *plugin = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
+	const Plugin  *plugin  = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
 	if (!scopeId.isEmpty() && !plugin)
 	{
 		if (const auto identity = snapshot.pluginRuntimeIdentitiesById.constFind(scopeId);
@@ -16224,30 +16558,7 @@ void WorldRuntime::populateLuaCallbackTimerSnapshots(
 	}
 
 	const QString &scopeId = scope->pluginId;
-	if (scope->kind == LuaCallbackStableSnapshotPatchKind::RuntimeLocation &&
-	    scope->runtimeLocationHandle != 0 && scope->runtimeId != 0)
-	{
-		auto                         *runtime = const_cast<WorldRuntime *>(this);
-		RuleRuntimeLocationResolution resolution;
-		const Timer                  *resolvedTimer = runtime->timerForRuntimeLocation(
-		    scope->runtimeLocationHandle, scope->runtimeId, scope->indexHint, nullptr, &resolution);
-		if (!resolvedTimer)
-			return;
-		const Plugin *plugin = resolution.plugin;
-		if ((!scopeId.isEmpty() && (!plugin || plugin->attributes.value(QStringLiteral("id")) != scopeId)) ||
-		    (scopeId.isEmpty() && plugin))
-		{
-			return;
-		}
-		const quint64 ownerHandle = resolution.ownerRuntimeLocationHandle;
-		static_cast<void>(patchLuaCallbackRuleSnapshotRow(snapshot.timerSnapshotStore, ownerHandle,
-		                                                  scope->runtimeLocationHandle,
-		                                                  timerSnapshotFromRule(*resolvedTimer)));
-		snapshot.missingTimerListPluginIds.remove(scopeId);
-		return;
-	}
-
-	const Plugin *plugin = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
+	const Plugin  *plugin  = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
 	if (!scopeId.isEmpty() && !plugin)
 	{
 		if (const auto identity = snapshot.pluginRuntimeIdentitiesById.constFind(scopeId);
@@ -16703,7 +17014,7 @@ QSharedPointer<LuaCallbackSnapshot> WorldRuntime::captureLuaCallbackSnapshotForD
 	static_cast<void>(mutableRuntime->publishPendingObservedPluginCallbackPresenceSnapshots());
 	// Publishing during an outer mutation batch queues the Plugins bit. Drain after catalog publication so this
 	// callback boundary includes both the already-committed mutation prefix and any newly arrived worker catalog.
-	applyPendingLuaCallbackSnapshotPatches();
+	applyPendingLuaCallbackSnapshotPatches(true);
 
 	if (QSharedPointer<LuaCallbackSnapshot> cachedSnapshot = cloneLuaCallbackDispatchSnapshotBase())
 	{
@@ -16977,7 +17288,7 @@ QSharedPointer<LuaCallbackSnapshot> WorldRuntime::captureLuaCallbackStableSnapsh
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::captureLuaCallbackStableSnapshotBase");
 	static_cast<void>(
 	    const_cast<WorldRuntime *>(this)->publishPendingObservedPluginCallbackPresenceSnapshots());
-	applyPendingLuaCallbackSnapshotPatches();
+	applyPendingLuaCallbackSnapshotPatches(true);
 	if (!m_luaCallbackDispatchSnapshotBaseCache ||
 	    m_luaCallbackDispatchSnapshotCacheGeneration != m_luaCallbackDispatchSnapshotGeneration)
 	{
@@ -17015,7 +17326,8 @@ void WorldRuntime::applyCausalPluginCallbackSnapshotDeltas(PluginCallbackDispatc
 			    *rebased, *revision->before, *revision->after, revision->stableDomainMask,
 			    revision->mapperOperations, revision->arrayMutations, revision->miniWindowMutations,
 			    revision->runtimeCounterUpdates, revision->entityMutations, revision->entityResetSlots,
-			    revision->fullStableDomainMask, revision->scopedStableSnapshotPatches);
+			    revision->fullStableDomainMask, revision->scopedStableSnapshotPatches,
+			    revision->targetedRulePatches);
 		}
 		applyCausalMiniWindowPresentationMutations(*rebased, revision->miniWindowPresentationMutations);
 	}
@@ -28214,24 +28526,25 @@ void WorldRuntime::markTriggerRuntimeStateChanged(const QString &pluginId)
 
 void WorldRuntime::markTriggerRuntimeStateChanged(const QString &pluginId,
                                                   const quint64  runtimeLocationHandle,
-                                                  const quint64 runtimeId, const int indexHint)
+                                                  const quint64 runtimeId, const int indexHint,
+                                                  const LuaCallbackRuleSnapshotParts parts)
 {
 	markTriggerRuntimeStatesChanged(pluginId, {
-	                                              {runtimeLocationHandle, runtimeId, indexHint}
+	                                              {runtimeLocationHandle, runtimeId, indexHint, parts}
     });
 }
 
-void WorldRuntime::markTriggerRuntimeStatesChanged(
-    const QString &pluginId, const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations)
+void WorldRuntime::markTriggerRuntimeStatesChanged(const QString                                &pluginId,
+                                                   const QVector<LuaCallbackRuleSnapshotChange> &changes)
 {
 	if (QThread::currentThread() != thread())
 	{
-		qmudInvokeMethodChecked(this, [this, pluginId, runtimeLocations]
-		                        { markTriggerRuntimeStatesChanged(pluginId, runtimeLocations); });
+		qmudInvokeMethodChecked(this, [this, pluginId, changes]
+		                        { markTriggerRuntimeStatesChanged(pluginId, changes); });
 		return;
 	}
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markTriggerRuntimeStatesChanged");
-	markRuleRuntimeStatesChanged(LuaCallbackStableSnapshotDomain::Triggers, pluginId, runtimeLocations);
+	markRuleRuntimeStatesChanged(LuaCallbackStableSnapshotDomain::Triggers, pluginId, changes);
 }
 
 void WorldRuntime::markTriggerRulesChanged()
@@ -28459,24 +28772,25 @@ void WorldRuntime::markAliasRuntimeStateChanged(const QString &pluginId)
 }
 
 void WorldRuntime::markAliasRuntimeStateChanged(const QString &pluginId, const quint64 runtimeLocationHandle,
-                                                const quint64 runtimeId, const int indexHint)
+                                                const quint64 runtimeId, const int indexHint,
+                                                const LuaCallbackRuleSnapshotParts parts)
 {
 	markAliasRuntimeStatesChanged(pluginId, {
-	                                            {runtimeLocationHandle, runtimeId, indexHint}
+	                                            {runtimeLocationHandle, runtimeId, indexHint, parts}
     });
 }
 
-void WorldRuntime::markAliasRuntimeStatesChanged(
-    const QString &pluginId, const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations)
+void WorldRuntime::markAliasRuntimeStatesChanged(const QString                                &pluginId,
+                                                 const QVector<LuaCallbackRuleSnapshotChange> &changes)
 {
 	if (QThread::currentThread() != thread())
 	{
-		qmudInvokeMethodChecked(this, [this, pluginId, runtimeLocations]
-		                        { markAliasRuntimeStatesChanged(pluginId, runtimeLocations); });
+		qmudInvokeMethodChecked(this, [this, pluginId, changes]
+		                        { markAliasRuntimeStatesChanged(pluginId, changes); });
 		return;
 	}
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markAliasRuntimeStatesChanged");
-	markRuleRuntimeStatesChanged(LuaCallbackStableSnapshotDomain::Aliases, pluginId, runtimeLocations);
+	markRuleRuntimeStatesChanged(LuaCallbackStableSnapshotDomain::Aliases, pluginId, changes);
 }
 
 void WorldRuntime::markAliasRulesChanged()
@@ -28652,24 +28966,25 @@ void WorldRuntime::markTimerRuntimeStateChanged(const QString &pluginId)
 }
 
 void WorldRuntime::markTimerRuntimeStateChanged(const QString &pluginId, const quint64 runtimeLocationHandle,
-                                                const quint64 runtimeId, const int indexHint)
+                                                const quint64 runtimeId, const int indexHint,
+                                                const LuaCallbackRuleSnapshotParts parts)
 {
 	markTimerRuntimeStatesChanged(pluginId, {
-	                                            {runtimeLocationHandle, runtimeId, indexHint}
+	                                            {runtimeLocationHandle, runtimeId, indexHint, parts}
     });
 }
 
-void WorldRuntime::markTimerRuntimeStatesChanged(
-    const QString &pluginId, const QVector<std::tuple<quint64, quint64, int>> &runtimeLocations)
+void WorldRuntime::markTimerRuntimeStatesChanged(const QString                                &pluginId,
+                                                 const QVector<LuaCallbackRuleSnapshotChange> &changes)
 {
 	if (QThread::currentThread() != thread())
 	{
-		qmudInvokeMethodChecked(this, [this, pluginId, runtimeLocations]
-		                        { markTimerRuntimeStatesChanged(pluginId, runtimeLocations); });
+		qmudInvokeMethodChecked(this, [this, pluginId, changes]
+		                        { markTimerRuntimeStatesChanged(pluginId, changes); });
 		return;
 	}
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markTimerRuntimeStatesChanged");
-	markRuleRuntimeStatesChanged(LuaCallbackStableSnapshotDomain::Timers, pluginId, runtimeLocations);
+	markRuleRuntimeStatesChanged(LuaCallbackStableSnapshotDomain::Timers, pluginId, changes);
 }
 
 void WorldRuntime::markPluginTimersChanged(const QString &pluginId)

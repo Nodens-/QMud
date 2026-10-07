@@ -38,11 +38,13 @@ namespace QMudAliasMatch
 	 * @param startOffset Start offset for regex matching.
 	 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
 	 * @param matchAttempts Optional count incremented immediately before a valid regex is executed.
+	 * @param matchOptions Qt match options applied to this execution.
 	 * @return Match result with capture data and span columns.
 	 */
-	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
-	                              bool allowEmptyMatch, int startOffset = 0,
-	                              qint64 *executionTimeNs = nullptr, int *matchAttempts = nullptr);
+	MatchResult
+	matchWithCaptures(const QRegularExpression &regex, const QString &subject, bool allowEmptyMatch,
+	                  int startOffset = 0, qint64 *executionTimeNs = nullptr, int *matchAttempts = nullptr,
+	                  QRegularExpression::MatchOptions matchOptions = QRegularExpression::NoMatchOption);
 
 	/**
 	 * @brief Checks whether alias/trigger nested execution depth exceeds configured limit.
@@ -50,7 +52,7 @@ namespace QMudAliasMatch
 	 * @param maxDepth Configured maximum allowed depth.
 	 * @return `true` when execution must stop due to depth overflow.
 	 */
-	bool        exceedsExecutionDepth(int currentDepth, int maxDepth);
+	bool exceedsExecutionDepth(int currentDepth, int maxDepth);
 } // namespace QMudAliasMatch
 
 #endif // QMUD_ALIASMATCHUTILS_H

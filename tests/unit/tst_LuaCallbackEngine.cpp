@@ -464,6 +464,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void timerEvaluationPlanSurvivesTraceStructuralMutation();
 		void reentrantTimerBodyWaitsForPendingRoutine();
 		void aliasMissesPublishRuntimeSnapshotOncePerScope();
+		void aliasMissWithoutPriorWildcardsSharesDetailSnapshot();
 		void timerScheduleRuntimeMutationsPatchWithoutDirtyingWorld();
 		void luaTimerMutationApisReplayExactRuntimeState();
 		void deferredTimerCreationReplaysExactScheduleTimestamp();
@@ -495,8 +496,14 @@ class tst_LuaCallbackEngine final : public QObject
 		void batchedArrayMemberPatchesUpdateBaseOnce();
 		void emptyArrayAndDatabaseIdentifiersRemainScoped();
 		void persistentStringMapPreservesImmutableVersions();
+		void persistentGenerationalDenseSlotMapPreservesImmutableVersions();
+		void causalRuleReplacementRetainsQueuedRecycledSlotGeneration();
+		void ruleSnapshotStoreRetainsRecycledPluginOwnerGeneration();
 		void batchedTargetedRuleRuntimePatchesUpdateBaseOnce();
+		void causalTargetedRulePatchesBatchAcrossDensePages();
+		void targetedRulePatchRebuildsMissingOwnerRow();
 		void batchedFullOwnerRulePatchSuppressesTargetedCausalPatch();
+		void directPluginPatchSuppressesExpandedTargetedRulePatches();
 		void pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndUnload();
 		void existingPluginGlobalPromotionPatchesMetadata();
 		void callbackDispatchSnapshotUsesNativeEffectiveSequence();
@@ -9833,7 +9840,9 @@ return true
 	QCOMPARE(aliasSnapshotRows(*initial, QString()).constFirst().matched, 0);
 	QCOMPARE(timerSnapshotRows(*initial, QString()).constFirst().firedCount, 0);
 	QVERIFY(after->triggerSnapshotStore.owners == initial->triggerSnapshotStore.owners);
-	QVERIFY(after->triggerSnapshotStore.rows != initial->triggerSnapshotStore.rows);
+	QVERIFY(after->triggerSnapshotStore.rows == initial->triggerSnapshotStore.rows);
+	QVERIFY(after->triggerSnapshotStore.runtimeStates != initial->triggerSnapshotStore.runtimeStates);
+	QVERIFY(after->triggerSnapshotStore.detailStates != initial->triggerSnapshotStore.detailStates);
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
 	WorldRuntime::Trigger oneShotTrigger = trigger;
@@ -10675,7 +10684,8 @@ void tst_LuaCallbackEngine::aliasMissesPublishRuntimeSnapshotOncePerScope()
 	runtime.setAliases({makeAlias(QStringLiteral("first"), QStringLiteral("^first$")),
 	                    makeAlias(QStringLiteral("second"), QStringLiteral("^second$"))});
 	runtime.ensureAllAliasRuntimeIds();
-	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
 
 	constexpr auto aliasesIndex = static_cast<size_t>(WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
 	const quint64  aliasesBefore = runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(aliasesIndex);
@@ -10686,11 +10696,44 @@ void tst_LuaCallbackEngine::aliasMissesPublishRuntimeSnapshotOncePerScope()
 	QCOMPARE(processor.executeCommand(QStringLiteral("unmatched")), eOK);
 
 	QCOMPARE(runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(aliasesIndex), aliasesBefore);
-	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchesBefore + 1);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchesBefore);
 	QCOMPARE(runtime.aliases().at(0).matchAttempts, 1);
 	QCOMPARE(runtime.aliases().at(1).matchAttempts, 1);
 	QVERIFY(runtime.aliases().at(0).lastMatchWildcards.isEmpty());
 	QVERIFY(runtime.aliases().at(1).lastMatchWildcards.isEmpty());
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchesBefore + 1);
+	QCOMPARE(aliasSnapshotRows(*snapshot, {}).at(0).matchAttempts, 1);
+	QCOMPARE(aliasSnapshotRows(*snapshot, {}).at(1).matchAttempts, 1);
+	QVERIFY(snapshot->aliasSnapshotStore.rows == initial->aliasSnapshotStore.rows);
+	QVERIFY(snapshot->aliasSnapshotStore.runtimeStates != initial->aliasSnapshotStore.runtimeStates);
+	QVERIFY(snapshot->aliasSnapshotStore.detailStates != initial->aliasSnapshotStore.detailStates);
+}
+
+void tst_LuaCallbackEngine::aliasMissWithoutPriorWildcardsSharesDetailSnapshot()
+{
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("miss"));
+	alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("^matched$"));
+	alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setAliases({alias});
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	QCOMPARE(processor.executeCommand(QStringLiteral("unmatched")), eOK);
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	QCOMPARE(aliasSnapshotRows(*snapshot, {}).constFirst().matchAttempts, 1);
+	QVERIFY(snapshot->aliasSnapshotStore.rows == initial->aliasSnapshotStore.rows);
+	QVERIFY(snapshot->aliasSnapshotStore.runtimeStates != initial->aliasSnapshotStore.runtimeStates);
+	QVERIFY(snapshot->aliasSnapshotStore.detailStates == initial->aliasSnapshotStore.detailStates);
 }
 
 void tst_LuaCallbackEngine::timerScheduleRuntimeMutationsPatchWithoutDirtyingWorld()
@@ -10853,6 +10896,11 @@ end
 	QVERIFY(timerSnapshotRows(*afterResetOne, QString()).at(0).nextFireTime.isValid());
 	QVERIFY(!timerSnapshotRows(*afterResetOne, QString()).at(1).nextFireTime.isValid());
 	QVERIFY(!timerSnapshotRows(*beforeResetOne, QString()).at(0).nextFireTime.isValid());
+	QVERIFY(afterResetOne->timerSnapshotStore.rows == beforeResetOne->timerSnapshotStore.rows);
+	QVERIFY(afterResetOne->timerSnapshotStore.runtimeStates ==
+	        beforeResetOne->timerSnapshotStore.runtimeStates);
+	QVERIFY(afterResetOne->timerSnapshotStore.detailStates !=
+	        beforeResetOne->timerSnapshotStore.detailStates);
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
 	const QStringList resetAllResult = runMutation(QStringLiteral("reset_all"));
@@ -10867,6 +10915,10 @@ end
 	const auto afterResetAll = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(timerSnapshotRows(*afterResetAll, QString()).at(0).nextFireTime.isValid());
 	QVERIFY(timerSnapshotRows(*afterResetAll, QString()).at(1).nextFireTime.isValid());
+	QVERIFY(afterResetAll->timerSnapshotStore.rows == afterResetOne->timerSnapshotStore.rows);
+	QVERIFY(afterResetAll->timerSnapshotStore.runtimeStates ==
+	        afterResetOne->timerSnapshotStore.runtimeStates);
+	QVERIFY(afterResetAll->timerSnapshotStore.detailStates != afterResetOne->timerSnapshotStore.detailStates);
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
 	runtime.setWorldFileModified(false);
@@ -11587,7 +11639,8 @@ void tst_LuaCallbackEngine::aliasRuntimeItemPatchUsesStableIdentity()
 	QVERIFY(firstId != secondId);
 
 	aliases[1].matched = 7;
-	runtime.markAliasRuntimeStateChanged(QString(), secondLocationHandle, secondId, 1);
+	runtime.markAliasRuntimeStateChanged(QString(), secondLocationHandle, secondId, 1,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
 	const auto secondChanged = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(secondChanged);
 	QCOMPARE(aliasSnapshotRows(*secondChanged, QString()).at(0).matched, 0);
@@ -11595,7 +11648,8 @@ void tst_LuaCallbackEngine::aliasRuntimeItemPatchUsesStableIdentity()
 	QCOMPARE(aliasSnapshotRows(*initial, QString()).at(1).matched, 0);
 
 	aliases[0].matched = 9;
-	runtime.markAliasRuntimeStateChanged(QString(), firstLocationHandle, firstId, 1);
+	runtime.markAliasRuntimeStateChanged(QString(), firstLocationHandle, firstId, 1,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
 	const auto staleHintChanged = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(staleHintChanged);
 	QCOMPARE(aliasSnapshotRows(*staleHintChanged, QString()).at(0).matched, 9);
@@ -11605,7 +11659,8 @@ void tst_LuaCallbackEngine::aliasRuntimeItemPatchUsesStableIdentity()
 	aliases[0].matched = 11;
 	aliases[1].matched = 12;
 	runtime.markAliasRuntimeStateChanged(QString(), std::numeric_limits<quint64>::max(),
-	                                     std::numeric_limits<quint64>::max(), -1);
+	                                     std::numeric_limits<quint64>::max(), -1,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
 	const auto unresolvedIdentityChanged = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(unresolvedIdentityChanged);
 	QCOMPARE(aliasSnapshotRows(*unresolvedIdentityChanged, QString()).at(0).matched, 9);
@@ -11653,8 +11708,10 @@ void tst_LuaCallbackEngine::staleRuleRuntimeItemPatchDoesNotCrossPluginReplaceme
 	QVERIFY(replacement.timers.constFirst().runtimeLocationHandle != staleTimerLocation);
 	replacement.aliases.first().matched        = 17;
 	replacement.timers.first().invocationCount = 23;
-	runtime.markAliasRuntimeStateChanged(pluginId, staleAliasLocation, staleAliasId, 0);
-	runtime.markTimerRuntimeStateChanged(pluginId, staleTimerLocation, staleTimerId, 0);
+	runtime.markAliasRuntimeStateChanged(pluginId, staleAliasLocation, staleAliasId, 0,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
+	runtime.markTimerRuntimeStateChanged(pluginId, staleTimerLocation, staleTimerId, 0,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
 	const auto stalePatch = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(stalePatch);
 	QCOMPARE(aliasSnapshotRows(*stalePatch, pluginId).constFirst().matched, 0);
@@ -11663,9 +11720,9 @@ void tst_LuaCallbackEngine::staleRuleRuntimeItemPatchDoesNotCrossPluginReplaceme
 	const WorldRuntime::Alias &currentAlias = replacement.aliases.constFirst();
 	const WorldRuntime::Timer &currentTimer = replacement.timers.constFirst();
 	runtime.markAliasRuntimeStateChanged(pluginId, currentAlias.runtimeLocationHandle, currentAlias.runtimeId,
-	                                     0);
+	                                     0, LuaCallbackRuleSnapshotPart::RuntimeState);
 	runtime.markTimerRuntimeStateChanged(pluginId, currentTimer.runtimeLocationHandle, currentTimer.runtimeId,
-	                                     0);
+	                                     0, LuaCallbackRuleSnapshotPart::RuntimeState);
 	const auto currentPatch = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(currentPatch);
 	QCOMPARE(aliasSnapshotRows(*currentPatch, pluginId).constFirst().matched, 17);
@@ -12805,6 +12862,182 @@ void tst_LuaCallbackEngine::persistentStringMapPreservesImmutableVersions()
 	QVERIFY(equivalent != updated);
 }
 
+void tst_LuaCallbackEngine::persistentGenerationalDenseSlotMapPreservesImmutableVersions()
+{
+	using PersistentMap = LuaCallbackPersistentGenerationalDenseSlotMap<LuaCallbackAliasSnapshot>;
+	const auto makeRow  = [](const quint64 handle, const QString &name)
+	{
+		auto row                   = QSharedPointer<LuaCallbackAliasSnapshot>::create();
+		row->runtimeLocationHandle = handle;
+		row->attributes.insert(QStringLiteral("name"), name);
+		return row;
+	};
+	constexpr quint64   oldCollisionHandle = (quint64{1} << 32U) | 17U;
+	constexpr quint64   newCollisionHandle = (quint64{2} << 32U) | 17U;
+	PersistentMap       map;
+	const PersistentMap initial = map.withUpdates({
+	    {0,	              makeRow(0,                  QStringLiteral("zero"))          },
+	    {63,	             makeRow(63,                 QStringLiteral("page-end"))      },
+	    {64,	             makeRow(64,                 QStringLiteral("page-start"))    },
+	    {129,	            makeRow(129,                QStringLiteral("third-page"))    },
+	    {oldCollisionHandle, makeRow(oldCollisionHandle, QStringLiteral("old-generation"))}
+    });
+	QCOMPARE(initial.value(0)->attributes.value(QStringLiteral("name")), QStringLiteral("zero"));
+	QCOMPARE(initial.value(63)->attributes.value(QStringLiteral("name")), QStringLiteral("page-end"));
+	QCOMPARE(initial.value(64)->attributes.value(QStringLiteral("name")), QStringLiteral("page-start"));
+	QCOMPARE(initial.value(129)->attributes.value(QStringLiteral("name")), QStringLiteral("third-page"));
+	QVERIFY(!initial.value(65));
+
+	const PersistentMap updated = initial.withUpdates({
+	    {63, makeRow(63, QStringLiteral("first"))},
+	    {63, makeRow(63, QStringLiteral("second"))},
+	    {64, {}},
+	    {192, makeRow(192, QStringLiteral("fourth"))},
+	    {newCollisionHandle, makeRow(newCollisionHandle, QStringLiteral("new-generation"))}
+    });
+	QCOMPARE(updated.value(63)->attributes.value(QStringLiteral("name")), QStringLiteral("second"));
+	QVERIFY(!updated.value(64));
+	QCOMPARE(updated.value(192)->attributes.value(QStringLiteral("name")), QStringLiteral("fourth"));
+	QCOMPARE(updated.value(oldCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("old-generation"));
+	QCOMPARE(updated.value(newCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("new-generation"));
+	QCOMPARE(initial.value(63)->attributes.value(QStringLiteral("name")), QStringLiteral("page-end"));
+	QCOMPARE(initial.value(64)->attributes.value(QStringLiteral("name")), QStringLiteral("page-start"));
+	QVERIFY(!initial.value(newCollisionHandle));
+	QVERIFY(!initial.value(192));
+
+	const PersistentMap replacedCollision = updated.withUpdates({
+	    {oldCollisionHandle, makeRow(oldCollisionHandle, QStringLiteral("changed-old-generation"))}
+    });
+	QCOMPARE(replacedCollision.value(oldCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("changed-old-generation"));
+	QCOMPARE(replacedCollision.value(newCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("new-generation"));
+	QCOMPARE(updated.value(oldCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("old-generation"));
+
+	const PersistentMap removed = updated.withUpdates({
+	    {oldCollisionHandle, {}}
+    });
+	QVERIFY(!removed.value(oldCollisionHandle));
+	QCOMPARE(removed.value(newCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("new-generation"));
+
+	const PersistentMap promoted = updated.withUpdates({
+	    {newCollisionHandle, {}}
+    });
+	QVERIFY(!promoted.value(newCollisionHandle));
+	QCOMPARE(promoted.value(oldCollisionHandle)->attributes.value(QStringLiteral("name")),
+	         QStringLiteral("old-generation"));
+}
+
+void tst_LuaCallbackEngine::causalRuleReplacementRetainsQueuedRecycledSlotGeneration()
+{
+	const auto makeAlias = [](const QString &name)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		return alias;
+	};
+
+	WorldRuntime runtime;
+	runtime.setAliases({makeAlias(QStringLiteral("queued"))});
+	WorldRuntime::PluginCallbackDispatchCommand command;
+	LuaBatchDispatchRequest                     request;
+	request.kind                        = LuaBatchDispatchKind::NoArgs;
+	command.request.callbackSnapshotArg = runtime.captureLuaCallbackSnapshotForRequest(request);
+	command.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
+	QVERIFY(command.request.callbackSnapshotArg);
+	const quint64 queuedHandle = runtime.aliases().first().runtimeLocationHandle;
+
+	runtime.setAliases({makeAlias(QStringLiteral("intervening"))});
+	const quint64 interveningHandle = runtime.aliases().first().runtimeLocationHandle;
+	QCOMPARE(luaCallbackRuntimeLocationSlotKey(interveningHandle),
+	         luaCallbackRuntimeLocationSlotKey(queuedHandle));
+	QVERIFY(interveningHandle != queuedHandle);
+
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back([&runtime, makeAlias]
+	                          { runtime.setAliases({makeAlias(QStringLiteral("causal"))}); });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	const quint64 causalHandle = runtime.aliases().first().runtimeLocationHandle;
+	QCOMPARE(luaCallbackRuntimeLocationSlotKey(causalHandle),
+	         luaCallbackRuntimeLocationSlotKey(queuedHandle));
+	QVERIFY(causalHandle != interveningHandle);
+
+	runtime.applyCausalPluginCallbackSnapshotDeltas(command);
+	const QList<LuaCallbackAliasSnapshot> rows =
+	    aliasSnapshotRows(*command.request.callbackSnapshotArg, QString());
+	QCOMPARE(rows.size(), 2);
+	QCOMPARE(rows.at(0).runtimeLocationHandle, queuedHandle);
+	QCOMPARE(rows.at(0).attributes.value(QStringLiteral("name")), QStringLiteral("queued"));
+	QCOMPARE(rows.at(1).runtimeLocationHandle, causalHandle);
+	QCOMPARE(rows.at(1).attributes.value(QStringLiteral("name")), QStringLiteral("causal"));
+}
+
+void tst_LuaCallbackEngine::ruleSnapshotStoreRetainsRecycledPluginOwnerGeneration()
+{
+	using Store                      = LuaCallbackRuleSnapshotStore<LuaCallbackAliasSnapshot>;
+	constexpr quint64 oldOwnerHandle = (quint64{1} << 32U) | 7U;
+	constexpr quint64 newOwnerHandle = (quint64{2} << 32U) | 7U;
+	constexpr quint64 oldRuleHandle  = (quint64{1} << 32U) | 21U;
+	constexpr quint64 newRuleHandle  = (quint64{2} << 32U) | 21U;
+
+	auto              oldOwner      = QSharedPointer<Store::Owner>::create();
+	oldOwner->runtimeLocationHandle = oldOwnerHandle;
+	oldOwner->orderedRuleLocationHandles.push_back(oldRuleHandle);
+	auto newOwner                   = QSharedPointer<Store::Owner>::create();
+	newOwner->runtimeLocationHandle = newOwnerHandle;
+	newOwner->orderedRuleLocationHandles.push_back(newRuleHandle);
+	auto oldRow                   = QSharedPointer<LuaCallbackAliasSnapshot>::create();
+	oldRow->runtimeId             = 1;
+	oldRow->runtimeLocationHandle = oldRuleHandle;
+	oldRow->attributes.insert(QStringLiteral("name"), QStringLiteral("old-owner-rule"));
+	auto newRow                   = QSharedPointer<LuaCallbackAliasSnapshot>::create();
+	newRow->runtimeId             = 2;
+	newRow->runtimeLocationHandle = newRuleHandle;
+	newRow->attributes.insert(QStringLiteral("name"), QStringLiteral("new-owner-rule"));
+
+	Store store;
+	store.owners                                  = store.owners.withUpdates({
+	    {oldOwnerHandle, oldOwner},
+        {newOwnerHandle, newOwner}
+    });
+	store.rows                                    = store.rows.withUpdates({
+	    {oldRuleHandle, oldRow},
+        {newRuleHandle, newRow}
+    });
+	store.runtimeStates                           = store.runtimeStates.withUpdates({
+	    {oldRuleHandle, luaCallbackRuleRuntimeState(*oldRow)},
+	    {newRuleHandle, luaCallbackRuleRuntimeState(*newRow)}
+    });
+	store.detailStates                            = store.detailStates.withUpdates({
+	    {oldRuleHandle, QSharedPointer<const LuaCallbackRuleDetailStateSnapshot>::create(
+	                        luaCallbackRuleDetailState(*oldRow))},
+	    {newRuleHandle, QSharedPointer<const LuaCallbackRuleDetailStateSnapshot>::create(
+	                        luaCallbackRuleDetailState(*newRow))}
+    });
+	bool                                  found   = false;
+	const QList<LuaCallbackAliasSnapshot> oldRows = luaCallbackRuleSnapshotList(store, oldOwnerHandle, found);
+	QVERIFY(found);
+	QCOMPARE(oldRows.size(), 1);
+	QCOMPARE(oldRows.first().attributes.value(QStringLiteral("name")), QStringLiteral("old-owner-rule"));
+	const QList<LuaCallbackAliasSnapshot> newRows = luaCallbackRuleSnapshotList(store, newOwnerHandle, found);
+	QVERIFY(found);
+	QCOMPARE(newRows.size(), 1);
+	QCOMPARE(newRows.first().attributes.value(QStringLiteral("name")), QStringLiteral("new-owner-rule"));
+
+	store.owners = store.owners.withUpdates({
+	    {oldOwnerHandle, {}}
+    });
+	QVERIFY(!store.owners.value(oldOwnerHandle));
+	QVERIFY(store.owners.value(newOwnerHandle));
+}
+
 void tst_LuaCallbackEngine::batchedTargetedRuleRuntimePatchesUpdateBaseOnce()
 {
 	auto makeAlias = [](const QString &name)
@@ -12821,34 +13054,155 @@ void tst_LuaCallbackEngine::batchedTargetedRuleRuntimePatchesUpdateBaseOnce()
 	QCOMPARE(aliases.size(), 2);
 	aliases[0].matchAttempts = 3;
 	aliases[1].matchAttempts = 5;
-	const QVector<std::tuple<quint64, quint64, int>> runtimeLocations{
-	    {aliases.at(0).runtimeLocationHandle, aliases.at(0).runtimeId, 0},
-	    {aliases.at(1).runtimeLocationHandle, aliases.at(1).runtimeId, 1}
+	const QVector<LuaCallbackRuleSnapshotChange> runtimeLocations{
+	    {aliases.at(0).runtimeLocationHandle, aliases.at(0).runtimeId, 0,
+	     LuaCallbackRuleSnapshotPart::RuntimeState},
+	    {aliases.at(1).runtimeLocationHandle, aliases.at(1).runtimeId, 1,
+	     LuaCallbackRuleSnapshotPart::RuntimeState}
     };
 	const quint64 patchesBefore = runtime.m_luaCallbackDispatchSnapshotBasePatchCount;
 
 	runtime.beginLuaCallbackSnapshotMutationBatch();
 	runtime.markAliasRuntimeStatesChanged(QString(), runtimeLocations);
 	runtime.markAliasRuntimeStateChanged(QString(), aliases.at(0).runtimeLocationHandle,
-	                                     aliases.at(0).runtimeId, -1);
+	                                     aliases.at(0).runtimeId, -1,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
 	const auto pending = runtime.m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.constFind(
 	    WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
 	QVERIFY(pending != runtime.m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.constEnd());
-	QCOMPARE(pending->scopes.size(), 2);
-	const auto firstScopeKey = WorldRuntime::LuaCallbackStableSnapshotPatchScope::runtimeLocation(
-	    {}, aliases.at(0).runtimeLocationHandle, aliases.at(0).runtimeId, 100);
-	const auto firstScope = pending->scopes.find(firstScopeKey);
-	QVERIFY(firstScope != pending->scopes.end());
-	QCOMPARE(firstScope->indexHint, -1);
+	QVERIFY(pending->scopes.isEmpty());
+	QCOMPARE(pending->targetedRulePatches.size(), 2);
+	const auto firstPatch = pending->targetedRulePatches.constFind(
+	    luaCallbackRuntimeLocationSlotKey(aliases.at(0).runtimeLocationHandle));
+	QVERIFY(firstPatch != pending->targetedRulePatches.cend());
+	QCOMPARE(firstPatch->runtimeId, aliases.at(0).runtimeId);
+	QCOMPARE(firstPatch->indexHint, -1);
 	runtime.endLuaCallbackSnapshotMutationBatch();
 
-	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchesBefore + 1);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchesBefore);
 	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchesBefore + 1);
 	const QList<LuaCallbackAliasSnapshot> rows = aliasSnapshotRows(*snapshot, QString());
 	QCOMPARE(rows.size(), 2);
 	QCOMPARE(rows.at(0).matchAttempts, 3);
 	QCOMPARE(rows.at(1).matchAttempts, 5);
+}
+
+void tst_LuaCallbackEngine::causalTargetedRulePatchesBatchAcrossDensePages()
+{
+	QList<WorldRuntime::Alias> aliases;
+	aliases.reserve(66);
+	for (int index = 0; index < 66; ++index)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), QStringLiteral("alias_%1").arg(index));
+		aliases.push_back(std::move(alias));
+	}
+
+	WorldRuntime runtime;
+	runtime.setAliases(aliases);
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	const auto                  revisionBefore = runtime.m_causalPluginCallbackSnapshotRevision;
+
+	QList<WorldRuntime::Alias> &runtimeAliases = runtime.aliasesMutable();
+	runtimeAliases[10].matched                 = 77;
+	runtime.markAliasRuntimeStateChanged({}, runtimeAliases.at(10).runtimeLocationHandle,
+	                                     runtimeAliases.at(10).runtimeId, 10,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
+	WorldRuntime::PluginCallbackDispatchCommand queuedCommand;
+	queuedCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	queuedCommand.causalSnapshotRevision      = revisionBefore;
+	QVERIFY(queuedCommand.request.callbackSnapshotArg);
+
+	const QVector<int>                     changedIndexes{0, 62, 63, 65};
+	QVector<LuaCallbackRuleSnapshotChange> runtimeLocations;
+	runtimeLocations.reserve(changedIndexes.size());
+	for (const int index : changedIndexes)
+	{
+		const WorldRuntime::Alias &alias = runtimeAliases.at(index);
+		runtimeLocations.push_back(
+		    {alias.runtimeLocationHandle, alias.runtimeId, index, LuaCallbackRuleSnapshotPart::RuntimeState});
+	}
+
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, changedIndexes, runtimeLocations]
+	    {
+		    QList<WorldRuntime::Alias> &currentAliases = runtime.aliasesMutable();
+		    for (const int index : changedIndexes)
+			    currentAliases[index].matchAttempts = index + 1;
+		    runtime.markAliasRuntimeStatesChanged({}, runtimeLocations);
+	    });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	QVERIFY(revisionBefore->next);
+	const auto targeted = revisionBefore->next->targetedRulePatches.constFind(
+	    WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
+	QVERIFY(targeted != revisionBefore->next->targetedRulePatches.cend());
+	QCOMPARE(targeted->size(), changedIndexes.size());
+
+	const auto beforeRebaseStore = queuedCommand.request.callbackSnapshotArg->aliasSnapshotStore;
+	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	const auto &afterRebaseStore = queuedCommand.request.callbackSnapshotArg->aliasSnapshotStore;
+	QVERIFY(afterRebaseStore.rows == beforeRebaseStore.rows);
+	QVERIFY(afterRebaseStore.detailStates == beforeRebaseStore.detailStates);
+	QVERIFY(afterRebaseStore.runtimeStates != beforeRebaseStore.runtimeStates);
+	const QList<LuaCallbackAliasSnapshot> rebased =
+	    aliasSnapshotRows(*queuedCommand.request.callbackSnapshotArg, {});
+	QCOMPARE(rebased.size(), 66);
+	for (const int index : changedIndexes)
+		QCOMPARE(rebased.at(index).matchAttempts, index + 1);
+	QCOMPARE(rebased.at(10).matched, 77);
+	const QList<LuaCallbackAliasSnapshot> original = aliasSnapshotRows(*initial, {});
+	QCOMPARE(original.at(10).matched, 0);
+	for (const int index : changedIndexes)
+		QCOMPARE(original.at(index).matchAttempts, 0);
+}
+
+void tst_LuaCallbackEngine::targetedRulePatchRebuildsMissingOwnerRow()
+{
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("fallback"));
+	WorldRuntime runtime;
+	runtime.setAliases({alias});
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	WorldRuntime::Alias &runtimeAlias = runtime.aliasesMutable().first();
+	auto                &store        = runtime.m_luaCallbackDispatchSnapshotBaseCache->aliasSnapshotStore;
+	using RowMap                      = LuaCallbackRuleSnapshotStore<LuaCallbackAliasSnapshot>::RowMap;
+	store.rows                        = store.rows.withUpdates(QVector<RowMap::Update>{
+	    {runtimeAlias.runtimeLocationHandle, {}}
+    });
+	runtimeAlias.matchAttempts        = 7;
+	{
+		auto revision = std::make_shared<WorldRuntime::CausalPluginCallbackSnapshotRevision>();
+		runtime.m_causalPluginCallbackSnapshotCaptureStack.push_back(revision);
+		const auto popRevision =
+		    qScopeGuard([&runtime] { runtime.m_causalPluginCallbackSnapshotCaptureStack.removeLast(); });
+		Q_UNUSED(popRevision);
+		runtime.markAliasRuntimeStateChanged({}, runtimeAlias.runtimeLocationHandle, runtimeAlias.runtimeId,
+		                                     0, LuaCallbackRuleSnapshotPart::RuntimeState);
+		QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+		const auto ownerPatches = revision->scopedStableSnapshotPatches.constFind(
+		    WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
+		QVERIFY(ownerPatches != revision->scopedStableSnapshotPatches.cend());
+		LuaCallbackStableCausalPatch ownerPatch;
+		ownerPatch.kind = LuaCallbackStableSnapshotPatchKind::Owner;
+		QVERIFY(ownerPatches->contains(ownerPatch));
+		QVERIFY(
+		    !revision->targetedRulePatches.contains(WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases));
+	}
+
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	const QList<LuaCallbackAliasSnapshot> rows = aliasSnapshotRows(*snapshot, {});
+	QCOMPARE(rows.size(), 1);
+	QCOMPARE(rows.first().matchAttempts, 7);
 }
 
 void tst_LuaCallbackEngine::batchedFullOwnerRulePatchSuppressesTargetedCausalPatch()
@@ -12869,7 +13223,8 @@ void tst_LuaCallbackEngine::batchedFullOwnerRulePatchSuppressesTargetedCausalPat
 	aliases.first().matchAttempts       = 1;
 	runtime.beginLuaCallbackSnapshotMutationBatch();
 	runtime.markAliasRuntimeStateChanged(QString(), aliases.first().runtimeLocationHandle,
-	                                     aliases.first().runtimeId, 0);
+	                                     aliases.first().runtimeId, 0,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
 	runtime.markAliasRuntimeStateChanged(QString());
 	runtime.endLuaCallbackSnapshotMutationBatch();
 
@@ -12877,9 +13232,48 @@ void tst_LuaCallbackEngine::batchedFullOwnerRulePatchSuppressesTargetedCausalPat
 	    WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
 	QVERIFY(patches != revision->scopedStableSnapshotPatches.constEnd());
 	QCOMPARE(patches->size(), 1);
+	QVERIFY(!revision->targetedRulePatches.contains(WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases));
 	LuaCallbackStableCausalPatch ownerPatch;
 	ownerPatch.kind = LuaCallbackStableSnapshotPatchKind::Owner;
 	QVERIFY(patches->contains(ownerPatch));
+}
+
+void tst_LuaCallbackEngine::directPluginPatchSuppressesExpandedTargetedRulePatches()
+{
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("expanded"));
+	WorldRuntime runtime;
+	runtime.setAliases({alias});
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	auto revision = std::make_shared<WorldRuntime::CausalPluginCallbackSnapshotRevision>();
+	runtime.m_causalPluginCallbackSnapshotCaptureStack.push_back(revision);
+	const auto popRevision =
+	    qScopeGuard([&runtime] { runtime.m_causalPluginCallbackSnapshotCaptureStack.removeLast(); });
+	Q_UNUSED(popRevision);
+
+	WorldRuntime::Alias &runtimeAlias = runtime.aliasesMutable().first();
+	runtimeAlias.matchAttempts        = 1;
+	runtime.markAliasRuntimeStateChanged({}, runtimeAlias.runtimeLocationHandle, runtimeAlias.runtimeId, 0,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+	QVERIFY(revision->targetedRulePatches.contains(WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases));
+
+	runtimeAlias.matchAttempts = 2;
+	runtime.markAliasRuntimeStateChanged({}, runtimeAlias.runtimeLocationHandle, runtimeAlias.runtimeId, 0,
+	                                     LuaCallbackRuleSnapshotPart::RuntimeState);
+	QVERIFY(runtime.m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.contains(
+	    WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases));
+	runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
+	QVERIFY(!revision->targetedRulePatches.contains(WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases));
+	const auto pendingAliases = runtime.m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.constFind(
+	    WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
+	QVERIFY(pendingAliases == runtime.m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain.cend() ||
+	        pendingAliases->targetedRulePatches.isEmpty());
+
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	QCOMPARE(aliasSnapshotRows(*snapshot, {}).constFirst().matchAttempts, 2);
 }
 
 void tst_LuaCallbackEngine::pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndUnload()

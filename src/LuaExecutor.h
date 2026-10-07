@@ -449,14 +449,237 @@ struct LuaCallbackTimerSnapshot
 };
 
 /**
- * @brief Returns the stable slot key encoded in a runtime-location handle.
+ * @brief Compact scalar runtime state shared by trigger, alias, and timer snapshot stores.
+ */
+struct LuaCallbackRuleRuntimeStateSnapshot
+{
+		quint64 runtimeId{0};
+		quint64 runtimeLocationHandle{0};
+		qint64  executionTimeNs{0};
+		int     matched{0};
+		int     invocationCount{0};
+		int     matchCount{0};
+		int     matchAttempts{0};
+		int     firedCount{0};
+		int     executingScriptDepth{0};
+		bool    executingScript{false};
+		bool    operator==(const LuaCallbackRuleRuntimeStateSnapshot &) const = default;
+};
+
+/**
+ * @brief Infrequently changing non-definition state shared by callback rule snapshots.
+ */
+struct LuaCallbackRuleDetailStateSnapshot
+{
+		quint64     runtimeId{0};
+		quint64     runtimeLocationHandle{0};
+		QString     lastMatchTarget;
+		QStringList lastMatchWildcards;
+		QDateTime   lastMatched;
+		QDateTime   lastFired;
+		QDateTime   nextFireTime;
+		bool        operator==(const LuaCallbackRuleDetailStateSnapshot &) const = default;
+};
+
+/**
+ * @brief Extracts compact scalar state from a trigger row.
+ * @param row Trigger snapshot row.
+ * @return Compact scalar state.
+ */
+[[nodiscard]] inline LuaCallbackRuleRuntimeStateSnapshot
+luaCallbackRuleRuntimeState(const LuaCallbackTriggerSnapshot &row)
+{
+	return {row.runtimeId,
+	        row.runtimeLocationHandle,
+	        row.executionTimeNs,
+	        row.matched,
+	        row.invocationCount,
+	        row.matchCount,
+	        row.matchAttempts,
+	        0,
+	        row.executingScriptDepth,
+	        row.executingScript};
+}
+
+/**
+ * @brief Extracts compact scalar state from an alias row.
+ * @param row Alias snapshot row.
+ * @return Compact scalar state.
+ */
+[[nodiscard]] inline LuaCallbackRuleRuntimeStateSnapshot
+luaCallbackRuleRuntimeState(const LuaCallbackAliasSnapshot &row)
+{
+	return {row.runtimeId,
+	        row.runtimeLocationHandle,
+	        row.executionTimeNs,
+	        row.matched,
+	        row.invocationCount,
+	        row.matchCount,
+	        row.matchAttempts,
+	        0,
+	        row.executingScriptDepth,
+	        row.executingScript};
+}
+
+/**
+ * @brief Extracts compact scalar state from a timer row.
+ * @param row Timer snapshot row.
+ * @return Compact scalar state.
+ */
+[[nodiscard]] inline LuaCallbackRuleRuntimeStateSnapshot
+luaCallbackRuleRuntimeState(const LuaCallbackTimerSnapshot &row)
+{
+	return {row.runtimeId,
+	        row.runtimeLocationHandle,
+	        0,
+	        0,
+	        row.invocationCount,
+	        0,
+	        0,
+	        row.firedCount,
+	        row.executingScriptDepth,
+	        row.executingScript};
+}
+
+/**
+ * @brief Extracts detail state from a trigger row.
+ * @param row Trigger snapshot row.
+ * @return Trigger detail state.
+ */
+[[nodiscard]] inline LuaCallbackRuleDetailStateSnapshot
+luaCallbackRuleDetailState(const LuaCallbackTriggerSnapshot &row)
+{
+	return {row.runtimeId,
+	        row.runtimeLocationHandle,
+	        row.lastMatchTarget,
+	        row.lastMatchWildcards,
+	        row.lastMatched,
+	        {},
+	        {}};
+}
+
+/**
+ * @brief Extracts detail state from an alias row.
+ * @param row Alias snapshot row.
+ * @return Alias detail state.
+ */
+[[nodiscard]] inline LuaCallbackRuleDetailStateSnapshot
+luaCallbackRuleDetailState(const LuaCallbackAliasSnapshot &row)
+{
+	return {row.runtimeId,
+	        row.runtimeLocationHandle,
+	        row.lastMatchTarget,
+	        row.lastMatchWildcards,
+	        row.lastMatched,
+	        {},
+	        {}};
+}
+
+/**
+ * @brief Extracts detail state from a timer row.
+ * @param row Timer snapshot row.
+ * @return Timer detail state.
+ */
+[[nodiscard]] inline LuaCallbackRuleDetailStateSnapshot
+luaCallbackRuleDetailState(const LuaCallbackTimerSnapshot &row)
+{
+	return {row.runtimeId, row.runtimeLocationHandle, {}, {}, {}, row.lastFired, row.nextFireTime};
+}
+
+/**
+ * @brief Applies compact scalar state to a trigger row.
+ * @param row Trigger row to update.
+ * @param state Scalar state to apply.
+ */
+inline void luaCallbackApplyRuleRuntimeState(LuaCallbackTriggerSnapshot                &row,
+                                             const LuaCallbackRuleRuntimeStateSnapshot &state)
+{
+	row.matched              = state.matched;
+	row.invocationCount      = state.invocationCount;
+	row.matchCount           = state.matchCount;
+	row.matchAttempts        = state.matchAttempts;
+	row.executionTimeNs      = state.executionTimeNs;
+	row.executingScriptDepth = state.executingScriptDepth;
+	row.executingScript      = state.executingScript;
+}
+
+/**
+ * @brief Applies compact scalar state to an alias row.
+ * @param row Alias row to update.
+ * @param state Scalar state to apply.
+ */
+inline void luaCallbackApplyRuleRuntimeState(LuaCallbackAliasSnapshot                  &row,
+                                             const LuaCallbackRuleRuntimeStateSnapshot &state)
+{
+	row.matched              = state.matched;
+	row.invocationCount      = state.invocationCount;
+	row.matchCount           = state.matchCount;
+	row.matchAttempts        = state.matchAttempts;
+	row.executionTimeNs      = state.executionTimeNs;
+	row.executingScriptDepth = state.executingScriptDepth;
+	row.executingScript      = state.executingScript;
+}
+
+/**
+ * @brief Applies compact scalar state to a timer row.
+ * @param row Timer row to update.
+ * @param state Scalar state to apply.
+ */
+inline void luaCallbackApplyRuleRuntimeState(LuaCallbackTimerSnapshot                  &row,
+                                             const LuaCallbackRuleRuntimeStateSnapshot &state)
+{
+	row.firedCount           = state.firedCount;
+	row.invocationCount      = state.invocationCount;
+	row.executingScriptDepth = state.executingScriptDepth;
+	row.executingScript      = state.executingScript;
+}
+
+/**
+ * @brief Applies detail state to a trigger row.
+ * @param row Trigger row to update.
+ * @param state Detail state to apply.
+ */
+inline void luaCallbackApplyRuleDetailState(LuaCallbackTriggerSnapshot               &row,
+                                            const LuaCallbackRuleDetailStateSnapshot &state)
+{
+	row.lastMatchTarget    = state.lastMatchTarget;
+	row.lastMatchWildcards = state.lastMatchWildcards;
+	row.lastMatched        = state.lastMatched;
+}
+
+/**
+ * @brief Applies detail state to an alias row.
+ * @param row Alias row to update.
+ * @param state Detail state to apply.
+ */
+inline void luaCallbackApplyRuleDetailState(LuaCallbackAliasSnapshot                 &row,
+                                            const LuaCallbackRuleDetailStateSnapshot &state)
+{
+	row.lastMatchTarget    = state.lastMatchTarget;
+	row.lastMatchWildcards = state.lastMatchWildcards;
+	row.lastMatched        = state.lastMatched;
+}
+
+/**
+ * @brief Applies detail state to a timer row.
+ * @param row Timer row to update.
+ * @param state Detail state to apply.
+ */
+inline void luaCallbackApplyRuleDetailState(LuaCallbackTimerSnapshot                 &row,
+                                            const LuaCallbackRuleDetailStateSnapshot &state)
+{
+	row.lastFired    = state.lastFired;
+	row.nextFireTime = state.nextFireTime;
+}
+
+/**
+ * @brief Returns the dense slot key encoded in a runtime-location handle.
  *
- * Runtime-location generations remain in the stored value and are validated by readers. The slot key only chooses
- * a path in the immutable page tree, so recycling a slot replaces the current generation without altering snapshots
- * that still own an older root.
+ * The low 32 bits identify the recycled allocator slot. The complete handle remains the identity and must be used
+ * to distinguish generations that coexist in an immutable snapshot.
  *
  * @param runtimeLocationHandle Generation-checked runtime-location handle, or zero for the world owner.
- * @return Encoded slot key suitable for LuaCallbackPersistentSlotMap.
+ * @return Dense allocator slot key.
  */
 [[nodiscard]] constexpr quint32
 luaCallbackRuntimeLocationSlotKey(const quint64 runtimeLocationHandle) noexcept
@@ -571,6 +794,444 @@ template <typename Value> class LuaCallbackPersistentSlotMap
 		bool operator==(const LuaCallbackPersistentSlotMap &other) const noexcept
 		{
 			return m_root == other.m_root;
+		}
+};
+
+/**
+ * @brief Immutable paged map for generation-checked callback rule runtime locations.
+ *
+ * Runtime-location slots are allocated densely and recycled. Each page slot retains the immutable values for every
+ * generation that still belongs to that snapshot, distinguished by the complete runtime-location handle. Capturing
+ * a map copies one shared directory root. A batch write copies one fixed-depth directory path per touched page and
+ * each touched fixed-size page once. The normal one-generation case performs one directory lookup, one page lookup,
+ * and one handle comparison.
+ *
+ * @tparam Value Immutable value stored at a runtime-location slot.
+ */
+template <typename Value> class LuaCallbackPersistentGenerationalDenseSlotMap
+{
+	private:
+		static constexpr quint32 kPageSize = 64;
+
+		struct CollisionEntry
+		{
+				QSharedPointer<const Value>          value;
+				QSharedPointer<const CollisionEntry> next;
+		};
+
+		struct Page
+		{
+				std::array<QSharedPointer<const Value>, kPageSize>   values;
+				QHash<quint32, QSharedPointer<const CollisionEntry>> collisionChains;
+				quint32                                              occupiedCount{0};
+		};
+
+		LuaCallbackPersistentSlotMap<Page>        m_pages;
+
+		/**
+		 * @brief Clones one immutable page for a transaction.
+		 * @param source Existing page, or an empty pointer for a new page.
+		 * @return Mutable page clone.
+		 */
+		[[nodiscard]] static QSharedPointer<Page> clonePage(const QSharedPointer<const Page> &source)
+		{
+			return source ? QSharedPointer<Page>::create(*source) : QSharedPointer<Page>::create();
+		}
+
+		/**
+		 * @brief Applies one exact-generation replacement or removal to a collision chain.
+		 * @param head Existing immutable generation chain.
+		 * @param runtimeLocationHandle Complete generation-checked identity to change.
+		 * @param value Replacement value, or an empty pointer to remove that generation.
+		 * @param found Receives whether the requested generation existed.
+		 * @return Updated chain sharing every unaffected suffix.
+		 */
+		[[nodiscard]] static QSharedPointer<const CollisionEntry>
+		updatedCollisionChain(const QSharedPointer<const CollisionEntry> &head,
+		                      const quint64 runtimeLocationHandle, const QSharedPointer<const Value> &value,
+		                      bool &found)
+		{
+			found = false;
+			if (!head)
+				return {};
+			if (head->value->runtimeLocationHandle == runtimeLocationHandle)
+			{
+				found = true;
+				return value ? QSharedPointer<const CollisionEntry>::create(CollisionEntry{value, head->next})
+				             : head->next;
+			}
+
+			QVector<QSharedPointer<const CollisionEntry>> prefix;
+			auto                                          current = head;
+			while (current && current->value->runtimeLocationHandle != runtimeLocationHandle)
+			{
+				prefix.push_back(current);
+				current = current->next;
+			}
+			if (!current)
+				return head;
+
+			found = true;
+			QSharedPointer<const CollisionEntry> updated =
+			    value ? QSharedPointer<const CollisionEntry>::create(CollisionEntry{value, current->next})
+			          : current->next;
+			for (auto it = prefix.crbegin(); it != prefix.crend(); ++it)
+			{
+				updated = QSharedPointer<const CollisionEntry>::create(
+				    CollisionEntry{(*it)->value, std::move(updated)});
+			}
+			return updated;
+		}
+
+	public:
+		/**
+		 * @brief One replacement applied by withUpdates().
+		 */
+		struct Update
+		{
+				quint64                     runtimeLocationHandle{0};
+				QSharedPointer<const Value> value;
+		};
+
+		/**
+		 * @brief Finds one immutable value.
+		 * @param runtimeLocationHandle Complete generation-checked runtime-location identity.
+		 * @return Stored value, or an empty pointer when absent.
+		 */
+		[[nodiscard]] QSharedPointer<const Value> value(const quint64 runtimeLocationHandle) const
+		{
+			const quint32 key       = luaCallbackRuntimeLocationSlotKey(runtimeLocationHandle);
+			const quint32 pageIndex = key / kPageSize;
+			const auto    page      = m_pages.value(pageIndex);
+			if (!page)
+				return {};
+			const quint32 entryIndex = key % kPageSize;
+			const auto   &primary    = page->values.at(entryIndex);
+			if (!primary || primary->runtimeLocationHandle == runtimeLocationHandle)
+				return primary;
+			auto collision = page->collisionChains.value(entryIndex);
+			while (collision && collision->value->runtimeLocationHandle != runtimeLocationHandle)
+				collision = collision->next;
+			return collision ? collision->value : QSharedPointer<const Value>{};
+		}
+
+		/**
+		 * @brief Applies replacements and removals in one immutable transaction.
+		 * @param updates Exact-generation replacements; an empty value removes that generation.
+		 * @return Map sharing every untouched page with this map.
+		 */
+		[[nodiscard]] LuaCallbackPersistentGenerationalDenseSlotMap
+		withUpdates(const QVector<Update> &updates) const
+		{
+			if (updates.isEmpty())
+				return *this;
+
+			QHash<quint32, QSharedPointer<Page>> mutablePages;
+			mutablePages.reserve(updates.size());
+			for (const Update &update : updates)
+			{
+				Q_ASSERT(!update.value ||
+				         update.value->runtimeLocationHandle == update.runtimeLocationHandle);
+				const quint32 key       = luaCallbackRuntimeLocationSlotKey(update.runtimeLocationHandle);
+				const quint32 pageIndex = key / kPageSize;
+				auto          mutableIt = mutablePages.find(pageIndex);
+				if (mutableIt == mutablePages.end())
+				{
+					const auto page = m_pages.value(pageIndex);
+					if (!page && !update.value)
+						continue;
+					mutableIt = mutablePages.insert(pageIndex, clonePage(page));
+				}
+				QSharedPointer<Page> &mutablePage = mutableIt.value();
+
+				const quint32         entryIndex = key % kPageSize;
+				auto                 &primary    = mutablePage->values.at(entryIndex);
+				const bool            wasPresent = static_cast<bool>(primary);
+				if (!primary)
+				{
+					primary = update.value;
+				}
+				else if (primary->runtimeLocationHandle == update.runtimeLocationHandle)
+				{
+					if (update.value)
+					{
+						primary = update.value;
+					}
+					else if (const auto collisions = mutablePage->collisionChains.value(entryIndex))
+					{
+						primary = collisions->value;
+						if (collisions->next)
+							mutablePage->collisionChains.insert(entryIndex, collisions->next);
+						else
+							mutablePage->collisionChains.remove(entryIndex);
+					}
+					else
+					{
+						primary.reset();
+					}
+				}
+				else
+				{
+					const auto collisions        = mutablePage->collisionChains.value(entryIndex);
+					bool       collisionFound    = false;
+					const auto updatedCollisions = updatedCollisionChain(
+					    collisions, update.runtimeLocationHandle, update.value, collisionFound);
+					if (collisionFound)
+					{
+						if (updatedCollisions)
+							mutablePage->collisionChains.insert(entryIndex, updatedCollisions);
+						else
+							mutablePage->collisionChains.remove(entryIndex);
+					}
+					else if (update.value)
+					{
+						mutablePage->collisionChains.insert(entryIndex,
+						                                    QSharedPointer<const CollisionEntry>::create(
+						                                        CollisionEntry{primary, collisions}));
+						primary = update.value;
+					}
+				}
+				const bool isPresent = static_cast<bool>(primary);
+				if (wasPresent != isPresent)
+				{
+					if (isPresent)
+						++mutablePage->occupiedCount;
+					else
+						--mutablePage->occupiedCount;
+				}
+			}
+			QVector<typename LuaCallbackPersistentSlotMap<Page>::Update> pageUpdates;
+			pageUpdates.reserve(mutablePages.size());
+			for (auto it = mutablePages.begin(); it != mutablePages.end(); ++it)
+			{
+				pageUpdates.push_back({it.key(), it.value()->occupiedCount == 0
+				                                     ? QSharedPointer<const Page>{}
+				                                     : QSharedPointer<const Page>(std::move(it.value()))});
+			}
+
+			LuaCallbackPersistentGenerationalDenseSlotMap result;
+			result.m_pages = m_pages.withUpdates(pageUpdates);
+			return result;
+		}
+
+		/**
+		 * @brief Compares immutable directory identity.
+		 * @param other Map to compare.
+		 * @return Whether both maps share the same directory revision.
+		 */
+		bool operator==(const LuaCallbackPersistentGenerationalDenseSlotMap &other) const noexcept
+		{
+			return m_pages == other.m_pages;
+		}
+};
+
+/**
+ * @brief Immutable generation-checked map storing small values inline in fixed-size pages.
+ *
+ * The fixed-depth directory and exact-generation collision handling match
+ * LuaCallbackPersistentGenerationalDenseSlotMap. Inline page cells avoid one allocation and one shared-pointer
+ * reference count per scalar rule-state update.
+ *
+ * @tparam Value Small immutable value carrying a runtimeLocationHandle member.
+ */
+template <typename Value> class LuaCallbackPersistentGenerationalInlineSlotMap
+{
+	private:
+		static constexpr quint32 kPageSize = 64;
+
+		struct CollisionEntry
+		{
+				Value                                value;
+				QSharedPointer<const CollisionEntry> next;
+		};
+
+		struct Page
+		{
+				std::array<std::optional<Value>, kPageSize>          values;
+				QHash<quint32, QSharedPointer<const CollisionEntry>> collisionChains;
+				quint32                                              occupiedCount{0};
+		};
+
+		LuaCallbackPersistentSlotMap<Page> m_pages;
+
+		/**
+		 * @brief Replaces or removes one exact generation in an immutable collision chain.
+		 * @param head Existing collision chain.
+		 * @param runtimeLocationHandle Complete generation-checked identity.
+		 * @param value Replacement value, or no value for removal.
+		 * @param found Receives whether the generation existed.
+		 * @return Updated collision chain.
+		 */
+		[[nodiscard]] static QSharedPointer<const CollisionEntry>
+		updatedCollisionChain(const QSharedPointer<const CollisionEntry> &head,
+		                      const quint64 runtimeLocationHandle, const std::optional<Value> &value,
+		                      bool &found)
+		{
+			found = false;
+			if (!head)
+				return {};
+			if (head->value.runtimeLocationHandle == runtimeLocationHandle)
+			{
+				found = true;
+				return value
+				           ? QSharedPointer<const CollisionEntry>::create(CollisionEntry{*value, head->next})
+				           : head->next;
+			}
+
+			QVector<QSharedPointer<const CollisionEntry>> prefix;
+			auto                                          current = head;
+			while (current && current->value.runtimeLocationHandle != runtimeLocationHandle)
+			{
+				prefix.push_back(current);
+				current = current->next;
+			}
+			if (!current)
+				return head;
+
+			found = true;
+			QSharedPointer<const CollisionEntry> updated =
+			    value ? QSharedPointer<const CollisionEntry>::create(CollisionEntry{*value, current->next})
+			          : current->next;
+			for (auto it = prefix.crbegin(); it != prefix.crend(); ++it)
+			{
+				updated = QSharedPointer<const CollisionEntry>::create(
+				    CollisionEntry{(*it)->value, std::move(updated)});
+			}
+			return updated;
+		}
+
+	public:
+		/** @brief One exact-generation replacement or removal. */
+		struct Update
+		{
+				quint64              runtimeLocationHandle{0};
+				std::optional<Value> value;
+		};
+
+		/**
+		 * @brief Finds one exact-generation value.
+		 * @param runtimeLocationHandle Complete generation-checked runtime-location identity.
+		 * @return Stored value, or no value when absent.
+		 */
+		[[nodiscard]] std::optional<Value> value(const quint64 runtimeLocationHandle) const
+		{
+			const quint32 key       = luaCallbackRuntimeLocationSlotKey(runtimeLocationHandle);
+			const quint32 pageIndex = key / kPageSize;
+			const auto    page      = m_pages.value(pageIndex);
+			if (!page)
+				return std::nullopt;
+			const quint32 entryIndex = key % kPageSize;
+			const auto   &primary    = page->values.at(entryIndex);
+			if (!primary || primary->runtimeLocationHandle == runtimeLocationHandle)
+				return primary;
+			auto collision = page->collisionChains.value(entryIndex);
+			while (collision && collision->value.runtimeLocationHandle != runtimeLocationHandle)
+				collision = collision->next;
+			return collision ? std::optional<Value>{collision->value} : std::nullopt;
+		}
+
+		/**
+		 * @brief Applies exact-generation replacements and removals in one immutable transaction.
+		 * @param updates Replacements and removals to apply.
+		 * @return Map sharing all untouched directory paths and pages.
+		 */
+		[[nodiscard]] LuaCallbackPersistentGenerationalInlineSlotMap
+		withUpdates(const QVector<Update> &updates) const
+		{
+			if (updates.isEmpty())
+				return *this;
+
+			QHash<quint32, QSharedPointer<Page>> mutablePages;
+			mutablePages.reserve(updates.size());
+			for (const Update &update : updates)
+			{
+				Q_ASSERT(!update.value ||
+				         update.value->runtimeLocationHandle == update.runtimeLocationHandle);
+				const quint32 key       = luaCallbackRuntimeLocationSlotKey(update.runtimeLocationHandle);
+				const quint32 pageIndex = key / kPageSize;
+				auto          mutableIt = mutablePages.find(pageIndex);
+				if (mutableIt == mutablePages.end())
+				{
+					const auto page = m_pages.value(pageIndex);
+					if (!page && !update.value)
+						continue;
+					mutableIt = mutablePages.insert(pageIndex, page ? QSharedPointer<Page>::create(*page)
+					                                                : QSharedPointer<Page>::create());
+				}
+				QSharedPointer<Page> &page       = mutableIt.value();
+				const quint32         entryIndex = key % kPageSize;
+				auto                 &primary    = page->values.at(entryIndex);
+				const bool            wasPresent = primary.has_value();
+				if (!primary)
+				{
+					primary = update.value;
+				}
+				else if (primary->runtimeLocationHandle == update.runtimeLocationHandle)
+				{
+					if (update.value)
+						primary = update.value;
+					else if (const auto collisions = page->collisionChains.value(entryIndex))
+					{
+						primary = collisions->value;
+						if (collisions->next)
+							page->collisionChains.insert(entryIndex, collisions->next);
+						else
+							page->collisionChains.remove(entryIndex);
+					}
+					else
+						primary.reset();
+				}
+				else
+				{
+					const auto collisions = page->collisionChains.value(entryIndex);
+					bool       found      = false;
+					const auto updated =
+					    updatedCollisionChain(collisions, update.runtimeLocationHandle, update.value, found);
+					if (found)
+					{
+						if (updated)
+							page->collisionChains.insert(entryIndex, updated);
+						else
+							page->collisionChains.remove(entryIndex);
+					}
+					else if (update.value)
+					{
+						page->collisionChains.insert(entryIndex, QSharedPointer<const CollisionEntry>::create(
+						                                             CollisionEntry{*primary, collisions}));
+						primary = update.value;
+					}
+				}
+				const bool isPresent = primary.has_value();
+				if (wasPresent != isPresent)
+				{
+					if (isPresent)
+						++page->occupiedCount;
+					else
+						--page->occupiedCount;
+				}
+			}
+
+			QVector<typename LuaCallbackPersistentSlotMap<Page>::Update> pageUpdates;
+			pageUpdates.reserve(mutablePages.size());
+			for (auto it = mutablePages.begin(); it != mutablePages.end(); ++it)
+			{
+				pageUpdates.push_back({it.key(), it.value()->occupiedCount == 0
+				                                     ? QSharedPointer<const Page>{}
+				                                     : QSharedPointer<const Page>(std::move(it.value()))});
+			}
+			LuaCallbackPersistentGenerationalInlineSlotMap result;
+			result.m_pages = m_pages.withUpdates(pageUpdates);
+			return result;
+		}
+
+		/**
+		 * @brief Compares immutable directory identity.
+		 * @param other Map to compare.
+		 * @return Whether both maps share one directory revision.
+		 */
+		bool operator==(const LuaCallbackPersistentGenerationalInlineSlotMap &other) const noexcept
+		{
+			return m_pages == other.m_pages;
 		}
 };
 
@@ -963,11 +1624,44 @@ template <typename Row> struct LuaCallbackRuleSnapshotStore
 				bool             operator==(const Owner &) const = default;
 		};
 
-		LuaCallbackPersistentSlotMap<Owner> owners;
-		LuaCallbackPersistentSlotMap<Row>   rows;
+		using OwnerMap = LuaCallbackPersistentGenerationalDenseSlotMap<Owner>;
+		using RowMap   = LuaCallbackPersistentGenerationalDenseSlotMap<Row>;
+		using RuntimeStateMap =
+		    LuaCallbackPersistentGenerationalInlineSlotMap<LuaCallbackRuleRuntimeStateSnapshot>;
+		using DetailStateMap =
+		    LuaCallbackPersistentGenerationalDenseSlotMap<LuaCallbackRuleDetailStateSnapshot>;
 
-		bool                                operator==(const LuaCallbackRuleSnapshotStore &) const = default;
+		OwnerMap        owners;
+		RowMap          rows;
+		RuntimeStateMap runtimeStates;
+		DetailStateMap  detailStates;
+
+		bool            operator==(const LuaCallbackRuleSnapshotStore &) const = default;
 };
+
+/**
+ * @brief Materializes one exact rule row from its independently shared components.
+ * @param store Rule snapshot store.
+ * @param runtimeLocationHandle Generation-checked rule location.
+ * @return Combined row, or no value when any component is absent or has a different identity.
+ */
+template <typename Row>
+[[nodiscard]] std::optional<Row> luaCallbackRuleSnapshotValue(const LuaCallbackRuleSnapshotStore<Row> &store,
+                                                              const quint64 runtimeLocationHandle)
+{
+	const auto definition = store.rows.value(runtimeLocationHandle);
+	const auto runtime    = store.runtimeStates.value(runtimeLocationHandle);
+	const auto detail     = store.detailStates.value(runtimeLocationHandle);
+	if (!definition || !runtime || !detail || definition->runtimeId != runtime->runtimeId ||
+	    definition->runtimeId != detail->runtimeId)
+	{
+		return std::nullopt;
+	}
+	Row row = *definition;
+	luaCallbackApplyRuleRuntimeState(row, *runtime);
+	luaCallbackApplyRuleDetailState(row, *detail);
+	return row;
+}
 
 /**
  * @brief Materializes one ordered rule collection from an immutable snapshot store.
@@ -981,18 +1675,18 @@ template <typename Row>
                                                      const quint64 ownerRuntimeLocationHandle, bool &found)
 {
 	found            = false;
-	const auto owner = store.owners.value(luaCallbackRuntimeLocationSlotKey(ownerRuntimeLocationHandle));
-	if (!owner || owner->runtimeLocationHandle != ownerRuntimeLocationHandle)
+	const auto owner = store.owners.value(ownerRuntimeLocationHandle);
+	if (!owner)
 		return {};
 
 	QList<Row> result;
 	result.reserve(owner->orderedRuleLocationHandles.size());
 	for (const quint64 ruleHandle : owner->orderedRuleLocationHandles)
 	{
-		const auto row = store.rows.value(luaCallbackRuntimeLocationSlotKey(ruleHandle));
-		if (!row || row->runtimeLocationHandle != ruleHandle)
+		const auto row = luaCallbackRuleSnapshotValue(store, ruleHandle);
+		if (!row)
 			return {};
-		result.push_back(*row);
+		result.push_back(std::move(*row));
 	}
 	found = true;
 	return result;
@@ -1616,8 +2310,7 @@ enum class LuaCallbackStableSnapshotPatchKind : quint8
 {
 	Owner,
 	Item,
-	Member,
-	RuntimeLocation
+	Member
 };
 
 /**
@@ -1626,25 +2319,66 @@ enum class LuaCallbackStableSnapshotPatchKind : quint8
 struct LuaCallbackStableCausalPatch
 {
 		QString                            pluginId;
-		quint64                            runtimeLocationHandle{0};
-		quint64                            runtimeId{0};
 		QString                            itemName;
 		QString                            memberName;
 		bool                               topologyMayChange{false};
 		LuaCallbackStableSnapshotPatchKind kind{LuaCallbackStableSnapshotPatchKind::Owner};
 		bool                               operator==(const LuaCallbackStableCausalPatch &other) const
 		{
-			return pluginId == other.pluginId && runtimeLocationHandle == other.runtimeLocationHandle &&
-			       runtimeId == other.runtimeId && itemName == other.itemName &&
+			return pluginId == other.pluginId && itemName == other.itemName &&
 			       memberName == other.memberName && kind == other.kind;
 		}
 
 		friend size_t qHash(const LuaCallbackStableCausalPatch &patch, const size_t seed = 0) noexcept
 		{
-			return qHashMulti(seed, patch.pluginId, patch.runtimeLocationHandle, patch.runtimeId,
-			                  patch.itemName, patch.memberName, patch.kind);
+			return qHashMulti(seed, patch.pluginId, patch.itemName, patch.memberName, patch.kind);
 		}
 };
+
+/** @brief Independently stored portions of a callback rule snapshot row. */
+enum class LuaCallbackRuleSnapshotPart : quint8
+{
+	Definition   = 0x01,
+	RuntimeState = 0x02,
+	DetailState  = 0x04
+};
+Q_DECLARE_FLAGS(LuaCallbackRuleSnapshotParts, LuaCallbackRuleSnapshotPart)
+Q_DECLARE_OPERATORS_FOR_FLAGS(LuaCallbackRuleSnapshotParts)
+
+/** @return Every independently stored callback rule snapshot portion. */
+[[nodiscard]] constexpr LuaCallbackRuleSnapshotParts luaCallbackAllRuleSnapshotParts() noexcept
+{
+	return LuaCallbackRuleSnapshotPart::Definition | LuaCallbackRuleSnapshotPart::RuntimeState |
+	       LuaCallbackRuleSnapshotPart::DetailState;
+}
+
+/**
+ * @brief Component changes for one generation-checked callback rule.
+ */
+struct LuaCallbackRuleSnapshotChange
+{
+		quint64                      runtimeLocationHandle{0};
+		quint64                      runtimeId{0};
+		int                          indexHint{-1};
+		LuaCallbackRuleSnapshotParts parts{};
+};
+
+/**
+ * @brief Exact component patch for one trigger, alias, or timer snapshot row.
+ *
+ * The complete runtime-location handle is both the coalescing key and generation check. The runtime id independently
+ * verifies the resolved rule, while the index hint accelerates lookup without defining identity.
+ */
+struct LuaCallbackTargetedRulePatch
+{
+		QString                      pluginId;
+		quint64                      runtimeLocationHandle{0};
+		quint64                      runtimeId{0};
+		int                          indexHint{-1};
+		LuaCallbackRuleSnapshotParts parts{};
+};
+
+using LuaCallbackTargetedRulePatches = QHash<quint64, LuaCallbackTargetedRulePatch>;
 
 [[nodiscard]] constexpr quint32
 luaCallbackStableSnapshotDomainBit(const LuaCallbackStableSnapshotDomain domain)
