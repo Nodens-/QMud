@@ -1437,9 +1437,10 @@ class tst_WorldView_Basic : public QObject
 			constexpr int                      blockSize   = WorldView::NativeLayoutHeightIndex::kBlockSize;
 			constexpr int                      lineCount   = blockSize * 2 + 17;
 			constexpr qreal                    lineAdvance = 10.0;
-			IndexedRingBuffer<WorldView::NativeLayoutSlot> layoutSlots(lineCount);
-			for (WorldView::NativeLayoutSlot &slot : layoutSlots)
-				slot.visualRows = 1;
+			PagedIndexedRingBuffer<WorldView::NativeLayoutSlot> layoutSlots;
+			layoutSlots.assign(lineCount, WorldView::NativeLayoutSlot{});
+			for (int line = 0; line < lineCount; ++line)
+				layoutSlots[line].visualRows = 1;
 
 			heightIndex.assign(lineCount, lineAdvance);
 			QCOMPARE(heightIndex.totalHeight(), static_cast<qreal>(lineCount) * lineAdvance);
@@ -1554,6 +1555,48 @@ class tst_WorldView_Basic : public QObject
 			                              layoutFont);
 			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 4);
 			QVERIFY(view.m_nativeLayoutCachedContentSalt != fontSalt);
+		}
+
+		void nativeExactLayoutCacheIsBoundedAndRebuildsEvictedLayouts()
+		{
+			constexpr int lineCount = WorldView::kNativeExactLayoutCacheLimit * 2;
+			WorldView     view;
+			for (int index = 0; index < lineCount; ++index)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = QStringLiteral("bounded exact layout %1").arg(index);
+				line.fadeTimestamp          = {};
+				line.firstRuntimeLineNumber = index + 1;
+				line.lastRuntimeLineNumber  = index + 1;
+				line.flags                  = WorldRuntime::LineOutput;
+				view.m_nativeRenderModel->m_nativeRenderLineCache.push_back(std::move(line));
+			}
+			view.m_nativeRenderModel->m_nativeRenderLineCacheValid = true;
+			view.m_nativeRenderModel->m_nativeRenderLineCacheSource =
+			    WorldView::NativeRenderCacheSource::RuntimeLive;
+
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
+			                              layoutFont);
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
+			                           layoutFont);
+
+			QCOMPARE(view.m_nativeExactLayoutCache.count(), WorldView::kNativeExactLayoutCacheLimit);
+			QVERIFY(!view.nativeLayoutForLine(0));
+			QVERIFY(view.nativeLayoutForLine(lineCount - 1));
+			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
+			const int   expectedRows              = view.m_nativeLayoutSlots.at(0).visualRows;
+			const qreal expectedHeight            = view.m_nativeLayoutHeightIndex.heightAt(0);
+			const int   measurementsBeforeRebuild = view.m_nativeLayoutRowMeasurements;
+
+			static_cast<void>(view.ensureNativeLayoutRange(view.m_nativeRenderModel->m_nativeRenderLineCache,
+			                                               0, 0, 400, 400, 0, layoutFont));
+
+			QVERIFY(view.nativeLayoutForLine(0));
+			QCOMPARE(view.m_nativeExactLayoutCache.count(), WorldView::kNativeExactLayoutCacheLimit);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, expectedRows);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), expectedHeight);
+			QCOMPARE(view.m_nativeLayoutRowMeasurements, measurementsBeforeRebuild + 1);
 		}
 
 		void nativeLayoutAdvancesConsecutiveRenderDeltasWithoutReset()
@@ -1753,7 +1796,7 @@ class tst_WorldView_Basic : public QObject
 				const WorldView::NativeLayoutSlot &slot = view.m_nativeLayoutSlots.at(insertedIndex);
 				QCOMPARE(slot.runtimeLineKey, WorldView::nativeRuntimeLineKey(*insertedLine));
 				QVERIFY(slot.visualRows > 1);
-				QVERIFY(!slot.lineLayout);
+				QVERIFY(!view.nativeLayoutForLine(insertedIndex));
 				QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(insertedIndex),
 				         static_cast<qreal>(slot.visualRows) * view.m_nativeLayoutCachedLineAdvance);
 				QCOMPARE(view.nativeLayoutForLine(kRetainedOriginalIndex + mutation + 1), retainedLayout);
@@ -10176,6 +10219,165 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_nativePrimaryPaintState.renderRevision,
 			         view.m_nativeRenderModel->m_nativeRenderLineCacheRevision);
 
+			resetTestState();
+		}
+
+		void nativeOutputScrollBlitHandlesCappedHeadTrimWithStableScrollBars()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("80"));
+
+			WorldView view;
+			view.resize(640, 320);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			const QString wrappedLine = QStringLiteral("wrapped-output-first\nwrapped-output-second\n"
+			                                           "wrapped-output-third");
+			const QString shortLine   = QStringLiteral("short-output");
+			for (int index = 0; index < 80; ++index)
+			{
+				const QString &text = index == 0 ? wrappedLine : shortLine;
+				runtimeForTest()->addLine(text, WorldRuntime::LineOutput, true);
+			}
+			QCoreApplication::processEvents();
+
+			auto *const nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+			QVERIFY(view.m_nativePrimaryPaintState.valid);
+			QCOMPARE(view.m_nativeLayoutSlots.constFirst().visualRows, 3);
+			QTextBrowser *const outputBrowser = findVisibleOutputBrowser(view);
+			QVERIFY(outputBrowser);
+			QVERIFY(outputBrowser->verticalScrollBar());
+			const int originalScrollValue = outputBrowser->verticalScrollBar()->value();
+			const int originalScrollMax   = outputBrowser->verticalScrollBar()->maximum();
+			QCOMPARE(originalScrollValue, originalScrollMax);
+
+			runtimeForTest()->addLine(wrappedLine, WorldRuntime::LineOutput, true);
+			QCoreApplication::sendPostedEvents(&view, QEvent::MetaCall);
+			QCOMPARE(view.m_nativeRenderModel->m_nativeRenderCacheDelta.kind,
+			         WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend);
+			QVERIFY(view.m_nativeRenderModel->m_nativeRenderCacheDelta.headTrimCount > 0);
+			QCOMPARE(outputBrowser->verticalScrollBar()->value(), originalScrollValue);
+			QCOMPARE(outputBrowser->verticalScrollBar()->maximum(), originalScrollMax);
+			QVERIFY(view.m_nativeOutputScrollBlitPending);
+			QCOMPARE(view.m_nativeLayoutSlots.constLast().visualRows, 3);
+			const quint64 firstTargetRevision = view.m_nativeOutputScrollBlitTargetState.renderRevision;
+
+			runtimeOutputForTest(view).appendOutputText(shortLine, true);
+			QCoreApplication::sendPostedEvents(&view, QEvent::MetaCall);
+			QCOMPARE(outputBrowser->verticalScrollBar()->value(), originalScrollValue);
+			QCOMPARE(outputBrowser->verticalScrollBar()->maximum(), originalScrollMax);
+			QVERIFY(view.m_nativeOutputScrollBlitPending);
+			QVERIFY(view.m_nativeOutputScrollBlitTargetState.renderRevision > firstTargetRevision);
+			const QRect paneRect = view.nativeOutputPaneRect(view.m_output);
+			QVERIFY(!view.m_nativeOutputScrollBlitExposedRegion.isEmpty());
+			QCOMPARE(view.m_nativeOutputScrollBlitExposedRegion.boundingRect().bottom(), paneRect.bottom());
+
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.m_nativeOutputScrollBlitPending);
+			const QImage incrementallyPainted = nativeCanvas->grab().toImage();
+			view.requestNativeOutputRepaint();
+			QCoreApplication::processEvents();
+			const QImage fullyPainted = nativeCanvas->grab().toImage();
+			QCOMPARE(incrementallyPainted, fullyPainted);
+
+			view.m_fadeEnabled = true;
+			runtimeOutputForTest(view).appendOutputText(shortLine, true);
+			QCoreApplication::sendPostedEvents(&view, QEvent::MetaCall);
+			QVERIFY(!view.m_nativeOutputScrollBlitPending);
+			view.m_fadeEnabled = false;
+			QCoreApplication::processEvents();
+
+			view.setOutputSelection(80, 80, 1, 3);
+			QCoreApplication::processEvents();
+			runtimeOutputForTest(view).appendOutputText(shortLine, true);
+			QCoreApplication::sendPostedEvents(&view, QEvent::MetaCall);
+			QVERIFY(!view.m_nativeOutputScrollBlitPending);
+
+			resetTestState();
+		}
+
+		void hiddenOutputPresentationKeepsLogicalStateCurrentWithoutWidgetWrites()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("80"));
+
+			WorldView view;
+			view.resize(640, 320);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			for (int index = 0; index < 80; ++index)
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("hidden-primer-%1").arg(index),
+				                                            true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *const outputBrowser = findVisibleOutputBrowser(view);
+			QVERIFY(outputBrowser);
+			QScrollBar *const physicalBar = outputBrowser->verticalScrollBar();
+			QVERIFY(physicalBar);
+			auto *const nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+			const int physicalMaximumBefore = physicalBar->maximum();
+			const int physicalValueBefore   = physicalBar->value();
+
+			view.setOutputPresentationExposed(false);
+			QVERIFY(!view.outputPresentationExposed());
+			QVERIFY(!nativeCanvas->updatesEnabled());
+			const quint64 renderRevisionBeforeSetting =
+			    view.m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+			setTestWorldAttribute(QStringLiteral("line_spacing"), QStringLiteral("100"));
+			view.applyRuntimeSettingsWithoutOutputRebuild();
+			QCOMPARE(view.m_nativeRenderModel->m_nativeRenderLineCacheRevision, renderRevisionBeforeSetting);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, renderRevisionBeforeSetting);
+			QCOMPARE(view.m_nativeLayoutCachedLineSpacing, 100);
+			for (int index = 0; index < 12; ++index)
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("hidden-update-%1").arg(index),
+				                                            true);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.m_nativeConsumedRenderRevision,
+			         view.m_nativeRenderModel->m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision,
+			         view.m_nativeRenderModel->m_nativeRenderLineCacheRevision);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 80);
+			QVERIFY(view.m_nativePrimaryScrollState.valid);
+			QVERIFY(view.m_nativePrimaryScrollState.maximum > physicalMaximumBefore);
+			QCOMPARE(view.m_nativePrimaryScrollState.value, view.m_nativePrimaryScrollState.maximum);
+			QCOMPARE(view.outputScrollPosition(), view.m_nativePrimaryScrollState.value);
+			QCOMPARE(physicalBar->maximum(), physicalMaximumBefore);
+			QCOMPARE(physicalBar->value(), physicalValueBefore);
+			QVERIFY(view.m_outputPresentationRepaintDeferred);
+			const int logicalMaximum = view.m_nativePrimaryScrollState.maximum;
+			const int logicalValue   = view.m_nativePrimaryScrollState.value;
+			physicalBar->setRange(0, 3);
+			physicalBar->setValue(1);
+			QCOMPARE(view.m_nativePrimaryScrollState.maximum, logicalMaximum);
+			QCOMPARE(view.m_nativePrimaryScrollState.value, logicalValue);
+
+			QVERIFY(view.m_outputScrollBar);
+			QVERIFY(!view.m_outputScrollBar->isHidden());
+			QCOMPARE(view.setOutputScroll(-1, false), eOK);
+			QVERIFY(!view.outputScrollBarVisible());
+			QVERIFY(!view.m_outputScrollBar->isHidden());
+			const int measurementsBeforeExposure = view.m_nativeLayoutRowMeasurements;
+			const int resetsBeforeExposure       = view.m_nativeLayoutCacheResets;
+
+			view.setOutputPresentationExposed(true);
+			QVERIFY(view.outputPresentationExposed());
+			QVERIFY(nativeCanvas->updatesEnabled());
+			QCOMPARE(physicalBar->maximum(), view.m_nativePrimaryScrollState.maximum);
+			QCOMPARE(physicalBar->value(), view.m_nativePrimaryScrollState.value);
+			QVERIFY(view.m_outputScrollBar->isHidden());
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBeforeExposure);
+			QCOMPARE(view.m_nativeLayoutRowMeasurements, measurementsBeforeExposure);
+
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.m_nativeOutputRepaintQueued);
+			QCOMPARE(view.outputLines().constLast(), QStringLiteral("hidden-update-11"));
 			resetTestState();
 		}
 

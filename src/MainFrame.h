@@ -712,6 +712,7 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		bool                                m_disableKeyboardMenuActivation{false};
 		mutable bool                        m_mdiPresentationTransitionActive{false};
 		bool                                m_mdiPresentationReconciliationQueued{false};
+		bool                                m_worldOutputPresentationExposureUpdateQueued{false};
 		bool                                m_deferredUiRefreshQueued{false};
 		bool                                m_deferredUiRefreshStatus{false};
 		bool                                m_deferredUiRefreshTabs{false};
@@ -858,6 +859,14 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @param preferredActiveWindow Active child to maximize before inactive children.
 		 */
 		void                         maximizeMdiSubWindows(QMdiSubWindow *preferredActiveWindow) const;
+		/**
+		 * @brief Updates which world views may write to their physical output presentation.
+		 */
+		void                         updateWorldOutputPresentationExposure() const;
+		/**
+		 * @brief Queues one coalesced output-presentation exposure update after an MDI state event.
+		 */
+		void                         queueWorldOutputPresentationExposureUpdate();
 		/**
 		 * @brief Reconciles presentation after Qt finishes the current MDI child state-change transaction.
 		 */

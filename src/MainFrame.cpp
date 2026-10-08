@@ -1500,6 +1500,7 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 		if (mdiUpdatesEnabled)
 			m_mdiArea->viewport()->update();
 	}
+	updateWorldOutputPresentationExposure();
 }
 
 void MainWindow::observeLuaCallbackPresentationRuntime(const WorldRuntime *runtime)
@@ -2265,6 +2266,7 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 		if (entry.runtime)
 			entry.runtime->requestActiveState(entry.runtime == activeRuntime);
+	updateWorldOutputPresentationExposure();
 	refreshTitleBar();
 	if (activeRuntime)
 	{
@@ -2284,7 +2286,6 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	{
 		if (WorldView *view = world->view())
 		{
-			view->primeNativeOutputCaches();
 			view->focusInput();
 		}
 	}
@@ -3456,6 +3457,7 @@ void MainWindow::setTabbedWindowPresentationActive(const bool active)
 		m_mdiArea->setOption(QMdiArea::DontMaximizeSubWindowOnActivation, false);
 	}
 	m_mdiArea->setUpdatesEnabled(updatesEnabled);
+	updateWorldOutputPresentationExposure();
 	m_mdiTabs.updateTabs();
 	if (updatesEnabled)
 		m_mdiArea->viewport()->update();
@@ -3492,6 +3494,40 @@ void MainWindow::maximizeMdiSubWindows(QMdiSubWindow *preferredActiveWindow) con
 		if (subWindow && subWindow != preferredActiveWindow &&
 		    (!subWindow->isMaximized() || subWindow->isMinimized()))
 			subWindow->showMaximized();
+}
+
+void MainWindow::updateWorldOutputPresentationExposure() const
+{
+	if (!m_mdiArea)
+		return;
+	const bool                 tabbedPresentation = isTabbedWindowPresentationActive();
+	const QMdiSubWindow *const activeWindow       = m_mdiArea->activeSubWindow();
+	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	{
+		if (!entry.window)
+			continue;
+		WorldView *const view = entry.window->view();
+		if (!view)
+			continue;
+		const bool windowVisible = entry.window->isVisible() && !entry.window->isMinimized();
+		const bool exposed       = windowVisible && (!tabbedPresentation || entry.window == activeWindow);
+		view->setOutputPresentationExposed(exposed);
+	}
+}
+
+void MainWindow::queueWorldOutputPresentationExposureUpdate()
+{
+	if (m_worldOutputPresentationExposureUpdateQueued)
+		return;
+	m_worldOutputPresentationExposureUpdateQueued = true;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    m_worldOutputPresentationExposureUpdateQueued = false;
+		    updateWorldOutputPresentationExposure();
+	    },
+	    Qt::QueuedConnection);
 }
 
 void MainWindow::queueMdiPresentationReconciliation()
@@ -3740,6 +3776,16 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 		if (auto *subWindow = qobject_cast<QMdiSubWindow *>(watched);
 		    subWindow && m_mdiArea && m_mdiArea->subWindowList().contains(subWindow))
 			queueMdiPresentationReconciliation();
+	}
+	if (!m_mdiPresentationTransitionActive &&
+	    (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+	     event->type() == QEvent::WindowStateChange))
+	{
+		if (auto *subWindow = qobject_cast<QMdiSubWindow *>(watched);
+		    subWindow && m_mdiArea && m_mdiArea->subWindowList().contains(subWindow))
+		{
+			queueWorldOutputPresentationExposureUpdate();
+		}
 	}
 
 	if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)

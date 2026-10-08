@@ -2005,6 +2005,16 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			    bar, &QScrollBar::rangeChanged, this,
 			    [this, bar](int min, int max)
 			    {
+				    if (!m_outputPresentationExposed)
+					    return;
+				    if (auto *const state = nativeOutputScrollStateForView(m_output); state)
+				    {
+					    state->minimum  = min;
+					    state->maximum  = max;
+					    state->pageStep = bar->pageStep();
+					    state->value    = qBound(min, bar->value(), max);
+					    state->valid    = true;
+				    }
 				    if (traceOutputBackfillEnabled())
 				    {
 					    qInfo().noquote()
@@ -2028,6 +2038,13 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			    bar, &QScrollBar::valueChanged, this,
 			    [this](int value)
 			    {
+				    if (!m_outputPresentationExposed)
+					    return;
+				    if (NativeOutputScrollState *const state = nativeOutputScrollStateForView(m_output))
+				    {
+					    state->value = value;
+					    state->valid = true;
+				    }
 				    if (traceOutputBackfillEnabled())
 				    {
 					    const QScrollBar *const outputBar =
@@ -2052,7 +2069,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			connect(m_outputScrollBar, &QScrollBar::valueChanged, this,
 			        [this, bar](int value)
 			        {
-				        if (!bar)
+				        if (!m_outputPresentationExposed || !bar)
 					        return;
 				        setSemanticOutputScrollPosition(bar, value);
 			        });
@@ -2063,13 +2080,30 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			        [this](int) { noteUserScrollAction(); });
 			syncExternal();
 		}
-		connect(bar, &QScrollBar::valueChanged, this, [this](int) { emit outputScrollChanged(); });
+		connect(bar, &QScrollBar::valueChanged, this,
+		        [this](int)
+		        {
+			        if (m_outputPresentationExposed)
+				        emit outputScrollChanged();
+		        });
 	}
 	if (m_liveOutput && m_liveOutput->verticalScrollBar())
 	{
 		connect(m_liveOutput->verticalScrollBar(), &QScrollBar::valueChanged, this,
 		        [this](int)
 		        {
+			        if (!m_outputPresentationExposed)
+				        return;
+			        if (NativeOutputScrollState *const state = nativeOutputScrollStateForView(m_liveOutput))
+			        {
+				        const QScrollBar *const bar = m_liveOutput->verticalScrollBar();
+				        state->minimum              = bar->minimum();
+				        state->maximum              = bar->maximum();
+				        state->pageStep             = bar->pageStep();
+				        state->singleStep           = bar->singleStep();
+				        state->value                = bar->value();
+				        state->valid                = true;
+			        }
 			        clearNativeSelectionIfSourceViewportMissing(m_liveOutput);
 			        if (!m_nativeScrollSyncInPaint)
 				        requestNativeOutputRepaint();
@@ -2309,6 +2343,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	m_nativeRenderModel = runtime ? runtime->m_outputRenderModel : std::make_shared<WorldOutputRenderModel>();
 	m_nativeConsumedRenderRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	m_nativeLayoutCacheValid       = false;
+	m_nativeExactLayoutCache.clear();
 	if (runtime)
 	{
 		// Runtime/native mode must clear stale standalone output state.
@@ -2420,6 +2455,7 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	m_nativeRenderModel = runtime ? runtime->m_outputRenderModel : std::make_shared<WorldOutputRenderModel>();
 	m_nativeConsumedRenderRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	m_nativeLayoutCacheValid       = false;
+	m_nativeExactLayoutCache.clear();
 
 	if (runtime)
 	{
@@ -3029,11 +3065,36 @@ bool WorldView::setSemanticOutputScrollPosition(QScrollBar *bar, const int targe
 {
 	if (!bar)
 		return false;
-	if (bar == (m_output ? m_output->verticalScrollBar() : nullptr))
+	WrapTextBrowser *const view =
+	    bar == (m_output ? m_output->verticalScrollBar() : nullptr)
+	        ? m_output
+	        : (bar == (m_liveOutput ? m_liveOutput->verticalScrollBar() : nullptr) ? m_liveOutput : nullptr);
+	if (view == m_output)
 		clearNativePrimaryViewportAnchor();
+	NativeOutputScrollState *const state = nativeOutputScrollStateForView(view);
+	if (!m_outputPresentationExposed && state && state->valid)
+	{
+		const int previousPosition = state->value;
+		state->value               = qBound(state->minimum, target, state->maximum);
+		if (state->value == previousPosition)
+			return false;
+		if (view == m_output)
+			emit outputScrollChanged();
+		notifySemanticOutputViewportChanged(preserveDuringCallbackSuppression);
+		return true;
+	}
 
 	const int previousPosition = bar->value();
 	bar->setValue(qBound(bar->minimum(), target, bar->maximum()));
+	if (state)
+	{
+		state->minimum    = bar->minimum();
+		state->maximum    = bar->maximum();
+		state->pageStep   = qMax(1, bar->pageStep());
+		state->singleStep = qMax(1, bar->singleStep());
+		state->value      = bar->value();
+		state->valid      = true;
+	}
 	if (bar->value() == previousPosition)
 		return false;
 
@@ -3065,7 +3126,7 @@ int WorldView::outputScrollUnitsPerLine() const
 
 int WorldView::nativeSplitTopScrollSeamValue(const int fullMaximum) const
 {
-	if (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible())
+	if (!m_scrollbackSplitActive || !m_liveOutput)
 		return fullMaximum;
 
 	const QRect liveTextRect = nativeOutputPaneRect(m_liveOutput);
@@ -3076,7 +3137,15 @@ int WorldView::nativeSplitTopScrollSeamValue(const int fullMaximum) const
 
 void WorldView::syncOutputScrollSingleStep() const
 {
+	static_cast<void>(nativeOutputScrollState(m_output));
+	static_cast<void>(nativeOutputScrollState(m_liveOutput));
 	const int singleStep = outputScrollUnitsPerLine();
+	if (m_nativePrimaryScrollState.valid)
+		m_nativePrimaryScrollState.singleStep = singleStep;
+	if (m_nativeLiveScrollState.valid)
+		m_nativeLiveScrollState.singleStep = singleStep;
+	if (!m_outputPresentationExposed)
+		return;
 	if (m_output)
 	{
 		if (QScrollBar *const bar = m_output->verticalScrollBar())
@@ -3089,6 +3158,75 @@ void WorldView::syncOutputScrollSingleStep() const
 	}
 	if (m_outputScrollBar)
 		m_outputScrollBar->setSingleStep(singleStep);
+}
+
+void WorldView::synchronizeNativeOutputLayoutForPresentationChange() const
+{
+	if (!m_output || !m_nativeOutputCanvas)
+		return;
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	syncNativeOutputScrollBarsFromLayout(lines, true);
+	requestNativeOutputRepaint();
+}
+
+WorldView::NativeOutputScrollState *
+WorldView::nativeOutputScrollStateForView(const WrapTextBrowser *view) const
+{
+	if (view == m_output)
+		return &m_nativePrimaryScrollState;
+	if (view == m_liveOutput)
+		return &m_nativeLiveScrollState;
+	return nullptr;
+}
+
+WorldView::NativeOutputScrollState WorldView::nativeOutputScrollState(const WrapTextBrowser *view) const
+{
+	NativeOutputScrollState *const state = nativeOutputScrollStateForView(view);
+	if (!state)
+		return {};
+	if (!state->valid && view)
+	{
+		if (const QScrollBar *const bar = view->verticalScrollBar())
+		{
+			state->minimum    = bar->minimum();
+			state->maximum    = bar->maximum();
+			state->pageStep   = qMax(1, bar->pageStep());
+			state->singleStep = qMax(1, bar->singleStep());
+			state->value      = qBound(state->minimum, bar->value(), state->maximum);
+			state->valid      = true;
+		}
+	}
+	return *state;
+}
+
+void WorldView::applyNativeOutputScrollPresentation() const
+{
+	if (!m_outputPresentationExposed)
+		return;
+	auto applyPane = [this](const WrapTextBrowser *view)
+	{
+		if (!view)
+			return;
+		QScrollBar *const              bar   = view->verticalScrollBar();
+		NativeOutputScrollState *const state = nativeOutputScrollStateForView(view);
+		if (!bar || !state || !state->valid)
+			return;
+		QSignalBlocker blocker(bar);
+		bar->setSingleStep(state->singleStep);
+		bar->setPageStep(state->pageStep);
+		bar->setRange(state->minimum, state->maximum);
+		bar->setValue(state->value);
+	};
+	applyPane(m_output);
+	applyPane(m_liveOutput);
+	if (m_outputScrollBar && m_nativePrimaryScrollState.valid)
+	{
+		QSignalBlocker blocker(m_outputScrollBar);
+		m_outputScrollBar->setSingleStep(m_nativePrimaryScrollState.singleStep);
+		m_outputScrollBar->setPageStep(m_nativePrimaryScrollState.pageStep);
+		m_outputScrollBar->setRange(m_nativePrimaryScrollState.minimum, m_nativePrimaryScrollState.maximum);
+		m_outputScrollBar->setValue(m_nativePrimaryScrollState.value);
+	}
 }
 
 void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLines &lines,
@@ -3112,7 +3250,7 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLin
 	if (!primaryTextRect.isEmpty())
 		panes.push_back({primaryTextRect, m_output});
 
-	if (m_scrollbackSplitActive && m_liveOutput && m_liveOutput->isVisible())
+	if (m_scrollbackSplitActive && m_liveOutput)
 	{
 		const QRect liveTextRect = nativeOutputPaneRect(m_liveOutput);
 		if (!liveTextRect.isEmpty())
@@ -3159,16 +3297,18 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLin
 		{
 			if (!pane.view)
 				continue;
-			QScrollBar *const bar = pane.view->verticalScrollBar();
-			if (!bar)
+			QScrollBar *const              bar          = pane.view->verticalScrollBar();
+			NativeOutputScrollState *const logicalState = nativeOutputScrollStateForView(pane.view);
+			if (!bar || !logicalState)
 				continue;
+			const NativeOutputScrollState previousState = nativeOutputScrollState(pane.view);
 
-			const int  pageStep          = qMax(1, pane.textRect.height());
-			const int  maxScroll         = qMax(0, contentHeight - pageStep);
-			const int  oldValue          = bar->value();
-			const int  oldMax            = bar->maximum();
-			const bool wasAtEnd          = oldValue >= oldMax;
-			const bool canAutoFollowTail = !(m_scrollbackSplitActive && pane.view == m_output);
+			const int                     pageStep  = qMax(1, pane.textRect.height());
+			const int                     maxScroll = qMax(0, contentHeight - pageStep);
+			const int                     oldValue  = previousState.value;
+			const int                     oldMax    = previousState.maximum;
+			const bool                    wasAtEnd  = oldValue >= oldMax;
+			const bool canAutoFollowTail            = !(m_scrollbackSplitActive && pane.view == m_output);
 			const int  splitTopSeamValue =
 			    canAutoFollowTail ? maxScroll : nativeSplitTopScrollSeamValue(maxScroll);
 
@@ -3223,47 +3363,62 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLin
 			if (!canAutoFollowTail)
 				targetValue = qMin(targetValue, splitTopSeamValue);
 
-			const bool needsSingleStepUpdate = bar->singleStep() != lineStep;
-			const bool needsPageStepUpdate   = bar->pageStep() != pageStep;
-			const bool needsRangeUpdate      = bar->minimum() != 0 || bar->maximum() != maxScroll;
-			const bool needsValueUpdate      = bar->value() != targetValue;
-			if (needsSingleStepUpdate || needsPageStepUpdate || needsRangeUpdate || needsValueUpdate)
+			const bool logicalValueChanged = previousState.valid && previousState.value != targetValue;
+			logicalState->minimum          = 0;
+			logicalState->maximum          = maxScroll;
+			logicalState->pageStep         = pageStep;
+			logicalState->singleStep       = lineStep;
+			logicalState->value            = targetValue;
+			logicalState->valid            = true;
+			if (m_outputPresentationExposed)
 			{
-				const bool updatesEnabled = bar->updatesEnabled();
-				if (updatesEnabled)
-					bar->setUpdatesEnabled(false);
-				if (needsSingleStepUpdate)
-					bar->setSingleStep(lineStep);
-				if (needsPageStepUpdate)
-					bar->setPageStep(pageStep);
-				if (needsRangeUpdate)
-					bar->setRange(0, maxScroll);
-				if (needsValueUpdate)
-					bar->setValue(targetValue);
-				if (updatesEnabled)
-					bar->setUpdatesEnabled(true);
+				const bool needsSingleStepUpdate = bar->singleStep() != lineStep;
+				const bool needsPageStepUpdate   = bar->pageStep() != pageStep;
+				const bool needsRangeUpdate      = bar->minimum() != 0 || bar->maximum() != maxScroll;
+				const bool needsValueUpdate      = bar->value() != targetValue;
+				if (needsSingleStepUpdate || needsPageStepUpdate || needsRangeUpdate || needsValueUpdate)
+				{
+					const bool updatesEnabled = bar->updatesEnabled();
+					if (updatesEnabled)
+						bar->setUpdatesEnabled(false);
+					if (needsSingleStepUpdate)
+						bar->setSingleStep(lineStep);
+					if (needsPageStepUpdate)
+						bar->setPageStep(pageStep);
+					if (needsRangeUpdate)
+						bar->setRange(0, maxScroll);
+					if (needsValueUpdate)
+						bar->setValue(targetValue);
+					if (updatesEnabled)
+						bar->setUpdatesEnabled(true);
+				}
+			}
+			else if (logicalValueChanged && pane.view == m_output)
+			{
+				emit const_cast<WorldView *>(this)->outputScrollChanged();
 			}
 			if (pane.view == m_output && m_nativePrimaryViewportAnchor.valid &&
 			    !m_nativePrimaryViewportAnchor.layoutPrepared)
 			{
-				m_nativePrimaryViewportAnchor.sourceScroll = bar->value();
+				m_nativePrimaryViewportAnchor.sourceScroll = targetValue;
 			}
-			if (!canAutoFollowTail)
+			if (!canAutoFollowTail && m_outputPresentationExposed)
 			{
 				refreshNativeOutputPanePaintStateFromLayout(pane.view, pane.textRect, targetValue, maxScroll,
 				                                            lines);
 			}
 		}
 
-		if (m_outputScrollBar)
+		if (m_outputPresentationExposed && m_outputScrollBar)
 		{
-			if (const QScrollBar *const outputBar = m_output->verticalScrollBar(); outputBar)
+			if (m_nativePrimaryScrollState.valid)
 			{
 				QSignalBlocker externalBlock(m_outputScrollBar);
-				m_outputScrollBar->setRange(outputBar->minimum(), outputBar->maximum());
-				m_outputScrollBar->setPageStep(outputBar->pageStep());
-				m_outputScrollBar->setSingleStep(outputBar->singleStep());
-				m_outputScrollBar->setValue(outputBar->value());
+				m_outputScrollBar->setRange(m_nativePrimaryScrollState.minimum,
+				                            m_nativePrimaryScrollState.maximum);
+				m_outputScrollBar->setPageStep(m_nativePrimaryScrollState.pageStep);
+				m_outputScrollBar->setSingleStep(m_nativePrimaryScrollState.singleStep);
+				m_outputScrollBar->setValue(m_nativePrimaryScrollState.value);
 			}
 		}
 	}
@@ -3278,6 +3433,12 @@ void WorldView::requestNativeOutputRepaint(const QRect &rect) const
 {
 	if (!m_nativeOutputCanvas)
 		return;
+	if (!m_outputPresentationExposed)
+	{
+		m_outputPresentationRepaintDeferred = true;
+		clearNativeOutputScrollBlitState();
+		return;
+	}
 	if (rect.isValid())
 	{
 		requestNativeOutputRepaintRegion(QRegion(rect));
@@ -3305,6 +3466,12 @@ void WorldView::queueNativeOutputRepaintRegion(const QRegion &region,
 {
 	if (!m_nativeOutputCanvas || region.isEmpty())
 		return;
+	if (!m_outputPresentationExposed)
+	{
+		m_outputPresentationRepaintDeferred = true;
+		clearNativeOutputScrollBlitState();
+		return;
+	}
 	if (m_nativeOutputScrollBlitPending && independentOfScrollBlit)
 		m_nativeOutputScrollBlitIndependentRepaintRegion += region;
 	if (m_nativeOutputRepaintAll)
@@ -3322,6 +3489,14 @@ void WorldView::queueNativeOutputRepaintRegion(const QRegion &region,
 void WorldView::flushQueuedNativeOutputRepaint() const
 {
 	m_nativeOutputRepaintQueued = false;
+	if (!m_outputPresentationExposed)
+	{
+		m_outputPresentationRepaintDeferred = true;
+		m_nativeOutputRepaintAll            = false;
+		m_nativeOutputRepaintRegion         = {};
+		clearNativeOutputScrollBlitState();
+		return;
+	}
 	if (!m_nativeOutputCanvas)
 	{
 		m_nativeOutputRepaintAll    = false;
@@ -3473,26 +3648,30 @@ QRect WorldView::nativeOutputVisiblePaneRepaintRect() const
 bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
     const WorldView::NativeOutputRenderLines &lines) const
 {
-	if (!m_nativeOutputCanvas || !m_output || !m_output->isVisible() || lines.isEmpty())
+	if (!m_outputPresentationExposed || !m_nativeOutputCanvas || !m_output || !m_output->isVisible() ||
+	    lines.isEmpty())
 		return false;
-	if (m_nativeRenderModel->m_nativeRenderCacheDelta.kind != NativeRenderCacheDeltaKind::TailAppend ||
-	    m_nativeRenderModel->m_nativeRenderCacheDelta.headTrimCount > 0 ||
-	    m_nativeRenderModel->m_nativeRenderCacheDelta.headLineMutated)
+	const NativeRenderCacheDelta &delta = m_nativeRenderModel->m_nativeRenderCacheDelta;
+	const bool                    supportedDelta =
+	    delta.kind == NativeRenderCacheDeltaKind::TailAppend ||
+	    (delta.kind == NativeRenderCacheDeltaKind::HeadTrimTailAppend && delta.headTrimCount > 0);
+	if (!supportedDelta || delta.headLineMutated)
 	{
 		return false;
 	}
 	if (m_scrollbackSplitActive || m_nativeOutputRepaintAll)
 		return false;
-	if (m_nativeRenderModel->m_nativeRenderCacheDelta.revision !=
-	        m_nativeRenderModel->m_nativeRenderLineCacheRevision ||
-	    m_nativeRenderModel->m_nativeRenderCacheDelta.newLineCount != sizeToInt(lines.size()))
+	if (m_fadeEnabled && !m_frozen)
+		return false;
+	if (delta.revision != m_nativeRenderModel->m_nativeRenderLineCacheRevision ||
+	    delta.newLineCount != sizeToInt(lines.size()))
 	{
 		return false;
 	}
 	const NativeOutputPanePaintState &sourceState =
 	    m_nativeOutputScrollBlitPending ? m_nativeOutputScrollBlitTargetState : m_nativePrimaryPaintState;
 	if (m_nativeRenderModel->m_nativeRenderLineCacheRevision == 0 || !sourceState.valid ||
-	    sourceState.renderRevision != m_nativeRenderModel->m_nativeRenderCacheDelta.fromRevision)
+	    sourceState.renderRevision != delta.fromRevision)
 	{
 		return false;
 	}
@@ -3518,17 +3697,16 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	if (currentScrollY < currentScrollMax || sourceState.scrollY < sourceState.scrollMax)
 		return false;
 
-	const int scrollDelta = currentScrollY - sourceState.scrollY;
-	if (scrollDelta < 0 || scrollDelta >= paneRect.height())
-		return false;
-
 	if (m_globalViewSettings->bleedBackground || (m_runtime && !m_runtime->backgroundImage().isNull()))
 	{
 		return false;
 	}
 	if (sourceState.visibleLineKeys.isEmpty() ||
 	    sourceState.visibleLineKeys.size() != sourceState.visibleLineTops.size() ||
-	    sourceState.visibleLineKeys.size() != sourceState.visibleLineBottoms.size())
+	    sourceState.visibleLineKeys.size() != sourceState.visibleLineBottoms.size() ||
+	    sourceState.visibleLineKeys.size() != sourceState.visibleLinePaintHashes.size() ||
+	    sourceState.visibleLineKeys.size() != sourceState.visibleFirstRuntimeLineNumbers.size() ||
+	    sourceState.visibleLineKeys.size() != sourceState.visibleLastRuntimeLineNumbers.size())
 	{
 		return false;
 	}
@@ -3577,9 +3755,10 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	if (!captureNativeOutputPanePaintState(targetState, paneRect, currentScrollY, currentScrollMax, lines))
 		return false;
 	QRect     dirtyRect;
-	const int firstDirtyLine =
-	    qMax(0, m_nativeRenderModel->m_nativeRenderCacheDelta.oldLineCount -
-	                (m_nativeRenderModel->m_nativeRenderCacheDelta.tailLineMutated ? 1 : 0));
+	const int preservedLineCount = delta.kind == NativeRenderCacheDeltaKind::HeadTrimTailAppend
+	                                   ? qMax(0, delta.oldLineCount - delta.headTrimCount)
+	                                   : qMax(0, delta.oldLineCount);
+	const int firstDirtyLine     = qMax(0, preservedLineCount - (delta.tailLineMutated ? 1 : 0));
 	if (firstDirtyLine < sizeToInt(lines.size()) && firstDirtyLine <= currentLastVisibleLine)
 	{
 		const qreal dirtyTop = static_cast<qreal>(paneRect.top()) +
@@ -3604,25 +3783,65 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 		currentLineIndexesByKey.insert(lineKey, currentIndex);
 	}
 
-	int mappedLineCount = 0;
+	bool shiftEstablished = false;
+	int  pixelShift       = 0;
 	for (int oldIndex = 0; oldIndex < sourceState.visibleLineKeys.size(); ++oldIndex)
 	{
-		const int shiftedTop    = sourceState.visibleLineTops.at(oldIndex) - scrollDelta;
-		const int shiftedBottom = sourceState.visibleLineBottoms.at(oldIndex) - scrollDelta;
+		const auto currentIndex = currentLineIndexesByKey.constFind(sourceState.visibleLineKeys.at(oldIndex));
+		if (currentIndex == currentLineIndexesByKey.cend())
+			continue;
+		if (targetState.visibleLinePaintHashes.at(*currentIndex) !=
+		        sourceState.visibleLinePaintHashes.at(oldIndex) ||
+		    targetState.visibleFirstRuntimeLineNumbers.at(*currentIndex) !=
+		        sourceState.visibleFirstRuntimeLineNumbers.at(oldIndex) ||
+		    targetState.visibleLastRuntimeLineNumbers.at(*currentIndex) !=
+		        sourceState.visibleLastRuntimeLineNumbers.at(oldIndex))
+		{
+			return false;
+		}
+		const int topShift =
+		    targetState.visibleLineTops.at(*currentIndex) - sourceState.visibleLineTops.at(oldIndex);
+		const int bottomShift =
+		    targetState.visibleLineBottoms.at(*currentIndex) - sourceState.visibleLineBottoms.at(oldIndex);
+		if (std::abs(topShift - bottomShift) > 1)
+			return false;
+		if (!shiftEstablished)
+		{
+			pixelShift       = topShift;
+			shiftEstablished = true;
+		}
+		else if (std::abs(pixelShift - topShift) > 1 || std::abs(pixelShift - bottomShift) > 1)
+		{
+			return false;
+		}
+	}
+	if (!shiftEstablished || pixelShift > 0 || -pixelShift >= paneRect.height())
+		return false;
+
+	int mappedVisibleLineCount = 0;
+	for (int oldIndex = 0; oldIndex < sourceState.visibleLineKeys.size(); ++oldIndex)
+	{
+		const int shiftedTop    = sourceState.visibleLineTops.at(oldIndex) + pixelShift;
+		const int shiftedBottom = sourceState.visibleLineBottoms.at(oldIndex) + pixelShift;
 		if (shiftedBottom <= 0 || shiftedTop >= paneRect.height())
 			continue;
 
 		const auto currentIndex = currentLineIndexesByKey.constFind(sourceState.visibleLineKeys.at(oldIndex));
-		if (currentIndex == currentLineIndexesByKey.cend())
-			return false;
-		if (std::abs(targetState.visibleLineTops.at(*currentIndex) - shiftedTop) > 1 ||
+		if (currentIndex == currentLineIndexesByKey.cend() ||
+		    targetState.visibleLinePaintHashes.at(*currentIndex) !=
+		        sourceState.visibleLinePaintHashes.at(oldIndex) ||
+		    targetState.visibleFirstRuntimeLineNumbers.at(*currentIndex) !=
+		        sourceState.visibleFirstRuntimeLineNumbers.at(oldIndex) ||
+		    targetState.visibleLastRuntimeLineNumbers.at(*currentIndex) !=
+		        sourceState.visibleLastRuntimeLineNumbers.at(oldIndex) ||
+		    std::abs(targetState.visibleLineTops.at(*currentIndex) - shiftedTop) > 1 ||
 		    std::abs(targetState.visibleLineBottoms.at(*currentIndex) - shiftedBottom) > 1)
 		{
 			return false;
 		}
-		++mappedLineCount;
+		++mappedVisibleLineCount;
 	}
-	if (mappedLineCount <= 0)
+	if (mappedVisibleLineCount <= 0)
 		return false;
 
 	QRegion exposedRegion;
@@ -3630,18 +3849,17 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	QRegion repaintRegion;
 	if (m_nativeOutputScrollBlitPending)
 	{
-		exposedRegion =
-		    m_nativeOutputScrollBlitExposedRegion.translated(0, -scrollDelta).intersected(paneRect);
+		exposedRegion = m_nativeOutputScrollBlitExposedRegion.translated(0, pixelShift).intersected(paneRect);
 		backgroundRegion =
-		    m_nativeOutputScrollBlitBackgroundRegion.translated(0, -scrollDelta).intersected(paneRect);
-		repaintRegion =
-		    m_nativeOutputScrollBlitRepaintRegion.translated(0, -scrollDelta).intersected(paneRect);
+		    m_nativeOutputScrollBlitBackgroundRegion.translated(0, pixelShift).intersected(paneRect);
+		repaintRegion = m_nativeOutputScrollBlitRepaintRegion.translated(0, pixelShift).intersected(paneRect);
 	}
-	if (scrollDelta > 0)
+	if (pixelShift < 0)
 	{
-		m_nativeOutputCanvas->scroll(0, -scrollDelta, paneRect);
-		const QRect exposedRect(paneRect.left(), paneRect.bottom() - scrollDelta + 1, paneRect.width(),
-		                        scrollDelta);
+		m_nativeOutputCanvas->scroll(0, pixelShift, paneRect);
+		const int   exposedHeight = -pixelShift;
+		const QRect exposedRect(paneRect.left(), paneRect.bottom() - exposedHeight + 1, paneRect.width(),
+		                        exposedHeight);
 		exposedRegion += exposedRect;
 		backgroundRegion += exposedRect;
 	}
@@ -3653,7 +3871,7 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	{
 		const QRegion fixedUnderlays = m_miniWindowPaintBounds.underlayRegion.intersected(paneRect);
 		repaintRegion += fixedUnderlays;
-		repaintRegion += fixedUnderlays.translated(0, -scrollDelta).intersected(paneRect);
+		repaintRegion += fixedUnderlays.translated(0, pixelShift).intersected(paneRect);
 	}
 	repaintRegion = repaintRegion.intersected(paneRect);
 	if (repaintRegion.isEmpty())
@@ -4207,12 +4425,12 @@ void WorldView::updateAccessibleOutputReviewCursor(const bool forceNotify) const
 
 	const NativeOutputRenderLines &lines     = nativeOutputRenderLines();
 	const int                      lineIndex = accessibleOutputReviewLineIndexForTopPane(lines);
-	const int               cursorOffset = lineIndex >= 0 ? accessibleOutputOffsetForLine(lines, lineIndex)
-	                                                      : accessibleOutputCharacterCount(lines);
-	const QScrollBar *const bar          = m_output ? m_output->verticalScrollBar() : nullptr;
-	const int               scrollValue  = bar ? bar->value() : -1;
-	const bool              changed      = m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset ||
-	                                       m_accessibleOutputReviewLastNotifiedScrollValue != scrollValue;
+	const int cursorOffset = lineIndex >= 0 ? accessibleOutputOffsetForLine(lines, lineIndex)
+	                                        : accessibleOutputCharacterCount(lines);
+	const NativeOutputScrollState scrollState = nativeOutputScrollState(m_output);
+	const int                     scrollValue = scrollState.valid ? scrollState.value : -1;
+	const bool changed = m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset ||
+	                     m_accessibleOutputReviewLastNotifiedScrollValue != scrollValue;
 	m_accessibleOutputReviewLastNotifiedCursorOffset = cursorOffset;
 	m_accessibleOutputReviewLastNotifiedScrollValue  = scrollValue;
 	if (changed || forceNotify)
@@ -4371,14 +4589,14 @@ void WorldView::clearAccessibleOutputSelectionReviewState() const
 
 	const NativeOutputRenderLines &lines     = nativeOutputRenderLines();
 	const int                      lineIndex = accessibleOutputReviewLineIndexForTopPane(lines);
-	const int               cursorOffset = lineIndex >= 0 ? accessibleOutputOffsetForLine(lines, lineIndex)
-	                                                      : accessibleOutputCharacterCount(lines);
-	const QScrollBar *const bar          = m_output ? m_output->verticalScrollBar() : nullptr;
-	const int               scrollValue  = bar ? bar->value() : -1;
-	const bool              changed      = m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset ||
-	                                       m_accessibleOutputReviewLastNotifiedScrollValue != scrollValue;
-	m_accessibleOutputReviewActive       = true;
-	m_accessibleOutputReviewTargetKind   = AccessibleOutputReviewTargetKind::SplitTopPane;
+	const int cursorOffset = lineIndex >= 0 ? accessibleOutputOffsetForLine(lines, lineIndex)
+	                                        : accessibleOutputCharacterCount(lines);
+	const NativeOutputScrollState scrollState = nativeOutputScrollState(m_output);
+	const int                     scrollValue = scrollState.valid ? scrollState.value : -1;
+	const bool changed                 = m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset ||
+	                                     m_accessibleOutputReviewLastNotifiedScrollValue != scrollValue;
+	m_accessibleOutputReviewActive     = true;
+	m_accessibleOutputReviewTargetKind = AccessibleOutputReviewTargetKind::SplitTopPane;
 	m_accessibleOutputReviewLastNotifiedCursorOffset = cursorOffset;
 	m_accessibleOutputReviewLastNotifiedScrollValue  = scrollValue;
 	if (changed)
@@ -4404,8 +4622,8 @@ int WorldView::accessibleOutputReviewLineIndexForPane(const WrapTextBrowser     
 	if (lines.isEmpty() || !view || !view->viewport())
 		return -1;
 
-	const QScrollBar *const bar = view->verticalScrollBar();
-	if (!bar)
+	const NativeOutputScrollState scrollState = nativeOutputScrollState(view);
+	if (!scrollState.valid)
 		return -1;
 
 	const QRect viewportRect = view->viewport()->rect();
@@ -4421,8 +4639,9 @@ int WorldView::accessibleOutputReviewLineIndexForPane(const WrapTextBrowser     
 	if (m_nativeLayoutHeightIndex.size() != lines.size())
 		return -1;
 
-	const int   lineCount      = sizeToInt(lines.size());
-	const qreal visibleTop     = static_cast<qreal>(qBound(bar->minimum(), bar->value(), bar->maximum()));
+	const int  lineCount = sizeToInt(lines.size());
+	const auto visibleTop =
+	    static_cast<qreal>(qBound(scrollState.minimum, scrollState.value, scrollState.maximum));
 	const qreal visibleBottom  = visibleTop + static_cast<qreal>(viewportRect.height());
 	const int   firstCandidate = qBound(0, nativeLayoutLineAtY(visibleTop), lineCount - 1);
 	const int   lastCandidate =
@@ -4560,6 +4779,7 @@ bool WorldView::captureNativeOutputPanePaintState(NativeOutputPanePaintState &st
 
 	QVector<int>     visibleLineIndexes;
 	QVector<quint64> visibleLineKeys;
+	QVector<quint64> visibleLinePaintHashes;
 	QVector<qint64>  visibleFirstRuntimeLineNumbers;
 	QVector<qint64>  visibleLastRuntimeLineNumbers;
 	QVector<int>     visibleLineTops;
@@ -4575,6 +4795,7 @@ bool WorldView::captureNativeOutputPanePaintState(NativeOutputPanePaintState &st
 		{
 			visibleLineIndexes.reserve(lastVisibleLine - firstVisibleLine + 1);
 			visibleLineKeys.reserve(lastVisibleLine - firstVisibleLine + 1);
+			visibleLinePaintHashes.reserve(lastVisibleLine - firstVisibleLine + 1);
 			visibleFirstRuntimeLineNumbers.reserve(lastVisibleLine - firstVisibleLine + 1);
 			visibleLastRuntimeLineNumbers.reserve(lastVisibleLine - firstVisibleLine + 1);
 			visibleLineTops.reserve(lastVisibleLine - firstVisibleLine + 1);
@@ -4586,6 +4807,13 @@ bool WorldView::captureNativeOutputPanePaintState(NativeOutputPanePaintState &st
 				const qreal visibleLineBottom      = visibleLineTop + m_nativeLayoutHeightIndex.heightAt(i);
 				visibleLineIndexes.push_back(i);
 				visibleLineKeys.push_back(m_nativeLayoutSlots.at(i).runtimeLineKey);
+				quint64 paintHash =
+				    hashCombine(m_nativeLayoutSlots.at(i).lineContentHash, static_cast<quint64>(line.flags));
+				paintHash = hashCombine(paintHash, static_cast<quint64>(line.fadeTimestamp.isValid()));
+				if (line.fadeTimestamp.isValid())
+					paintHash =
+					    hashCombine(paintHash, static_cast<quint64>(line.fadeTimestamp.toMSecsSinceEpoch()));
+				visibleLinePaintHashes.push_back(paintHash);
 				visibleFirstRuntimeLineNumbers.push_back(line.firstRuntimeLineNumber);
 				visibleLastRuntimeLineNumbers.push_back(line.lastRuntimeLineNumber);
 				visibleLineTops.push_back(static_cast<int>(std::round(visibleLineTop - visibleTop)));
@@ -4601,6 +4829,7 @@ bool WorldView::captureNativeOutputPanePaintState(NativeOutputPanePaintState &st
 	state.renderRevision                 = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	state.visibleLineIndexes             = std::move(visibleLineIndexes);
 	state.visibleLineKeys                = std::move(visibleLineKeys);
+	state.visibleLinePaintHashes         = std::move(visibleLinePaintHashes);
 	state.visibleFirstRuntimeLineNumbers = std::move(visibleFirstRuntimeLineNumbers);
 	state.visibleLastRuntimeLineNumbers  = std::move(visibleLastRuntimeLineNumbers);
 	state.visibleLineTops                = std::move(visibleLineTops);
@@ -4663,6 +4892,8 @@ void WorldView::primeNativeOutputCaches() const
 {
 	if (!m_output || !m_output->viewport() || !m_nativeOutputCanvas)
 		return;
+	if (!m_outputPresentationExposed)
+		return;
 	if (!isVisible() || !m_output->viewport()->isVisible())
 		return;
 	if (m_runtime && !m_runtime->isActive())
@@ -4687,6 +4918,54 @@ void WorldView::primeNativeOutputCaches() const
 		ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
 		                         layoutFont);
 	}
+}
+
+void WorldView::setOutputPresentationExposed(const bool exposed)
+{
+	if (m_outputPresentationExposed == exposed)
+		return;
+
+	static_cast<void>(nativeOutputScrollState(m_output));
+	static_cast<void>(nativeOutputScrollState(m_liveOutput));
+	if (!exposed)
+	{
+		m_outputPresentationExposed = false;
+		clearNativeOutputScrollBlitState();
+		if (m_nativeOutputCanvas)
+			m_nativeOutputCanvas->setUpdatesEnabled(false);
+		if (m_miniUnderlay)
+			m_miniUnderlay->setUpdatesEnabled(false);
+		if (m_miniOverlay)
+			m_miniOverlay->setUpdatesEnabled(false);
+		if (m_outputScrollBar)
+			m_outputScrollBar->setUpdatesEnabled(false);
+		return;
+	}
+
+	m_outputPresentationExposed = true;
+	applyNativeOutputScrollPresentation();
+	if (m_outputScrollBar)
+		m_outputScrollBar->setVisible(m_outputScrollBarWanted);
+	if (m_outputContainer && m_outputContainer->layout())
+		static_cast<void>(m_outputContainer->layout()->activate());
+	if (m_nativeOutputCanvas)
+		m_nativeOutputCanvas->setUpdatesEnabled(true);
+	if (m_miniUnderlay)
+		m_miniUnderlay->setUpdatesEnabled(true);
+	if (m_miniOverlay)
+		m_miniOverlay->setUpdatesEnabled(true);
+	if (m_outputScrollBar)
+		m_outputScrollBar->setUpdatesEnabled(true);
+	m_nativePrimaryPaintState           = {};
+	m_nativeLivePaintState              = {};
+	m_outputPresentationRepaintDeferred = false;
+	m_pendingSemanticOutputRepaint      = SemanticOutputRepaint::Full;
+	releaseSemanticOutputRepaint();
+}
+
+bool WorldView::outputPresentationExposed() const
+{
+	return m_outputPresentationExposed;
 }
 
 QRect WorldView::nativeOutputPaneRect(const WrapTextBrowser *view) const
@@ -5759,8 +6038,8 @@ void WorldView::NativeLayoutHeightIndex::setHeight(const int index, const qreal 
 }
 
 void WorldView::NativeLayoutHeightIndex::setLayoutSlotHeightRange(
-    const int firstLine, const int lastLineExclusive, const IndexedRingBuffer<NativeLayoutSlot> &layoutSlots,
-    const qreal lineAdvance)
+    const int firstLine, const int lastLineExclusive,
+    const PagedIndexedRingBuffer<NativeLayoutSlot> &layoutSlots, const qreal lineAdvance)
 {
 	const int lineCount = std::min(sizeToInt(m_heights.size()), sizeToInt(layoutSlots.size()));
 	if (lineCount <= 0 || m_blockLengths.isEmpty())
@@ -6104,7 +6383,6 @@ void WorldView::refreshNativeLayoutMetadataRanges(const NativeOutputRenderLines 
 			slot.runtimeLineKey    = nativeRuntimeLineKey(line);
 			if (slot.lineContentHash != contentHash)
 			{
-				slot.lineLayout.clear();
 				slot.lineContentHash = contentHash;
 				slot.visualRows      = estimateNativeLineRows(line, effectiveWrapWidth, layoutFontMetrics);
 				slot.rowsExact       = line.text.isEmpty() ? 1 : 0;
@@ -6683,41 +6961,22 @@ int WorldView::ensureNativeLineLayout(const NativeOutputRenderLines &lines, cons
 	const int     effectiveWrapWidth = hasLocalContent ? localWrapWidthPixels : wrapWidthPixels;
 	const quint64 visualHash         = line.visualHash != 0 ? line.visualHash : nativeLineContentHash(line);
 	const quint64 contentHash = nativeLayoutLineCacheHash(visualHash, effectiveWrapWidth, layoutContentSalt);
-	NativeLayoutSlot &slot    = m_nativeLayoutSlots[index];
-	if (const auto &cachedLayout = slot.lineLayout; cachedLayout && slot.lineContentHash == contentHash)
+	const quint64 runtimeLineKey         = nativeRuntimeLineKey(line);
+	NativeLayoutSlot               &slot = m_nativeLayoutSlots[index];
+	const NativeExactLayoutCacheKey cacheKey{runtimeLineKey, contentHash};
+	if (QTextLayout *const cachedLayout = m_nativeExactLayoutCache.object(cacheKey))
 	{
-		if (slot.rowsExact != 0 && slot.visualRows > 0)
-			return slot.visualRows;
-
-		if (!cachedLayout->cacheEnabled())
-			cachedLayout->setCacheEnabled(true);
-
-		QTextOption option = cachedLayout->textOption();
-		option.setWrapMode(effectiveWrapWidth >= 1000000 ? QTextOption::NoWrap : QTextOption::WordWrap);
-		cachedLayout->setTextOption(option);
-		cachedLayout->clearLayout();
-		cachedLayout->beginLayout();
-		int rowCount = 0;
-		while (true)
-		{
-			QTextLine textLine = cachedLayout->createLine();
-			if (!textLine.isValid())
-				break;
-			textLine.setLineWidth(static_cast<qreal>(effectiveWrapWidth));
-			textLine.setPosition({0.0, static_cast<qreal>(rowCount) * defaultLineAdvance});
-			++rowCount;
-		}
-		cachedLayout->endLayout();
-		rowCount        = qMax(1, rowCount);
-		slot.visualRows = rowCount;
-		slot.rowsExact  = 1;
-		++m_nativeLayoutRowMeasurements;
+		const int rowCount   = qMax(1, cachedLayout->lineCount());
+		slot.runtimeLineKey  = runtimeLineKey;
+		slot.lineContentHash = contentHash;
+		slot.visualRows      = rowCount;
+		slot.rowsExact       = 1;
 		return rowCount;
 	}
 
 	if (line.text.isEmpty())
 	{
-		slot.lineLayout.clear();
+		slot.runtimeLineKey  = runtimeLineKey;
 		slot.lineContentHash = contentHash;
 		slot.visualRows      = 1;
 		slot.rowsExact       = 1;
@@ -6730,7 +6989,7 @@ int WorldView::ensureNativeLineLayout(const NativeOutputRenderLines &lines, cons
 	// separators so pre-wrapped local output (echo/notes) always paints as
 	// wrapped rows instead of clipped single rows.
 	layoutText.replace(QLatin1Char('\n'), QChar::LineSeparator);
-	auto layout = QSharedPointer<QTextLayout>::create(layoutText, layoutFont);
+	auto layout = std::make_unique<QTextLayout>(layoutText, layoutFont);
 	layout->setCacheEnabled(true);
 	QTextOption option;
 	option.setWrapMode(effectiveWrapWidth >= 1000000 ? QTextOption::NoWrap : QTextOption::WordWrap);
@@ -6750,10 +7009,11 @@ int WorldView::ensureNativeLineLayout(const NativeOutputRenderLines &lines, cons
 	layout->endLayout();
 	rowCount = qMax(1, rowCount);
 
-	slot.lineLayout      = layout;
+	slot.runtimeLineKey  = runtimeLineKey;
 	slot.lineContentHash = contentHash;
 	slot.visualRows      = rowCount;
 	slot.rowsExact       = 1;
+	m_nativeExactLayoutCache.insert(cacheKey, layout.release());
 	++m_nativeLayoutRowMeasurements;
 	return rowCount;
 }
@@ -6840,7 +7100,7 @@ void WorldView::restoreNativeExactLayoutSlots(
 
 		NativeLayoutSlot restoredSlot = snapshot.slot;
 		restoredSlot.runtimeLineKey   = runtimeLineKey;
-		m_nativeLayoutSlots[i]        = std::move(restoredSlot);
+		m_nativeLayoutSlots[i]        = restoredSlot;
 		m_nativeLayoutHeightIndex.setHeight(i, snapshot.height);
 		restoredExactSlot = true;
 	}
@@ -6945,9 +7205,7 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 
 		const NativeOutputRenderLine &line = lines.at(i);
 		const NativeLayoutSlot       &slot = m_nativeLayoutSlots.at(i);
-		const bool                    exactLineHasLayout =
-		    slot.rowsExact == 0 || line.text.isEmpty() || static_cast<bool>(slot.lineLayout);
-		if (slot.visualRows <= 0 || !exactLineHasLayout)
+		if (slot.visualRows <= 0)
 			return false;
 
 		return slot.runtimeLineKey == nativeRuntimeLineKey(line) &&
@@ -7110,8 +7368,8 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 
 		if (!remappedFastPath)
 		{
-			IndexedRingBuffer<NativeLayoutSlot> oldSlots;
-			NativeLayoutHeightIndex             oldHeightIndex;
+			PagedIndexedRingBuffer<NativeLayoutSlot> oldSlots;
+			NativeLayoutHeightIndex                  oldHeightIndex;
 			oldSlots.swap(m_nativeLayoutSlots);
 			oldHeightIndex.swap(m_nativeLayoutHeightIndex);
 
@@ -7127,12 +7385,12 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 			{
 				NativeLayoutSlot slot;
 				slot.runtimeLineKey = newLineKey;
-				m_nativeLayoutSlots.push_back(std::move(slot));
+				m_nativeLayoutSlots.push_back(slot);
 				m_nativeLayoutHeightIndex.append(defaultLineAdvance);
 			};
 			auto appendLineFromOld = [&](const int oldIndex)
 			{
-				m_nativeLayoutSlots.push_back(std::move(oldSlots[oldIndex]));
+				m_nativeLayoutSlots.push_back(oldSlots[oldIndex]);
 				m_nativeLayoutHeightIndex.append(oldHeightIndex.heightAt(oldIndex));
 			};
 			int       oldIndex = 0;
@@ -7237,9 +7495,10 @@ const QTextLayout *WorldView::nativeLayoutForLine(const int index) const
 {
 	if (index < 0 || index >= m_nativeLayoutSlots.size())
 		return nullptr;
-	if (const auto &layout = m_nativeLayoutSlots.at(index).lineLayout; layout)
-		return layout.data();
-	return nullptr;
+	const NativeLayoutSlot &slot = m_nativeLayoutSlots.at(index);
+	if (slot.runtimeLineKey == 0)
+		return nullptr;
+	return m_nativeExactLayoutCache.object({slot.runtimeLineKey, slot.lineContentHash});
 }
 
 void WorldView::bumpNativeRenderLineCacheRevision(const NativeRenderCacheDeltaKind kind,
@@ -7314,18 +7573,20 @@ void WorldView::consumeNativeRenderCacheDelta(const NativeRenderCacheDelta &delt
 	const bool canCarryPrimaryViewportAnchor = deltaIsContiguous &&
 	                                           delta.kind != NativeRenderCacheDeltaKind::FullReset &&
 	                                           delta.kind != NativeRenderCacheDeltaKind::Unknown;
-	QScrollBar *const primaryScroll          = m_output ? m_output->verticalScrollBar() : nullptr;
-	const bool        passiveObserverReview  = m_runtimeObserver && !m_commandInteractionEnabled &&
-	                                           !m_scrollbackSplitActive && primaryScroll &&
-	                                           primaryScroll->value() < primaryScroll->maximum();
-	const bool        splitReview            = m_scrollbackSplitActive && primaryScroll;
-	bool anchorPending = m_nativePrimaryViewportAnchor.valid &&
-	                     m_nativePrimaryViewportAnchor.revision == previousRevision && primaryScroll &&
-	                     m_nativePrimaryViewportAnchor.sourceScroll == primaryScroll->value();
+	QScrollBar *const             primaryScroll          = m_output ? m_output->verticalScrollBar() : nullptr;
+	const NativeOutputScrollState primaryScrollState     = nativeOutputScrollState(m_output);
+	const bool                    primaryScrollAvailable = primaryScroll && primaryScrollState.valid;
+	const bool passiveObserverReview = m_runtimeObserver && !m_commandInteractionEnabled &&
+	                                   !m_scrollbackSplitActive && primaryScrollAvailable &&
+	                                   primaryScrollState.value < primaryScrollState.maximum;
+	const bool splitReview           = m_scrollbackSplitActive && primaryScrollAvailable;
+	bool       anchorPending =
+	    m_nativePrimaryViewportAnchor.valid && m_nativePrimaryViewportAnchor.revision == previousRevision &&
+	    primaryScrollAvailable && m_nativePrimaryViewportAnchor.sourceScroll == primaryScrollState.value;
 	if (!anchorPending && m_nativePrimaryViewportAnchor.valid)
 		clearNativePrimaryViewportAnchor();
 
-	if (canCarryPrimaryViewportAnchor && (passiveObserverReview || splitReview) && primaryScroll)
+	if (canCarryPrimaryViewportAnchor && (passiveObserverReview || splitReview) && primaryScrollAvailable)
 	{
 		if (!anchorPending && delta.oldLineCount > 0)
 		{
@@ -7333,12 +7594,13 @@ void WorldView::consumeNativeRenderCacheDelta(const NativeRenderCacheDelta &delt
 			if (layoutCacheWasValid && sizeToInt(m_nativeLayoutSlots.size()) == delta.oldLineCount &&
 			    sizeToInt(m_nativeLayoutHeightIndex.size()) == delta.oldLineCount)
 			{
-				firstVisibleLine = qBound(0, nativeLayoutLineAtY(static_cast<qreal>(primaryScroll->value())),
-				                          delta.oldLineCount - 1);
+				firstVisibleLine =
+				    qBound(0, nativeLayoutLineAtY(static_cast<qreal>(primaryScrollState.value)),
+				           delta.oldLineCount - 1);
 			}
 			if (m_nativePrimaryPaintState.valid &&
 			    m_nativePrimaryPaintState.renderRevision == previousRevision &&
-			    m_nativePrimaryPaintState.scrollY == primaryScroll->value() &&
+			    m_nativePrimaryPaintState.scrollY == primaryScrollState.value &&
 			    !m_nativePrimaryPaintState.visibleLineIndexes.isEmpty())
 			{
 				firstVisibleLine = m_nativePrimaryPaintState.visibleLineIndexes.constFirst();
@@ -7376,10 +7638,10 @@ void WorldView::consumeNativeRenderCacheDelta(const NativeRenderCacheDelta &delt
 				                                   : 0;
 				qint64  anchorRuntimeLineNumber{0};
 				qreal   anchorViewportTop =
-				    nativeLayoutCumulativeHeightAt(anchorLineIndex) - primaryScroll->value();
+				    nativeLayoutCumulativeHeightAt(anchorLineIndex) - primaryScrollState.value;
 				if (m_nativePrimaryPaintState.valid &&
 				    m_nativePrimaryPaintState.renderRevision == previousRevision &&
-				    m_nativePrimaryPaintState.scrollY == primaryScroll->value() &&
+				    m_nativePrimaryPaintState.scrollY == primaryScrollState.value &&
 				    !m_nativePrimaryPaintState.visibleLineIndexes.isEmpty() &&
 				    m_nativePrimaryPaintState.visibleLineIndexes.size() ==
 				        m_nativePrimaryPaintState.visibleLineKeys.size() &&
@@ -7402,7 +7664,7 @@ void WorldView::consumeNativeRenderCacheDelta(const NativeRenderCacheDelta &delt
 					    .runtimeLineNumber = anchorRuntimeLineNumber,
 					    .viewportTop       = anchorViewportTop,
 					    .revision          = previousRevision,
-					    .sourceScroll      = primaryScroll->value(),
+					    .sourceScroll      = primaryScrollState.value,
 					    .layoutPrepared    = false,
 					    .valid             = true,
 					};
@@ -9393,14 +9655,10 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	    m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight() : 0.0;
 
 	const int nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
-	int       scrollY         = 0;
-	int       scrollMax       = 0;
-	if (const QScrollBar *const bar = view->verticalScrollBar())
-	{
-		scrollY   = qMax(0, bar->value());
-		scrollMax = qMax(0, bar->maximum());
-	}
-	int effectiveScrollY = 0;
+	const NativeOutputScrollState scrollState      = nativeOutputScrollState(view);
+	const int                     scrollY          = scrollState.valid ? qMax(0, scrollState.value) : 0;
+	const int                     scrollMax        = scrollState.valid ? qMax(0, scrollState.maximum) : 0;
+	int                           effectiveScrollY = 0;
 	if (nativeMaxScroll > 0)
 	{
 		if (scrollMax > 0)
@@ -9581,15 +9839,11 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 	const qreal docY =
 	    m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight() : 0.0;
 	const int nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
-	int       scrollY         = 0;
-	int       scrollMax       = 0;
-	if (const QScrollBar *const bar = view->verticalScrollBar())
-	{
-		scrollY   = qMax(0, bar->value());
-		scrollMax = qMax(0, bar->maximum());
-	}
+	const NativeOutputScrollState scrollState = nativeOutputScrollState(view);
+	const int                     scrollY     = scrollState.valid ? qMax(0, scrollState.value) : 0;
+	const int                     scrollMax   = scrollState.valid ? qMax(0, scrollState.maximum) : 0;
 
-	int effectiveScrollY = 0;
+	int                           effectiveScrollY = 0;
 	if (nativeMaxScroll > 0)
 	{
 		if (scrollMax > 0)
@@ -9696,8 +9950,11 @@ void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int
 	const int rangeBottom =
 	    qMax(rangeTop + 1, static_cast<int>(std::ceil(nativeLayoutCumulativeHeightAt(lastLine + 1))));
 
-	const int currentTop    = bar->value();
-	const int pageStep      = qMax(1, bar->pageStep());
+	const NativeOutputScrollState scrollState = nativeOutputScrollState(view);
+	if (!scrollState.valid)
+		return;
+	const int currentTop    = scrollState.value;
+	const int pageStep      = qMax(1, scrollState.pageStep);
 	const int currentBottom = currentTop + pageStep;
 	int       target        = currentTop;
 	if (rangeTop < currentTop)
@@ -9705,9 +9962,9 @@ void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int
 	else if (rangeBottom > currentBottom)
 		target = rangeBottom - pageStep;
 
-	target                   = qBound(bar->minimum(), target, bar->maximum());
+	target                   = qBound(scrollState.minimum, target, scrollState.maximum);
 	const bool primaryOutput = view == m_output;
-	if (target == bar->value())
+	if (target == scrollState.value)
 	{
 		if (primaryOutput)
 			const_cast<WorldView *>(this)->syncOutputScrollbackReviewState(notifyReviewTarget);
@@ -11620,7 +11877,7 @@ WorldView::synchronizeNativeRuntimeOutputPresentation(const bool allowLayoutBuil
 	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (m_nativeConsumedRenderRevision != m_nativeRenderModel->m_nativeRenderLineCacheRevision)
 		consumeNativeRenderCacheDelta(m_nativeRenderModel->m_nativeRenderCacheDelta);
-	syncNativeOutputScrollBarsFromLayout(lines, allowLayoutBuild);
+	syncNativeOutputScrollBarsFromLayout(lines, allowLayoutBuild || !m_outputPresentationExposed);
 	if (followTail && !m_frozen && m_commandInteractionEnabled)
 	{
 		if (m_scrollbackSplitActive)
@@ -11640,7 +11897,7 @@ void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayou
 	queueSemanticOutputRepaint(followTail ? SemanticOutputRepaint::PresentationVisible
 	                                      : SemanticOutputRepaint::PresentationDelta);
 	m_nativeRuntimeOutputPresentationNeedsLayoutSync =
-	    m_nativeRuntimeOutputPresentationNeedsLayoutSync || allowLayoutBuild;
+	    m_nativeRuntimeOutputPresentationNeedsLayoutSync || allowLayoutBuild || !m_outputPresentationExposed;
 	m_nativeRuntimeOutputPresentationFollowTail = m_nativeRuntimeOutputPresentationFollowTail || followTail;
 	if (m_runtimeOutputMutationBatchDepth > 0)
 	{
@@ -11783,6 +12040,12 @@ void WorldView::releaseSemanticOutputRepaint()
 		return;
 	if (hasPendingOutputPresentationWork())
 		return;
+	if (!m_outputPresentationExposed)
+	{
+		m_outputPresentationRepaintDeferred = true;
+		clearNativeOutputScrollBlitState();
+		return;
+	}
 
 	const SemanticOutputRepaint repaint = m_pendingSemanticOutputRepaint;
 	m_pendingSemanticOutputRepaint      = SemanticOutputRepaint::None;
@@ -11825,12 +12088,21 @@ void WorldView::scrollViewToEnd(const WrapTextBrowser *view)
 	QScrollBar *const bar = view->verticalScrollBar();
 	if (!bar)
 		return;
+	NativeOutputScrollState *const state = nativeOutputScrollStateForView(view);
+	if (!m_outputPresentationExposed && state && state->valid)
+	{
+		const bool changed = state->value != state->maximum;
+		state->value       = state->maximum;
+		if (changed && view == m_output)
+			emit outputScrollChanged();
+		return;
+	}
 	bar->setValue(bar->maximum());
 }
 
 WrapTextBrowser *WorldView::activeOutputView() const
 {
-	if (m_scrollbackSplitActive && m_liveOutput && m_liveOutput->isVisible())
+	if (m_scrollbackSplitActive && m_liveOutput)
 		return m_liveOutput;
 	return m_output;
 }
@@ -11842,7 +12114,8 @@ void WorldView::scrollOutputToStart()
 	static_cast<void>(synchronizePendingOutputScrollPosition());
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const bool changed = setSemanticOutputScrollPosition(bar, bar->minimum());
+		const NativeOutputScrollState state   = nativeOutputScrollState(m_output);
+		const bool                    changed = setSemanticOutputScrollPosition(bar, state.minimum);
 		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
@@ -11862,7 +12135,7 @@ void WorldView::scrollOutputToEnd()
 	if (m_output)
 	{
 		if (QScrollBar *const bar = m_output->verticalScrollBar())
-			setSemanticOutputScrollPosition(bar, bar->maximum());
+			setSemanticOutputScrollPosition(bar, nativeOutputScrollState(m_output).maximum);
 		clearAccessibleOutputReviewCursor();
 	}
 	requestNativeOutputRepaint();
@@ -11875,7 +12148,8 @@ void WorldView::scrollOutputPageUp()
 	static_cast<void>(synchronizePendingOutputScrollPosition());
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() - bar->pageStep());
+		const NativeOutputScrollState state = nativeOutputScrollState(m_output);
+		const bool changed = setSemanticOutputScrollPosition(bar, state.value - state.pageStep);
 		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
@@ -11890,7 +12164,8 @@ void WorldView::scrollOutputPageDown()
 	static_cast<void>(synchronizePendingOutputScrollPosition());
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() + bar->pageStep());
+		const NativeOutputScrollState state = nativeOutputScrollState(m_output);
+		const bool changed = setSemanticOutputScrollPosition(bar, state.value + state.pageStep);
 		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
@@ -11905,7 +12180,8 @@ void WorldView::scrollOutputLineUp()
 	static_cast<void>(synchronizePendingOutputScrollPosition());
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() - outputScrollUnitsPerLine());
+		const bool changed = setSemanticOutputScrollPosition(bar, nativeOutputScrollState(m_output).value -
+		                                                              outputScrollUnitsPerLine());
 		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
@@ -11920,7 +12196,8 @@ void WorldView::scrollOutputLineDown()
 	static_cast<void>(synchronizePendingOutputScrollPosition());
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() + outputScrollUnitsPerLine());
+		const bool changed = setSemanticOutputScrollPosition(bar, nativeOutputScrollState(m_output).value +
+		                                                              outputScrollUnitsPerLine());
 		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
@@ -12292,10 +12569,10 @@ bool WorldView::isAtBufferEnd() const
 {
 	if (!m_output)
 		return true;
-	QScrollBar *const bar = m_output->verticalScrollBar();
-	if (!bar)
+	const NativeOutputScrollState state = nativeOutputScrollState(m_output);
+	if (!state.valid)
 		return true;
-	return bar->value() >= nativeSplitTopScrollSeamValue(bar->maximum());
+	return state.value >= nativeSplitTopScrollSeamValue(state.maximum);
 }
 
 void WorldView::selectOutputLine(int zeroBasedLine) const
@@ -12353,8 +12630,11 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 	const int lineBottom =
 	    qMax(lineTop + 1, static_cast<int>(std::ceil(nativeLayoutCumulativeHeightAt(zeroBasedLine + 1))));
 
-	const int currentTop    = bar->value();
-	const int pageStep      = qMax(1, bar->pageStep());
+	const NativeOutputScrollState scrollState = nativeOutputScrollState(m_output);
+	if (!scrollState.valid)
+		return;
+	const int currentTop    = scrollState.value;
+	const int pageStep      = qMax(1, scrollState.pageStep);
 	const int currentBottom = currentTop + pageStep;
 	int       target        = currentTop;
 	if (lineTop < currentTop)
@@ -12362,7 +12642,7 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 	else if (lineBottom > currentBottom)
 		target = lineBottom - pageStep;
 
-	target = qBound(bar->minimum(), target, bar->maximum());
+	target = qBound(scrollState.minimum, target, scrollState.maximum);
 	const_cast<WorldView *>(this)->setSemanticOutputScrollPosition(bar, target);
 	const_cast<WorldView *>(this)->syncOutputScrollbackReviewState(false);
 	notifyAccessibleOutputSelectionReviewTarget(lines, zeroBasedLine, startColumn, endColumn);
@@ -12404,15 +12684,15 @@ int WorldView::setOutputScroll(int position, bool visible)
 	const bool visibilityChanged = m_outputScrollBarWanted != visible;
 	m_outputScrollBarWanted      = visible;
 
-	if (m_outputScrollBar)
+	if (m_outputPresentationExposed && m_outputScrollBar)
 		m_outputScrollBar->setVisible(visible);
-	if (visibilityChanged && m_outputContainer && m_outputContainer->layout())
+	if (m_outputPresentationExposed && visibilityChanged && m_outputContainer && m_outputContainer->layout())
 		static_cast<void>(m_outputContainer->layout()->activate());
 
 	QScrollBar *bar = m_output->verticalScrollBar();
 	if (!bar)
 		return eBadParameter;
-	const int previousPosition = bar->value();
+	const int previousPosition = outputScrollPosition();
 	bool      positionChanged  = false;
 
 	if (position != -2)
@@ -12420,17 +12700,18 @@ int WorldView::setOutputScroll(int position, bool visible)
 		m_nativeRuntimeOutputPresentationFollowTail      = false;
 		m_nativeRuntimeOutputPresentationNeedsLayoutSync = true;
 		static_cast<void>(synchronizePendingOutputScrollPosition());
-		int target = position;
+		const NativeOutputScrollState scrollState = nativeOutputScrollState(m_output);
+		int                           target      = position;
 		if (position == -1)
-			target = bar->maximum();
-		if (target < bar->minimum())
-			target = bar->minimum();
-		if (target > bar->maximum())
-			target = bar->maximum();
+			target = scrollState.maximum;
+		if (target < scrollState.minimum)
+			target = scrollState.minimum;
+		if (target > scrollState.maximum)
+			target = scrollState.maximum;
 		positionChanged = setSemanticOutputScrollPosition(bar, target, false);
 		syncOutputScrollbackReviewState();
 	}
-	if (visibilityChanged || (!positionChanged && bar->value() != previousPosition))
+	if (visibilityChanged || (!positionChanged && outputScrollPosition() != previousPosition))
 		notifySemanticOutputViewportChanged(false);
 	if (visibilityChanged)
 		emit callbackCommandUiPresentationChanged();
@@ -13226,15 +13507,13 @@ int WorldView::outputScrollPosition() const
 {
 	if (!m_output)
 		return 0;
-	QScrollBar *const bar = m_output->verticalScrollBar();
-	if (!bar)
-		return 0;
-	return bar->value();
+	const NativeOutputScrollState state = nativeOutputScrollState(m_output);
+	return state.valid ? state.value : 0;
 }
 
 bool WorldView::outputScrollBarVisible() const
 {
-	return m_outputScrollBar && m_outputScrollBar->isVisible();
+	return m_outputScrollBarWanted;
 }
 
 bool WorldView::outputScrollBarWanted() const
@@ -15860,10 +16139,13 @@ void WorldView::applyNumericWorldOptionPresentation(const WorldNumericOptionBind
 			restoreOutputFromPersistedLines(m_runtime->lines());
 	}
 
+	if (binding == WrapColumn || binding == OutputWrap)
+		synchronizeNativeOutputLayoutForPresentationChange();
+
 	if (binding == AlternativeInverse && m_runtime)
 		restoreOutputFromPersistedLines(m_runtime->lines());
 	else if (binding == UnderlineHyperlinks || binding == UseCustomLinkColour)
-		requestNativeOutputRepaint();
+		synchronizeNativeOutputLayoutForPresentationChange();
 }
 
 void WorldView::applyNumericWorldOptionFlagsPresentation(const QString &key, const int flags,
@@ -15887,7 +16169,7 @@ void WorldView::applyNumericWorldOptionFlagsPresentation(const QString &key, con
 		rebuiltOutput = true;
 	}
 	if ((flags & OPT_UPDATE_VIEWS) && !rebuiltOutput)
-		requestNativeOutputRepaint();
+		synchronizeNativeOutputLayoutForPresentationChange();
 
 	if (m_hasRuntimeSettingsSnapshot && m_runtime && runtimeSettingsAttributeKeys().contains(key))
 		m_lastRuntimeSettingsAttributes.insert(key, m_runtime->worldAttributes().value(key));
@@ -16277,7 +16559,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 			m_nativeRenderModel->m_nativeRenderLineCacheValid  = true;
 			m_nativeRenderModel->m_nativeRenderLineCacheSource = NativeRenderCacheSource::RuntimePinned;
 		}
-		requestNativeOutputRepaint();
+		synchronizeNativeOutputLayoutForPresentationChange();
 	}
 	else if (!rebuildOutput)
 	{
@@ -16454,7 +16736,7 @@ void WorldView::applyOutputWrapRuntimeSettings()
 void WorldView::applyNawsNegotiationPresentation()
 {
 	applyOutputWrapRuntimeSettings();
-	requestNativeOutputRepaint();
+	synchronizeNativeOutputLayoutForPresentationChange();
 }
 
 void WorldView::applyInputPaletteRuntimeSettings() const

@@ -14,7 +14,9 @@
 #include "WorldOutputRenderModel.h"
 #include "WorldRuntime.h"
 #include "WorldViewGlobalSettings.h"
+#include "helpers/PagedIndexedRingBuffer.h"
 
+#include <QCache>
 #include <QElapsedTimer>
 #include <QFont>
 #include <QHash>
@@ -28,7 +30,6 @@
 #include <QRegion>
 #include <QRegularExpression>
 #include <QScopedPointer>
-#include <QSharedPointer>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QSet>
 #include <QString>
@@ -294,10 +295,20 @@ class WorldView : public QWidget
 		 */
 		void primeNativeOutputCaches() const;
 		/**
+		 * @brief Marks whether this view's output widgets are currently presented to the user.
+		 * @param exposed `true` when physical scrollbar and repaint updates should be applied.
+		 */
+		void setOutputPresentationExposed(bool exposed);
+		/**
+		 * @brief Returns whether physical output presentation is currently exposed.
+		 * @return `true` when output widgets receive presentation updates.
+		 */
+		[[nodiscard]] bool            outputPresentationExposed() const;
+		/**
 		 * @brief Echoes user input text into output stream.
 		 * @param text Input text to echo.
 		 */
-		void echoInputText(const QString &text);
+		void                          echoInputText(const QString &text);
 		/**
 		 * @brief Returns current output lines as plain strings.
 		 * @return Plain-text output lines.
@@ -1317,30 +1328,52 @@ class WorldView : public QWidget
 		 */
 		void              syncOutputScrollSingleStep() const;
 		/**
+		 * @brief Synchronizes native layout metadata after a layout-affecting presentation change.
+		 */
+		void              synchronizeNativeOutputLayoutForPresentationChange() const;
+		struct NativeOutputScrollState;
+		/**
+		 * @brief Returns logical native scroll state for an output pane.
+		 * @param view Output pane whose state is requested.
+		 * @return Mutable logical state, or `nullptr` for an unrelated widget.
+		 */
+		[[nodiscard]] NativeOutputScrollState *
+		nativeOutputScrollStateForView(const WrapTextBrowser *view) const;
+		/**
+		 * @brief Seeds a pane's logical scroll state from its widget when needed.
+		 * @param view Output pane to inspect.
+		 * @return Current logical state, or a default state for an unrelated widget.
+		 */
+		[[nodiscard]] NativeOutputScrollState nativeOutputScrollState(const WrapTextBrowser *view) const;
+		/**
+		 * @brief Applies current logical scrollbar state to physical widgets.
+		 */
+		void                                  applyNativeOutputScrollPresentation() const;
+		/**
 		 * @brief Synchronizes output scrollbars from current native layout metrics.
 		 * @param lines Current native render lines.
 		 * @param allowLayoutBuild Build/rebuild native layout cache when metrics are stale.
 		 */
-		void              syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLines &lines,
-		                                                       bool allowLayoutBuild = true) const;
+		void syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLines &lines,
+		                                          bool allowLayoutBuild = true) const;
 		/**
 		 * @brief Requests a repaint for the native output canvas.
 		 */
-		void              requestNativeOutputRepaint() const;
-		void              requestNativeOutputRepaint(const QRect &rect) const;
+		void requestNativeOutputRepaint() const;
+		void requestNativeOutputRepaint(const QRect &rect) const;
 		/**
 		 * @brief Requests an exact, potentially non-rectangular native-output repaint.
 		 * @param region Canvas region to invalidate.
 		 */
-		void              requestNativeOutputRepaintRegion(const QRegion &region) const;
+		void requestNativeOutputRepaintRegion(const QRegion &region) const;
 		/**
 		 * @brief Flushes a coalesced native output repaint request.
 		 */
-		void              flushQueuedNativeOutputRepaint() const;
+		void flushQueuedNativeOutputRepaint() const;
 		/**
 		 * @brief Requests a minimal tail repaint for append/partial-output updates.
 		 */
-		void              requestNativeOutputTailRepaint() const;
+		void requestNativeOutputTailRepaint() const;
 		struct NativeOutputPanePaintState;
 		struct NativeOutputSelectionState;
 		/**
@@ -1704,11 +1737,24 @@ class WorldView : public QWidget
 				quint64          renderRevision{0};
 				QVector<int>     visibleLineIndexes;
 				QVector<quint64> visibleLineKeys;
+				QVector<quint64> visibleLinePaintHashes;
 				QVector<qint64>  visibleFirstRuntimeLineNumbers;
 				QVector<qint64>  visibleLastRuntimeLineNumbers;
 				QVector<int>     visibleLineTops;
 				QVector<int>     visibleLineBottoms;
 				bool             valid{false};
+		};
+		/**
+		 * @brief Logical scrollbar state maintained independently of hidden presentation widgets.
+		 */
+		struct NativeOutputScrollState
+		{
+				int  minimum{0};
+				int  maximum{0};
+				int  pageStep{1};
+				int  singleStep{1};
+				int  value{0};
+				bool valid{false};
 		};
 		/**
 		 * @brief Native runtime append caller classification for temporary diagnostics.
@@ -1927,17 +1973,44 @@ class WorldView : public QWidget
 		/**
 		 * @brief Per-render-line native layout cache state.
 		 *
-		 * Slots are kept in one ring buffer so structural render-line deltas cannot
+		 * Slots are kept in one indexed buffer so structural render-line deltas cannot
 		 * desynchronize row estimates, exact layouts, hashes, and runtime identity.
 		 */
 		struct NativeLayoutSlot
 		{
-				int                         visualRows{-1};
-				quint64                     runtimeLineKey{0};
-				quint64                     lineContentHash{0};
-				QSharedPointer<QTextLayout> lineLayout;
-				uchar                       rowsExact{0};
+				int     visualRows{-1};
+				quint64 runtimeLineKey{0};
+				quint64 lineContentHash{0};
+				uchar   rowsExact{0};
 		};
+		/**
+		 * @brief Stable identity for one exact native text layout.
+		 */
+		struct NativeExactLayoutCacheKey
+		{
+				quint64            runtimeLineKey{0};
+				quint64            lineContentHash{0};
+
+				/**
+				 * @brief Compares the runtime line and complete layout-content identity.
+				 * @param other Cache key to compare.
+				 * @return `true` when both keys identify the same exact layout.
+				 */
+				[[nodiscard]] bool operator==(const NativeExactLayoutCacheKey &other) const = default;
+
+				/**
+				 * @brief Hashes an exact native layout cache key.
+				 * @param key Cache key to hash.
+				 * @param seed Initial hash seed.
+				 * @return Combined key hash.
+				 */
+				friend size_t      qHash(const NativeExactLayoutCacheKey &key, size_t seed = 0) noexcept
+				{
+					seed = ::qHash(key.runtimeLineKey, seed);
+					return ::qHash(key.lineContentHash, seed);
+				}
+		};
+		static constexpr int kNativeExactLayoutCacheLimit = 1024;
 		/**
 		 * @brief One normalized structural replacement applied to both native layout topology containers.
 		 */
@@ -1950,7 +2023,7 @@ class WorldView : public QWidget
 				qreal defaultHeight{0.0};
 		};
 		/**
-		 * @brief Slot topology and exact layout state retained by stable runtime-line identity during reconciliation.
+		 * @brief Slot topology and exact geometry retained by stable runtime-line identity during reconciliation.
 		 */
 		struct NativeExactLayoutSlotSnapshot
 		{
@@ -1978,7 +2051,7 @@ class WorldView : public QWidget
 				[[nodiscard]] bool operator==(const WrapMarginReservationCacheKey &other) const = default;
 		};
 		/**
-		 * @brief Captures slot topology and exact layouts that may survive a structural render-cache delta.
+		 * @brief Captures slot topology and exact geometry that may survive a structural render-cache delta.
 		 * @return Slots keyed by stable runtime-line identity.
 		 */
 		[[nodiscard]] QHash<quint64, NativeExactLayoutSlotSnapshot> captureNativeExactLayoutSlots() const;
@@ -1992,7 +2065,7 @@ class WorldView : public QWidget
 		    const NativeOutputRenderLines                       &lines,
 		    const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots);
 		/**
-		 * @brief Restores exact layouts whose stable identity and visual content still match.
+		 * @brief Restores exact geometry whose stable identity and visual content still match.
 		 * @param lines Current native render lines.
 		 * @param wrapWidthPixels Effective wrap width for runtime output.
 		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
@@ -2020,30 +2093,30 @@ class WorldView : public QWidget
 				void                    replace(const NativeLayoutTopologyReplacement &replacement);
 				void                    setHeight(int index, qreal height);
 				void setLayoutSlotHeightRange(int firstLine, int lastLineExclusive,
-				                              const IndexedRingBuffer<NativeLayoutSlot> &layoutSlots,
-				                              qreal                                      lineAdvance);
+				                              const PagedIndexedRingBuffer<NativeLayoutSlot> &layoutSlots,
+				                              qreal                                           lineAdvance);
 				void swap(NativeLayoutHeightIndex &other) noexcept;
 
 			private:
 				friend class ::tst_WorldView_Basic;
 
-				static constexpr int     kBlockSize = 256;
+				static constexpr int          kBlockSize = 256;
 
-				void                     rebuildBlockSums();
-				void                     rebuildBlockSumsFromBlock(int firstBlock, int firstLine);
-				void                     rebuildFenwick();
-				void                     addBlockLengthDelta(int blockIndex, int delta);
-				void                     addBlockSumDelta(int blockIndex, qreal delta);
-				[[nodiscard]] int        blockLengthPrefix(int blockCount) const;
-				[[nodiscard]] qreal      blockSumPrefix(int blockCount) const;
-				[[nodiscard]] int        blockForLine(int lineIndex, int *prefixLines) const;
-				[[nodiscard]] int        blockForY(qreal y, qreal *prefixHeight) const;
+				void                          rebuildBlockSums();
+				void                          rebuildBlockSumsFromBlock(int firstBlock, int firstLine);
+				void                          rebuildFenwick();
+				void                          addBlockLengthDelta(int blockIndex, int delta);
+				void                          addBlockSumDelta(int blockIndex, qreal delta);
+				[[nodiscard]] int             blockLengthPrefix(int blockCount) const;
+				[[nodiscard]] qreal           blockSumPrefix(int blockCount) const;
+				[[nodiscard]] int             blockForLine(int lineIndex, int *prefixLines) const;
+				[[nodiscard]] int             blockForY(qreal y, qreal *prefixHeight) const;
 
-				IndexedRingBuffer<qreal> m_heights;
-				IndexedRingBuffer<int>   m_blockLengths;
-				IndexedRingBuffer<qreal> m_blockSums;
-				QVector<int>             m_lengthFenwick;
-				QVector<qreal>           m_sumFenwick;
+				PagedIndexedRingBuffer<qreal> m_heights;
+				IndexedRingBuffer<int>        m_blockLengths;
+				IndexedRingBuffer<qreal>      m_blockSums;
+				QVector<int>                  m_lengthFenwick;
+				QVector<qreal>                m_sumFenwick;
 		};
 		[[nodiscard]] qreal              nativeLayoutCumulativeHeightAt(int index) const;
 		[[nodiscard]] int                nativeLayoutLineAtY(qreal y) const;
@@ -2621,7 +2694,7 @@ class WorldView : public QWidget
 		 * @brief Scrolls target output view to end.
 		 * @param view Target output view.
 		 */
-		static void          scrollViewToEnd(const WrapTextBrowser *view);
+		void scrollViewToEnd(const WrapTextBrowser *view);
 		/**
 		 * @brief Maps global point to output stack coordinates.
 		 * @param globalPos Global screen coordinate.
@@ -2999,6 +3072,10 @@ class WorldView : public QWidget
 		QWidget                                    *m_miniOverlay{nullptr};
 		QScrollBar                                 *m_outputScrollBar{nullptr};
 		bool                                        m_outputScrollBarWanted{true};
+		bool                                        m_outputPresentationExposed{true};
+		mutable bool                                m_outputPresentationRepaintDeferred{false};
+		mutable NativeOutputScrollState             m_nativePrimaryScrollState;
+		mutable NativeOutputScrollState             m_nativeLiveScrollState;
 		mutable bool                                m_nativeScrollSyncInPaint{false};
 		mutable bool                                m_nativeOutputRepaintQueued{false};
 		mutable bool                                m_nativeOutputRepaintAll{false};
@@ -3086,139 +3163,141 @@ class WorldView : public QWidget
 		mutable quint64                                m_nativeSplitTopHeadTrimAdjustedRevision{0};
 		mutable quint64                                m_nativeSplitTopHeadTrimCapturedRevision{0};
 		mutable NativeViewportAnchor                   m_nativePrimaryViewportAnchor;
-		mutable IndexedRingBuffer<NativeLayoutSlot>    m_nativeLayoutSlots;
-		mutable NativeLayoutHeightIndex                m_nativeLayoutHeightIndex;
-		mutable int                                    m_nativeLayoutExactPrefixCount{0};
-		mutable bool                                   m_nativeLayoutCacheValid{false};
-		mutable int                                    m_nativeLayoutCachedWrapWidth{0};
-		mutable int                                    m_nativeLayoutCachedLocalWrapWidth{0};
-		mutable int                                    m_nativeLayoutCachedLineSpacing{0};
-		mutable quint64                                m_nativeLayoutCachedStyleKey{0};
-		mutable qreal                                  m_nativeLayoutCachedLineAdvance{0.0};
-		mutable QFont                                  m_nativeLayoutCachedFont;
-		mutable quint64                                m_nativeLayoutCachedContentSalt{0};
-		mutable quint64                                m_nativeLayoutCachedRenderRevision{0};
-		mutable quint64                                m_nativeConsumedRenderRevision{0};
-		mutable int                                    m_nativeLayoutCacheResets{0};
-		mutable quint64                                m_nativeLayoutMetadataRefreshes{0};
-		mutable quint64                                m_nativeLayoutContentSaltComputations{0};
-		mutable int                                    m_nativeLayoutRowMeasurements{0};
-		mutable int                                    m_nativeExactLayoutSnapshotCaptures{0};
-		mutable int                                    m_nativeExactLayoutSnapshotRestores{0};
-		IndexedRingBuffer<WorldRuntime::LineEntry>     m_nativeStandaloneOutputLines;
-		qint64                                         m_nativeStandaloneNextLineNumber{1};
-		bool                                           m_wrapInput{false};
-		int                                            m_inputPixelOffset{0};
-		WorldRuntime                                  *m_runtime{nullptr};
-		QMetaObject::Connection                        m_runtimeOutputConnection;
-		QMetaObject::Connection                        m_runtimeStyledOutputConnection;
-		QVector<QMetaObject::Connection>               m_runtimePresentationConnections;
+		mutable PagedIndexedRingBuffer<NativeLayoutSlot>       m_nativeLayoutSlots;
+		mutable QCache<NativeExactLayoutCacheKey, QTextLayout> m_nativeExactLayoutCache{
+		    kNativeExactLayoutCacheLimit};
+		mutable NativeLayoutHeightIndex            m_nativeLayoutHeightIndex;
+		mutable int                                m_nativeLayoutExactPrefixCount{0};
+		mutable bool                               m_nativeLayoutCacheValid{false};
+		mutable int                                m_nativeLayoutCachedWrapWidth{0};
+		mutable int                                m_nativeLayoutCachedLocalWrapWidth{0};
+		mutable int                                m_nativeLayoutCachedLineSpacing{0};
+		mutable quint64                            m_nativeLayoutCachedStyleKey{0};
+		mutable qreal                              m_nativeLayoutCachedLineAdvance{0.0};
+		mutable QFont                              m_nativeLayoutCachedFont;
+		mutable quint64                            m_nativeLayoutCachedContentSalt{0};
+		mutable quint64                            m_nativeLayoutCachedRenderRevision{0};
+		mutable quint64                            m_nativeConsumedRenderRevision{0};
+		mutable int                                m_nativeLayoutCacheResets{0};
+		mutable quint64                            m_nativeLayoutMetadataRefreshes{0};
+		mutable quint64                            m_nativeLayoutContentSaltComputations{0};
+		mutable int                                m_nativeLayoutRowMeasurements{0};
+		mutable int                                m_nativeExactLayoutSnapshotCaptures{0};
+		mutable int                                m_nativeExactLayoutSnapshotRestores{0};
+		IndexedRingBuffer<WorldRuntime::LineEntry> m_nativeStandaloneOutputLines;
+		qint64                                     m_nativeStandaloneNextLineNumber{1};
+		bool                                       m_wrapInput{false};
+		int                                        m_inputPixelOffset{0};
+		WorldRuntime                              *m_runtime{nullptr};
+		QMetaObject::Connection                    m_runtimeOutputConnection;
+		QMetaObject::Connection                    m_runtimeStyledOutputConnection;
+		QVector<QMetaObject::Connection>           m_runtimePresentationConnections;
 		/** Whether this view is counted as a render-delta observer by its bound runtime. */
-		bool                                           m_runtimeRenderDeltaObserverRegistered{false};
-		bool                                           m_runtimeObserver{false};
-		bool                                           m_commandInteractionEnabled{true};
-		QFont                                          m_defaultOutputFont;
-		QFont                                          m_defaultInputFont;
-		bool                                           m_displayMyInput{false};
-		bool                                           m_escapeDeletesInput{false};
-		bool                                           m_saveDeletedCommand{false};
-		int                                            m_partialSaveCharacterThreshold{10};
-		bool                                           m_confirmOnPaste{false};
-		bool                                           m_ctrlBackspaceDeletesLastWord{false};
-		bool                                           m_arrowsChangeHistory{false};
-		bool                                           m_arrowKeysWrap{false};
-		bool                                           m_arrowRecallsPartial{false};
-		bool                                           m_altArrowRecallsPartial{false};
-		bool                                           m_ctrlZGoesToEndOfBuffer{false};
-		bool                                           m_ctrlPGoesToPreviousCommand{false};
-		bool                                           m_ctrlNGoesToNextCommand{false};
-		QList<QKeySequence>                            m_commandOptionNextShortcuts;
-		QList<QKeySequence>                            m_commandOptionPreviousShortcuts;
-		QList<QKeySequence>                            m_commandOptionBufferEndShortcuts;
-		QList<QKeySequence>                            m_nextCommandShortcuts;
-		QList<QKeySequence>                            m_previousCommandShortcuts;
-		QList<QKeySequence>                            m_displayStartShortcuts;
-		QList<QKeySequence>                            m_displayPageUpShortcuts;
-		QList<QKeySequence>                            m_displayPageDownShortcuts;
-		QList<QKeySequence>                            m_displayEndShortcuts;
-		QList<QKeySequence>                            m_displayLineUpShortcuts;
-		QList<QKeySequence>                            m_displayLineDownShortcuts;
-		QList<QKeySequence>                            m_outputSplitStartShortcuts;
-		QList<QKeySequence>                            m_outputSplitEndShortcuts;
-		QList<QKeySequence>                            m_recallLastWordShortcuts;
-		bool                                           m_confirmBeforeReplacingTyping{false};
-		bool                                           m_doubleClickInserts{false};
-		bool                                           m_doubleClickSends{false};
-		bool                                           m_showBold{true};
-		bool                                           m_showItalic{true};
-		bool                                           m_showUnderline{true};
-		bool                                           m_alternativeInverse{false};
-		bool                                           m_lineInformation{false};
-		int                                            m_lineSpacing{0};
-		bool                                           m_lowerCaseTabCompletion{false};
-		bool                                           m_tabCompletionExcludesSymbolPrefix{true};
-		bool                                           m_tabCompletionExcludesSymbolSuffix{true};
-		bool                                           m_tabCompletionSpace{false};
-		bool                                           m_autoRepeat{false};
-		bool                                           m_keepCommandsOnSameLine{false};
-		bool                                           m_noEchoOff{false};
-		bool                                           m_echoForceTerminatesPartialPrompts{false};
-		bool                                           m_noEcho{false};
-		bool                                           m_alwaysRecordCommandHistory{false};
-		bool                                           m_hyperlinkAddsToCommandHistory{false};
-		bool                                           m_inputChanged{false};
-		bool                                           m_settingText{false};
-		bool                                           m_notifyingPluginCommandChanged{false};
-		bool                                           m_frozen{false};
-		bool                                           m_autoPause{false};
-		const WorldViewGlobalSettings                 *m_globalViewSettings{nullptr};
-		WorldViewGlobalSettings                        m_localGlobalViewSettings;
-		QMetaObject::Connection                        m_globalViewSettingsConnection;
-		bool                                           m_autoResizeCommandWindow{false};
-		int                                            m_autoResizeMinimumLines{1};
-		int                                            m_autoResizeMaximumLines{20};
-		int                                            m_tabCompletionLines{200};
-		QString                                        m_tabCompletionDefaults;
-		QString                                        m_tabCompletionCycleTargetLower;
-		int                                            m_tabCompletionCycleStartColumn{-1};
-		int                                            m_tabCompletionCycleEndColumn{-1};
-		int                                            m_tabCompletionCycleLastSource{-2};
-		bool                                           m_tabCompletionCycleActive{false};
-		QSet<QString>                                  m_tabCompletionCycleSeenCompletions;
-		int                                            m_fadeOutputBufferAfterSeconds{0};
-		int                                            m_fadeOutputOpacityPercent{100};
-		int                                            m_fadeOutputSeconds{1};
-		mutable QTimer                                *m_fadeTimer{nullptr};
-		bool                                           m_fadeEnabled{false};
-		QDateTime                                      m_timeFadeCancelled;
-		bool                                           m_breakBeforeNextServerOutput{false};
-		bool                                           m_keepPauseAtBottom{false};
-		bool                                           m_userScrollAction{false};
-		int                                            m_lastGoToLine{1};
-		bool                                           m_defaultInputHeightApplied{false};
-		bool                                           m_scrollbackSplitActive{false};
-		int                                            m_splitViewDividerWidth{kDefaultSplitViewDividerWidth};
-		int                                            m_lastLiveSplitSize{0};
-		int                                            m_wrapColumn{0};
-		int                                            m_historyLimit{0};
-		bool                                           m_useCustomLinkColour{false};
-		bool                                           m_underlineHyperlinks{true};
-		QColor                                         m_hyperlinkColour;
-		QColor                                         m_outputBackground;
-		QColor                                         m_outputTextColour;
-		TimestampRenderSettings                        m_outputTimestampRenderSettings;
-		TimestampRenderSettings                        m_inputTimestampRenderSettings;
-		TimestampRenderSettings                        m_notesTimestampRenderSettings;
-		int                                            m_historyIndex{-1};
-		int                                            m_partialIndex{-1};
-		QString                                        m_partialCommand;
-		QString                                        m_lastCommand;
-		QVector<QString>                               m_history;
-		QVector<PendingOutput>                         m_pendingOutput;
-		bool                                           m_flushingPending{false};
-		bool                                           m_hasPartialOutput{false};
-		int                                            m_partialOutputStart{0};
-		int                                            m_partialOutputLength{0};
+		bool                                       m_runtimeRenderDeltaObserverRegistered{false};
+		bool                                       m_runtimeObserver{false};
+		bool                                       m_commandInteractionEnabled{true};
+		QFont                                      m_defaultOutputFont;
+		QFont                                      m_defaultInputFont;
+		bool                                       m_displayMyInput{false};
+		bool                                       m_escapeDeletesInput{false};
+		bool                                       m_saveDeletedCommand{false};
+		int                                        m_partialSaveCharacterThreshold{10};
+		bool                                       m_confirmOnPaste{false};
+		bool                                       m_ctrlBackspaceDeletesLastWord{false};
+		bool                                       m_arrowsChangeHistory{false};
+		bool                                       m_arrowKeysWrap{false};
+		bool                                       m_arrowRecallsPartial{false};
+		bool                                       m_altArrowRecallsPartial{false};
+		bool                                       m_ctrlZGoesToEndOfBuffer{false};
+		bool                                       m_ctrlPGoesToPreviousCommand{false};
+		bool                                       m_ctrlNGoesToNextCommand{false};
+		QList<QKeySequence>                        m_commandOptionNextShortcuts;
+		QList<QKeySequence>                        m_commandOptionPreviousShortcuts;
+		QList<QKeySequence>                        m_commandOptionBufferEndShortcuts;
+		QList<QKeySequence>                        m_nextCommandShortcuts;
+		QList<QKeySequence>                        m_previousCommandShortcuts;
+		QList<QKeySequence>                        m_displayStartShortcuts;
+		QList<QKeySequence>                        m_displayPageUpShortcuts;
+		QList<QKeySequence>                        m_displayPageDownShortcuts;
+		QList<QKeySequence>                        m_displayEndShortcuts;
+		QList<QKeySequence>                        m_displayLineUpShortcuts;
+		QList<QKeySequence>                        m_displayLineDownShortcuts;
+		QList<QKeySequence>                        m_outputSplitStartShortcuts;
+		QList<QKeySequence>                        m_outputSplitEndShortcuts;
+		QList<QKeySequence>                        m_recallLastWordShortcuts;
+		bool                                       m_confirmBeforeReplacingTyping{false};
+		bool                                       m_doubleClickInserts{false};
+		bool                                       m_doubleClickSends{false};
+		bool                                       m_showBold{true};
+		bool                                       m_showItalic{true};
+		bool                                       m_showUnderline{true};
+		bool                                       m_alternativeInverse{false};
+		bool                                       m_lineInformation{false};
+		int                                        m_lineSpacing{0};
+		bool                                       m_lowerCaseTabCompletion{false};
+		bool                                       m_tabCompletionExcludesSymbolPrefix{true};
+		bool                                       m_tabCompletionExcludesSymbolSuffix{true};
+		bool                                       m_tabCompletionSpace{false};
+		bool                                       m_autoRepeat{false};
+		bool                                       m_keepCommandsOnSameLine{false};
+		bool                                       m_noEchoOff{false};
+		bool                                       m_echoForceTerminatesPartialPrompts{false};
+		bool                                       m_noEcho{false};
+		bool                                       m_alwaysRecordCommandHistory{false};
+		bool                                       m_hyperlinkAddsToCommandHistory{false};
+		bool                                       m_inputChanged{false};
+		bool                                       m_settingText{false};
+		bool                                       m_notifyingPluginCommandChanged{false};
+		bool                                       m_frozen{false};
+		bool                                       m_autoPause{false};
+		const WorldViewGlobalSettings             *m_globalViewSettings{nullptr};
+		WorldViewGlobalSettings                    m_localGlobalViewSettings;
+		QMetaObject::Connection                    m_globalViewSettingsConnection;
+		bool                                       m_autoResizeCommandWindow{false};
+		int                                        m_autoResizeMinimumLines{1};
+		int                                        m_autoResizeMaximumLines{20};
+		int                                        m_tabCompletionLines{200};
+		QString                                    m_tabCompletionDefaults;
+		QString                                    m_tabCompletionCycleTargetLower;
+		int                                        m_tabCompletionCycleStartColumn{-1};
+		int                                        m_tabCompletionCycleEndColumn{-1};
+		int                                        m_tabCompletionCycleLastSource{-2};
+		bool                                       m_tabCompletionCycleActive{false};
+		QSet<QString>                              m_tabCompletionCycleSeenCompletions;
+		int                                        m_fadeOutputBufferAfterSeconds{0};
+		int                                        m_fadeOutputOpacityPercent{100};
+		int                                        m_fadeOutputSeconds{1};
+		mutable QTimer                            *m_fadeTimer{nullptr};
+		bool                                       m_fadeEnabled{false};
+		QDateTime                                  m_timeFadeCancelled;
+		bool                                       m_breakBeforeNextServerOutput{false};
+		bool                                       m_keepPauseAtBottom{false};
+		bool                                       m_userScrollAction{false};
+		int                                        m_lastGoToLine{1};
+		bool                                       m_defaultInputHeightApplied{false};
+		bool                                       m_scrollbackSplitActive{false};
+		int                                        m_splitViewDividerWidth{kDefaultSplitViewDividerWidth};
+		int                                        m_lastLiveSplitSize{0};
+		int                                        m_wrapColumn{0};
+		int                                        m_historyLimit{0};
+		bool                                       m_useCustomLinkColour{false};
+		bool                                       m_underlineHyperlinks{true};
+		QColor                                     m_hyperlinkColour;
+		QColor                                     m_outputBackground;
+		QColor                                     m_outputTextColour;
+		TimestampRenderSettings                    m_outputTimestampRenderSettings;
+		TimestampRenderSettings                    m_inputTimestampRenderSettings;
+		TimestampRenderSettings                    m_notesTimestampRenderSettings;
+		int                                        m_historyIndex{-1};
+		int                                        m_partialIndex{-1};
+		QString                                    m_partialCommand;
+		QString                                    m_lastCommand;
+		QVector<QString>                           m_history;
+		QVector<PendingOutput>                     m_pendingOutput;
+		bool                                       m_flushingPending{false};
+		bool                                       m_hasPartialOutput{false};
+		int                                        m_partialOutputStart{0};
+		int                                        m_partialOutputLength{0};
 		struct OutputFindState;
 		QScopedPointer<OutputFindState>         m_outputFind;
 		QScopedPointer<CommandHistoryFindState> m_commandHistoryFind;

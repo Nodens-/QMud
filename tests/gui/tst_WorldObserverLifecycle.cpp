@@ -247,6 +247,45 @@ end
 			secondPrimary->setRuntime(nullptr);
 		}
 
+		static void tabPresentationExposesOnlyTheActiveWorldWindow()
+		{
+			MainWindow frame;
+			frame.resize(900, 700);
+			frame.show();
+			frame.setWindowTabsStyle(kMdiTabsTop);
+
+			auto *runtime  = new WorldRuntime(&frame);
+			auto *primary  = new WorldChildWindow(QStringLiteral("Primary"));
+			auto *observer = new WorldChildWindow(QStringLiteral("Observer"));
+			primary->setRuntime(runtime);
+			observer->setRuntimeObserver(runtime);
+			frame.addMdiSubWindow(primary, true);
+			frame.addMdiSubWindow(observer, false);
+			QCoreApplication::processEvents();
+
+			QVERIFY(frame.isTabbedWindowPresentationActive());
+			QCOMPARE(frame.activeWorldPresentationWindow(), primary);
+			QVERIFY(primary->view()->outputPresentationExposed());
+			QVERIFY(!observer->view()->outputPresentationExposed());
+
+			frame.activateWorldWindow(observer);
+			QCoreApplication::processEvents();
+			QCOMPARE(frame.activeWorldPresentationWindow(), observer);
+			QVERIFY(!primary->view()->outputPresentationExposed());
+			QVERIFY(observer->view()->outputPresentationExposed());
+
+			frame.setWindowTabsStyle(0);
+			QCoreApplication::processEvents();
+			QVERIFY(!frame.isTabbedWindowPresentationActive());
+			QVERIFY(primary->isVisible());
+			QVERIFY(observer->isVisible());
+			QVERIFY(primary->view()->outputPresentationExposed());
+			QVERIFY(observer->view()->outputPresentationExposed());
+
+			observer->setRuntimeObserver(nullptr);
+			primary->setRuntime(nullptr);
+		}
+
 		/**
 		 * @brief Verifies shared render deltas reach every presentation synchronously and transform only once.
 		 */

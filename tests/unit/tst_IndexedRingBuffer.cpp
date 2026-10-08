@@ -7,10 +7,12 @@
  */
 
 #include "IndexedRingBuffer.h"
+#include "PagedIndexedRingBuffer.h"
 
 #include <QtTest/QTest>
 
 #include <algorithm>
+#include <random>
 #include <ranges>
 
 static_assert(std::random_access_iterator<IndexedRingBuffer<int>::iterator>);
@@ -259,6 +261,78 @@ namespace
 				QCOMPARE(visited, expectedVisited);
 				QCOMPARE(buffer.findIndexIf([](const int value, const qsizetype) { return value == 99; }),
 				         qsizetype{-1});
+			}
+
+			void pagedHeadRemovalRotatesStorageWithoutMovingRetainedElements()
+			{
+				PagedIndexedRingBuffer<int, 4> buffer;
+				for (int value = 1; value <= 8; ++value)
+					buffer.push_back(value);
+
+				const int *const retainedAddress = &buffer[4];
+				buffer.remove(0, 4);
+				for (int value = 9; value <= 12; ++value)
+					buffer.push_back(value);
+
+				QCOMPARE(buffer.toVector(), QVector<int>({5, 6, 7, 8, 9, 10, 11, 12}));
+				QCOMPARE(&buffer[0], retainedAddress);
+			}
+
+			void pagedReplacementMatchesReferenceSequenceAcrossPageBoundaries()
+			{
+				PagedIndexedRingBuffer<int, 4> buffer;
+				QVector<int>                   reference;
+				std::random_device             randomDevice;
+				std::mt19937                   random(randomDevice());
+				for (int operation = 0; operation < 20000; ++operation)
+				{
+					const int action = std::uniform_int_distribution<int>(0, 3)(random);
+					if (action == 0 || reference.isEmpty())
+					{
+						const int value = std::uniform_int_distribution<int>()(random);
+						buffer.push_back(value);
+						reference.push_back(value);
+					}
+					else if (action == 1)
+					{
+						const qsizetype maximumCount = qMin<qsizetype>(7, reference.size());
+						const qsizetype count =
+						    std::uniform_int_distribution<qsizetype>(1, maximumCount)(random);
+						buffer.remove(0, count);
+						reference.remove(0, count);
+					}
+					else
+					{
+						const qsizetype index =
+						    std::uniform_int_distribution<qsizetype>(0, reference.size())(random);
+						const qsizetype maximumRemoveCount = qMin<qsizetype>(5, reference.size() - index);
+						const qsizetype removeCount =
+						    std::uniform_int_distribution<qsizetype>(0, maximumRemoveCount)(random);
+						const qsizetype insertCount = std::uniform_int_distribution<qsizetype>(0, 5)(random);
+						const int       value       = std::uniform_int_distribution<int>()(random);
+						buffer.replace({index, removeCount, insertCount}, value);
+						reference.remove(index, removeCount);
+						for (qsizetype inserted = 0; inserted < insertCount; ++inserted)
+							reference.insert(index + inserted, value);
+					}
+
+					QCOMPARE(buffer.toVector(), reference);
+				}
+			}
+
+			void pagedLargeGrowthDoesNotRelocateExistingPages()
+			{
+				constexpr qsizetype                   lineCount = 500000;
+				PagedIndexedRingBuffer<quint64, 1024> buffer;
+				buffer.assign(lineCount, 7);
+				const quint64 *const retainedAddress = &buffer[lineCount / 2];
+
+				for (int appended = 0; appended < 4096; ++appended)
+					buffer.push_back(static_cast<quint64>(appended));
+
+				QCOMPARE(buffer.size(), lineCount + 4096);
+				QCOMPARE(&buffer[lineCount / 2], retainedAddress);
+				QCOMPARE(buffer.constLast(), quint64{4095});
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};
