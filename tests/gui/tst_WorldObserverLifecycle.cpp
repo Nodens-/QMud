@@ -18,6 +18,7 @@
 #include <QClipboard>
 #include <QFile>
 #include <QGuiApplication>
+#include <QMdiArea>
 #include <QPointer>
 #include <QScopeGuard>
 #include <QScrollBar>
@@ -65,6 +66,35 @@ namespace
 		}
 		return nullptr;
 	}
+
+	class PaintEventCounter final : public QObject
+	{
+		public:
+			/**
+			 * @brief Returns the number of observed paint events.
+			 * @return Observed paint-event count.
+			 */
+			[[nodiscard]] int count() const
+			{
+				return m_count;
+			}
+
+			/**
+			 * @brief Counts paint events delivered to the watched output canvas.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the object.
+			 * @return Result of the base event filter.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (watched && event && event->type() == QEvent::Paint)
+					++m_count;
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			int m_count{0};
+	};
 
 	QString worldVariable(const WorldRuntime &runtime, const QString &name)
 	{
@@ -284,6 +314,84 @@ end
 
 			observer->setRuntimeObserver(nullptr);
 			primary->setRuntime(nullptr);
+		}
+
+		/**
+		 * @brief Verifies losing application focus preserves the selected tab's live presentation.
+		 */
+		static void applicationFocusLossKeepsSelectedTabLive()
+		{
+			MainWindow frame;
+			frame.resize(900, 700);
+			frame.show();
+			frame.setWindowTabsStyle(kMdiTabsTop);
+
+			auto *selectedRuntime = new WorldRuntime(&frame);
+			auto *hiddenRuntime   = new WorldRuntime(&frame);
+			auto *selectedWorld   = new WorldChildWindow(QStringLiteral("Selected"));
+			auto *hiddenWorld     = new WorldChildWindow(QStringLiteral("Hidden"));
+			selectedWorld->setRuntime(selectedRuntime);
+			hiddenWorld->setRuntime(hiddenRuntime);
+			frame.addMdiSubWindow(selectedWorld, true);
+			frame.addMdiSubWindow(hiddenWorld, false);
+			for (int line = 0; line < 300; ++line)
+			{
+				selectedRuntime->addLine(QStringLiteral("selected-output-%1").arg(line),
+				                         WorldRuntime::LineOutput, true);
+			}
+			QCoreApplication::processEvents();
+
+			QVERIFY(selectedRuntime->isActive());
+			QVERIFY(!hiddenRuntime->isActive());
+			QVERIFY(selectedWorld->view()->outputPresentationExposed());
+			QVERIFY(!hiddenWorld->view()->outputPresentationExposed());
+			const QString selectedFrameTitle = frame.windowTitle();
+			QVERIFY(!selectedFrameTitle.isEmpty());
+
+			QAbstractScrollArea *const output = findScrollableOutput(*selectedWorld->view());
+			QVERIFY(output);
+			QScrollBar *const scroll = output->verticalScrollBar();
+			QVERIFY(scroll);
+			scroll->setValue(scroll->maximum());
+			auto *const canvas =
+			    selectedWorld->view()->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(canvas);
+			PaintEventCounter paintCounter;
+			canvas->installEventFilter(&paintCounter);
+
+			auto *const mdiArea = frame.findChild<QMdiArea *>();
+			QVERIFY(mdiArea);
+			QCOMPARE(mdiArea->activeSubWindow(), selectedWorld);
+			mdiArea->setActiveSubWindow(nullptr);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(mdiArea->activeSubWindow(), nullptr);
+			QCOMPARE(frame.activeWorldPresentationWindow(), selectedWorld);
+			QCOMPARE(frame.windowTitle(), selectedFrameTitle);
+			QVERIFY(selectedRuntime->isActive());
+			QVERIFY(!hiddenRuntime->isActive());
+			QVERIFY(selectedWorld->view()->outputPresentationExposed());
+			QVERIFY(!hiddenWorld->view()->outputPresentationExposed());
+			QVERIFY(canvas->updatesEnabled());
+			QVERIFY(scroll->updatesEnabled());
+
+			const int priorMaximum    = scroll->maximum();
+			const int priorPaintCount = paintCounter.count();
+			selectedRuntime->addLine(QStringLiteral("selected-output-after-focus-loss"),
+			                         WorldRuntime::LineOutput, true);
+			QTRY_VERIFY(scroll->maximum() > priorMaximum);
+			QCOMPARE(scroll->value(), scroll->maximum());
+			QTRY_VERIFY(paintCounter.count() > priorPaintCount);
+
+			const QPointer<WorldChildWindow> selectedGuard = selectedWorld;
+			selectedWorld->close();
+			QTRY_VERIFY(selectedGuard.isNull());
+			QTRY_COMPARE(frame.activeWorldPresentationWindow(), hiddenWorld);
+			QTRY_VERIFY(!selectedRuntime->isActive());
+			QTRY_VERIFY(hiddenRuntime->isActive());
+			QVERIFY(hiddenWorld->view()->outputPresentationExposed());
+
+			hiddenWorld->setRuntime(nullptr);
 		}
 
 		/**

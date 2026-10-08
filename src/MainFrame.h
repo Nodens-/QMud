@@ -136,8 +136,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		[[nodiscard]] WorldChildWindow *activeWorldChildWindow() const override;
 		/**
-		 * @brief Returns the currently focused world presentation, including a passive observer.
-		 * @return Focused world MDI child, or `nullptr` when another presentation is active.
+		 * @brief Returns the selected world presentation, including a passive observer.
+		 * @return Selected world MDI child, or `nullptr` when another presentation is selected.
 		 */
 		[[nodiscard]] WorldChildWindow *activeWorldPresentationWindow() const;
 		/**

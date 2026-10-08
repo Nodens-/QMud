@@ -5061,11 +5061,7 @@ int WorldView::nativeWrapWidthPixels(const int viewportWidth, const bool wrapEna
 		return 1000000;
 	if (nativeServerSideWrapActive())
 		return 1000000;
-	const bool inactiveAndNotExposed =
-	    m_runtime && !m_runtime->isActive() &&
-	    (!isVisible() || (m_nativeOutputCanvas && !m_nativeOutputCanvas->isVisible()) ||
-	     (window() && !window()->isActiveWindow()));
-	if (inactiveAndNotExposed && m_nativeLayoutCacheValid && m_nativeLayoutCachedWrapWidth > 0)
+	if (!m_outputPresentationExposed && m_nativeLayoutCacheValid && m_nativeLayoutCachedWrapWidth > 0)
 		return m_nativeLayoutCachedWrapWidth;
 	return qMax(1, viewportWidth);
 }
@@ -5076,11 +5072,7 @@ int WorldView::nativeLocalWrapWidthPixels(const int viewportWidth, const bool wr
 		return 1000000;
 	if (nativeServerSideWrapActive())
 		return 1000000;
-	const bool inactiveAndNotExposed =
-	    m_runtime && !m_runtime->isActive() &&
-	    (!isVisible() || (m_nativeOutputCanvas && !m_nativeOutputCanvas->isVisible()) ||
-	     (window() && !window()->isActiveWindow()));
-	if (inactiveAndNotExposed && m_nativeLayoutCacheValid && m_nativeLayoutCachedLocalWrapWidth > 0)
+	if (!m_outputPresentationExposed && m_nativeLayoutCacheValid && m_nativeLayoutCachedLocalWrapWidth > 0)
 		return m_nativeLayoutCachedLocalWrapWidth;
 	return qMax(1, viewportWidth);
 }

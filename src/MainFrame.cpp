@@ -1537,9 +1537,7 @@ WorldChildWindow *MainWindow::activeWorldChildWindow() const
 
 WorldChildWindow *MainWindow::activeWorldPresentationWindow() const
 {
-	if (!m_mdiArea)
-		return nullptr;
-	return qobject_cast<WorldChildWindow *>(m_mdiArea->activeSubWindow());
+	return qobject_cast<WorldChildWindow *>(currentOrLastActiveSubWindow());
 }
 
 TextChildWindow *MainWindow::activeTextChildWindow() const
@@ -2260,20 +2258,21 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 		}
 	}
 
-	WorldRuntime *activeRuntime = nullptr;
-	if (auto *world = qobject_cast<WorldChildWindow *>(window))
+	QMdiSubWindow *const selectedWindow = window ? window : currentOrLastActiveSubWindow();
+	WorldRuntime        *activeRuntime  = nullptr;
+	if (auto *world = qobject_cast<WorldChildWindow *>(selectedWindow))
 		activeRuntime = world->runtime();
 	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 		if (entry.runtime)
 			entry.runtime->requestActiveState(entry.runtime == activeRuntime);
 	updateWorldOutputPresentationExposure();
 	refreshTitleBar();
-	if (activeRuntime)
+	if (window && activeRuntime)
 	{
 		if (AppController *app = AppController::instance())
 			app->processScriptFileChange(activeRuntime);
 	}
-	const auto *activeWorld = qobject_cast<WorldChildWindow *>(window);
+	const auto *activeWorld = qobject_cast<WorldChildWindow *>(selectedWindow);
 	setActiveShortcutAcceleratorRuntime(activeWorld && activeWorld->isPrimaryRuntimeBinding() ? activeRuntime
 	                                                                                          : nullptr);
 	updateStatusBar();
@@ -2282,11 +2281,11 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	updateActivityToolbarButtons();
 	m_mdiTabs.updateTabs();
 	applyInfoBarAppearance(activeRuntime);
-	if (auto *world = qobject_cast<WorldChildWindow *>(window))
+	if (window)
 	{
-		if (WorldView *view = world->view())
+		if (auto *world = qobject_cast<WorldChildWindow *>(selectedWindow); world && world->view())
 		{
-			view->focusInput();
+			world->view()->focusInput();
 		}
 	}
 }
@@ -2409,15 +2408,12 @@ void MainWindow::refreshTitleBar()
 	const auto baseTitle = QStringLiteral("QMud");
 	QString    mainTitle;
 
-	if (m_mdiArea)
+	if (QMdiSubWindow *selectedWindow = currentOrLastActiveSubWindow())
 	{
-		if (QMdiSubWindow *active = m_mdiArea->activeSubWindow())
+		if (const auto *world = qobject_cast<WorldChildWindow *>(selectedWindow))
 		{
-			if (const auto *world = qobject_cast<WorldChildWindow *>(active))
-			{
-				if (const WorldRuntime *runtime = world->runtime())
-					mainTitle = runtime->mainTitleOverride();
-			}
+			if (const WorldRuntime *runtime = world->runtime())
+				mainTitle = runtime->mainTitleOverride();
 		}
 	}
 
@@ -3501,7 +3497,7 @@ void MainWindow::updateWorldOutputPresentationExposure() const
 	if (!m_mdiArea)
 		return;
 	const bool                 tabbedPresentation = isTabbedWindowPresentationActive();
-	const QMdiSubWindow *const activeWindow       = m_mdiArea->activeSubWindow();
+	const QMdiSubWindow *const selectedWindow     = currentOrLastActiveSubWindow();
 	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
 	{
 		if (!entry.window)
@@ -3510,7 +3506,7 @@ void MainWindow::updateWorldOutputPresentationExposure() const
 		if (!view)
 			continue;
 		const bool windowVisible = entry.window->isVisible() && !entry.window->isMinimized();
-		const bool exposed       = windowVisible && (!tabbedPresentation || entry.window == activeWindow);
+		const bool exposed       = windowVisible && (!tabbedPresentation || entry.window == selectedWindow);
 		view->setOutputPresentationExposed(exposed);
 	}
 }
@@ -3764,10 +3760,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 	if (event->type() == QEvent::Close)
 	{
 		if (auto *closingSubWindow = qobject_cast<QMdiSubWindow *>(watched);
-		    closingSubWindow && m_mdiArea && m_mdiArea->activeSubWindow() == closingSubWindow)
+		    closingSubWindow && m_mdiArea && currentOrLastActiveSubWindow() == closingSubWindow)
 		{
 			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			m_tabActivationHistory.onCloseEvent(closingSubWindow, m_mdiArea->activeSubWindow(), windows);
+			m_tabActivationHistory.onCloseEvent(closingSubWindow, currentOrLastActiveSubWindow(), windows);
 		}
 	}
 
