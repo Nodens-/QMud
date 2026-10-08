@@ -117,6 +117,18 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	/**
+	 * @brief Computes the output renderer's effective advance for one visual row.
+	 * @param font Font used to lay out output text.
+	 * @param lineSpacingSetting Configured extra line spacing percentage.
+	 * @return Effective visual-row advance in pixels.
+	 */
+	qreal effectiveOutputLineAdvance(const QFont &font, const int lineSpacingSetting)
+	{
+		const qreal spacingFactor = (100.0 + static_cast<qreal>(qMax(0, lineSpacingSetting))) / 100.0;
+		return static_cast<qreal>(qMax(1, QFontMetrics(font).lineSpacing())) * spacingFactor;
+	}
+
 	bool isTabCompletionSymbol(const QChar character)
 	{
 		static const QString symbols = QStringLiteral("!@#$%^&*()_+-=[]{};:\"',./<>?`~\\|");
@@ -1958,6 +1970,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	connect(m_input, &QPlainTextEdit::textChanged, this,
 	        [this]
 	        {
+		        emit callbackCommandUiPresentationChanged();
 		        if (m_settingText)
 			        return;
 		        m_inputChanged = true;
@@ -2064,6 +2077,9 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	}
 	syncOutputScrollSingleStep();
 	connect(m_input, &QPlainTextEdit::selectionChanged, this, [this] { emit inputSelectionChanged(); });
+	connect(this, &WorldView::inputSelectionChanged, this, &WorldView::callbackCommandUiPresentationChanged);
+	connect(this, &WorldView::outputSelectionChanged, this, &WorldView::callbackCommandUiPresentationChanged);
+	connect(this, &WorldView::outputScrollChanged, this, &WorldView::callbackCommandUiPresentationChanged);
 	if (m_outputSplitter)
 	{
 		connect(m_outputSplitter, &QSplitter::splitterMoved, this,
@@ -2114,12 +2130,20 @@ void WorldView::disconnectRuntimePresentation()
 	m_runtimeBatchCompletedPartialLineNumber                = 0;
 }
 
+void WorldView::resetMiniWindowPresentationUpdateState()
+{
+	if (++m_miniWindowPresentationUpdateGeneration == 0)
+		++m_miniWindowPresentationUpdateGeneration;
+	m_pendingMiniWindowPresentationEffects = {};
+	m_wrapMarginUpdateQueued               = false;
+}
+
 void WorldView::connectRuntimePresentation()
 {
 	if (!m_runtime)
 		return;
 	disconnectRuntimePresentation();
-	m_runtimePresentationConnections.reserve(m_commandInteractionEnabled ? 15 : 12);
+	m_runtimePresentationConnections.reserve(m_commandInteractionEnabled ? 16 : 13);
 	m_runtimePresentationConnections.push_back(connect(
 	    m_runtime, &QObject::destroyed, this,
 	    [this]
@@ -2161,6 +2185,9 @@ void WorldView::connectRuntimePresentation()
 	                                                   &WorldRuntime::partialOutputPresentationCleared, this,
 	                                                   &WorldView::clearPartialOutput, Qt::DirectConnection));
 	m_runtimePresentationConnections.push_back(
+	    connect(m_runtime, &WorldRuntime::partialOutputPresentationReserved, this,
+	            &WorldView::reservePartialOutputAsRuntimeLine, Qt::DirectConnection));
+	m_runtimePresentationConnections.push_back(
 	    connect(m_runtime, &WorldRuntime::partialOutputPresentationCompleted, this,
 	            &WorldView::completePartialOutputAsRuntimeLine, Qt::DirectConnection));
 	if (!m_runtimeObserver)
@@ -2185,6 +2212,9 @@ void WorldView::connectRuntimePresentation()
 	m_runtimePresentationConnections.push_back(
 	    connect(m_runtime, &WorldRuntime::numericWorldOptionPresentationRequested, this,
 	            &WorldView::applyNumericWorldOptionPresentation, Qt::DirectConnection));
+	m_runtimePresentationConnections.push_back(connect(m_runtime, &WorldRuntime::nawsNegotiationStateChanged,
+	                                                   this, &WorldView::applyNawsNegotiationPresentation,
+	                                                   Qt::DirectConnection));
 	m_runtimePresentationConnections.push_back(
 	    connect(m_runtime, &WorldRuntime::numericWorldOptionFlagsPresentationRequested, this,
 	            &WorldView::applyNumericWorldOptionFlagsPresentation, Qt::DirectConnection));
@@ -2249,6 +2279,9 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		connectRuntimePresentation();
 		return;
 	}
+	resetMiniWindowPresentationUpdateState();
+	if (const bool endedDragCapture = clearMiniWindowMouseCaptureState(); endedDragCapture)
+		synchronizeMiniWindowLayoutPolicyChange();
 	cancelPendingHyperlinkActivation();
 	invalidateOutputFindCursor();
 
@@ -2293,22 +2326,20 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_nativePrimaryPaintState        = {};
 		m_nativeLivePaintState           = {};
 		clearNativeOutputScrollBlitState();
-		m_miniWindowChangeSerial               = 0;
 		m_miniWindowPaintBoundsValid           = false;
 		m_pendingMiniWindowUnderlayDirtyRegion = {};
 		m_pendingMiniWindowOverlayDirtyRegion  = {};
-		m_wrapMarginReservationCacheValid      = false;
-		m_wrapMarginReservationPixels          = 0;
+		m_wrapMarginReservationCacheKey.reset();
+		m_wrapMarginReservationPixels = 0;
 	}
 
-	m_miniWindowChangeSerial  = 0;
 	m_nativePrimaryPaintState = {};
 	m_nativeLivePaintState    = {};
 	clearNativeOutputScrollBlitState();
-	m_miniWindowPaintBoundsValid                            = false;
-	m_pendingMiniWindowUnderlayDirtyRegion                  = {};
-	m_pendingMiniWindowOverlayDirtyRegion                   = {};
-	m_wrapMarginReservationCacheValid                       = false;
+	m_miniWindowPaintBoundsValid           = false;
+	m_pendingMiniWindowUnderlayDirtyRegion = {};
+	m_pendingMiniWindowOverlayDirtyRegion  = {};
+	m_wrapMarginReservationCacheKey.reset();
 	m_wrapMarginReservationPixels                           = 0;
 	m_runtimeOutputMutationBatchDepth                       = 0;
 	m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
@@ -2353,6 +2384,8 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 {
 	m_runtimeObserver = runtime != nullptr;
+	if (runtime != m_runtime)
+		resetMiniWindowPresentationUpdateState();
 	setCommandInteractionEnabled(false);
 	if (runtime && m_runtime == runtime)
 	{
@@ -2408,16 +2441,14 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		m_lastQueuedOutputClientSizeValid                       = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
-		m_nativeStandaloneNextLineNumber  = 1;
-		m_miniWindowChangeSerial          = 0;
-		m_wrapMarginReservationCacheValid = false;
-		m_wrapMarginReservationPixels     = 0;
+		m_nativeStandaloneNextLineNumber = 1;
+		m_wrapMarginReservationCacheKey.reset();
+		m_wrapMarginReservationPixels = 0;
 	}
 
-	m_miniWindowChangeSerial          = 0;
-	m_wrapMarginReservationCacheValid = false;
-	m_wrapMarginReservationPixels     = 0;
-	m_runtime                         = runtime;
+	m_wrapMarginReservationCacheKey.reset();
+	m_wrapMarginReservationPixels = 0;
+	m_runtime                     = runtime;
 	resetRuntimeSettingsSnapshot();
 	if (m_runtime && m_runtime->outputPresentationMutationBatchActive())
 		beginRuntimeOutputMutationBatch(m_runtime->outputPresentationMutationBatchSuppressesDraw());
@@ -2437,22 +2468,21 @@ void WorldView::setPassiveBufferView(const bool passive)
 
 void WorldView::setCommandInteractionEnabled(const bool enabled)
 {
-	m_commandInteractionEnabled = enabled;
-	if (m_runtimeObserver && m_frozen)
-		setFrozen(false);
+	if (m_commandInteractionEnabled != enabled)
+		resetMiniWindowPresentationUpdateState();
 	if (!enabled)
 	{
 		setScrollbackSplitActive(false);
 		cancelPendingHyperlinkActivation();
-		stopMiniWindowMouseCapture();
-		m_capturedWindowName.clear();
+		if (const bool endedDragCapture = clearMiniWindowMouseCaptureState(); endedDragCapture)
+			synchronizeMiniWindowLayoutPolicyChange();
 		m_hoverWindowName.clear();
-		m_hasCapturedMiniWindowPressLocal       = false;
-		m_hasPendingCapturedMiniWindowDragMove  = false;
-		m_capturedMiniWindowDragMoveDrainQueued = false;
 		clearPendingHotspotTooltip();
 		clearHotspotCursor();
 	}
+	m_commandInteractionEnabled = enabled;
+	if (m_runtimeObserver && m_frozen)
+		setFrozen(false);
 
 	if (!m_input)
 		return;
@@ -2530,9 +2560,9 @@ WorldView::MiniWindowPaintBoundsSnapshot WorldView::miniWindowPaintBoundsSnapsho
 	snapshot.foregroundImageMode = m_runtime->foregroundImageMode();
 
 	const QRect clientRect(QPoint(0, 0), snapshot.clientSize);
-	const auto  windows = m_runtime->sortedMiniWindowsMutable();
-	m_runtime->layoutMiniWindows(snapshot.clientSize, snapshot.ownerSize, true, &windows);
-	m_runtime->layoutMiniWindows(snapshot.clientSize, snapshot.ownerSize, false, &windows);
+	if (m_runtime->view() == this)
+		m_runtime->synchronizeMiniWindowLayout(snapshot.clientSize, snapshot.ownerSize);
+	const auto windows = m_runtime->sortedMiniWindowsMutable();
 	snapshot.windows.reserve(windows.size());
 	for (const MiniWindow *window : windows)
 	{
@@ -2663,26 +2693,39 @@ void WorldView::refreshMiniWindows(const bool forceFullRepaint) const
 		m_miniOverlay->update();
 }
 
-void WorldView::onMiniWindowsChanged()
+void WorldView::onMiniWindowsChanged(const MiniWindowChangeEffects effects)
 {
 	if (!m_commandInteractionEnabled)
 		return;
-	++m_miniWindowChangeSerial;
-	m_wrapMarginReservationCacheValid = false;
+	m_pendingMiniWindowPresentationEffects |= effects;
+	if (effects.testFlag(MiniWindowChangeEffect::Layout))
+		m_wrapMarginReservationCacheKey.reset();
 	if (m_wrapMarginUpdateQueued)
 		return;
-	m_wrapMarginUpdateQueued = true;
+	m_wrapMarginUpdateQueued       = true;
+	const quint64 updateGeneration = m_miniWindowPresentationUpdateGeneration;
 	QMetaObject::invokeMethod(
 	    this,
-	    [this]
+	    [this, updateGeneration]
 	    {
-		    m_wrapMarginUpdateQueued = false;
+		    if (updateGeneration != m_miniWindowPresentationUpdateGeneration)
+			    return;
+		    const MiniWindowChangeEffects effects = std::exchange(m_pendingMiniWindowPresentationEffects, {});
+		    m_wrapMarginUpdateQueued              = false;
 		    refreshMiniWindows();
-		    updateWrapMargin();
-		    if (m_runtime)
-			    m_runtime->refreshNawsWindowSize();
+		    if (effects.testFlag(MiniWindowChangeEffect::Layout))
+			    updateWrapMargin();
 	    },
 	    Qt::QueuedConnection);
+}
+
+void WorldView::synchronizeMiniWindowLayoutPolicyChange(const bool forceFullRepaint)
+{
+	if (!m_commandInteractionEnabled || !m_runtime || m_runtime->view() != this)
+		return;
+	m_wrapMarginReservationCacheKey.reset();
+	updateWrapMargin();
+	refreshMiniWindows(forceFullRepaint);
 }
 
 void WorldView::syncMiniWindowDevicePixelRatio() const
@@ -2829,6 +2872,11 @@ bool WorldView::isMiniWindowCaptureActive() const
 bool WorldView::isMiniWindowDragCaptureActive() const
 {
 	return !m_capturedWindowName.isEmpty() && m_capturedMiniWindowDragActive;
+}
+
+bool WorldView::isMiniWindowScalerDisabled() const
+{
+	return m_globalViewSettings && m_globalViewSettings->disableMiniWindowScaler;
 }
 
 QString WorldView::geometryConstrainedMiniWindowName() const
@@ -3012,7 +3060,7 @@ int WorldView::outputScrollUnitsPerLine() const
 	const WrapTextBrowser *const view = m_output ? m_output : m_liveOutput;
 	if (!view)
 		return 1;
-	return qMax(1, QFontMetrics(view->font()).lineSpacing());
+	return qMax(1, qRound(effectiveOutputLineAdvance(view->font(), m_lineSpacing)));
 }
 
 int WorldView::nativeSplitTopScrollSeamValue(const int fullMaximum) const
@@ -3078,11 +3126,9 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLin
 	const int  wrapWidthPixels = nativeWrapWidthPixels(panes.constFirst().textRect.width(), wrapEnabled);
 	const int  localWrapWidthPixels =
 	    nativeLocalWrapWidthPixels(panes.constFirst().textRect.width(), wrapEnabled);
-	const int   lineSpacingSetting = qMax(0, m_lineSpacing);
-	const QFont layoutFont         = m_output->font();
-	const qreal lineSpacingFactor  = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
-	const qreal fallbackLineAdvance =
-	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
+	const int   lineSpacingSetting  = qMax(0, m_lineSpacing);
+	const QFont layoutFont          = m_output->font();
+	const qreal fallbackLineAdvance = effectiveOutputLineAdvance(layoutFont, lineSpacingSetting);
 
 	if (!lines.isEmpty() && !nativeLayoutCacheReadyFor(lines, wrapWidthPixels, localWrapWidthPixels,
 	                                                   lineSpacingSetting, layoutFont))
@@ -5916,10 +5962,8 @@ bool WorldView::nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &li
                                                const int wrapWidthPixels, const int localWrapWidthPixels,
                                                const int lineSpacingSetting, const QFont &layoutFont) const
 {
-	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
-	const qreal lineAdvance =
-	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
-	const quint64 styleKey = nativeLayoutStyleKey();
+	const qreal   lineAdvance = effectiveOutputLineAdvance(layoutFont, lineSpacingSetting);
+	const quint64 styleKey    = nativeLayoutStyleKey();
 	const bool    cacheDimensionsMatch =
 	    m_nativeLayoutHeightIndex.size() == lines.size() && m_nativeLayoutSlots.size() == lines.size();
 	return m_nativeLayoutCacheValid && cacheDimensionsMatch &&
@@ -6353,11 +6397,9 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 	if (lines.isEmpty())
 		return false;
 
-	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
-	const qreal defaultLineAdvance =
-	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
-	const quint64 styleKey      = nativeLayoutStyleKey();
-	const bool    cacheWasValid = m_nativeLayoutCacheValid;
+	const qreal   defaultLineAdvance = effectiveOutputLineAdvance(layoutFont, lineSpacingSetting);
+	const quint64 styleKey           = nativeLayoutStyleKey();
+	const bool    cacheWasValid      = m_nativeLayoutCacheValid;
 	const bool    keyMatches = cacheWasValid && m_nativeLayoutCachedWrapWidth == wrapWidthPixels &&
 	                           m_nativeLayoutCachedLocalWrapWidth == localWrapWidthPixels &&
 	                           m_nativeLayoutCachedLineSpacing == lineSpacingSetting &&
@@ -6810,11 +6852,9 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
                                          const int localWrapWidthPixels, const int lineSpacingSetting,
                                          const QFont &layoutFont) const
 {
-	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
-	const qreal defaultLineAdvance =
-	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
-	const quint64 styleKey      = nativeLayoutStyleKey();
-	const bool    cacheWasValid = m_nativeLayoutCacheValid;
+	const qreal   defaultLineAdvance = effectiveOutputLineAdvance(layoutFont, lineSpacingSetting);
+	const quint64 styleKey           = nativeLayoutStyleKey();
+	const bool    cacheWasValid      = m_nativeLayoutCacheValid;
 	const bool    renderRevisionChanged =
 	    cacheWasValid &&
 	    m_nativeLayoutCachedRenderRevision != m_nativeRenderModel->m_nativeRenderLineCacheRevision;
@@ -7936,9 +7976,10 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 	bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::FullReset, oldLineCount);
 }
 
-const WorldView::NativeOutputRenderLines &WorldView::nativeOutputRenderLines() const
+const WorldView::NativeOutputRenderLines &
+WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 {
-	if (m_runtimeOutputMutationBatchDepth > 0)
+	if (m_runtimeOutputMutationBatchDepth > 0 && !reconcileDuringRuntimeBatch)
 		return m_nativeRenderModel->m_nativeRenderLineCache;
 
 	enum class RuntimeRebuildReason
@@ -9334,9 +9375,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	const int    wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
 	const int    localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
 	const int    lineSpacing          = qMax(0, m_lineSpacing);
-	const qreal  lineAdvance = static_cast<qreal>(qMax(1, QFontMetrics(view->font()).lineSpacing())) *
-	                           ((100.0 + static_cast<qreal>(lineSpacing)) / 100.0);
-	const QFont &layoutFont  = view->font();
+	const qreal  lineAdvance          = effectiveOutputLineAdvance(view->font(), lineSpacing);
+	const QFont &layoutFont           = view->font();
 	const bool   cacheReadyForHitTest =
 	    nativeLayoutRangeStateReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing, layoutFont);
 	if (!allowCacheBuild && !cacheReadyForHitTest)
@@ -9527,8 +9567,7 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 	const int    localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
 	const int    lineSpacing          = qMax(0, m_lineSpacing);
 	const QFont &layoutFont           = view->font();
-	const qreal  fallbackLineAdvance  = static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) *
-	                                    ((100.0 + static_cast<qreal>(lineSpacing)) / 100.0);
+	const qreal  fallbackLineAdvance  = effectiveOutputLineAdvance(layoutFont, lineSpacing);
 
 	static_cast<void>(ensureNativeLayoutRange(
 	    lines, qMax(0, lineIndex - 2), qMin(sizeToInt(lines.size()) - 1, lineIndex + 2), wrapWidthPixels,
@@ -11056,11 +11095,9 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	const int  wrapWidthPixels = nativeWrapWidthPixels(panes.constFirst().textRect.width(), wrapEnabled);
 	const int  localWrapWidthPixels =
 	    nativeLocalWrapWidthPixels(panes.constFirst().textRect.width(), wrapEnabled);
-	const int    lineSpacingSetting = qMax(0, m_lineSpacing);
-	const QFont &layoutFont         = m_output->font();
-	const qreal  lineSpacingFactor  = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
-	const qreal  fallbackLineAdvance =
-	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
+	const int    lineSpacingSetting  = qMax(0, m_lineSpacing);
+	const QFont &layoutFont          = m_output->font();
+	const qreal  fallbackLineAdvance = effectiveOutputLineAdvance(layoutFont, lineSpacingSetting);
 	if (!nativeLayoutCacheReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
 	                               layoutFont))
 	{
@@ -12395,6 +12432,8 @@ int WorldView::setOutputScroll(int position, bool visible)
 	}
 	if (visibilityChanged || (!positionChanged && bar->value() != previousPosition))
 		notifySemanticOutputViewportChanged(false);
+	if (visibilityChanged)
+		emit callbackCommandUiPresentationChanged();
 	return eOK;
 }
 
@@ -13015,6 +13054,9 @@ void WorldView::applySharedGlobalViewSettings()
 {
 	if (!m_globalViewSettings)
 		return;
+	const bool scalerPolicyChanged =
+	    m_appliedMiniWindowScalerDisabled != m_globalViewSettings->disableMiniWindowScaler;
+	m_appliedMiniWindowScalerDisabled = m_globalViewSettings->disableMiniWindowScaler;
 	setSplitViewDividerWidth(m_globalViewSettings->splitViewDividerWidth);
 	syncOutputScrollSingleStep();
 	if (m_input && m_input->verticalScrollBar())
@@ -13023,6 +13065,8 @@ void WorldView::applySharedGlobalViewSettings()
 		m_outputStack->update();
 	if (m_outputContainer)
 		m_outputContainer->update();
+	if (scalerPolicyChanged)
+		synchronizeMiniWindowLayoutPolicyChange();
 }
 
 int WorldView::inputSelectionStartColumn() const
@@ -13153,6 +13197,22 @@ QFont WorldView::outputFont() const
 	if (!m_output)
 		return {};
 	return m_output->font();
+}
+
+QSize WorldView::nawsWindowSize() const
+{
+	const QRect textRect = outputTextRectangle();
+	if (!m_nawsOutputGeometryEstablished || !m_output || textRect.width() <= 0 || textRect.height() <= 0)
+		return {};
+
+	const QFontMetrics metrics(m_output->font());
+	const int          characterWidth   = qMax(1, metrics.horizontalAdvance(QLatin1Char('x')));
+	const qreal        lineAdvance      = effectiveOutputLineAdvance(m_output->font(), m_lineSpacing);
+	constexpr int      maximumDimension = std::numeric_limits<quint16>::max();
+	const int          columns          = qBound(1, textRect.width() / characterWidth, maximumDimension);
+	const int          rows =
+	    qBound(1, static_cast<int>(std::floor(textRect.height() / lineAdvance)), maximumDimension);
+	return {columns, rows};
 }
 
 void WorldView::focusInput() const
@@ -13696,6 +13756,12 @@ void WorldView::completePartialOutputAsRuntimeLine(const quint64 partialLineRevi
 	clearPartialOutput();
 }
 
+void WorldView::reservePartialOutputAsRuntimeLine(const quint64 partialLineRevision,
+                                                  const qint64  runtimeLineNumber) const
+{
+	rebindNativePartialOutputAnchors(partialLineRevision, runtimeLineNumber);
+}
+
 void WorldView::rebindNativePartialOutputAnchors(const quint64 partialLineRevision,
                                                  const qint64  runtimeLineNumber) const
 {
@@ -13859,6 +13925,11 @@ void WorldView::applyOutputPresentationMutation(const WorldRuntime::OutputPresen
 	}
 	if (mutation.sequence != 0)
 		m_nativeRenderModel->lastOutputMutationSequence = mutation.sequence;
+	if (mutation.kind == Kind::LineChanged || mutation.kind == Kind::RangeChanged ||
+	    mutation.kind == Kind::LinesAppended || mutation.kind == Kind::RangeChangedAndLinesAppended)
+	{
+		invalidateCallbackOutputSelectionPresentation();
+	}
 	switch (mutation.kind)
 	{
 	case Kind::LineChanged:
@@ -13888,6 +13959,31 @@ void WorldView::applyOutputPresentationMutation(const WorldRuntime::OutputPresen
 		clearOutputBuffer();
 		break;
 	}
+}
+
+void WorldView::invalidateCallbackOutputSelectionPresentation()
+{
+	if (!hasActiveCallbackOutputSelection())
+		return;
+	emit callbackCommandUiPresentationChanged();
+}
+
+bool WorldView::hasActiveCallbackOutputSelection() const
+{
+	return m_commandInteractionEnabled &&
+	       (m_hasOutputSelection || m_nativeOutputSelection.hasSelection || m_nativeOutputSelection.dragging);
+}
+
+void WorldView::synchronizeCallbackOutputSelectionPresentation()
+{
+	if (!hasActiveCallbackOutputSelection())
+		return;
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines(true);
+	if (m_nativeConsumedRenderRevision != m_nativeRenderModel->m_nativeRenderLineCacheRevision)
+		consumeNativeRenderCacheDelta(m_nativeRenderModel->m_nativeRenderCacheDelta);
+	applyPendingNativeSelectionRenderDelta(lines);
+	clearNativeSelectionIfSourceViewportMissing(m_output);
+	clearNativeSelectionIfSourceViewportMissing(m_liveOutput);
 }
 
 void WorldView::notifyRuntimeOutputLineChanged()
@@ -14580,8 +14676,9 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath, const QRegi
 		}
 	}
 
+	if (m_runtime->view() == this)
+		m_runtime->synchronizeMiniWindowLayout(clientSize, ownerSize);
 	const auto windows = m_runtime->sortedMiniWindowsMutable();
-	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath, &windows);
 
 	for (MiniWindow *window : windows)
 	{
@@ -14820,10 +14917,13 @@ void WorldView::scheduleCapturedMiniWindowDragMove(const QPoint &callbackLocal)
 	if (m_capturedMiniWindowDragMoveDrainQueued)
 		return;
 
+	const quint64 captureGeneration         = m_miniWindowCaptureGeneration;
 	m_capturedMiniWindowDragMoveDrainQueued = QMetaObject::invokeMethod(
 	    this,
-	    [this]
+	    [this, captureGeneration]
 	    {
+		    if (captureGeneration != m_miniWindowCaptureGeneration)
+			    return;
 		    m_capturedMiniWindowDragMoveDrainQueued = false;
 		    dispatchPendingCapturedMiniWindowDragMove();
 	    },
@@ -14886,6 +14986,20 @@ void WorldView::stopMiniWindowMouseCapture()
 		m_miniWindowCaptureEventFilterInstalled = false;
 	}
 	m_mouseCaptured = false;
+}
+
+bool WorldView::clearMiniWindowMouseCaptureState()
+{
+	const bool endedDragCapture = isMiniWindowDragCaptureActive();
+	if (++m_miniWindowCaptureGeneration == 0)
+		++m_miniWindowCaptureGeneration;
+	stopMiniWindowMouseCapture();
+	m_capturedWindowName.clear();
+	m_capturedMiniWindowDragActive          = false;
+	m_hasCapturedMiniWindowPressLocal       = false;
+	m_hasPendingCapturedMiniWindowDragMove  = false;
+	m_capturedMiniWindowDragMoveDrainQueued = false;
+	return endedDragCapture;
 }
 
 bool WorldView::handleCapturedMiniWindowMouseEvent(QObject *watched, const QMouseEvent *event)
@@ -15000,6 +15114,7 @@ bool WorldView::handleMiniWindowMouseLeave(const QPoint &reportedPosition)
 	}
 	m_lastMousePos    = reportedPosition;
 	m_hasLastMousePos = true;
+	emit callbackCommandUiPresentationChanged();
 	m_runtime->notifyMiniWindowMouseMoved(reportedPosition.x(), reportedPosition.y(), QString());
 	if (m_hoverWindowName.isEmpty())
 		return false;
@@ -15052,6 +15167,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	                      : hitLocal;
 	m_lastMousePos    = hitLocal;
 	m_hasLastMousePos = true;
+	emit          callbackCommandUiPresentationChanged();
 
 	QString       hotspotId;
 	QString       windowName;
@@ -15246,6 +15362,7 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	const QPoint local     = mapEventToOutputStack(event->position(), source);
 	m_lastMousePos         = local;
 	m_hasLastMousePos      = true;
+	emit callbackCommandUiPresentationChanged();
 	if (!m_outputStack->rect().contains(local))
 		return false;
 
@@ -15347,6 +15464,8 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	m_hasPendingCapturedMiniWindowDragMove  = false;
 	m_capturedMiniWindowDragMoveDrainQueued = false;
 	startMiniWindowMouseCapture();
+	if (dragHandler)
+		synchronizeMiniWindowLayoutPolicyChange();
 
 	const auto it = window->hotspots.find(hotspotId);
 	if (it != window->hotspots.end())
@@ -15384,6 +15503,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	                         : rawLocal;
 	m_lastMousePos     = rawLocal;
 	m_hasLastMousePos  = true;
+	emit          callbackCommandUiPresentationChanged();
 	QString       hotspotId;
 	QString       windowName;
 	MiniWindow   *windowUnderCursor           = m_outputStack->rect().contains(rawLocal)
@@ -15492,13 +15612,9 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 			}
 		}
 	}
-	m_capturedWindowName.clear();
-	m_capturedMiniWindowDragActive         = false;
-	m_hasCapturedMiniWindowPressLocal      = false;
-	m_hasPendingCapturedMiniWindowDragMove = false;
-
+	static_cast<void>(clearMiniWindowMouseCaptureState());
 	if (dragCaptureActive)
-		refreshMiniWindows();
+		synchronizeMiniWindowLayoutPolicyChange();
 	if (m_outputStack->rect().contains(rawLocal))
 		handleMiniWindowMouseMove(event, source);
 	else
@@ -15939,6 +16055,11 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 
 	const QMap<QString, QString> &attrs          = m_runtime->worldAttributes();
 	const QMap<QString, QString> &multilineAttrs = m_runtime->worldMultilineAttributes();
+	bool                          lineSpacingOk  = false;
+	int lineSpacing = attrs.value(QStringLiteral("line_spacing")).toInt(&lineSpacingOk);
+	if (!lineSpacingOk || lineSpacing < 0)
+		lineSpacing = 0;
+	m_lineSpacing = lineSpacing;
 	applyOutputFontRuntimeSettings();
 	applyInputFontRuntimeSettings();
 
@@ -16006,17 +16127,12 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	m_showUnderline                  = !isDisabled(showUnderline);
 	const QString alternativeInverse = attrs.value(QStringLiteral("alternative_inverse"));
 	m_alternativeInverse             = isEnabled(alternativeInverse);
-	bool lineSpacingOk               = false;
-	int  lineSpacing                 = attrs.value(QStringLiteral("line_spacing")).toInt(&lineSpacingOk);
-	if (!lineSpacingOk || lineSpacing < 0)
-		lineSpacing = 0;
-	m_lineSpacing      = lineSpacing;
-	bool fadeAfterOk   = false;
-	bool fadeOpacityOk = false;
-	bool fadeSecondsOk = false;
-	int  fadeAfter     = attrs.value(QStringLiteral("fade_output_buffer_after_seconds")).toInt(&fadeAfterOk);
-	int  fadeOpacity   = attrs.value(QStringLiteral("fade_output_opacity_percent")).toInt(&fadeOpacityOk);
-	int  fadeSeconds   = attrs.value(QStringLiteral("fade_output_seconds")).toInt(&fadeSecondsOk);
+	bool fadeAfterOk                 = false;
+	bool fadeOpacityOk               = false;
+	bool fadeSecondsOk               = false;
+	int  fadeAfter   = attrs.value(QStringLiteral("fade_output_buffer_after_seconds")).toInt(&fadeAfterOk);
+	int  fadeOpacity = attrs.value(QStringLiteral("fade_output_opacity_percent")).toInt(&fadeOpacityOk);
+	int  fadeSeconds = attrs.value(QStringLiteral("fade_output_seconds")).toInt(&fadeSecondsOk);
 	if (!fadeAfterOk || fadeAfter < 0)
 		fadeAfter = 0;
 	if (!fadeOpacityOk)
@@ -16232,6 +16348,8 @@ void WorldView::applyOutputFontRuntimeSettings() const
 	const QFontMetrics metrics(font);
 	if (m_commandInteractionEnabled)
 		m_runtime->setOutputFontMetrics(metrics.height(), metrics.horizontalAdvance(QLatin1Char('M')));
+	if (m_commandInteractionEnabled && m_runtime->view() == this)
+		m_runtime->refreshNawsWindowSize();
 }
 
 void WorldView::applyHistoryLimit(const int limit)
@@ -16331,6 +16449,12 @@ void WorldView::applyOutputWrapRuntimeSettings()
 		m_liveOutput->setLineWrapMode(wrapMode);
 		m_liveOutput->setViewportMarginsPublic(0, 0, 0, 0);
 	}
+}
+
+void WorldView::applyNawsNegotiationPresentation()
+{
+	applyOutputWrapRuntimeSettings();
+	requestNativeOutputRepaint();
 }
 
 void WorldView::applyInputPaletteRuntimeSettings() const
@@ -16703,6 +16827,9 @@ void WorldView::resizeEvent(QResizeEvent *event)
 		                         .arg(bar ? bar->maximum() : -1);
 	}
 	QWidget::resizeEvent(event);
+	if (isVisible() && outputClientWidth() > 0 && outputClientHeight() > 0)
+		m_nawsOutputGeometryEstablished = true;
+	emit callbackCommandUiPresentationChanged();
 	updateWrapMargin();
 	updateInputWrap();
 	if (!m_defaultInputHeightApplied)
@@ -16735,6 +16862,9 @@ void WorldView::showEvent(QShowEvent *event)
 		                         .arg(bar ? bar->maximum() : -1);
 	}
 	QWidget::showEvent(event);
+	if (outputClientWidth() > 0 && outputClientHeight() > 0)
+		m_nawsOutputGeometryEstablished = true;
+	emit callbackCommandUiPresentationChanged();
 	if (m_nativeOutputCanvas)
 	{
 		m_nativeOutputCanvas->setVisible(true);
@@ -16800,6 +16930,9 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	if ((watched == m_outputContainer || watched == m_outputStack || watched == m_outputSplitter) &&
 	    event->type() == QEvent::Resize)
 	{
+		if (isVisible() && outputClientWidth() > 0 && outputClientHeight() > 0)
+			m_nawsOutputGeometryEstablished = true;
+		emit callbackCommandUiPresentationChanged();
 		if (watched == m_outputContainer || watched == m_outputStack)
 			updateWrapMargin();
 		refreshMiniWindows(true);
@@ -17055,7 +17188,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	return QWidget::eventFilter(watched, event);
 }
 
-void WorldView::updateWrapMargin() const
+void WorldView::updateWrapMargin()
 {
 	if (!m_outputStack || !m_outputSplitter)
 		return;
@@ -17072,89 +17205,7 @@ void WorldView::updateWrapMargin() const
 		m_outputSplitter->setGeometry(effectiveRect);
 		layoutChanged = true;
 	}
-	int reservedRight = 0;
-	if (m_commandInteractionEnabled && m_runtime && !effectiveRect.isEmpty())
-	{
-		const bool textRectangleCompatActive = hasConfiguredTextRectangle(m_runtime->textRectangle());
-		if (!textRectangleCompatActive)
-		{
-			const auto windows = m_runtime->sortedMiniWindowsMutable();
-			// Keep miniwindow rects current before calculating reserved margin so
-			// window moves/resizes are reflected immediately in NAWS sizing.
-			m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false, &windows);
-
-			const bool cacheHit = m_wrapMarginReservationCacheValid &&
-			                      m_wrapMarginReservationRect == effectiveRect &&
-			                      m_wrapMarginReservationSerial == m_miniWindowChangeSerial;
-			if (cacheHit)
-				reservedRight = m_wrapMarginReservationPixels;
-			else
-			{
-				int safeRight = effectiveRect.right() + 1;
-				for (MiniWindow *window : windows)
-				{
-					if (!window || !window->show || window->temporarilyHide)
-						continue;
-					if ((window->flags & kMiniWindowDrawUnderneath) != 0)
-						continue;
-
-					QRect candidateRect;
-					if (window->position == 6 || window->position == 7 || window->position == 8)
-					{
-						// For docked windows, use the laid-out rect when available so stacked
-						// dock panes reserve their true left edge for NAWS calculations.
-						if (!window->rect.isEmpty())
-						{
-							candidateRect = window->rect;
-						}
-						else
-						{
-							const int width = qMax(0, window->width);
-							if (width <= 0)
-								continue;
-							candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(),
-							                      width, effectiveRect.height());
-						}
-					}
-					else
-					{
-						if (window->rect.isEmpty())
-							continue;
-						const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
-						// Skip full-surface background modes; they are not overlay blockers.
-						if (!absolute && window->position >= 0 && window->position <= 3)
-							continue;
-						if (!absolute && window->position == 13)
-							continue;
-
-						const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
-						if (!rightHalf)
-							continue;
-						candidateRect = window->rect;
-					}
-
-					const QRect overlap = candidateRect.intersected(effectiveRect);
-					if (overlap.isEmpty())
-						continue;
-					safeRight = qMin(safeRight, overlap.left());
-				}
-				reservedRight                     = qMax(0, (effectiveRect.right() + 1) - safeRight);
-				m_wrapMarginReservationCacheValid = true;
-				m_wrapMarginReservationRect       = effectiveRect;
-				m_wrapMarginReservationSerial     = m_miniWindowChangeSerial;
-				m_wrapMarginReservationPixels     = reservedRight;
-			}
-		}
-		else
-		{
-			m_wrapMarginReservationCacheValid = false;
-		}
-	}
-	else
-	{
-		m_wrapMarginReservationCacheValid = false;
-	}
-	m_wrapMarginReservationPixels = reservedRight;
+	static_cast<void>(synchronizeWrapMarginReservation(effectiveRect));
 
 	auto applyMargin = [&layoutChanged](WrapTextBrowser *view)
 	{
@@ -17180,6 +17231,104 @@ void WorldView::updateWrapMargin() const
 		syncNativeOutputScrollBarsFromLayout(nativeOutputRenderLines());
 		requestNativeOutputRepaint();
 	}
+}
+
+void WorldView::synchronizeCallbackMiniWindowLayout()
+{
+	if (!m_outputStack || !m_outputSplitter || m_outputStack->width() <= 0 || m_outputStack->height() <= 0)
+		return;
+	const QRect textRect = outputTextRectangleForClient(m_outputStack->size(),
+	                                                    m_commandInteractionEnabled ? m_runtime : nullptr);
+	const QRect effectiveRect =
+	    textRect.isNull() ? QRect(0, 0, m_outputStack->width(), m_outputStack->height()) : textRect;
+	static_cast<void>(synchronizeWrapMarginReservation(effectiveRect));
+}
+
+bool WorldView::synchronizeWrapMarginReservation(const QRect &effectiveRect)
+{
+	const QSize clientSize        = m_outputStack ? m_outputStack->size() : QSize{};
+	const QSize ownerSize         = size();
+	const bool  ownsRuntimeLayout = m_commandInteractionEnabled && m_runtime && m_runtime->view() == this;
+	quint64     layoutRevision    = 0;
+	if (ownsRuntimeLayout)
+	{
+		m_runtime->synchronizeMiniWindowLayout(clientSize, ownerSize);
+		layoutRevision = m_runtime->miniWindowLayoutPresentationRevision();
+	}
+	const bool textRectangleActive =
+	    ownsRuntimeLayout && hasConfiguredTextRectangle(m_runtime->textRectangle());
+	const WrapMarginReservationCacheKey cacheKey{effectiveRect,  clientSize,        ownerSize,
+	                                             layoutRevision, ownsRuntimeLayout, textRectangleActive};
+	if (const bool cacheHit = m_wrapMarginReservationCacheKey && *m_wrapMarginReservationCacheKey == cacheKey;
+	    cacheHit)
+		return false;
+
+	const int previousReservedRight = m_wrapMarginReservationPixels;
+	int       reservedRight         = 0;
+	if (ownsRuntimeLayout && !textRectangleActive && !effectiveRect.isEmpty())
+	{
+		const auto windows = m_runtime->sortedMiniWindowsMutable();
+
+		int        safeRight = effectiveRect.right() + 1;
+		for (MiniWindow *window : windows)
+		{
+			if (!window || !window->show || window->temporarilyHide)
+				continue;
+			if ((window->flags & kMiniWindowDrawUnderneath) != 0)
+				continue;
+
+			QRect candidateRect;
+			if (window->position == 6 || window->position == 7 || window->position == 8)
+			{
+				// For docked windows, use the laid-out rect when available so stacked
+				// dock panes reserve their true left edge for NAWS calculations.
+				if (!window->rect.isEmpty())
+				{
+					candidateRect = window->rect;
+				}
+				else
+				{
+					const int width = qMax(0, window->width);
+					if (width <= 0)
+						continue;
+					candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(), width,
+					                      effectiveRect.height());
+				}
+			}
+			else
+			{
+				if (window->rect.isEmpty())
+					continue;
+				const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
+				// Skip full-surface background modes; they are not overlay blockers.
+				if (!absolute && window->position >= 0 && window->position <= 3)
+					continue;
+				if (!absolute && window->position == 13)
+					continue;
+
+				const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
+				if (!rightHalf)
+					continue;
+				candidateRect = window->rect;
+			}
+
+			const QRect overlap = candidateRect.intersected(effectiveRect);
+			if (overlap.isEmpty())
+				continue;
+			safeRight = qMin(safeRight, overlap.left());
+		}
+		reservedRight = qMax(0, (effectiveRect.right() + 1) - safeRight);
+	}
+	m_wrapMarginReservationCacheKey = cacheKey;
+	m_wrapMarginReservationPixels   = reservedRight;
+	const bool reservationChanged   = m_wrapMarginReservationPixels != previousReservedRight;
+	if (reservationChanged)
+	{
+		emit callbackCommandUiPresentationChanged();
+		if (ownsRuntimeLayout)
+			m_runtime->requestNawsWindowSizeRefresh();
+	}
+	return reservationChanged;
 }
 
 void WorldView::updateInputWrap() const

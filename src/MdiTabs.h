@@ -74,6 +74,10 @@ class MdiTabs : public QTabBar
 		 * @param subWindow Child represented by the selected tab.
 		 */
 		void windowActivationRequested(QMdiSubWindow *subWindow);
+		/**
+		 * @brief Reports a committed user change to the authoritative MDI window order.
+		 */
+		void windowOrderChanged();
 
 	private:
 		QMdiArea                        *m_mdiArea{nullptr};

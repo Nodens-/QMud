@@ -908,7 +908,7 @@ namespace
 			QHash<QString, bool>                            pluginCallbackPresenceByName;
 			QString                                         clipboardText;
 			bool                                            hasClipboardText{false};
-			MainWindow                                     *framePointer{nullptr};
+			QPointer<MainWindow>                            framePointer;
 			bool                                            hasFramePointer{false};
 			QHash<int, QRect>                               mainWindowPositionsByMode;
 			bool                                            mainWindowPositionsDirty{false};
@@ -5134,7 +5134,7 @@ namespace
 		{
 			if (notepad.title.compare(title, Qt::CaseInsensitive) != 0)
 				continue;
-			const auto relatedToken = reinterpret_cast<quintptr>(notepad.runtime);
+			const auto relatedToken = reinterpret_cast<quintptr>(notepad.runtime.data());
 			if (ownerToken != 0 && relatedToken == ownerToken)
 				return &notepad;
 			if (ownerToken != 0 && relatedToken != 0 && relatedToken != ownerToken)
@@ -5224,7 +5224,7 @@ namespace
 		{
 			if (!all)
 			{
-				const auto relatedToken = reinterpret_cast<quintptr>(notepad.runtime);
+				const auto relatedToken = reinterpret_cast<quintptr>(notepad.runtime.data());
 				if (relatedToken == ownerToken)
 				{
 					// Matched this runtime instance.
@@ -9887,7 +9887,7 @@ namespace
 			context->notepadPresentationRefreshUnavailable = false;
 		}
 		if (snapshot->hasFramePointer)
-			cacheCallbackFrame(engine, static_cast<MainWindow *>(snapshot->framePointer));
+			cacheCallbackFrame(engine, snapshot->framePointer.data());
 		context->triggerWildcardsSnapshot                = snapshot->triggerWildcardsSnapshot;
 		context->triggerNamedWildcardsSnapshot           = snapshot->triggerNamedWildcardsSnapshot;
 		context->aliasWildcardsSnapshot                  = snapshot->aliasWildcardsSnapshot;
@@ -19432,7 +19432,7 @@ static bool resolveFrameForApi(const LuaCallbackEngine *engine, MainWindow *&fra
 		if (const auto *dispatchSnapshot = engine->currentDispatchSnapshot();
 		    dispatchSnapshot && dispatchSnapshot->hasFramePointer)
 		{
-			frame = static_cast<MainWindow *>(dispatchSnapshot->framePointer);
+			frame = dispatchSnapshot->framePointer.data();
 			cacheCallbackFrame(engine, frame);
 			return frame != nullptr;
 		}

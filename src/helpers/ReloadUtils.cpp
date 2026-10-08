@@ -190,6 +190,7 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 		entry.insert(QStringLiteral("mccp_was_active"), world.mccpWasActive);
 		entry.insert(QStringLiteral("mccp_disable_attempted"), world.mccpDisableAttempted);
 		entry.insert(QStringLiteral("mccp_disable_succeeded"), world.mccpDisableSucceeded);
+		entry.insert(QStringLiteral("naws_negotiated"), world.nawsNegotiated);
 		entry.insert(QStringLiteral("utf8_enabled"), world.utf8Enabled);
 		entry.insert(QStringLiteral("notes"), world.notes);
 		worlds.append(entry);
@@ -354,6 +355,8 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		    !parseBoolField(object, "mccp_was_active", world.mccpWasActive) ||
 		    !parseBoolField(object, "mccp_disable_attempted", world.mccpDisableAttempted) ||
 		    !parseBoolField(object, "mccp_disable_succeeded", world.mccpDisableSucceeded) ||
+		    (object.contains(QStringLiteral("naws_negotiated")) &&
+		     !parseBoolField(object, "naws_negotiated", world.nawsNegotiated)) ||
 		    !parseBoolField(object, "utf8_enabled", world.utf8Enabled))
 		{
 			if (errorMessage)
@@ -539,7 +542,8 @@ ReloadRecoverySocketDecision applyReloadSocketRecovery(ReloadSocketRecoveryOps &
 	{
 		runtime.markReloadReattachConnectActionsSuppressed();
 		QString adoptError;
-		if (!runtime.adoptConnectedSocketDescriptor(worldState.socketDescriptor, &adoptError))
+		if (!runtime.adoptConnectedSocketDescriptor(worldState.socketDescriptor, worldState.nawsNegotiated,
+		                                            &adoptError))
 		{
 			(void)runtime.consumeReloadReattachConnectActionsSuppressed();
 			decision.outcome          = ReloadRecoverySocketOutcome::ReconnectQueued;

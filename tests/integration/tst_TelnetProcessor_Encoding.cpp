@@ -43,7 +43,8 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
-			void escapedIacInNormalText()
+			/** @brief Verifies escaped IAC bytes contribute to later processed-stream event offsets. */
+			void escapedIacMaintainsProcessedStreamOffsets()
 			{
 				TelnetProcessor  processor;
 				const QByteArray output = processor.processBytes(bytes({'a', IAC, IAC, 'b'}));
@@ -52,6 +53,15 @@ namespace
 				expected.append(static_cast<char>(IAC));
 				expected.append('b');
 				QCOMPARE(output, expected);
+
+				TelnetProcessor splitProcessor;
+				QCOMPARE(splitProcessor.processBytes(bytes({IAC})), QByteArray());
+				QCOMPARE(splitProcessor.processBytes(bytes({IAC, IAC, GA})), bytes({IAC}));
+				const QList<TelnetProcessor::TelnetStreamEvent> events =
+				    splitProcessor.takeTelnetStreamEvents();
+				QCOMPARE(events.size(), 1);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::IacGa);
+				QCOMPARE(events.constFirst().offset, 1);
 			}
 
 			void gaHandlingWithAndWithoutNewline()

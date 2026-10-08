@@ -17,6 +17,7 @@
 #include "helpers/EncodingUtils.h"
 
 #include <QList>
+#include <QScopeGuard>
 #include <QSet>
 #include <QString>
 #include <QtGlobal>
@@ -408,12 +409,15 @@ void TelnetProcessor::setNawsEnabled(const bool enabled)
 		return;
 
 	if (!enabled && m_nawsWanted)
-	{
 		sendIacWont(TELOPT_NAWS);
-		m_nawsWanted = false;
-	}
+	setNawsState(enabled, enabled && m_nawsWanted);
+}
 
-	m_naws = enabled;
+void TelnetProcessor::restoreNawsNegotiatedState(const bool negotiated)
+{
+	setNawsState(m_naws, negotiated);
+	if (isNawsNegotiated())
+		sendWindowSize();
 }
 
 void TelnetProcessor::setNegotiateOptionsOnce(const bool enabled)
@@ -540,7 +544,7 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpString.clear();
 	m_mxpEvents.clear();
 	m_mxpModeChanges.clear();
-	m_telnetPluginEvents.clear();
+	m_telnetStreamEvents.clear();
 	m_mxpEventSequence = 0;
 	m_mxpEnabled       = false;
 	m_puebloActive     = false;
@@ -548,7 +552,7 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpMode          = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 	clearCustomElements();
 	clearCustomEntities();
-	m_nawsWanted          = false;
+	setNawsState(m_naws, false);
 	m_compress            = false;
 	m_mccpType            = 0;
 	m_compressInitOk      = false;
@@ -756,7 +760,7 @@ void TelnetProcessor::handleWont(const unsigned char option)
 			m_callbacks.onNoEchoChanged(false);
 	}
 	if (option == TELOPT_NAWS)
-		m_nawsWanted = false;
+		setNawsState(m_naws, false);
 	if (option == TELOPT_START_TLS)
 	{
 		if (m_startTlsEnabled && !m_startTlsActive)
@@ -797,7 +801,7 @@ void TelnetProcessor::handleDo(const unsigned char option)
 		if (m_naws)
 		{
 			sendIacWill(option);
-			m_nawsWanted = true;
+			setNawsState(m_naws, true);
 			sendWindowSize();
 		}
 		else
@@ -857,7 +861,7 @@ void TelnetProcessor::handleDont(const unsigned char option)
 		m_ttypeSequence = 0;
 		break;
 	case TELOPT_NAWS:
-		m_nawsWanted = false;
+		setNawsState(m_naws, false);
 		break;
 	case TELOPT_START_TLS:
 		if (m_startTlsEnabled && !m_startTlsActive)
@@ -884,6 +888,10 @@ QByteArray TelnetProcessor::processBytes(const QByteArray              &data,
 	if (data.isEmpty() && m_pendingPacketTransformBytes.isEmpty())
 		return {};
 
+	const bool previousRecordStreamEvents  = m_recordTelnetStreamEvents;
+	m_recordTelnetStreamEvents             = true;
+	const auto restoreStreamEventRecording = qScopeGuard(
+	    [this, previousRecordStreamEvents] { m_recordTelnetStreamEvents = previousRecordStreamEvents; });
 	m_outputSize = 0;
 
 	QByteArray input = m_pendingPacketTransformBytes + data;
@@ -1158,10 +1166,10 @@ QByteArray TelnetProcessor::takeOutboundData()
 	return out;
 }
 
-QList<TelnetProcessor::TelnetPluginEvent> TelnetProcessor::takeTelnetPluginEvents()
+QList<TelnetProcessor::TelnetStreamEvent> TelnetProcessor::takeTelnetStreamEvents()
 {
-	QList<TelnetPluginEvent> events = m_telnetPluginEvents;
-	m_telnetPluginEvents.clear();
+	QList<TelnetStreamEvent> events = m_telnetStreamEvents;
+	m_telnetStreamEvents.clear();
 	return events;
 }
 
@@ -1706,7 +1714,21 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 {
 	QByteArray output;
 	output.reserve(data.size());
-	int  outputSize                   = m_outputSize;
+	int  outputSize       = m_outputSize;
+	auto appendOutputByte = [&](const char byte)
+	{
+		output.append(byte);
+		++outputSize;
+		m_outputSize = outputSize;
+	};
+	auto appendOutputBytes = [&](const QByteArray &bytes)
+	{
+		if (bytes.isEmpty())
+			return;
+		output.append(bytes);
+		outputSize += static_cast<int>(bytes.size());
+		m_outputSize = outputSize;
+	};
 	auto abortMxpCollectionOnOverflow = [this]
 	{
 		const char *phaseName = "token";
@@ -1863,11 +1885,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 					m_mxpPhase = MXP_NONE;
 					// here when entity collection complete
 					if (QByteArray resolved = mxpCollectedEntity(); !resolved.isEmpty())
-					{
-						output.append(resolved);
-						outputSize += static_cast<int>(resolved.size());
-						m_outputSize = outputSize;
-					}
+						appendOutputBytes(resolved);
 					m_mxpString.clear();
 					break;
 				case '&':
@@ -1933,9 +1951,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			if (m_mxpEnabled && !m_puebloActive && c == '\n')
 				mxpModeChange(-1);
 
-			output.append(static_cast<char>(c));
-			outputSize += 1;
-			m_outputSize = outputSize;
+			appendOutputByte(static_cast<char>(c));
 			break;
 
 		case HAVE_ESC:
@@ -1951,14 +1967,10 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				m_phase = NONE;
 				if (!m_ansiBuffer.isEmpty())
 				{
-					output.append(m_ansiBuffer);
-					outputSize += static_cast<int>(m_ansiBuffer.size());
-					m_outputSize = outputSize;
+					appendOutputBytes(m_ansiBuffer);
 					m_ansiBuffer.clear();
 				}
-				output.append(static_cast<char>(c));
-				outputSize += 1;
-				m_outputSize = outputSize;
+				appendOutputByte(static_cast<char>(c));
 			}
 			break;
 
@@ -1979,11 +1991,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				if (c == 'm')
 				{
 					if (!m_ansiBuffer.isEmpty())
-					{
-						output.append(m_ansiBuffer);
-						outputSize += static_cast<int>(m_ansiBuffer.size());
-						m_outputSize = outputSize;
-					}
+						appendOutputBytes(m_ansiBuffer);
 				}
 				else if (c == 'z') // MXP line security mode
 				{
@@ -2003,20 +2011,16 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			switch (c)
 			{
 			case IAC:
-				output.append(static_cast<char>(IAC));
+				appendOutputByte(static_cast<char>(IAC));
 				m_phase = NONE;
 				break;
 			case GA:
 			case EOR:
-				appendTelnetPluginEvent(TelnetPluginEvent::IacGa, c, {});
+				appendTelnetStreamEvent(TelnetStreamEvent::IacGa, c, {});
 				if (m_callbacks.onIacGa)
 					m_callbacks.onIacGa();
 				if (m_convertGAtoNewline)
-				{
-					output.append('\n');
-					outputSize += 1;
-					m_outputSize = outputSize;
-				}
+					appendOutputByte('\n');
 				m_phase = NONE;
 				break;
 			case SB:
@@ -2216,18 +2220,18 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			else if (m_subnegotiationType == TELOPT_MUD_SPECIFIC)
 			{
 				// stuff for Aardwolf (telopt 102) - call specific plugin handler: OnPluginTelnetOption
-				appendTelnetPluginEvent(TelnetPluginEvent::Option, m_subnegotiationType,
+				appendTelnetStreamEvent(TelnetStreamEvent::Option, m_subnegotiationType,
 				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetOption)
 					m_callbacks.onTelnetOption(m_subnegotiationData);
-				appendTelnetPluginEvent(TelnetPluginEvent::Subnegotiation, m_subnegotiationType,
+				appendTelnetStreamEvent(TelnetStreamEvent::Subnegotiation, m_subnegotiationType,
 				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetSubnegotiation)
 					m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
 			}
 			else
 			{
-				appendTelnetPluginEvent(TelnetPluginEvent::Subnegotiation, m_subnegotiationType,
+				appendTelnetStreamEvent(TelnetStreamEvent::Subnegotiation, m_subnegotiationType,
 				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetSubnegotiation)
 					m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
@@ -2507,16 +2511,29 @@ void TelnetProcessor::sendWindowSize()
 	m_outbound.append(response);
 }
 
-void TelnetProcessor::appendTelnetPluginEvent(const TelnetPluginEvent::Type type, const int option,
-                                              const QByteArray &data)
+void TelnetProcessor::setNawsState(const bool enabled, const bool wanted)
 {
-	TelnetPluginEvent event;
-	event.type     = type;
-	event.offset   = m_outputSize;
-	event.sequence = m_mxpEventSequence++;
-	event.option   = option;
-	event.data     = data;
-	m_telnetPluginEvents.append(event);
+	const bool wasNegotiated = isNawsNegotiated();
+	m_naws                   = enabled;
+	m_nawsWanted             = enabled && wanted;
+	const bool negotiated    = isNawsNegotiated();
+	if (negotiated != wasNegotiated && m_recordTelnetStreamEvents)
+		appendTelnetStreamEvent(TelnetStreamEvent::NawsNegotiatedChanged, TELOPT_NAWS, {}, negotiated);
+	if (negotiated != wasNegotiated && m_callbacks.onNawsNegotiatedChanged)
+		m_callbacks.onNawsNegotiatedChanged(negotiated);
+}
+
+void TelnetProcessor::appendTelnetStreamEvent(const TelnetStreamEvent::Type type, const int option,
+                                              const QByteArray &data, const bool negotiated)
+{
+	TelnetStreamEvent event;
+	event.type       = type;
+	event.offset     = m_outputSize;
+	event.sequence   = m_mxpEventSequence++;
+	event.option     = option;
+	event.data       = data;
+	event.negotiated = negotiated;
+	m_telnetStreamEvents.append(event);
 }
 
 QList<QByteArray> TelnetProcessor::effectiveCharsetNames() const

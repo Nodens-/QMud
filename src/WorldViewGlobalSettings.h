@@ -22,6 +22,7 @@ struct WorldViewGlobalSettings
 		bool               smootherScrolling{false};
 		bool               allTypingToCommandWindow{false};
 		bool               bleedBackground{false};
+		bool               disableMiniWindowScaler{false};
 		int                splitViewDividerWidth{5};
 
 		/**

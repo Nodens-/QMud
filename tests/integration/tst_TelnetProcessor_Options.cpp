@@ -394,11 +394,24 @@ namespace
 
 				processor.setWindowSize(132, 40);
 				QVERIFY(processor.takeOutboundData().isEmpty());
+
+				processor.resetConnectionState();
+				QVERIFY(!processor.isNawsNegotiated());
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				processor.restoreNawsNegotiatedState(true);
+				QVERIFY(processor.isNawsNegotiated());
+				QCOMPARE(processor.takeOutboundData(),
+				         bytes({IAC, SB, TELOPT_NAWS, 0x00, 0x84, 0x00, 0x28, IAC, SE}));
 			}
 
 			static void nawsNegotiationStateClearsOnDontWontAndReset()
 			{
-				TelnetProcessor processor;
+				TelnetProcessor            processor;
+				QList<bool>                negotiatedStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNawsNegotiatedChanged = [&negotiatedStates](const bool negotiated)
+				{ negotiatedStates.append(negotiated); };
+				processor.setCallbacks(callbacks);
 				processor.setNawsEnabled(true);
 				processor.setWindowSize(80, 24);
 				QVERIFY(!processor.isNawsNegotiated());
@@ -407,10 +420,22 @@ namespace
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
 				                                              0x00, 0x50, 0x00, 0x18, IAC, SE}));
 				QVERIFY(processor.isNawsNegotiated());
+				const QList<TelnetProcessor::TelnetStreamEvent> enabledEvents =
+				    processor.takeTelnetStreamEvents();
+				QCOMPARE(enabledEvents.size(), 1);
+				QCOMPARE(enabledEvents.constFirst().type,
+				         TelnetProcessor::TelnetStreamEvent::NawsNegotiatedChanged);
+				QVERIFY(enabledEvents.constFirst().negotiated);
 
 				processor.processBytes(bytes({IAC, DONT, TELOPT_NAWS}));
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
 				QVERIFY(!processor.isNawsNegotiated());
+				const QList<TelnetProcessor::TelnetStreamEvent> disabledEvents =
+				    processor.takeTelnetStreamEvents();
+				QCOMPARE(disabledEvents.size(), 1);
+				QCOMPARE(disabledEvents.constFirst().type,
+				         TelnetProcessor::TelnetStreamEvent::NawsNegotiatedChanged);
+				QVERIFY(!disabledEvents.constFirst().negotiated);
 
 				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
@@ -428,11 +453,19 @@ namespace
 
 				processor.resetConnectionState();
 				QVERIFY(!processor.isNawsNegotiated());
+				QCOMPARE(negotiatedStates, QList<bool>({true, false, true, false, true, false}));
+				processor.resetConnectionState();
+				QCOMPARE(negotiatedStates.size(), 6);
 			}
 
 			static void disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState()
 			{
-				TelnetProcessor processor;
+				TelnetProcessor            processor;
+				QList<bool>                negotiatedStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNawsNegotiatedChanged = [&negotiatedStates](const bool negotiated)
+				{ negotiatedStates.append(negotiated); };
+				processor.setCallbacks(callbacks);
 				processor.setNawsEnabled(true);
 				processor.setWindowSize(120, 40);
 
@@ -447,6 +480,46 @@ namespace
 
 				processor.setWindowSize(132, 45);
 				QVERIFY(processor.takeOutboundData().isEmpty());
+				QCOMPARE(negotiatedStates, QList<bool>({true, false}));
+			}
+
+			static void automaticProtectionAcceptsFinalNawsStateBeforeSuppressing()
+			{
+				TelnetProcessor            processor;
+				QList<bool>                negotiatedStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNawsNegotiatedChanged = [&negotiatedStates](const bool negotiated)
+				{ negotiatedStates.append(negotiated); };
+				processor.setCallbacks(callbacks);
+				processor.setNawsEnabled(true);
+				processor.setWindowSize(80, 24);
+				processor.setAutomaticRenegotiationLoopProtection(true);
+
+				for (int attempt = 0; attempt < 10; ++attempt)
+				{
+					const bool          enable  = attempt % 2 == 0;
+					const unsigned char command = enable ? DO : DONT;
+					processor.processBytes(bytes({IAC, command, TELOPT_NAWS}));
+					if (enable)
+					{
+						QCOMPARE(processor.takeOutboundData(),
+						         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18,
+						                IAC, SE}));
+					}
+					else
+					{
+						QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
+					}
+				}
+
+				QCOMPARE(negotiatedStates.size(), 10);
+				QVERIFY(!negotiatedStates.constLast());
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				QCOMPARE(negotiatedStates.size(), 10);
+				QVERIFY(!processor.isNawsNegotiated());
 			}
 
 			static void terminalTypeRequestReturnsConfiguredName()
@@ -576,6 +649,7 @@ namespace
 				    &doNawsSendsUpdatedWindowSizeAfterNegotiation,
 				    &nawsNegotiationStateClearsOnDontWontAndReset,
 				    &disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState,
+				    &automaticProtectionAcceptsFinalNawsStateBeforeSuppressing,
 				    &terminalTypeRequestReturnsConfiguredName,
 				    &charsetRequestAcceptedAndRejected,
 				    &startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill,
@@ -583,7 +657,7 @@ namespace
 				    &startTlsRejectionIsReported,
 				    &gaCanConvertToNewline,
 				};
-				static_assert(testFunctions.size() == 25);
+				static_assert(testFunctions.size() == 26);
 			}
 	};
 

@@ -10,6 +10,7 @@
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
 #include "MiniWindow.h"
+#include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
@@ -34,6 +35,103 @@ namespace
 			Q_OBJECT
 
 		private slots:
+			static void synchronizedLayoutPreservesOverflowStateForBothLayers()
+			{
+				WorldRuntime runtime;
+				WorldView    view;
+				view.resize(420, 300);
+				view.setRuntime(&runtime);
+				view.show();
+				QCoreApplication::processEvents();
+
+				const QSize clientSize(view.outputClientWidth(), view.outputClientHeight());
+				QVERIFY(clientSize.width() > 120);
+				const int dockWidth = (clientSize.width() * 2) / 3;
+				for (const auto &[name, flags] : {
+				         std::pair{QStringLiteral("overlay-a"),  0                        },
+                         std::pair{QStringLiteral("overlay-b"),  0                        },
+				         std::pair{QStringLiteral("underlay-a"), kMiniWindowDrawUnderneath},
+				         std::pair{QStringLiteral("underlay-b"), kMiniWindowDrawUnderneath}
+                })
+				{
+					QCOMPARE(runtime.windowCreate(name, 0, 0, dockWidth, 40, 5, flags, QColor(Qt::black),
+					                              QString()),
+					         eOK);
+					QCOMPARE(runtime.windowShow(name, true), eOK);
+				}
+
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
+				QVERIFY(!runtime.miniWindow(QStringLiteral("overlay-a"))->temporarilyHide);
+				QVERIFY(runtime.miniWindow(QStringLiteral("overlay-b"))->temporarilyHide);
+				QVERIFY(!runtime.miniWindow(QStringLiteral("underlay-a"))->temporarilyHide);
+				QVERIFY(runtime.miniWindow(QStringLiteral("underlay-b"))->temporarilyHide);
+
+				const quint64 synchronizedRevision =
+				    WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime);
+				const WorldRuntime::MiniWindowGeometryConstraintSnapshot geometry =
+				    runtime.miniWindowGeometryConstraintSnapshot();
+				QCOMPARE(geometry.displayClientWidth, clientSize.width());
+				QCOMPARE(geometry.displayClientHeight, clientSize.height());
+				QCOMPARE(WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime),
+				         synchronizedRevision);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
+				QCOMPARE(WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime),
+				         synchronizedRevision);
+				QCOMPARE(runtime.windowSetPixel(QStringLiteral("overlay-a"), 0, 0, 0), eOK);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
+				QCOMPARE(WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime),
+				         synchronizedRevision);
+			}
+
+			static void nestedSnapshotSynchronizesPendingLayoutMutation()
+			{
+				WorldRuntime runtime;
+				WorldView    view;
+				view.resize(420, 300);
+				view.setRuntime(&runtime);
+				view.show();
+				QCoreApplication::processEvents();
+
+				const QString windowName = QStringLiteral("batched-layout");
+				QCOMPARE(runtime.windowCreate(windowName, 10, 10, 80, 60, 0, kMiniWindowAbsoluteLocation,
+				                              QColor(Qt::black), QString()),
+				         eOK);
+				QCOMPARE(runtime.windowShow(windowName, true), eOK);
+				const QSize clientSize(view.outputClientWidth(), view.outputClientHeight());
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
+				const quint64 mutationBefore =
+				    WorldRuntimeTestAccess::miniWindowLayoutMutationRevision(runtime);
+				const quint64 presentationBefore =
+				    WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime);
+				QSignalSpy changedSpy(&runtime, &WorldRuntime::miniWindowsChanged);
+
+				runtime.beginMiniWindowMutationBatch();
+				QCOMPARE(runtime.windowResize(windowName, 140, 60, 0), eOK);
+				QCOMPARE(changedSpy.size(), 0);
+				QVERIFY(WorldRuntimeTestAccess::miniWindowLayoutMutationRevision(runtime) > mutationBefore);
+				QCOMPARE(WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime),
+				         presentationBefore);
+
+				const QSharedPointer<const LuaCallbackSnapshot> nestedSnapshot =
+				    runtime.luaCallbackSnapshotForBridgedCall();
+				QVERIFY(nestedSnapshot);
+				const auto semanticWindow = nestedSnapshot->miniWindowsByWindow.value(windowName);
+				QVERIFY(semanticWindow);
+				const auto presentation = nestedSnapshot->miniWindowPresentationByRuntimeId.value(
+				    static_cast<quint32>(semanticWindow->runtimeId));
+				QVERIFY(presentation);
+				QCOMPARE(presentation->rect.width(), 140);
+				QVERIFY(WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime) >
+				        presentationBefore);
+				const quint64 nestedPresentationRevision =
+				    WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime);
+
+				runtime.endMiniWindowMutationBatch();
+				QCOMPARE(changedSpy.size(), 1);
+				QCOMPARE(WorldRuntimeTestAccess::miniWindowLayoutPresentationRevision(runtime),
+				         nestedPresentationRevision);
+			}
+
 			static void hiddenAbsoluteBackingRetainsCanonicalGeometry()
 			{
 				WorldRuntime runtime;
@@ -145,9 +243,8 @@ end
 					QCOMPARE(runtime.windowShow(anchorId, true), eOK);
 				}
 
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);
 				QVERIFY(!window->rect.isEmpty());
@@ -274,9 +371,8 @@ end
 					QCOMPARE(runtime.windowShow(anchorId, true), eOK);
 				}
 
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);
 				QVERIFY(!window->rect.isEmpty());
@@ -307,8 +403,8 @@ end
 				                ->hotspots.value(QStringLiteral("drag"))
 				                .moveCallback.isEmpty());
 
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 				QCOMPARE(window->flags, destinationFlags);
 				const int capturedWidth =
 				    qRound(50.0 * static_cast<double>(clientWidth) / static_cast<double>(clientWidth + 100));
@@ -391,8 +487,8 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);
 				const double activeScale =
@@ -497,9 +593,8 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);
 
@@ -590,11 +685,10 @@ end
 				MiniWindow *window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				MiniWindowUtils::setPixel(*window, 1, 1, MiniWindowUtils::colorToRef(QColor(Qt::red)));
-				const qint64                backingCacheKey = window->backingSurface().cacheKey();
+				const qint64 backingCacheKey = window->backingSurface().cacheKey();
 
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 				QCOMPARE(window->rect, QRect(windowLocation, windowSize));
 
 				auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -686,11 +780,10 @@ end
 				MiniWindow *window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				MiniWindowUtils::setPixel(*window, 1, 1, MiniWindowUtils::colorToRef(QColor(Qt::red)));
-				const QDateTime             installedAt = window->installedAt;
+				const QDateTime installedAt = window->installedAt;
 
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
-				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, QSize(clientWidth, clientHeight),
+				                                                    view.size());
 
 				auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 				QVERIFY(nativeCanvas);
@@ -819,10 +912,8 @@ end
 				QCOMPARE(runtime.windowShow(capturedWindowId, true), eOK);
 				QCOMPARE(runtime.windowShow(distinctWindowId, true), eOK);
 
-				const QSize                 clientSize(clientWidth, clientHeight);
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(clientSize, view.size(), true, &windows);
-				runtime.layoutMiniWindows(clientSize, view.size(), false, &windows);
+				const QSize clientSize(clientWidth, clientHeight);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
 				const MiniWindow *capturedWindow = runtime.miniWindow(capturedWindowId);
 				QVERIFY(capturedWindow);
 
@@ -965,10 +1056,8 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				const QSize                 clientSize(view.outputClientWidth(), view.outputClientHeight());
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(clientSize, view.size(), true, &windows);
-				runtime.layoutMiniWindows(clientSize, view.size(), false, &windows);
+				const QSize clientSize(view.outputClientWidth(), view.outputClientHeight());
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);
 				auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -1026,8 +1115,7 @@ end
 					         eOK);
 					QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-					const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-					runtime.layoutMiniWindows(clientSize, view.size(), false, &windows);
+					WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, view.size());
 					const MiniWindow *window = runtime.miniWindow(windowId);
 					QVERIFY(window);
 					QCOMPARE(window->location, location);
@@ -1062,8 +1150,8 @@ end
 					         eOK);
 					QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-					const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-					runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
+					WorldRuntimeTestAccess::synchronizeMiniWindowLayout(
+					    runtime, QSize(clientWidth, clientHeight), view.size());
 					const MiniWindow *window = runtime.miniWindow(windowId);
 					QVERIFY(window);
 					QCOMPARE(window->location, location);
@@ -1071,8 +1159,64 @@ end
 					QCOMPARE(window->rect, QRect(location, QSize(windowWidth, windowHeight)));
 					QVERIFY(window->rect.right() >= clientWidth);
 					QVERIFY(window->rect.bottom() >= clientHeight);
+
+					view.synchronizeMiniWindowLayoutPolicyChange();
+					const int unscaledTextWidth = view.outputTextRectangle().width();
+					app.setGlobalOptionInt(QStringLiteral("DisableWindowScaler"), 0);
+					QCoreApplication::processEvents();
+					QVERIFY(window->rect.right() < clientWidth);
+					QVERIFY(window->rect.bottom() < clientHeight);
+					QVERIFY(view.outputTextRectangle().width() < unscaledTextWidth);
+
+					app.setGlobalOptionInt(QStringLiteral("DisableWindowScaler"), 1);
+					QCoreApplication::processEvents();
+					QCOMPARE(window->rect, QRect(location, QSize(windowWidth, windowHeight)));
+					QCOMPARE(view.outputTextRectangle().width(), unscaledTextWidth);
 				}
 				QVERIFY(!AppController::instance());
+			}
+
+			/** @brief Verifies maximize and restore transitions synchronize the scaler policy immediately. */
+			static void windowStateTransitionsSynchronizeScalerPolicy()
+			{
+				QVERIFY(!AppController::instance());
+
+				WorldRuntime     runtime;
+				WorldChildWindow window(QStringLiteral("Layout policy"));
+				window.resize(800, 600);
+				window.setRuntime(&runtime);
+				window.show();
+				QCoreApplication::processEvents();
+				WorldView *const view = window.view();
+				QVERIFY(view);
+				const QSize clientSize(view->outputClientWidth(), view->outputClientHeight());
+				QVERIFY(clientSize.width() > 240);
+				QVERIFY(clientSize.height() > 240);
+
+				const QString   windowId = QStringLiteral("window-state-overflow");
+				const QPoint    location(clientSize.width() - 60, clientSize.height() - 40);
+				constexpr QSize logicalSize(120, 80);
+				QCOMPARE(runtime.windowCreate(windowId, location.x(), location.y(), logicalSize.width(),
+				                              logicalSize.height(), 0, kMiniWindowAbsoluteLocation,
+				                              QColor(Qt::black), QString()),
+				         eOK);
+				QCOMPARE(runtime.windowShow(windowId, true), eOK);
+				QCoreApplication::processEvents();
+				const MiniWindow *miniWindow = runtime.miniWindow(windowId);
+				QVERIFY(miniWindow);
+				const QRect scaledRect = miniWindow->rect;
+				QVERIFY(scaledRect != QRect(location, logicalSize));
+
+				window.showMaximized();
+				QCoreApplication::processEvents();
+				QVERIFY(window.isMaximized());
+				QCOMPARE(miniWindow->rect, QRect(location, logicalSize));
+
+				window.showNormal();
+				QCoreApplication::processEvents();
+				QVERIFY(!window.isMaximized());
+				QCOMPARE(miniWindow->rect, scaledRect);
+				window.setRuntime(nullptr);
 			}
 
 			static void absoluteExtentArithmeticSaturatesBeforeScaling()
@@ -1091,9 +1235,8 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				constexpr QSize             clientSize(640, 480);
-				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
-				runtime.layoutMiniWindows(clientSize, clientSize, false, &windows);
+				constexpr QSize clientSize(640, 480);
+				WorldRuntimeTestAccess::synchronizeMiniWindowLayout(runtime, clientSize, clientSize);
 
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);

@@ -219,6 +219,7 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	m_runtime               = worldRuntime;
 	m_primaryRuntimeBinding = primary;
 	m_autosaveInFlight      = false;
+	emit runtimeBindingChanged();
 	refreshAutosaveTimer();
 	if (!m_view)
 		return;
@@ -305,10 +306,10 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		if (primary)
 		{
 			connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
-			        [this]
+			        [this](const MiniWindowChangeEffects effects)
 			        {
 				        if (m_view)
-					        m_view->onMiniWindowsChanged();
+					        m_view->onMiniWindowsChanged(effects);
 			        });
 		}
 		connect(m_view, &WorldView::hyperlinkHighlighted, this,
@@ -709,7 +710,10 @@ int WorldChildWindow::getInfoWindowShowCommand() const
 
 void WorldChildWindow::setInfoWindowShowCommand(const int command)
 {
+	if (m_infoWindowShowCommand == command)
+		return;
 	m_infoWindowShowCommand = command;
+	emit infoWindowShowCommandChanged();
 }
 
 void WorldChildWindow::handleAutosaveTick()
@@ -878,16 +882,16 @@ bool WorldChildWindow::event(QEvent *event)
 		if (event->type() == QEvent::WindowStateChange)
 		{
 			if (isMinimized())
-				m_infoWindowShowCommand = kWindowMinimize;
+				setInfoWindowShowCommand(kWindowMinimize);
 			else if (isMaximized())
-				m_infoWindowShowCommand = kWindowShowMaximized;
+				setInfoWindowShowCommand(kWindowShowMaximized);
 			else if (const auto *stateChange = dynamic_cast<QWindowStateChangeEvent *>(event);
 			         stateChange && (stateChange->oldState() & (Qt::WindowMinimized | Qt::WindowMaximized)))
-				m_infoWindowShowCommand = kWindowRestore;
+				setInfoWindowShowCommand(kWindowRestore);
 			else
-				m_infoWindowShowCommand = kWindowShowNormal;
+				setInfoWindowShowCommand(kWindowShowNormal);
 			if (m_view)
-				m_view->refreshMiniWindows(true);
+				m_view->synchronizeMiniWindowLayoutPolicyChange(true);
 			if (m_primaryRuntimeBinding)
 				runtime->notifyWorldOutputResized();
 		}

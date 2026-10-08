@@ -2718,6 +2718,8 @@ int WorldCommandProcessor::discardQueuedCommands()
 {
 	const int count                 = QMudCommandQueue::discardAll(m_queuedCommands);
 	m_triggerPriorityQueuedCommands = 0;
+	if (count > 0)
+		emit queuedCommandsChanged();
 	if (m_runtime)
 		m_runtime->setQueuedCommandCount(0);
 	updateQueuedCommandsStatusLine();
@@ -3260,18 +3262,21 @@ void WorldCommandProcessor::cancelActiveEnteredCommand()
 void WorldCommandProcessor::onIncomingLineReceived(const QString &line)
 {
 	onIncomingStyledLineReceived(line, QVector<WorldRuntime::StyleSpan>(),
-	                             m_runtime ? m_runtime->m_incomingPartialLineRevision : 0);
+	                             m_runtime ? m_runtime->m_incomingPartialLineRevision : 0,
+	                             m_runtime && m_runtime->isConnected() && m_runtime->isNawsNegotiated());
 }
 
 void WorldCommandProcessor::onIncomingStyledLineReceived(const QString                          &line,
                                                          const QVector<WorldRuntime::StyleSpan> &spans,
-                                                         const quint64 partialLineRevision)
+                                                         const quint64 partialLineRevision,
+                                                         const bool    serverSideWrapActive)
 {
 	PendingIncomingStreamItem request;
-	request.line                = line;
-	request.spans               = spans;
-	request.partialLineRevision = partialLineRevision;
-	request.presentationBatch   = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
+	request.line                 = line;
+	request.spans                = spans;
+	request.partialLineRevision  = partialLineRevision;
+	request.serverSideWrapActive = serverSideWrapActive;
+	request.presentationBatch    = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
 	adoptIncomingStreamBacklogPresentationBatch(request);
 	request.observation =
 	    m_runtime ? m_runtime->captureIncomingLineLuaObservation() : LuaCallbackIncomingLineObservation{};
@@ -3330,7 +3335,6 @@ void WorldCommandProcessor::startIncomingLine(
 		attrs                          = &m_runtime->worldAttributes();
 		const bool wrapEnabled         = isEnabled(attrs->value(QStringLiteral("wrap")));
 		const bool autoWrapWindow      = isEnabled(attrs->value(QStringLiteral("auto_wrap_window_width")));
-		const bool nawsNegotiated      = m_runtime->isConnected() && m_runtime->isNawsNegotiated();
 		const int  worldWrapColumn     = attrs->value(QStringLiteral("wrap_column")).toInt();
 		int        effectiveWrapColumn = worldWrapColumn;
 		if (autoWrapWindow)
@@ -3343,7 +3347,7 @@ void WorldCommandProcessor::startIncomingLine(
 				effectiveWrapColumn = calculatedColumns;
 		}
 		wrapColumn  = effectiveWrapColumn;
-		runtimeWrap = wrapEnabled && !nawsNegotiated && wrapColumn > 0;
+		runtimeWrap = wrapEnabled && !request.serverSideWrapActive && wrapColumn > 0;
 		indentParas = !(
 		    attrs->value(QStringLiteral("indent_paras")) == QStringLiteral("0") ||
 		    attrs->value(QStringLiteral("indent_paras")).compare(QStringLiteral("n"), Qt::CaseInsensitive) ==
@@ -3384,7 +3388,7 @@ void WorldCommandProcessor::startIncomingLine(
 		m_runtime->beginIncomingLineLuaContext(line, WorldRuntime::LineOutput, normalizedSpans, true);
 	}
 	if (m_runtime)
-		m_runtime->reserveIncomingLineLuaContextInBuffer();
+		m_runtime->reserveIncomingLineLuaContextInBuffer(request.partialLineRevision);
 
 	auto operation               = QSharedPointer<PendingIncomingLineOperation>::create();
 	operation->processor         = this;
@@ -4008,7 +4012,8 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 			if (m_runtime)
 				m_runtime->activateIncomingStreamPresentationBatch(item.presentationBatch);
 			if (!m_runtime || item.partialLineRevision == m_runtime->m_incomingPartialLineRevision)
-				presentIncomingPartialLine(item.line, item.spans, item.partialLineRevision);
+				presentIncomingPartialLine(item.line, item.spans, item.partialLineRevision,
+				                           item.serverSideWrapActive);
 			return;
 		case PendingIncomingStreamItem::Kind::OrderedAction:
 		{
@@ -4139,15 +4144,17 @@ void WorldCommandProcessor::drainPendingIncomingStreamItems(
 
 void WorldCommandProcessor::onIncomingStyledLinePartialReceived(const QString                          &line,
                                                                 const QVector<WorldRuntime::StyleSpan> &spans,
-                                                                const quint64 partialLineRevision)
+                                                                const quint64 partialLineRevision,
+                                                                const bool    serverSideWrapActive)
 {
 	PendingIncomingStreamItem request;
-	request.kind                = PendingIncomingStreamItem::Kind::PartialLine;
-	request.line                = line;
-	request.spans               = spans;
-	request.partialLineRevision = partialLineRevision;
-	request.nestingPlayback     = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
-	request.presentationBatch   = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
+	request.kind                 = PendingIncomingStreamItem::Kind::PartialLine;
+	request.line                 = line;
+	request.spans                = spans;
+	request.partialLineRevision  = partialLineRevision;
+	request.serverSideWrapActive = serverSideWrapActive;
+	request.nestingPlayback   = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
+	request.presentationBatch = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
 	adoptIncomingStreamBacklogPresentationBatch(request);
 	if (m_processingInputCriticalOperation || m_processingIncomingLine || m_processingIncomingStreamAction)
 	{
@@ -4164,13 +4171,15 @@ void WorldCommandProcessor::onIncomingStyledLinePartialReceived(const QString   
 	if (m_runtime)
 		m_runtime->activateIncomingStreamPresentationBatch(request.presentationBatch);
 	if (!m_runtime || request.partialLineRevision == m_runtime->m_incomingPartialLineRevision)
-		presentIncomingPartialLine(request.line, request.spans, request.partialLineRevision);
+		presentIncomingPartialLine(request.line, request.spans, request.partialLineRevision,
+		                           request.serverSideWrapActive);
 	finishIncomingStreamBacklogPresentationBatchIfIdle();
 }
 
 void WorldCommandProcessor::presentIncomingPartialLine(const QString                          &line,
                                                        const QVector<WorldRuntime::StyleSpan> &spans,
-                                                       const quint64 partialLineRevision) const
+                                                       const quint64 partialLineRevision,
+                                                       const bool    serverSideWrapActive) const
 {
 	if (!m_view)
 		return;
@@ -4182,7 +4191,6 @@ void WorldCommandProcessor::presentIncomingPartialLine(const QString            
 		const QMap<QString, QString> &attrs       = m_runtime->worldAttributes();
 		const bool                    wrapEnabled = isEnabledValue(attrs.value(QStringLiteral("wrap")));
 		const bool autoWrapWindow  = isEnabledValue(attrs.value(QStringLiteral("auto_wrap_window_width")));
-		const bool nawsNegotiated  = m_runtime->isConnected() && m_runtime->isNawsNegotiated();
 		const int  worldWrapColumn = attrs.value(QStringLiteral("wrap_column")).toInt();
 		int        wrapColumn      = worldWrapColumn;
 		if (autoWrapWindow)
@@ -4195,7 +4203,7 @@ void WorldCommandProcessor::presentIncomingPartialLine(const QString            
 				wrapColumn = calculatedColumns;
 		}
 
-		if (wrapEnabled && !nawsNegotiated && wrapColumn > 0)
+		if (wrapEnabled && !serverSideWrapActive && wrapColumn > 0)
 		{
 			const bool indentParas = !(attrs.value(QStringLiteral("indent_paras")) == QStringLiteral("0") ||
 			                           attrs.value(QStringLiteral("indent_paras"))
@@ -6431,8 +6439,9 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 	// cannot change what we are sending in OnPluginSent
 	if (m_pluginProcessingSent)
 		return;
+	const qsizetype queuedCommandCountBefore = m_queuedCommands.size();
 
-	bool bEcho = echo;
+	bool            bEcho = echo;
 	if (m_suppressInputLog)
 		logIt = false;
 
@@ -6509,6 +6518,8 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 		updateQueuedCommandsStatusLine();
 	if (m_runtime)
 		m_runtime->setQueuedCommandCount(safeQSizeToInt(m_queuedCommands.size()));
+	if (m_queuedCommands.size() != queuedCommandCountBefore)
+		emit queuedCommandsChanged();
 }
 
 void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, const bool logIt,
@@ -7241,7 +7252,9 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 	const int         queuedBefore    = safeQSizeToInt(m_queuedCommands.size());
 	const QStringList batch           = QMudCommandQueue::takeDispatchBatch(m_queuedCommands, flushAll);
 	const int         removedFromHead = queuedBefore - safeQSizeToInt(m_queuedCommands.size());
-	m_triggerPriorityQueuedCommands   = qMax(0, m_triggerPriorityQueuedCommands - removedFromHead);
+	if (removedFromHead > 0)
+		emit queuedCommandsChanged();
+	m_triggerPriorityQueuedCommands = qMax(0, m_triggerPriorityQueuedCommands - removedFromHead);
 	for (const QString &queued : batch)
 	{
 		const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(queued);

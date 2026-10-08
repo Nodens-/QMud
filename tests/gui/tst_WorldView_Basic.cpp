@@ -2529,6 +2529,55 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void nativeOutputSelectionBindsBeforeIncomingLineCallbackSnapshot()
+		{
+			resetTestState();
+
+			WorldRuntime *const   runtime = runtimeForTest();
+			WorldView             view;
+			WorldCommandProcessor processor;
+			setTestRuntime(view, runtime);
+			processor.setView(&view);
+			processor.setRuntime(runtime);
+			runtime->setCommandProcessor(&processor);
+			const auto resetProcessor = qScopeGuard(
+			    [runtime, &processor]
+			    {
+				    runtime->setCommandProcessor(nullptr);
+				    processor.setRuntime(nullptr);
+			    });
+			QObject::connect(runtime, &WorldRuntime::incomingStyledLineReceived, &processor,
+			                 &WorldCommandProcessor::onIncomingStyledLineReceived);
+			QObject::connect(runtime, &WorldRuntime::incomingStyledLinePartialReceived, &processor,
+			                 &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+
+			runtime->receiveRawData(QByteArrayLiteral("target partial"));
+			QTRY_COMPARE(view.outputLines().constLast(), QStringLiteral("target partial"));
+			view.setOutputSelection(1, 1, 1, 7);
+			QCOMPARE(view.m_nativeOutputSelection.anchorSource.kind,
+			         WorldView::NativeOutputSourceFragmentKind::PartialOutput);
+
+			QSharedPointer<const LuaCallbackSnapshot> reservationSnapshot;
+			QObject::connect(
+			    runtime, &WorldRuntime::partialOutputPresentationReserved, &view,
+			    [runtime, &reservationSnapshot]
+			    { reservationSnapshot = runtime->luaCallbackSnapshotForBridgedCall(); },
+			    Qt::DirectConnection);
+			runtime->receiveRawData(QByteArrayLiteral("\n"));
+
+			QTRY_VERIFY(reservationSnapshot);
+			QVERIFY(reservationSnapshot->commandUiPresentation);
+			QCOMPARE(reservationSnapshot->commandUiPresentation->state.outputSelectionStartLine, 1);
+			QCOMPARE(reservationSnapshot->commandUiPresentation->state.outputSelectionEndLine, 1);
+			QCOMPARE(reservationSnapshot->commandUiPresentation->state.outputSelectionStartColumn, 1);
+			QCOMPARE(reservationSnapshot->commandUiPresentation->state.outputSelectionEndColumn, 7);
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("target"));
+			QCOMPARE(view.m_nativeOutputSelection.anchorSource.kind,
+			         WorldView::NativeOutputSourceFragmentKind::RuntimeLine);
+			Q_UNUSED(resetProcessor);
+			resetTestState();
+		}
+
 		void staleIncomingPartialRevisionCannotReplaceCompletedPresentation()
 		{
 			resetTestState();
@@ -9732,6 +9781,37 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		/** @brief Verifies queued miniwindow effects retain layout work while visual-only work skips it. */
+		void miniWindowPresentationEffectsAccumulateAndGateLayoutWork()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 420);
+			view.show();
+			setTestRuntime(view, runtimeForTest());
+			QCoreApplication::processEvents();
+
+			view.m_wrapMarginReservationCacheKey.reset();
+			view.onMiniWindowsChanged(MiniWindowChangeEffect::Visual);
+			QVERIFY(view.m_wrapMarginUpdateQueued);
+			QVERIFY(view.m_pendingMiniWindowPresentationEffects.testFlag(MiniWindowChangeEffect::Visual));
+			QCoreApplication::processEvents();
+			QVERIFY(!view.m_wrapMarginUpdateQueued);
+			QVERIFY(!view.m_wrapMarginReservationCacheKey);
+
+			view.onMiniWindowsChanged(MiniWindowChangeEffect::Visual);
+			view.onMiniWindowsChanged(MiniWindowChangeEffect::Layout);
+			QVERIFY(view.m_pendingMiniWindowPresentationEffects.testFlag(MiniWindowChangeEffect::Visual));
+			QVERIFY(view.m_pendingMiniWindowPresentationEffects.testFlag(MiniWindowChangeEffect::Layout));
+			QCoreApplication::processEvents();
+			QVERIFY(!view.m_wrapMarginUpdateQueued);
+			QVERIFY(view.m_pendingMiniWindowPresentationEffects == MiniWindowChangeEffects{});
+			QVERIFY(view.m_wrapMarginReservationCacheKey);
+
+			resetTestState();
+		}
+
 		void textRectangleOutsideFillDoesNotCoverUnderlayMiniWindows()
 		{
 			resetTestState();
@@ -9739,7 +9819,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			g_textRectangle.left              = 220;
@@ -10167,7 +10247,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -11421,7 +11501,7 @@ class tst_WorldView_Basic : public QObject
 				span.length     = boundedSizeToInt(lineText.size());
 				span.actionType = WorldRuntime::ActionHyperlink;
 				span.action     = href;
-				runtimeOutputForTest(view).appendOutputTextStyled(lineText, {span}, true);
+				runtimeForTest()->addLine(lineText, WorldRuntime::LineOutput, {span}, true);
 			}
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -11441,7 +11521,7 @@ class tst_WorldView_Basic : public QObject
 			tailSpan.length     = boundedSizeToInt(tailText.size());
 			tailSpan.actionType = WorldRuntime::ActionHyperlink;
 			tailSpan.action     = QStringLiteral("https://example.org/trim-geometry/tail");
-			runtimeOutputForTest(view).appendOutputTextStyled(tailText, {tailSpan}, true);
+			runtimeForTest()->addLine(tailText, WorldRuntime::LineOutput, {tailSpan}, true);
 
 			scrollBar->setValue(0);
 			nativeCanvas->update();
@@ -14648,7 +14728,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -14724,7 +14804,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -14753,7 +14833,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -14818,7 +14898,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -14861,7 +14941,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			setTestRuntimeObserver(view, runtimeForTest());
+			setTestRuntime(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -15017,6 +15097,7 @@ end
 			                                   QStringLiteral("mark_deleted_hotspot"), {}, {}, {}, {}, {}, 0,
 			                                   0, {}),
 			         eOK);
+			QCoreApplication::processEvents();
 			window.mouseOverHotspot = QStringLiteral("earlier");
 			view.m_hoverWindowName  = window.name;
 

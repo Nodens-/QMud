@@ -283,10 +283,10 @@ namespace
 			{
 			}
 
-			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor,
-			                                                  QString  *errorMessage) override
+			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
+			                                                  QString *errorMessage) override
 			{
-				return m_runtime.adoptConnectedSocketDescriptor(descriptor, errorMessage);
+				return m_runtime.adoptConnectedSocketDescriptor(descriptor, nawsNegotiated, errorMessage);
 			}
 
 			void markReloadReattachConnectActionsSuppressed() override
@@ -2367,6 +2367,7 @@ AppController::AppController(QObject *parent) : QObject(parent)
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
+	refreshWorldViewGlobalSettings();
 	if (QCoreApplication *application = QCoreApplication::instance())
 		application->installEventFilter(this);
 }
@@ -3555,7 +3556,8 @@ void AppController::refreshWorldViewGlobalSettings()
 	updated.smootherScrolling         = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
 	updated.allTypingToCommandWindow =
 	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
-	updated.bleedBackground = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+	updated.bleedBackground         = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+	updated.disableMiniWindowScaler = getGlobalOption(QStringLiteral("DisableWindowScaler")).toInt() != 0;
 	updated.splitViewDividerWidth =
 	    qBound(0, getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt(), 200);
 	if (updated == m_worldViewGlobalSettings)
@@ -8658,6 +8660,8 @@ void AppController::loadGlobalsFromDatabase()
 		m_luaScript = "-- Put Lua initialization code (eg. sandbox) here.\r\n"
 		              "-- Example sandbox can be found in the docs directory.\r\n";
 	} // end of needing to put something in sandbox
+
+	refreshWorldViewGlobalSettings();
 } // end of AppController::loadGlobalsFromDatabase
 
 int AppController::dbExecute(const QString &sql, const bool showError) const
@@ -14901,6 +14905,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 		const bool connectedNow  = ctx.runtime->isConnected();
 		const bool connectingNow = ctx.runtime->isConnecting();
 		world.socketDescriptor   = ctx.runtime->nativeSocketDescriptor();
+		world.nawsNegotiated     = connectedNow && ctx.runtime->isNawsNegotiated();
 		const bool tlsEnabled =
 		    isEnabledFlag(ctx.runtime->worldAttributes().value(QStringLiteral("tls_encryption")));
 		if (!world.mccpDisableAttempted)

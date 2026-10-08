@@ -82,6 +82,16 @@ class WorldChildWindow : public QMdiSubWindow
 		 */
 		void                           setInfoWindowShowCommand(int command);
 
+	signals:
+		/**
+		 * @brief Emitted after the runtime pointer or primary/observer role changes.
+		 */
+		void runtimeBindingChanged();
+		/**
+		 * @brief Emitted after the callback-visible ShowWindow command changes.
+		 */
+		void infoWindowShowCommandChanged();
+
 	protected:
 		/**
 		 * @brief Handles close semantics including autosave/query behavior.

@@ -38,6 +38,7 @@
 #include <QWidget>
 
 #include <memory>
+#include <optional>
 #include <span>
 
 class QPlainTextEdit;
@@ -228,6 +229,12 @@ class WorldView : public QWidget
 		 * @brief Clears pending partial output line state.
 		 */
 		void clearPartialOutput();
+		/**
+		 * @brief Rebinds partial-output anchors when the partial acquires a runtime-line identity.
+		 * @param partialLineRevision Stable identity of the reserved partial line.
+		 * @param runtimeLineNumber Stable reserved runtime line number.
+		 */
+		void reservePartialOutputAsRuntimeLine(quint64 partialLineRevision, qint64 runtimeLineNumber) const;
 		/**
 		 * @brief Replaces the current partial-output identity with its completed runtime line.
 		 * @param partialLineRevision Stable identity of the completed partial line.
@@ -434,9 +441,16 @@ class WorldView : public QWidget
 		 */
 		void                          refreshMiniWindows(bool forceFullRepaint = false) const;
 		/**
-		 * @brief Notifies the view that miniwindow layout-affecting state changed.
+		 * @brief Notifies the view that miniwindow presentation state changed.
+		 * @param effects Presentation work required by the accepted mutations.
 		 */
-		void                          onMiniWindowsChanged();
+		void   onMiniWindowsChanged(MiniWindowChangeEffects effects = MiniWindowChangeEffect::Visual |
+		                                                              MiniWindowChangeEffect::Layout);
+		/**
+		 * @brief Synchronizes miniwindow presentation after a non-window layout policy changes.
+		 * @param forceFullRepaint Repaint the complete miniwindow layers when `true`.
+		 */
+		void   synchronizeMiniWindowLayoutPolicyChange(bool forceFullRepaint = false);
 		/**
 		 * @brief Converts miniwindow-local point to global coordinates.
 		 * @param window Miniwindow whose local coordinates are used.
@@ -444,7 +458,7 @@ class WorldView : public QWidget
 		 * @param y Local y coordinate.
 		 * @return Corresponding global screen coordinate.
 		 */
-		QPoint                        miniWindowGlobalPosition(const MiniWindow *window, int x, int y) const;
+		QPoint miniWindowGlobalPosition(const MiniWindow *window, int x, int y) const;
 		/**
 		 * @brief Parses MXP send/hint payloads into context-menu action entries.
 		 * @param rawHref Raw anchor href payload.
@@ -557,6 +571,11 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] bool        isMiniWindowDragCaptureActive() const;
 		/**
+		 * @brief Returns the cached application-wide miniwindow scaler policy.
+		 * @return `true` when absolute miniwindow scaling is disabled.
+		 */
+		[[nodiscard]] bool        isMiniWindowScalerDisabled() const;
+		/**
 		 * @brief Returns the miniwindow whose drag callback currently receives constrained geometry APIs.
 		 * @return Drag-constraint target name, or an empty string outside a drag callback dispatch.
 		 */
@@ -618,6 +637,10 @@ class WorldView : public QWidget
 		 * @brief Emitted when output scroll position changes.
 		 */
 		void outputScrollChanged();
+		/**
+		 * @brief Reports a change to callback-visible command or view presentation state.
+		 */
+		void callbackCommandUiPresentationChanged();
 		/**
 		 * @brief Emitted when frozen state toggles.
 		 * @param frozen New frozen state.
@@ -853,7 +876,17 @@ class WorldView : public QWidget
 		/**
 		 * @brief Recomputes output wrap margin.
 		 */
-		void                  updateWrapMargin() const;
+		void                  updateWrapMargin();
+		/**
+		 * @brief Synchronizes miniwindow layout state required by callback-visible output geometry.
+		 */
+		void                  synchronizeCallbackMiniWindowLayout();
+		/**
+		 * @brief Recomputes and caches the right-side miniwindow reservation when its inputs changed.
+		 * @param effectiveRect Current unreserved output text rectangle.
+		 * @return `true` when the cached reservation changed.
+		 */
+		bool                  synchronizeWrapMarginReservation(const QRect &effectiveRect);
 		/**
 		 * @brief Recomputes input wrapping mode/width.
 		 */
@@ -949,6 +982,11 @@ class WorldView : public QWidget
 		 * @return Effective output font.
 		 */
 		[[nodiscard]] QFont outputFont() const;
+		/**
+		 * @brief Returns the terminal dimensions represented by the effective output text rectangle.
+		 * @return NAWS columns and rows, or an empty size when output geometry is not measurable.
+		 */
+		[[nodiscard]] QSize nawsWindowSize() const;
 		/**
 		 * @brief Appends output text with internal routing flags.
 		 * @param text Text payload.
@@ -1083,6 +1121,10 @@ class WorldView : public QWidget
 		 * @brief Disconnects every shared runtime-presentation subscription.
 		 */
 		void                     disconnectRuntimePresentation();
+		/**
+		 * @brief Cancels queued miniwindow presentation work belonging to the previous view mode or runtime.
+		 */
+		void                     resetMiniWindowPresentationUpdateState();
 		/**
 		 * @brief Restores the current shared partial presentation after attach or unfreeze.
 		 */
@@ -1227,6 +1269,10 @@ class WorldView : public QWidget
 		 * @brief Applies only output wrapping presentation from the bound runtime.
 		 */
 		void applyOutputWrapRuntimeSettings();
+		/**
+		 * @brief Applies presentation consequences of an effective NAWS negotiation transition.
+		 */
+		void applyNawsNegotiationPresentation();
 		/**
 		 * @brief Applies only the input palette settings from the bound runtime.
 		 */
@@ -1913,6 +1959,25 @@ class WorldView : public QWidget
 				int              originalIndex{-1};
 		};
 		/**
+		 * @brief Complete identity of one cached right-side miniwindow reservation result.
+		 */
+		struct WrapMarginReservationCacheKey
+		{
+				QRect              effectiveRect;
+				QSize              clientSize;
+				QSize              ownerSize;
+				quint64            layoutRevision{0};
+				bool               ownsRuntimeLayout{false};
+				bool               textRectangleActive{false};
+
+				/**
+				 * @brief Compares every input that can affect the cached reservation.
+				 * @param other Cache key to compare.
+				 * @return `true` when both keys describe the same reservation inputs.
+				 */
+				[[nodiscard]] bool operator==(const WrapMarginReservationCacheKey &other) const = default;
+		};
+		/**
 		 * @brief Captures slot topology and exact layouts that may survive a structural render-cache delta.
 		 * @return Slots keyed by stable runtime-line identity.
 		 */
@@ -1980,14 +2045,17 @@ class WorldView : public QWidget
 				QVector<int>             m_lengthFenwick;
 				QVector<qreal>           m_sumFenwick;
 		};
-		[[nodiscard]] qreal                          nativeLayoutCumulativeHeightAt(int index) const;
-		[[nodiscard]] int                            nativeLayoutLineAtY(qreal y) const;
-		[[nodiscard]] const QTextLayout             *nativeLayoutForLine(int index) const;
+		[[nodiscard]] qreal              nativeLayoutCumulativeHeightAt(int index) const;
+		[[nodiscard]] int                nativeLayoutLineAtY(qreal y) const;
+		[[nodiscard]] const QTextLayout *nativeLayoutForLine(int index) const;
 		/**
 		 * @brief Builds native-render lines from runtime/standalone line state.
+		 * @param reconcileDuringRuntimeBatch `true` to reconcile already-published runtime mutations while
+		 * callback-visible state is captured inside an active presentation batch.
 		 * @return Logical lines with merged soft-returns and style spans.
 		 */
-		[[nodiscard]] const NativeOutputRenderLines &nativeOutputRenderLines() const;
+		[[nodiscard]] const NativeOutputRenderLines      &
+        nativeOutputRenderLines(bool reconcileDuringRuntimeBatch = false) const;
 		/**
 		 * @brief Rebuilds native render-line cache from provided runtime entries.
 		 * @param lines Source line entries.
@@ -2038,6 +2106,19 @@ class WorldView : public QWidget
 		 * @param followTail `true` to keep the live output pane at the tail.
 		 */
 		void               requestNativeRuntimeOutputPresentationSync(bool allowLayoutBuild, bool followTail);
+		/**
+		 * @brief Invalidates callback-visible selection coordinates before deferred output presentation catches up.
+		 */
+		void               invalidateCallbackOutputSelectionPresentation();
+		/**
+		 * @brief Returns whether callback-visible output selection coordinates are active.
+		 * @return `true` when native, resolved, or drag selection state exists.
+		 */
+		[[nodiscard]] bool hasActiveCallbackOutputSelection() const;
+		/**
+		 * @brief Applies pending render-model deltas needed by callback-visible selection coordinates.
+		 */
+		void               synchronizeCallbackOutputSelectionPresentation();
 		/**
 		 * @brief Returns whether the runtime tail advanced beyond the cached presentation tail.
 		 * @return `true` when the current runtime tail has not yet been presented.
@@ -2625,12 +2706,17 @@ class WorldView : public QWidget
 		 */
 		void        stopMiniWindowMouseCapture();
 		/**
+		 * @brief Clears logical miniwindow capture and every pending captured drag operation.
+		 * @return `true` when clearing capture ended an active drag layout policy.
+		 */
+		[[nodiscard]] bool    clearMiniWindowMouseCaptureState();
+		/**
 		 * @brief Routes captured miniwindow mouse events from any widget in this view window.
 		 * @param watched Object receiving the original event.
 		 * @param event Mouse event payload.
 		 * @return `true` when the captured event was consumed.
 		 */
-		bool        handleCapturedMiniWindowMouseEvent(QObject *watched, const QMouseEvent *event);
+		bool                  handleCapturedMiniWindowMouseEvent(QObject *watched, const QMouseEvent *event);
 		/**
 		 * @brief Returns hyperlink currently under global cursor, if any.
 		 * @return Hyperlink href under cursor, or empty when none.
@@ -2917,39 +3003,37 @@ class WorldView : public QWidget
 		mutable bool                                m_nativeOutputRepaintQueued{false};
 		mutable bool                                m_nativeOutputRepaintAll{false};
 		mutable QRegion                             m_nativeOutputRepaintRegion;
-		SemanticOutputRepaint                    m_pendingSemanticOutputRepaint{SemanticOutputRepaint::None};
-		int                                      m_drawCallbackCompletionsPending{0};
-		mutable NativeOutputPanePaintState       m_nativePrimaryPaintState;
-		mutable NativeOutputPanePaintState       m_nativeLivePaintState;
-		mutable NativeOutputPanePaintState       m_nativeOutputScrollBlitTargetState;
-		mutable bool                             m_nativeOutputScrollBlitPending{false};
-		mutable QRegion                          m_nativeOutputScrollBlitExposedRegion;
-		mutable QRegion                          m_nativeOutputScrollBlitBackgroundRegion;
-		mutable QRegion                          m_nativeOutputScrollBlitRepaintRegion;
-		mutable QRegion                          m_nativeOutputScrollBlitIndependentRepaintRegion;
-		quint64                                  m_miniWindowChangeSerial{0};
-		mutable bool                             m_miniWindowPaintBoundsValid{false};
-		mutable MiniWindowPaintBoundsSnapshot    m_miniWindowPaintBounds;
-		mutable QRegion                          m_pendingMiniWindowUnderlayDirtyRegion;
-		mutable QRegion                          m_pendingMiniWindowOverlayDirtyRegion;
-		mutable bool                             m_wrapMarginReservationCacheValid{false};
-		mutable QRect                            m_wrapMarginReservationRect;
-		mutable quint64                          m_wrapMarginReservationSerial{0};
-		mutable int                              m_wrapMarginReservationPixels{0};
-		QSize                                    m_lastQueuedOutputClientSize;
-		bool                                     m_lastQueuedOutputClientSizeValid{false};
-		std::shared_ptr<WorldOutputRenderModel>  m_nativeRenderModel;
-		mutable int                              m_accessibleOutputCharacterCount{-1};
-		mutable quint64                          m_accessibleOutputRevision{0};
-		mutable QString                          m_accessibleOutputText;
-		mutable bool                             m_accessibleOutputPendingTailAppend{false};
-		mutable QString                          m_accessibleOutputLastAnnouncedPartialText;
-		mutable bool                             m_accessibleOutputLiveEventsSuppressed{false};
-		mutable int                              m_accessibleOutputBaselineLineCount{-1};
-		mutable QString                          m_accessibleOutputBaselineTailText;
-		mutable QVector<int>                     m_accessibleOutputBaselineLineLengths;
-		mutable bool                             m_accessibleOutputReviewActive{false};
-		mutable AccessibleOutputReviewTargetKind m_accessibleOutputReviewTargetKind{
+		SemanticOutputRepaint                 m_pendingSemanticOutputRepaint{SemanticOutputRepaint::None};
+		int                                   m_drawCallbackCompletionsPending{0};
+		mutable NativeOutputPanePaintState    m_nativePrimaryPaintState;
+		mutable NativeOutputPanePaintState    m_nativeLivePaintState;
+		mutable NativeOutputPanePaintState    m_nativeOutputScrollBlitTargetState;
+		mutable bool                          m_nativeOutputScrollBlitPending{false};
+		mutable QRegion                       m_nativeOutputScrollBlitExposedRegion;
+		mutable QRegion                       m_nativeOutputScrollBlitBackgroundRegion;
+		mutable QRegion                       m_nativeOutputScrollBlitRepaintRegion;
+		mutable QRegion                       m_nativeOutputScrollBlitIndependentRepaintRegion;
+		mutable bool                          m_miniWindowPaintBoundsValid{false};
+		mutable MiniWindowPaintBoundsSnapshot m_miniWindowPaintBounds;
+		mutable QRegion                       m_pendingMiniWindowUnderlayDirtyRegion;
+		mutable QRegion                       m_pendingMiniWindowOverlayDirtyRegion;
+		mutable std::optional<WrapMarginReservationCacheKey> m_wrapMarginReservationCacheKey;
+		mutable int                                          m_wrapMarginReservationPixels{0};
+		QSize                                                m_lastQueuedOutputClientSize;
+		bool                                                 m_lastQueuedOutputClientSizeValid{false};
+		bool                                                 m_nawsOutputGeometryEstablished{false};
+		std::shared_ptr<WorldOutputRenderModel>              m_nativeRenderModel;
+		mutable int                                          m_accessibleOutputCharacterCount{-1};
+		mutable quint64                                      m_accessibleOutputRevision{0};
+		mutable QString                                      m_accessibleOutputText;
+		mutable bool                                         m_accessibleOutputPendingTailAppend{false};
+		mutable QString                                      m_accessibleOutputLastAnnouncedPartialText;
+		mutable bool                                         m_accessibleOutputLiveEventsSuppressed{false};
+		mutable int                                          m_accessibleOutputBaselineLineCount{-1};
+		mutable QString                                      m_accessibleOutputBaselineTailText;
+		mutable QVector<int>                                 m_accessibleOutputBaselineLineLengths;
+		mutable bool                                         m_accessibleOutputReviewActive{false};
+		mutable AccessibleOutputReviewTargetKind             m_accessibleOutputReviewTargetKind{
 		    AccessibleOutputReviewTargetKind::None};
 		mutable int                                    m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
 		mutable int                                    m_accessibleOutputReviewLastNotifiedScrollValue{-1};
@@ -3170,6 +3254,7 @@ class WorldView : public QWidget
 		bool                                    m_hasCapturedMiniWindowPressLocal{false};
 		bool                                    m_hasPendingCapturedMiniWindowDragMove{false};
 		bool                                    m_capturedMiniWindowDragMoveDrainQueued{false};
+		quint64                                 m_miniWindowCaptureGeneration{0};
 		bool                                    m_hasOutputSelection{false};
 		WrapTextBrowser                        *m_lastOutputSelectionView{nullptr};
 		int                                     m_lastSelectionStartLine{0};
@@ -3199,6 +3284,9 @@ class WorldView : public QWidget
 		mutable int                             m_autoResizeLastInputPixelOffset{0};
 		bool                                    m_worldOutputResizedQueued{false};
 		bool                                    m_wrapMarginUpdateQueued{false};
+		MiniWindowChangeEffects                 m_pendingMiniWindowPresentationEffects;
+		quint64                                 m_miniWindowPresentationUpdateGeneration{0};
+		bool                                    m_appliedMiniWindowScalerDisabled{false};
 		bool                                    m_nativeRuntimeOutputPresentationQueued{false};
 		bool                                    m_nativeRuntimeOutputPresentationNeedsLayoutSync{false};
 		bool                                    m_nativeRuntimeOutputPresentationFollowTail{false};

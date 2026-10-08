@@ -22,6 +22,7 @@
 #include <QMap>
 #include <QRect>
 #include <QSet>
+#include <QSharedPointer>
 #include <QStatusBar>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
@@ -39,6 +40,8 @@ class WorldChildWindow;
 class ActivityChildWindow;
 class TextChildWindow;
 class WorldRuntime;
+struct LuaCallbackMainWindowPresentationSnapshot;
+struct LuaCallbackUdpPresentationSnapshot;
 class QShowEvent;
 class QWidget;
 class QVBoxLayout;
@@ -542,14 +545,31 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		[[nodiscard]] QList<TextChildWindow *>       notepadWindows() const;
 		/**
+		 * @brief Returns the immutable callback-visible main-window presentation, rebuilding it when dirty.
+		 * @return Shared presentation snapshot retained by issued callbacks.
+		 */
+		[[nodiscard]] QSharedPointer<const LuaCallbackMainWindowPresentationSnapshot>
+		luaCallbackMainWindowPresentationSnapshot() const;
+		/**
+		 * @brief Returns the immutable application-wide UDP presentation, rebuilding it when dirty.
+		 * @param ownerRuntime Runtime whose local listener ownership is included.
+		 * @return Shared UDP presentation snapshot retained by issued callbacks.
+		 */
+		[[nodiscard]] QSharedPointer<const LuaCallbackUdpPresentationSnapshot>
+		     luaCallbackUdpPresentationSnapshot(const WorldRuntime *ownerRuntime) const;
+		/**
+		 * @brief Invalidates callback-visible UDP presentation after a listener mutation.
+		 */
+		void invalidateLuaCallbackUdpPresentationSnapshot() const;
+		/**
 		 * @brief Clears info bar contents.
 		 */
-		void                                         infoBarClear() const;
+		void infoBarClear() const;
 		/**
 		 * @brief Appends text to info bar.
 		 * @param text Text to append.
 		 */
-		void                                         infoBarAppend(const QString &text) const;
+		void infoBarAppend(const QString &text) const;
 		/**
 		 * @brief Sets info bar font style.
 		 * @param fontName Font family name.
@@ -705,6 +725,12 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		QList<QKeySequence>                 m_preferencesShortcuts;
 		QList<QKeySequence>                 m_selectPreviousTabShortcuts;
 		QList<QKeySequence>                 m_selectNextTabShortcuts;
+		mutable QSharedPointer<const LuaCallbackMainWindowPresentationSnapshot>
+		    m_luaCallbackMainWindowPresentationSnapshot;
+		mutable QHash<const WorldRuntime *, QSharedPointer<const LuaCallbackUdpPresentationSnapshot>>
+		             m_luaCallbackUdpPresentationSnapshots;
+		mutable bool m_luaCallbackMainWindowPresentationDirty{true};
+		mutable bool m_luaCallbackUdpPresentationDirty{true};
 
 	private slots:
 		/**
@@ -763,16 +789,26 @@ class MainWindow : public QMainWindow, public MainWindowHost
 
 	private:
 		/**
+		 * @brief Observes callback-visible identity changes for a runtime hosted by this frame.
+		 * @param runtime Runtime to observe, or `nullptr` after a window detaches.
+		 */
+		void observeLuaCallbackPresentationRuntime(const WorldRuntime *runtime);
+		/**
+		 * @brief Invalidates cached callback presentation when a runtime identity attribute changes.
+		 * @param key Changed world attribute key.
+		 */
+		void onLuaCallbackPresentationWorldAttributeChanged(const QString &key) const;
+		/**
 		 * @brief Internal UI construction and routing helpers.
 		 * @return `true` when world preferences shortcut was handled.
 		 */
-		bool                                     triggerWorldPreferencesFromShortcut();
+		bool triggerWorldPreferencesFromShortcut();
 		/**
 		 * @brief Activates adjacent MDI tab from keyboard navigation.
 		 * @param step Signed direction (`-1` for left, `+1` for right).
 		 * @return `true` when tab activation changed.
 		 */
-		bool                                     triggerAdjacentMdiTabFromShortcut(int step);
+		bool triggerAdjacentMdiTabFromShortcut(int step);
 		/**
 		 * @brief Returns effective action shortcuts after active-world accelerator precedence filtering.
 		 * @param id Stable shortcut/action identifier.

@@ -132,9 +132,9 @@ namespace
 				QVERIFY(!seenPackets.contains(compressed));
 				QCOMPARE(output, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n"));
 
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::Subnegotiation);
 				QCOMPARE(events.constFirst().offset, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n").size());
 			}
 
@@ -155,9 +155,9 @@ namespace
 				QCOMPARE(output, QByteArrayLiteral("beforeafter"));
 				QVERIFY(!processor.isCompressing());
 
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::Subnegotiation);
 				QCOMPARE(events.constFirst().option, static_cast<int>(GMCP));
 				QCOMPARE(events.constFirst().data, bytes({'a', IAC, SB, TELOPT_COMPRESS2, 'b'}));
 			}

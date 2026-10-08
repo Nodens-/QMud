@@ -225,11 +225,34 @@ class WorldRuntimeTestAccess final
 		{
 			return runtime.commitPendingIncomingPartialLineStorage(committedText);
 		}
-		static void layoutMiniWindows(WorldRuntime &runtime, const QSize &clientSize, const QSize &ownerSize,
-		                              const bool                   underneath,
-		                              const QVector<MiniWindow *> *orderedWindows = nullptr)
+		/**
+		 * @brief Synchronizes both miniwindow layout layers through the production cache boundary.
+		 * @param runtime Runtime whose miniwindows are synchronized.
+		 * @param clientSize Current output client size.
+		 * @param ownerSize Owning widget size.
+		 */
+		static void synchronizeMiniWindowLayout(WorldRuntime &runtime, const QSize &clientSize,
+		                                        const QSize &ownerSize)
 		{
-			runtime.layoutMiniWindows(clientSize, ownerSize, underneath, orderedWindows);
+			runtime.synchronizeMiniWindowLayout(clientSize, ownerSize);
+		}
+		/**
+		 * @brief Returns the authoritative miniwindow layout-mutation revision.
+		 * @param runtime Runtime whose revision is returned.
+		 * @return Current layout-mutation revision.
+		 */
+		static quint64 miniWindowLayoutMutationRevision(const WorldRuntime &runtime)
+		{
+			return runtime.m_miniWindowLayoutMutationRevision;
+		}
+		/**
+		 * @brief Returns the last synchronized miniwindow presentation-layout revision.
+		 * @param runtime Runtime whose revision is returned.
+		 * @return Current presentation-layout revision.
+		 */
+		static quint64 miniWindowLayoutPresentationRevision(const WorldRuntime &runtime)
+		{
+			return runtime.m_miniWindowLayoutPresentationRevision;
 		}
 		/**
 		 * @brief Dispatches a world-Lua hotspot callback through the production callback lane.

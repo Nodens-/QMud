@@ -54,6 +54,7 @@
 #include <utility>
 
 class LuaCallbackEngine;
+class MainWindow;
 class WorldRuntime;
 class QObject;
 struct LuaEngineObservedInitializationRequest;
@@ -1719,12 +1720,12 @@ struct LuaCallbackWorldRuntimeSnapshot
  */
 struct LuaCallbackWorldWindowPositionSnapshot
 {
-		WorldRuntime *runtime{nullptr};
-		int           ordinal{0};
-		QRect         normalGeometry;
-		QRect         frameGeometry;
-		QRect         screenNormalGeometry;
-		QRect         screenFrameGeometry;
+		QPointer<WorldRuntime> runtime;
+		int                    ordinal{0};
+		QRect                  normalGeometry;
+		QRect                  frameGeometry;
+		QRect                  screenNormalGeometry;
+		QRect                  screenFrameGeometry;
 };
 
 /**
@@ -1732,14 +1733,14 @@ struct LuaCallbackWorldWindowPositionSnapshot
  */
 struct LuaCallbackNotepadSnapshot
 {
-		WorldRuntime *runtime{nullptr};
-		QString       worldId;
-		QString       title;
-		QRect         geometry;
-		QString       text;
-		bool          hasEditor{false};
-		bool          hasGeometry{false};
-		bool          hasText{false};
+		QPointer<WorldRuntime> runtime;
+		QString                worldId;
+		QString                title;
+		QRect                  geometry;
+		QString                text;
+		bool                   hasEditor{false};
+		bool                   hasGeometry{false};
+		bool                   hasText{false};
 };
 
 /**
@@ -2893,6 +2894,46 @@ struct LuaCallbackCommandUiSnapshotState
 };
 
 /**
+ * @brief Immutable owner-published command and view presentation used by callback snapshots.
+ */
+struct LuaCallbackCommandUiPresentationSnapshot
+{
+		LuaCallbackCommandUiSnapshotState state;
+};
+
+/**
+ * @brief Immutable owner-published UDP listener presentation used by callback snapshots.
+ */
+struct LuaCallbackUdpPresentationSnapshot
+{
+		QList<int>          ports;
+		QHash<int, QString> listenerPluginIdsByPort;
+		QSet<int>           usedPorts;
+		QHash<int, int>     usedPortReferenceCounts;
+};
+
+/**
+ * @brief Immutable owner-published sound-buffer presentation used by callback snapshots.
+ */
+struct LuaCallbackSoundPresentationSnapshot
+{
+		QHash<int, int>  statusByBuffer;
+		QHash<int, bool> reusableByBuffer;
+};
+
+/**
+ * @brief Immutable main-window topology and geometry used by callback snapshots.
+ */
+struct LuaCallbackMainWindowPresentationSnapshot
+{
+		QPointer<MainWindow>                            frame;
+		QHash<int, QRect>                               mainWindowPositionsByMode;
+		QVector<LuaCallbackWorldRuntimeSnapshot>        worlds;
+		QVector<LuaCallbackWorldWindowPositionSnapshot> worldWindows;
+		QVector<LuaCallbackNotepadSnapshot>             notepads;
+};
+
+/**
  * @brief Coherent callback-visible runtime values sampled for one callback dispatch.
  */
 struct LuaCallbackRuntimeCountersSnapshotState
@@ -3228,16 +3269,20 @@ struct LuaCallbackStableSnapshotState
 struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
 {
 		// Dispatch-local presentation and runtime counters.
-		void                                               *framePointer{nullptr};
-		bool                                                hasFramePointer{false};
-		bool                                                hasCommandUiSnapshot{false};
-		LuaCallbackCommandUiSnapshotState                   commandUiSnapshotState;
-		bool                                                hasCommandHistorySnapshot{false};
-		QStringList                                         commandHistorySnapshot;
-		QString                                             activeMiniWindowExecutionName;
+		QSharedPointer<const LuaCallbackCommandUiPresentationSnapshot>  commandUiPresentation;
+		QSharedPointer<const LuaCallbackUdpPresentationSnapshot>        udpPresentation;
+		QSharedPointer<const LuaCallbackSoundPresentationSnapshot>      soundPresentation;
+		QSharedPointer<const LuaCallbackMainWindowPresentationSnapshot> mainWindowPresentation;
+		QPointer<MainWindow>                                            framePointer;
+		bool                                                            hasFramePointer{false};
+		bool                                                            hasCommandUiSnapshot{false};
+		LuaCallbackCommandUiSnapshotState                               commandUiSnapshotState;
+		bool                                                            hasCommandHistorySnapshot{false};
+		QStringList                                                     commandHistorySnapshot;
+		QString                                                         activeMiniWindowExecutionName;
 		/** MUSHclient WindowAddHotspot recursion guard inherited by this callback dispatch. */
-		bool                                                windowAddHotspotReentryBlocked{false};
-		QString                                             geometryConstrainedMiniWindowName;
+		bool                                                            windowAddHotspotReentryBlocked{false};
+		QString                                                         geometryConstrainedMiniWindowName;
 		int                                                 geometryConstraintDisplayClientHeight{0};
 		int                                                 geometryConstraintDisplayClientWidth{0};
 		double                                              absoluteMiniWindowScaleXOver{1.0};

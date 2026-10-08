@@ -127,6 +127,10 @@ class WorldCommandProcessor : public QObject
 
 	signals:
 		/**
+		 * @brief Reports a committed change to the queued-command presentation.
+		 */
+		void queuedCommandsChanged();
+		/**
 		 * @brief Requests script-send execution through the processor script dispatch channel.
 		 * @param pluginId Origin plugin ID, or empty for world script context.
 		 * @param text Script text/code to execute.
@@ -160,18 +164,21 @@ class WorldCommandProcessor : public QObject
 		 * @param line Incoming line text.
 		 * @param spans Style spans.
 		 * @param partialLineRevision Stable identity of the partial line completed by this line.
+		 * @param serverSideWrapActive Whether NAWS governed wrapping when this logical line began.
 		 */
 		void onIncomingStyledLineReceived(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans,
-		                                  quint64 partialLineRevision = 0);
+		                                  quint64 partialLineRevision = 0, bool serverSideWrapActive = false);
 		/**
 		 * @brief Processes partial styled line updates.
 		 * @param line Partial line text.
 		 * @param spans Style spans.
 		 * @param partialLineRevision Stable identity of the partial line update.
+		 * @param serverSideWrapActive Whether NAWS governed wrapping when this logical line began.
 		 */
 		void onIncomingStyledLinePartialReceived(const QString                          &line,
 		                                         const QVector<WorldRuntime::StyleSpan> &spans,
-		                                         quint64 partialLineRevision = 0);
+		                                         quint64 partialLineRevision  = 0,
+		                                         bool    serverSideWrapActive = false);
 		/**
 		 * @brief Dispatches activated hyperlink actions.
 		 * @param href Hyperlink target.
@@ -604,6 +611,7 @@ class WorldCommandProcessor : public QObject
 				LuaCallbackIncomingLineObservation                            observation;
 				unsigned short actionSource{WorldRuntime::eUnknownActionSource};
 				quint64        partialLineRevision{0};
+				bool           serverSideWrapActive{false};
 				bool           doingSimulate{false};
 		};
 		struct PendingIncomingLineOperation
@@ -680,7 +688,7 @@ class WorldCommandProcessor : public QObject
 		    const QSharedPointer<PendingIncomingLineOperation>        &parent,
 		    const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback, bool nestedOnly);
 		void presentIncomingPartialLine(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans,
-		                                quint64 partialLineRevision) const;
+		                                quint64 partialLineRevision, bool serverSideWrapActive) const;
 		/**
 		 * @brief Evaluates all trigger sets for an incoming line.
 		 * @param line Incoming line text.

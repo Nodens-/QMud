@@ -97,6 +97,8 @@ class TelnetProcessor
 				std::function<bool(int level)>              onMxpDiagnosticNeeded;
 				/** @brief NO-ECHO state changed callback. */
 				std::function<void(bool enabled)>           onNoEchoChanged;
+				/** @brief Effective NAWS negotiation state changed callback. */
+				std::function<void(bool negotiated)>        onNawsNegotiatedChanged;
 				/** @brief Fatal protocol error callback. */
 				std::function<void(const QString &message)> onFatalProtocolError;
 				/** @brief Custom MXP entity value changed. */
@@ -143,6 +145,15 @@ class TelnetProcessor
 		 * @param enabled Enable NAWS negotiation when `true`.
 		 */
 		void       setNawsEnabled(bool enabled);
+		/**
+		 * @brief Restores the peer NAWS request state for an adopted live connection.
+		 * @param negotiated Restore an active peer NAWS request when `true`.
+		 *
+		 * This does not emit a fresh WILL negotiation because descriptor adoption
+		 * preserves the existing TCP session. An active restoration sends the
+		 * current cached dimensions once.
+		 */
+		void       restoreNawsNegotiatedState(bool negotiated);
 		/**
 		 * @brief Enables/disables one-time telnet option negotiation mode.
 		 * @param enabled When `true`, repeated WILL/WONT and DO/DONT for an already
@@ -254,26 +265,28 @@ class TelnetProcessor
 		 */
 		QByteArray processBytes(const QByteArray &data, const PacketTransformCallback &packetTransform);
 		/**
-		 * @brief Plugin-visible telnet event emitted at a position in processed output.
+		 * @brief Telnet state or plugin callback event at a position in processed output.
 		 */
-		struct TelnetPluginEvent
+		struct TelnetStreamEvent
 		{
 				enum Type
 				{
 					IacGa,
 					Option,
-					Subnegotiation
+					Subnegotiation,
+					NawsNegotiatedChanged
 				} type{Subnegotiation};
 				int        offset{0};
 				int        sequence{0};
 				int        option{0};
 				QByteArray data;
+				bool       negotiated{false};
 		};
 		/**
-		 * @brief Returns and clears plugin-visible telnet events since the previous call.
-		 * @return Ordered telnet plugin events.
+		 * @brief Returns and clears ordered telnet stream events since the previous call.
+		 * @return Ordered telnet stream events.
 		 */
-		QList<TelnetPluginEvent> takeTelnetPluginEvents();
+		QList<TelnetStreamEvent> takeTelnetStreamEvents();
 		/**
 		 * @brief Returns and clears bytes queued for outbound socket write.
 		 * @return Queued outbound bytes.
@@ -705,6 +718,12 @@ class TelnetProcessor
 		 */
 		void                   sendWindowSize();
 		/**
+		 * @brief Updates NAWS preference and peer state and reports an effective negotiation transition.
+		 * @param enabled Whether local NAWS support is enabled.
+		 * @param wanted Whether the peer currently requests NAWS.
+		 */
+		void                   setNawsState(bool enabled, bool wanted);
+		/**
 		 * @brief Applies the configured response and state changes for IAC WILL.
 		 * @param option Telnet option code.
 		 */
@@ -736,12 +755,14 @@ class TelnetProcessor
 		/** @brief Clears rolling negotiation histories and active suppression intervals. */
 		void                   resetRenegotiationLoopProtection();
 		/**
-		 * @brief Records a plugin-visible telnet event at the current output position.
-		 * @param type Plugin event type.
+		 * @brief Records a telnet stream event at the current output position.
+		 * @param type Stream event type.
 		 * @param option Telnet option number.
 		 * @param data Telnet event payload bytes.
+		 * @param negotiated Effective NAWS state for a NAWS transition event.
 		 */
-		void appendTelnetPluginEvent(TelnetPluginEvent::Type type, int option, const QByteArray &data);
+		void appendTelnetStreamEvent(TelnetStreamEvent::Type type, int option, const QByteArray &data,
+		                             bool negotiated = false);
 		/**
 		 * @brief Returns the active CHARSET negotiation preference list.
 		 * @return Charset names in priority order.
@@ -850,7 +871,8 @@ class TelnetProcessor
 		CustomElementMap               m_customElements;
 		QList<MxpEvent>                m_mxpEvents;
 		QList<MxpModeChange>           m_mxpModeChanges;
-		QList<TelnetPluginEvent>       m_telnetPluginEvents;
+		QList<TelnetStreamEvent>       m_telnetStreamEvents;
+		bool                           m_recordTelnetStreamEvents{false};
 		int                            m_mxpEventSequence{0};
 		Callbacks                      m_callbacks;
 

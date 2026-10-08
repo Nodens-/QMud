@@ -219,6 +219,7 @@ void MdiTabs::onTabMoved(int from, int to)
 
 	m_orderedWindows.move(from, to);
 	m_userOrdered = true;
+	emit windowOrderChanged();
 }
 
 void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
