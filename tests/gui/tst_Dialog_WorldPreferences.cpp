@@ -7,11 +7,15 @@
  */
 
 #include "AppController.h"
+#include "WorldDocument.h"
+#include "WorldOptions.h"
 #include "WorldPreferencesRoutingUtils.h"
 #include "WorldRuntime.h"
 #include "dialogs/WorldPreferencesDialog.h"
 #include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
+#include "helpers/StringUtils.h"
+#include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
@@ -24,8 +28,12 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QFontMetrics>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -33,6 +41,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScopeGuard>
+#include <QSettings>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyleOptionSpinBox>
@@ -41,6 +50,23 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QtTest/QTest>
+
+/**
+ * @brief Narrow test access to new-world runtime initialization.
+ */
+class AppControllerTestAccess final
+{
+	public:
+		/**
+		 * @brief Initializes one runtime through the same path used by File/New.
+		 * @param controller Controller under test.
+		 * @param runtime Runtime to initialize.
+		 */
+		static void initializeWorldRuntime(const AppController &controller, WorldRuntime *runtime)
+		{
+			controller.initializeWorldRuntime(runtime);
+		}
+};
 
 namespace
 {
@@ -564,6 +590,1015 @@ namespace
 				         expectedPage);
 			}
 
+			/**
+			 * @brief Verifies construction and initial selection populate only the requested page.
+			 */
+			void initialSelectionPopulatesOnlyRequestedPage()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral("::"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				auto *const            pages =
+				    dialog.findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				for (int index = 0; index < pages->count(); ++index)
+					QVERIFY(!pages->widget(index)->property("qmud_page_populated").toBool());
+
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				QVERIFY(pages->widget(WorldPreferencesDialog::PageCommands)
+				            ->property("qmud_page_populated")
+				            .toBool());
+				QVERIFY(!pages->widget(WorldPreferencesDialog::PageGeneral)
+				             ->property("qmud_page_populated")
+				             .toBool());
+				QVERIFY(!pages->widget(WorldPreferencesDialog::PageLogging)
+				             ->property("qmud_page_populated")
+				             .toBool());
+				QVERIFY(!pages->widget(WorldPreferencesDialog::PageInfo)
+				             ->property("qmud_page_populated")
+				             .toBool());
+
+				auto *const separator =
+				    dialog.findChild<QLineEdit *>(QStringLiteral("commandStackCharacterEdit"));
+				QVERIFY(separator);
+				QCOMPARE(separator->text(), QStringLiteral("::"));
+			}
+
+			/**
+			 * @brief Verifies the existing per-world page state is persisted by world identity.
+			 */
+			void lastPagePersistenceIsPerWorldAndRemovesGlobalIndex()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString worldId = QStringLiteral("0123456789abcdef01234567");
+				{
+					QSettings settings(controller.iniFilePath(), QSettings::IniFormat);
+					settings.beginGroup(QStringLiteral("WorldPreferencesDialog"));
+					settings.setValue(QStringLiteral("PageIndex"),
+					                  static_cast<int>(WorldPreferencesDialog::PageLogging));
+					settings.beginGroup(QStringLiteral("LastPageByWorld"));
+					settings.remove(worldId);
+					settings.endGroup();
+					settings.endGroup();
+				}
+
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("id"), worldId);
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Persistence Test"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				{
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(WorldPreferencesDialog::PageTimers);
+					dialog.accept();
+				}
+
+				{
+					QSettings settings(controller.iniFilePath(), QSettings::IniFormat);
+					settings.beginGroup(QStringLiteral("WorldPreferencesDialog"));
+					QVERIFY(!settings.contains(QStringLiteral("PageIndex")));
+					settings.beginGroup(QStringLiteral("LastPageByWorld"));
+					QCOMPARE(settings.value(worldId).toInt(),
+					         static_cast<int>(WorldPreferencesDialog::PageTimers));
+					settings.endGroup();
+					settings.endGroup();
+				}
+
+				runtime.setLastPreferencesPage(WorldPreferencesDialog::PageGeneral);
+				WorldPreferencesDialog restored(&runtime, nullptr);
+				QCOMPARE(runtime.lastPreferencesPage(), static_cast<int>(WorldPreferencesDialog::PageTimers));
+
+				QSettings settings(controller.iniFilePath(), QSettings::IniFormat);
+				settings.beginGroup(QStringLiteral("WorldPreferencesDialog"));
+				settings.beginGroup(QStringLiteral("LastPageByWorld"));
+				settings.remove(worldId);
+				settings.endGroup();
+				settings.endGroup();
+			}
+
+			/**
+			 * @brief Verifies acceptance neither populates hidden pages nor writes unchanged options.
+			 */
+			void acceptanceCommitsOnlyChangedOptions()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Delta Test"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("auto_log_file_name"), QStringLiteral("keep.log"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				auto *const pages =
+				    dialog.findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				auto *const separator =
+				    dialog.findChild<QLineEdit *>(QStringLiteral("commandStackCharacterEdit"));
+				QCheckBox *const enabled =
+				    findCheckBoxByText(dialog, QStringLiteral("&Command Stacking Using:"));
+				QVERIFY(separator);
+				QVERIFY(enabled);
+
+				const QString concurrentHistoryValue = QStringLiteral("777");
+				runtime.setWorldAttribute(QStringLiteral("history_lines"), concurrentHistoryValue);
+				enabled->setChecked(true);
+				separator->setText(QStringLiteral("::"));
+				dialog.accept();
+
+				QVERIFY(!pages->widget(WorldPreferencesDialog::PageGeneral)
+				             ->property("qmud_page_populated")
+				             .toBool());
+				QVERIFY(!pages->widget(WorldPreferencesDialog::PageLogging)
+				             ->property("qmud_page_populated")
+				             .toBool());
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")),
+				         QStringLiteral("1"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
+				         QStringLiteral("::"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("history_lines")),
+				         concurrentHistoryValue);
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("auto_log_file_name")),
+				         QStringLiteral("keep.log"));
+			}
+
+			/**
+			 * @brief Verifies File/New enables global fonts without enabling configured collection files.
+			 */
+			void newWorldEnablesDefaultFontsOnly()
+			{
+				QVERIFY(!AppController::instance());
+				AppController     controller;
+				const QStringList collectionPreferences = {
+				    QStringLiteral("DefaultTriggersFile"), QStringLiteral("DefaultAliasesFile"),
+				    QStringLiteral("DefaultTimersFile"), QStringLiteral("DefaultMacrosFile"),
+				    QStringLiteral("DefaultColoursFile")};
+				QMap<QString, QString> previousValues;
+				for (const QString &preference : collectionPreferences)
+				{
+					previousValues.insert(preference, controller.getGlobalOption(preference).toString());
+					controller.setGlobalOptionString(preference, QStringLiteral("configured-default.xml"));
+				}
+				const QString previousInputFont =
+				    controller.getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
+				const QString previousOutputFont =
+				    controller.getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
+				const auto cleanup = qScopeGuard(
+				    [&controller, previousValues, previousInputFont, previousOutputFont]
+				    {
+					    for (auto it = previousValues.cbegin(); it != previousValues.cend(); ++it)
+						    controller.setGlobalOptionString(it.key(), it.value());
+					    controller.setGlobalOptionString(QStringLiteral("DefaultInputFont"),
+					                                     previousInputFont);
+					    controller.setGlobalOptionString(QStringLiteral("DefaultOutputFont"),
+					                                     previousOutputFont);
+				    });
+				controller.setGlobalOptionString(QStringLiteral("DefaultInputFont"),
+				                                 QStringLiteral("Input Font"));
+				controller.setGlobalOptionString(QStringLiteral("DefaultOutputFont"),
+				                                 QStringLiteral("Output Font"));
+
+				WorldRuntime runtime;
+				AppControllerTestAccess::initializeWorldRuntime(controller, &runtime);
+				for (const QString &optionName :
+				     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+				      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+				      QStringLiteral("use_default_colours")})
+				{
+					QVERIFY(!qmudIsEnabledFlag(runtime.worldAttributes().value(optionName)));
+				}
+				QVERIFY(qmudIsEnabledFlag(
+				    runtime.worldAttributes().value(QStringLiteral("use_default_input_font"))));
+				QVERIFY(qmudIsEnabledFlag(
+				    runtime.worldAttributes().value(QStringLiteral("use_default_output_font"))));
+			}
+
+			/**
+			 * @brief Verifies enabling default fonts preserves the world's custom font attributes.
+			 */
+			void defaultFontOverridesPreserveCustomWorldFonts()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString previousInputFont =
+				    controller.getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
+				const QString previousOutputFont =
+				    controller.getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
+				const auto cleanup = qScopeGuard(
+				    [&controller, previousInputFont, previousOutputFont]
+				    {
+					    controller.setGlobalOptionString(QStringLiteral("DefaultInputFont"),
+					                                     previousInputFont);
+					    controller.setGlobalOptionString(QStringLiteral("DefaultOutputFont"),
+					                                     previousOutputFont);
+				    });
+				controller.setGlobalOptionString(QStringLiteral("DefaultInputFont"),
+				                                 QStringLiteral("Global Input Font"));
+				controller.setGlobalOptionString(QStringLiteral("DefaultOutputFont"),
+				                                 QStringLiteral("Global Output Font"));
+
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("input_font_name"), QStringLiteral("Custom Input"));
+				runtime.setWorldAttribute(QStringLiteral("input_font_height"), QStringLiteral("13"));
+				runtime.setWorldAttribute(QStringLiteral("output_font_name"),
+				                          QStringLiteral("Custom Output"));
+				runtime.setWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("14"));
+				runtime.setWorldFileModified(false);
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				QCheckBox *const useDefaultInput =
+				    findCheckBoxByText(dialog, QStringLiteral("O&verride With Default"));
+				QVERIFY(useDefaultInput);
+				useDefaultInput->setChecked(true);
+				dialog.setInitialPage(WorldPreferencesDialog::PageOutput);
+				QCheckBox *const useDefaultOutput =
+				    findCheckBoxByText(dialog, QStringLiteral("Override with default"));
+				QVERIFY(useDefaultOutput);
+				useDefaultOutput->setChecked(true);
+				dialog.accept();
+
+				QVERIFY(qmudIsEnabledFlag(
+				    runtime.worldAttributes().value(QStringLiteral("use_default_input_font"))));
+				QVERIFY(qmudIsEnabledFlag(
+				    runtime.worldAttributes().value(QStringLiteral("use_default_output_font"))));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("input_font_name")),
+				         QStringLiteral("Custom Input"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("input_font_height")),
+				         QStringLiteral("13"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("output_font_name")),
+				         QStringLiteral("Custom Output"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("output_font_height")),
+				         QStringLiteral("14"));
+			}
+
+			/**
+			 * @brief Verifies default overrides apply at runtime while saved world data remains restorable.
+			 */
+			void defaultOverridesApplyAtRuntimeAndPreserveWorldData()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString defaultsPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_default_transition_test.qdt"));
+				const QString worldPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_override_persistence_test.qdl"));
+				const QString configuredDefaultsPath = QDir::current().relativeFilePath(defaultsPath);
+				const QString previousTriggersFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
+				const QString previousAliasesFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultAliasesFile")).toString();
+				const auto cleanup = qScopeGuard(
+				    [&controller, defaultsPath, worldPath, previousTriggersFile, previousAliasesFile]
+				    {
+					    controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+					                                     previousTriggersFile);
+					    controller.setGlobalOptionString(QStringLiteral("DefaultAliasesFile"),
+					                                     previousAliasesFile);
+					    QFile::remove(defaultsPath);
+					    QFile::remove(worldPath);
+				    });
+				QFile::remove(defaultsPath);
+				QFile::remove(worldPath);
+				QFile defaultsFile(defaultsPath);
+				QVERIFY(defaultsFile.open(QIODevice::WriteOnly | QIODevice::Text));
+				QVERIFY(defaultsFile.write(QByteArrayLiteral(
+				            "<qmud><world world_file_version=\"1000\" qmud_version=\"10.01\" "
+				            "date_saved=\"2026-10-08 12:00:00\" id=\"1234567890abcdef12345678\" "
+				            "name=\"Defaults\" site=\"example.invalid\" port=\"4000\"></world>"
+				            "<triggers><trigger name=\"Default trigger\" match=\"default\">"
+				            "<send>trigger default</send></trigger></triggers>"
+				            "<aliases><alias name=\"Default alias\" match=\"default\">"
+				            "<send>alias default</send></alias></aliases></qmud>")) > 0);
+				defaultsFile.close();
+				controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+				                                 configuredDefaultsPath);
+				controller.setGlobalOptionString(QStringLiteral("DefaultAliasesFile"),
+				                                 configuredDefaultsPath);
+				const QString configuredTriggers =
+				    controller.getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
+				QVERIFY2(QFileInfo::exists(controller.makeAbsolutePath(configuredTriggers)),
+				         qPrintable(
+				             QStringLiteral("Configured trigger path: %1; resolved path: %2")
+				                 .arg(configuredTriggers, controller.makeAbsolutePath(configuredTriggers))));
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Defaults Test"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_aliases"), QStringLiteral("0"));
+				WorldRuntime::Trigger liveTrigger;
+				liveTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("Live trigger"));
+				liveTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("live"));
+				WorldRuntime::Alias liveAlias;
+				liveAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("Live alias"));
+				liveAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("live"));
+				runtime.setTriggers({liveTrigger});
+				runtime.setAliases({liveAlias});
+				QString saveError;
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+				runtime.setWorldFilePath(worldPath);
+				runtime.setWorldAttribute(QStringLiteral("use_default_aliases"), QStringLiteral("1"));
+
+				WorldPreferencesDialog triggerDialog(&runtime, nullptr);
+				triggerDialog.setInitialPage(WorldPreferencesDialog::PageTriggers);
+				const RuleViewWidgets triggerWidgets = findRuleViewWidgets(triggerDialog, RuleKind::Trigger);
+				QVERIFY(triggerWidgets.pasteButton);
+				QClipboard *const clipboard = QGuiApplication::clipboard();
+				QVERIFY(clipboard);
+				clipboard->setText(QStringLiteral(
+				    "<qmud><triggers><trigger name=\"Discarded enabling edit\" "
+				    "match=\"discard-enable\"><send>discard</send></trigger></triggers></qmud>"));
+				triggerWidgets.pasteButton->click();
+				QCOMPARE(runtime.triggers().size(), 1);
+				QCOMPARE(triggerWidgets.table->rowCount(), 2);
+				QCheckBox *const useDefaultTriggers =
+				    findCheckBoxByText(triggerDialog, QStringLiteral("O&verride with default triggers"));
+				QVERIFY(useDefaultTriggers);
+				QVERIFY(!useDefaultTriggers->isChecked());
+				QVERIFY(QMetaObject::invokeMethod(
+				    &triggerDialog,
+				    []
+				    {
+					    if (auto *const message =
+					            qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					        message)
+						    message->button(QMessageBox::No)->click();
+				    },
+				    Qt::QueuedConnection));
+				useDefaultTriggers->setChecked(true);
+				QVERIFY(!useDefaultTriggers->isChecked());
+				QCOMPARE(triggerWidgets.table->rowCount(), 2);
+				QString confirmationText;
+				QVERIFY(QMetaObject::invokeMethod(
+				    &triggerDialog,
+				    [&confirmationText]
+				    {
+					    auto *const message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    if (!message)
+						    return;
+					    confirmationText = message->text();
+					    message->button(QMessageBox::Yes)->click();
+				    },
+				    Qt::QueuedConnection));
+				useDefaultTriggers->setChecked(true);
+				QCOMPARE(triggerWidgets.table->rowCount(), 1);
+				QVERIFY(!triggerWidgets.table->findItems(QStringLiteral("Default trigger"), Qt::MatchExactly)
+				             .isEmpty());
+				triggerDialog.accept();
+				QVERIFY(confirmationText.contains(QStringLiteral("temporarily replace")));
+				QVERIFY(confirmationText.contains(QStringLiteral("will be preserved")));
+				QVERIFY(!confirmationText.contains(QStringLiteral("PERMANENTLY")));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("use_default_triggers")),
+				         QStringLiteral("1"));
+				QStringList triggerNames;
+				for (const WorldRuntime::Trigger &trigger : runtime.triggers())
+					triggerNames.push_back(trigger.attributes.value(QStringLiteral("name")));
+				QVERIFY2(triggerNames.contains(QStringLiteral("Default trigger")),
+				         qPrintable(QStringLiteral("Loaded trigger names: %1").arg(triggerNames.join(", "))));
+				QCOMPARE(runtime.aliases().size(), 1);
+				QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Live alias"));
+
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+				WorldDocument savedWorld;
+				QVERIFY2(savedWorld.loadFromFile(worldPath), qPrintable(savedWorld.errorString()));
+				QCOMPARE(savedWorld.triggers().size(), 1);
+				QCOMPARE(savedWorld.triggers().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Live trigger"));
+				QCOMPARE(savedWorld.aliases().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Live alias"));
+				QCOMPARE(savedWorld.worldAttributes().value(QStringLiteral("use_default_triggers")),
+				         QStringLiteral("y"));
+
+				WorldPreferencesDialog restoreDialog(&runtime, nullptr);
+				restoreDialog.setInitialPage(WorldPreferencesDialog::PageTriggers);
+				const RuleViewWidgets restoreWidgets = findRuleViewWidgets(restoreDialog, RuleKind::Trigger);
+				QVERIFY(restoreWidgets.pasteButton);
+				QCheckBox *const restoreTriggers =
+				    findCheckBoxByText(restoreDialog, QStringLiteral("O&verride with default triggers"));
+				QVERIFY(restoreTriggers);
+				QVERIFY(restoreTriggers->isChecked());
+				restoreTriggers->setChecked(false);
+				QVERIFY(!restoreTriggers->isChecked());
+				QVERIFY(restoreWidgets.pasteButton->isEnabled());
+				clipboard->setText(
+				    QStringLiteral("<qmud><triggers><trigger name=\"Post-disable edit\" "
+				                   "match=\"post-disable\"><send>kept</send></trigger></triggers></qmud>"));
+				restoreWidgets.pasteButton->click();
+				QVERIFY(!restoreTriggers->isChecked());
+				QCOMPARE(restoreWidgets.table->rowCount(), 2);
+				QVERIFY(QMetaObject::invokeMethod(
+				    &restoreDialog,
+				    []
+				    {
+					    if (auto *const message =
+					            qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					        message)
+						    message->button(QMessageBox::Yes)->click();
+				    },
+				    Qt::QueuedConnection));
+				restoreTriggers->setChecked(true);
+				QCOMPARE(restoreWidgets.table->rowCount(), 1);
+				restoreTriggers->setChecked(false);
+				QCOMPARE(restoreWidgets.table->rowCount(), 1);
+				restoreWidgets.pasteButton->click();
+				QCOMPARE(runtime.triggers().size(), 1);
+				restoreDialog.accept();
+				QCOMPARE(restoreDialog.result(), static_cast<int>(QDialog::Accepted));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("use_default_triggers")),
+				         QStringLiteral("0"));
+				QCOMPARE(runtime.triggers().size(), 2);
+				QStringList restoredTriggerNames;
+				for (const WorldRuntime::Trigger &trigger : runtime.triggers())
+					restoredTriggerNames.push_back(trigger.attributes.value(QStringLiteral("name")));
+				QVERIFY(restoredTriggerNames.contains(QStringLiteral("Live trigger")));
+				QVERIFY(restoredTriggerNames.contains(QStringLiteral("Post-disable edit")));
+
+				WorldPreferencesDialog aliasDialog(&runtime, nullptr);
+				aliasDialog.setInitialPage(WorldPreferencesDialog::PageAliases);
+				QCheckBox *const useDefaultAliases =
+				    findCheckBoxByText(aliasDialog, QStringLiteral("O&verride with default aliases"));
+				QVERIFY(useDefaultAliases);
+				QVERIFY(useDefaultAliases->isChecked());
+				aliasDialog.accept();
+				QCOMPARE(runtime.aliases().size(), 1);
+				QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Live alias"));
+			}
+
+			/**
+			 * @brief Verifies refreshing a restored macro editor does not re-enable its runtime override.
+			 */
+			void disabledMacroOverrideSurvivesTableRefresh()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString worldPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_macro_refresh_test.qdl"));
+				const auto cleanup = qScopeGuard([worldPath] { QFile::remove(worldPath); });
+				QFile::remove(worldPath);
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
+				runtime.applyDefaultWorldOptions();
+				WorldRuntime::Macro persistedMacro;
+				persistedMacro.attributes.insert(QStringLiteral("name"), QStringLiteral("F1"));
+				persistedMacro.attributes.insert(QStringLiteral("type"), QStringLiteral("send_now"));
+				persistedMacro.children.insert(QStringLiteral("send"), QStringLiteral("persisted macro"));
+				runtime.setMacros({persistedMacro});
+				QString saveError;
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+				runtime.setWorldAttribute(QStringLiteral("use_default_macros"), QStringLiteral("1"));
+				WorldRuntime::Macro runtimeMacro = persistedMacro;
+				runtimeMacro.children.insert(QStringLiteral("send"), QStringLiteral("runtime default"));
+				runtime.setMacros({runtimeMacro});
+				runtime.setWorldFileModified(false);
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageMacros);
+				QCheckBox *const useDefaultMacros =
+				    findCheckBoxByText(dialog, QStringLiteral("Override with default macros"));
+				QVERIFY(useDefaultMacros);
+				QVERIFY(useDefaultMacros->isChecked());
+				useDefaultMacros->setChecked(false);
+				QVERIFY(!useDefaultMacros->isChecked());
+
+				QTableWidget *macrosTable = nullptr;
+				for (QTableWidget *table : dialog.findChildren<QTableWidget *>())
+				{
+					if (table->horizontalHeaderItem(0) &&
+					    table->horizontalHeaderItem(0)->text() == QStringLiteral("Macro Name"))
+					{
+						macrosTable = table;
+						break;
+					}
+				}
+				QVERIFY(macrosTable);
+				QCOMPARE(macrosTable->rowCount(), 1);
+				QCOMPARE(macrosTable->item(0, 2)->text(), QStringLiteral("persisted macro"));
+				macrosTable->horizontalHeader()->sectionClicked(0);
+				QVERIFY(!useDefaultMacros->isChecked());
+				QCOMPARE(macrosTable->item(0, 2)->text(), QStringLiteral("persisted macro"));
+			}
+
+			/**
+			 * @brief Verifies an active colour override disables every palette mutation control.
+			 */
+			void customColourPageInitializesSharedOverrideState()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("use_default_colours"), QStringLiteral("1"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCustomColours);
+				QCheckBox *const useDefaultColours =
+				    findCheckBoxByText(dialog, QStringLiteral("Override with default colours"));
+				QVERIFY(useDefaultColours);
+				QVERIFY(useDefaultColours->isChecked());
+				for (int index = 0; index < MAX_CUSTOM; ++index)
+				{
+					auto *name =
+					    dialog.findChild<QLineEdit *>(QStringLiteral("customColourName%1").arg(index));
+					auto *text =
+					    dialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch%1").arg(index));
+					auto *back =
+					    dialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch%1").arg(index));
+					QVERIFY(name);
+					QVERIFY(text);
+					QVERIFY(back);
+					QVERIFY(!name->isEnabled());
+					QVERIFY(!text->isEnabled());
+					QVERIFY(!back->isEnabled());
+				}
+				for (int index = 0; index < 8; ++index)
+				{
+					auto *normal =
+					    dialog.findChild<QPushButton *>(QStringLiteral("ansiNormalSwatch%1").arg(index));
+					auto *bold =
+					    dialog.findChild<QPushButton *>(QStringLiteral("ansiBoldSwatch%1").arg(index));
+					QVERIFY(normal);
+					QVERIFY(bold);
+					QVERIFY(!normal->isEnabled());
+					QVERIFY(!bold->isEnabled());
+				}
+				const QStringList mutationButtonNames = {
+				    QStringLiteral("customColourDefaultsButton"), QStringLiteral("customColourLighterButton"),
+				    QStringLiteral("customColourDarkerButton"),   QStringLiteral("customColourMoreButton"),
+				    QStringLiteral("customColourLessButton"),     QStringLiteral("customColourInvertButton"),
+				    QStringLiteral("customColourSwapButton"),     QStringLiteral("customColourRandomButton"),
+				    QStringLiteral("ansiNormalLighterButton"),    QStringLiteral("ansiNormalDarkerButton"),
+				    QStringLiteral("ansiBoldLighterButton"),      QStringLiteral("ansiBoldDarkerButton"),
+				    QStringLiteral("ansiColourDefaultsButton"),   QStringLiteral("ansiColourSwapButton"),
+				    QStringLiteral("ansiColourInvertButton"),     QStringLiteral("ansiColourLighterButton"),
+				    QStringLiteral("ansiColourDarkerButton"),     QStringLiteral("ansiColourMoreButton"),
+				    QStringLiteral("ansiColourLessButton"),       QStringLiteral("ansiColourRandomButton"),
+				    QStringLiteral("ansiColourLoadButton"),       QStringLiteral("ansiCopyToCustomButton")};
+				for (const QString &buttonName : mutationButtonNames)
+				{
+					auto *button = dialog.findChild<QPushButton *>(buttonName);
+					QVERIFY2(button, qPrintable(QStringLiteral("Missing %1").arg(buttonName)));
+					QVERIFY2(
+					    !button->isEnabled(),
+					    qPrintable(QStringLiteral("%1 remains enabled under the override").arg(buttonName)));
+				}
+
+				auto *saveButton = dialog.findChild<QPushButton *>(QStringLiteral("ansiColourSaveButton"));
+				QVERIFY(saveButton);
+				QVERIFY(saveButton->isEnabled());
+			}
+
+			/**
+			 * @brief Verifies every default override is rejected by the shared SetOption writer.
+			 */
+			void scriptDefaultOverrideOptionsAreReadOnly()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				for (const QString &optionName :
+				     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+				      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+				      QStringLiteral("use_default_colours"), QStringLiteral("use_default_input_font"),
+				      QStringLiteral("use_default_output_font")})
+				{
+					const WorldNumericOption *const option =
+					    QMudWorldOptions::findWorldNumericOption(optionName);
+					QVERIFY(option);
+					QVERIFY((option->flags & OPT_CANNOT_WRITE) != 0);
+					const QString before = runtime.worldAttributes().value(optionName);
+					QCOMPARE(runtime.setOptionItem(*option, 1), ePluginCannotSetOption);
+					QCOMPARE(runtime.worldAttributes().value(optionName), before);
+				}
+			}
+
+			/**
+			 * @brief Verifies one invalid configured default does not block other enabled defaults.
+			 */
+			void configuredDefaultFailuresAreIndependent()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString defaultsPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_independent_defaults_test.qdt"));
+				const QString previousTriggersFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
+				const QString previousAliasesFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultAliasesFile")).toString();
+				const QString previousTimersFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultTimersFile")).toString();
+				const auto cleanup = qScopeGuard(
+				    [&controller, defaultsPath, previousTriggersFile, previousAliasesFile, previousTimersFile]
+				    {
+					    controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+					                                     previousTriggersFile);
+					    controller.setGlobalOptionString(QStringLiteral("DefaultAliasesFile"),
+					                                     previousAliasesFile);
+					    controller.setGlobalOptionString(QStringLiteral("DefaultTimersFile"),
+					                                     previousTimersFile);
+					    QFile::remove(defaultsPath);
+				    });
+				QFile::remove(defaultsPath);
+				QFile defaultsFile(defaultsPath);
+				QVERIFY(defaultsFile.open(QIODevice::WriteOnly | QIODevice::Text));
+				QVERIFY(defaultsFile.write(QByteArrayLiteral(
+				            "<qmud><world name=\"Defaults\" site=\"example.invalid\" port=\"4000\"/>"
+				            "<triggers><trigger name=\"Default trigger\" match=\"default\"/>"
+				            "</triggers><timers><timer name=\"Default timer\" second=\"10\"/>"
+				            "</timers></qmud>")) > 0);
+				defaultsFile.close();
+				const QString configuredDefaultsPath = QDir::current().relativeFilePath(defaultsPath);
+				controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+				                                 configuredDefaultsPath);
+				controller.setGlobalOptionString(QStringLiteral("DefaultAliasesFile"),
+				                                 QStringLiteral("missing-default-aliases.qda"));
+				controller.setGlobalOptionString(QStringLiteral("DefaultTimersFile"), configuredDefaultsPath);
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_aliases"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_timers"), QStringLiteral("1"));
+				WorldRuntime::Alias existingAlias;
+				existingAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("Existing alias"));
+				existingAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("existing"));
+				runtime.setAliases({existingAlias});
+
+				QString error;
+				QVERIFY(!controller.applyConfiguredWorldDefaults(&runtime, {}, {}, &error));
+				QVERIFY(error.contains(QStringLiteral("missing-default-aliases.qda")));
+				QCOMPARE(runtime.triggers().size(), 1);
+				QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Default trigger"));
+				QCOMPARE(runtime.aliases().size(), 1);
+				QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Existing alias"));
+				QCOMPARE(runtime.timers().size(), 1);
+				QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Default timer"));
+			}
+
+			/**
+			 * @brief Verifies an active override can be disabled after its configured default is removed.
+			 */
+			void activeOverrideWithoutConfiguredDefaultCanBeDisabled()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString previousTriggersFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
+				const QString worldPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_removed_default_test.qdl"));
+				const auto cleanup = qScopeGuard(
+				    [&controller, previousTriggersFile, worldPath]
+				    {
+					    controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+					                                     previousTriggersFile);
+					    QFile::remove(worldPath);
+				    });
+				QFile::remove(worldPath);
+				controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"), QString());
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Removed Default"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("0"));
+				WorldRuntime::Trigger persistentTrigger;
+				persistentTrigger.attributes.insert(QStringLiteral("name"),
+				                                    QStringLiteral("Persistent trigger"));
+				persistentTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("persistent"));
+				runtime.setTriggers({persistentTrigger});
+				QString saveError;
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+				runtime.setWorldFilePath(worldPath);
+				runtime.setWorldFileModified(false);
+
+				WorldRuntime::Trigger runtimeDefault;
+				runtimeDefault.attributes.insert(QStringLiteral("name"), QStringLiteral("Runtime default"));
+				runtimeDefault.attributes.insert(QStringLiteral("match"), QStringLiteral("default"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("1"));
+				runtime.setTriggers({runtimeDefault});
+				runtime.setWorldFileModified(false);
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageTriggers);
+				QCheckBox *const useDefaultTriggers =
+				    findCheckBoxByText(dialog, QStringLiteral("O&verride with default triggers"));
+				const RuleViewWidgets widgets = findRuleViewWidgets(dialog, RuleKind::Trigger);
+				QVERIFY(useDefaultTriggers);
+				QVERIFY(widgets.pasteButton);
+				QVERIFY(useDefaultTriggers->isChecked());
+				QVERIFY(useDefaultTriggers->isEnabled());
+				QVERIFY(!widgets.pasteButton->isEnabled());
+
+				useDefaultTriggers->setChecked(false);
+				QVERIFY(widgets.pasteButton->isEnabled());
+				dialog.accept();
+				QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("use_default_triggers")),
+				         QStringLiteral("0"));
+				QCOMPARE(runtime.triggers().size(), 1);
+				QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Persistent trigger"));
+			}
+
+			/**
+			 * @brief Verifies a failed default load leaves the override and runtime collection unchanged.
+			 */
+			void failedDefaultOverrideLoadDoesNotCommitTheOverride()
+			{
+				QVERIFY(!AppController::instance());
+				AppController controller;
+				const QString previousTriggersFile =
+				    controller.getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
+				const QString worldPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_failed_default_test.qdl"));
+				const auto cleanup = qScopeGuard(
+				    [&controller, previousTriggersFile, worldPath]
+				    {
+					    controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+					                                     previousTriggersFile);
+					    QFile::remove(worldPath);
+				    });
+				QFile::remove(worldPath);
+				controller.setGlobalOptionString(QStringLiteral("DefaultTriggersFile"),
+				                                 QStringLiteral("missing-default-triggers.qdt"));
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Failed Default Test"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("0"));
+				const QString persistedHistoryLines =
+				    runtime.worldAttributes().value(QStringLiteral("history_lines"));
+				QString saveError;
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+				runtime.setWorldFilePath(worldPath);
+				runtime.setWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("4321"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageTriggers);
+				QCheckBox *const useDefaultTriggers =
+				    findCheckBoxByText(dialog, QStringLiteral("O&verride with default triggers"));
+				QVERIFY(useDefaultTriggers);
+				QString warningText;
+				QVERIFY(QMetaObject::invokeMethod(
+				    &dialog,
+				    [&warningText]
+				    {
+					    auto *const message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    if (!message)
+						    return;
+					    warningText = message->text();
+					    message->button(QMessageBox::Ok)->click();
+				    },
+				    Qt::QueuedConnection));
+				useDefaultTriggers->setChecked(true);
+				QVERIFY(!useDefaultTriggers->isChecked());
+				dialog.accept();
+				QVERIFY(warningText.contains(QStringLiteral("does not exist")));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("use_default_triggers")),
+				         QStringLiteral("0"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("history_lines")),
+				         QStringLiteral("4321"));
+				QVERIFY(runtime.worldFileModified());
+				QVERIFY(runtime.triggers().isEmpty());
+				WorldDocument savedWorld;
+				QVERIFY2(savedWorld.loadFromFile(worldPath), qPrintable(savedWorld.errorString()));
+				QCOMPARE(savedWorld.worldAttributes().value(QStringLiteral("history_lines")),
+				         persistedHistoryLines);
+			}
+
+			/**
+			 * @brief Verifies every runtime-only override preserves the corresponding world-file data.
+			 */
+			void overriddenRuntimeCollectionsDoNotReplacePersistentWorldData()
+			{
+				const QString worldPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("world_preferences_all_override_persistence_test.qdl"));
+				const auto cleanup = qScopeGuard([worldPath] { QFile::remove(worldPath); });
+				QFile::remove(worldPath);
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("All Overrides"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("input_font_name"), QStringLiteral("Saved Input"));
+				runtime.setWorldAttribute(QStringLiteral("output_font_name"), QStringLiteral("Saved Output"));
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("Saved trigger"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("saved trigger"));
+				WorldRuntime::Alias alias;
+				alias.attributes.insert(QStringLiteral("name"), QStringLiteral("Saved alias"));
+				alias.attributes.insert(QStringLiteral("match"), QStringLiteral("saved alias"));
+				WorldRuntime::Timer timer;
+				timer.attributes.insert(QStringLiteral("name"), QStringLiteral("Saved timer"));
+				timer.attributes.insert(QStringLiteral("second"), QStringLiteral("10"));
+				WorldRuntime::Macro macro;
+				macro.attributes.insert(QStringLiteral("name"), QStringLiteral("F1"));
+				macro.attributes.insert(QStringLiteral("type"), QStringLiteral("replace"));
+				macro.children.insert(QStringLiteral("send"), QStringLiteral("saved macro"));
+				WorldRuntime::Colour colour;
+				colour.group = QStringLiteral("custom");
+				colour.attributes.insert(QStringLiteral("seq"), QStringLiteral("1"));
+				colour.attributes.insert(QStringLiteral("name"), QStringLiteral("Saved colour"));
+				colour.attributes.insert(QStringLiteral("text"), QStringLiteral("#123456"));
+				colour.attributes.insert(QStringLiteral("back"), QStringLiteral("#654321"));
+				runtime.setTriggers({trigger});
+				runtime.setAliases({alias});
+				runtime.setTimers({timer});
+				runtime.setMacros({macro});
+				runtime.setColours({colour});
+				QString saveError;
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+				runtime.setWorldFilePath(worldPath);
+
+				trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("Runtime trigger"));
+				alias.attributes.insert(QStringLiteral("name"), QStringLiteral("Runtime alias"));
+				timer.attributes.insert(QStringLiteral("name"), QStringLiteral("Runtime timer"));
+				macro.children.insert(QStringLiteral("send"), QStringLiteral("runtime macro"));
+				colour.attributes.insert(QStringLiteral("name"), QStringLiteral("Runtime colour"));
+				runtime.setTriggers({trigger});
+				runtime.setAliases({alias});
+				runtime.setTimers({timer});
+				runtime.setMacros({macro});
+				runtime.setColours({colour});
+				for (const QString &option :
+				     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+				      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+				      QStringLiteral("use_default_colours"), QStringLiteral("use_default_input_font"),
+				      QStringLiteral("use_default_output_font")})
+				{
+					runtime.setWorldAttribute(option, QStringLiteral("1"));
+				}
+				QVERIFY2(runtime.saveWorldFile(worldPath, &saveError), qPrintable(saveError));
+
+				WorldDocument savedWorld;
+				QVERIFY2(savedWorld.loadFromFile(worldPath), qPrintable(savedWorld.errorString()));
+				QCOMPARE(savedWorld.triggers().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Saved trigger"));
+				QCOMPARE(savedWorld.aliases().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Saved alias"));
+				QCOMPARE(savedWorld.timers().constFirst().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Saved timer"));
+				QCOMPARE(savedWorld.macros().constFirst().children.value(QStringLiteral("send")),
+				         QStringLiteral("saved macro"));
+				const auto savedColour = std::ranges::find_if(
+				    savedWorld.colours(),
+				    [](const WorldDocument::Colour &entry)
+				    {
+					    return entry.group == QStringLiteral("custom") &&
+					           entry.attributes.value(QStringLiteral("seq")) == QStringLiteral("1");
+				    });
+				QVERIFY(savedColour != savedWorld.colours().cend());
+				QCOMPARE(savedColour->attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Saved colour"));
+				QCOMPARE(savedWorld.worldAttributes().value(QStringLiteral("input_font_name")),
+				         QStringLiteral("Saved Input"));
+				QCOMPARE(savedWorld.worldAttributes().value(QStringLiteral("output_font_name")),
+				         QStringLiteral("Saved Output"));
+			}
+
+			/**
+			 * @brief Verifies editing a default printing cell creates its missing persistent style entry.
+			 */
+			void printingEditCreatesMissingStyleEntry()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QVERIFY(runtime.printingStyles().isEmpty());
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PagePrinting);
+				auto *const pages =
+				    dialog.findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				QGroupBox *normalGroup = nullptr;
+				for (QGroupBox *group :
+				     pages->widget(WorldPreferencesDialog::PagePrinting)->findChildren<QGroupBox *>())
+				{
+					if (group->title() == QStringLiteral("Normal"))
+					{
+						normalGroup = group;
+						break;
+					}
+				}
+				QVERIFY(normalGroup);
+				auto *const printingGrid = qobject_cast<QGridLayout *>(normalGroup->layout());
+				QVERIFY(printingGrid);
+				QLayoutItem *const firstBoldItem = printingGrid->itemAtPosition(1, 1);
+				QVERIFY(firstBoldItem);
+				auto *const firstBold = qobject_cast<QCheckBox *>(firstBoldItem->widget());
+				QVERIFY(firstBold);
+				firstBold->setChecked(true);
+				dialog.accept();
+
+				QCOMPARE(runtime.printingStyles().size(), 1);
+				const WorldRuntime::PrintingStyle &style = runtime.printingStyles().constFirst();
+				QCOMPARE(style.group, QStringLiteral("ansi/normal"));
+				QCOMPARE(style.attributes.value(QStringLiteral("seq")), QStringLiteral("1"));
+				QCOMPARE(style.attributes.value(QStringLiteral("bold")), QStringLiteral("1"));
+				QCOMPARE(style.attributes.value(QStringLiteral("italic")), QString());
+				QCOMPARE(style.attributes.value(QStringLiteral("underline")), QString());
+			}
+
+			/**
+			 * @brief Verifies queued population stays size-neutral and untouched pages preserve later runtime values.
+			 */
+			void backgroundPopulationPreservesSizeAndUntouchedRuntimeChanges()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Background Test"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("1"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageGeneral);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				const QSize initialSize = dialog.size();
+				auto *const pages =
+				    dialog.findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				for (int index = 0; index < pages->count(); ++index)
+				{
+					if (index == WorldPreferencesDialog::PageSound)
+						continue;
+					QTRY_VERIFY(pages->widget(index)->property("qmud_page_populated").toBool());
+				}
+				QCOMPARE(dialog.size(), initialSize);
+
+				runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("0"));
+				dialog.accept();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("log_output")), QStringLiteral("0"));
+			}
+
+			/**
+			 * @brief Verifies Info action statistics populate automatically and memory calculation stays separate.
+			 */
+			void infoActionStatisticsAreAutomaticAndMemoryCalculationIsSeparate()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				WorldRuntime::StyleSpan span;
+				span.length     = 1;
+				span.actionType = WorldRuntime::ActionSend;
+				span.action     = QStringLiteral("look");
+				const QVector spans{span};
+				for (int index = 0; index < 1001; ++index)
+					runtime.addLine(QStringLiteral("x"), WorldRuntime::LineOutput, spans);
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageInfo);
+				auto *const actions    = dialog.findChild<QLabel *>(QStringLiteral("infoMxpActionsCached"));
+				auto *const references = dialog.findChild<QLabel *>(QStringLiteral("infoMxpReferenceCount"));
+				auto *const memory     = dialog.findChild<QLabel *>(QStringLiteral("infoMemoryUsed"));
+				auto *const calculate =
+				    dialog.findChild<QPushButton *>(QStringLiteral("infoCalculateMemory"));
+				QVERIFY(actions);
+				QVERIFY(references);
+				QVERIFY(memory);
+				QVERIFY(calculate);
+				QCOMPARE(actions->text(), QStringLiteral("1"));
+				QCOMPARE(references->text(), QStringLiteral("1001"));
+				QCOMPARE(memory->text(), QStringLiteral("-"));
+				QVERIFY(calculate->isEnabled());
+
+				span.action = QStringLiteral("score");
+				runtime.addLine(QStringLiteral("x"), WorldRuntime::LineOutput, QVector{span});
+				calculate->click();
+				QCOMPARE(actions->text(), QStringLiteral("1"));
+				QCOMPARE(references->text(), QStringLiteral("1001"));
+				QVERIFY(memory->text() != QStringLiteral("-"));
+				QVERIFY(!calculate->isEnabled());
+			}
+
 			void spinBoxesUseRangeBasedWidthPolicy()
 			{
 				const QString sourcePath =
@@ -856,7 +1891,7 @@ namespace
 				QCoreApplication::processEvents();
 				QVERIFY(resizeEvents.count() <= 1);
 
-				auto *pages   = dialog.findChild<QStackedWidget *>();
+				auto *pages   = dialog.findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
 				auto *tree    = dialog.findChild<QTreeWidget *>();
 				auto *buttons = dialog.findChild<QDialogButtonBox *>();
 				QVERIFY(pages);
@@ -1069,7 +2104,8 @@ namespace
 				    QStringLiteral("n"));
 
 				WorldPreferencesDialog dialog(&runtime, nullptr);
-				QCheckBox *const       option =
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				QCheckBox *const option =
 				    findCheckBoxByText(dialog, QStringLiteral("Echo Force-Terminates Partial Prompts"));
 				QVERIFY(option);
 				QVERIFY(!option->isChecked());
@@ -1083,7 +2119,8 @@ namespace
 				    QStringLiteral("1"));
 
 				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
-				QCheckBox *const       restoredOption = findCheckBoxByText(
+				restoredDialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				QCheckBox *const restoredOption = findCheckBoxByText(
 				    restoredDialog, QStringLiteral("Echo Force-Terminates Partial Prompts"));
 				QVERIFY(restoredOption);
 				QVERIFY(restoredOption->isChecked());
@@ -1100,7 +2137,8 @@ namespace
 				                          QStringLiteral("1"));
 
 				WorldPreferencesDialog dialog(&runtime, nullptr);
-				QCheckBox *const       automatic = findCheckBoxByText(
+				dialog.setInitialPage(WorldPreferencesDialog::PageConnecting);
+				QCheckBox *const automatic = findCheckBoxByText(
 				    dialog,
 				    QStringLiteral("Automatically protect against Telnet option renegotiation loops"));
 				QCheckBox *const manual =
@@ -1123,7 +2161,8 @@ namespace
 				    QStringLiteral("1"));
 
 				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
-				QCheckBox *const       restoredAutomatic = findCheckBoxByText(
+				restoredDialog.setInitialPage(WorldPreferencesDialog::PageConnecting);
+				QCheckBox *const restoredAutomatic = findCheckBoxByText(
 				    restoredDialog,
 				    QStringLiteral("Automatically protect against Telnet option renegotiation loops"));
 				QCheckBox *const restoredManual =
@@ -1135,7 +2174,7 @@ namespace
 				QVERIFY(restoredManual->isChecked());
 			}
 
-			void customColoursLoadPersistAndCreateMissingCanonicalEntries()
+			void customColourEditPersistsWithoutCreatingUntouchedEntries()
 			{
 				WorldRuntime::Colour existing;
 				existing.group = QStringLiteral("custom");
@@ -1150,6 +2189,7 @@ namespace
 				runtime.setColours({existing});
 
 				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCustomColours);
 				auto *name       = dialog.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
 				auto *textSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
 				auto *backSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch0"));
@@ -1177,7 +2217,7 @@ namespace
 					if (colour.attributes.value(QStringLiteral("seq")) == QStringLiteral("1"))
 						changed = &colour;
 				}
-				QCOMPARE(customCount, MAX_CUSTOM);
+				QCOMPARE(customCount, 1);
 				QVERIFY(changed);
 				QCOMPARE(changed->attributes.value(QStringLiteral("seq")), QStringLiteral("1"));
 				QCOMPARE(changed->attributes.value(QStringLiteral("name")), QStringLiteral("Changed"));
@@ -1187,7 +2227,8 @@ namespace
 				         QColor(QStringLiteral("#2468ac")));
 
 				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
-				auto                  *restoredName =
+				restoredDialog.setInitialPage(WorldPreferencesDialog::PageCustomColours);
+				auto *restoredName =
 				    restoredDialog.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
 				auto *restoredText =
 				    restoredDialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
@@ -1300,6 +2341,7 @@ namespace
 				runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
 
 				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageOutput);
 				auto *combo = dialog.findChild<QComboBox *>(QStringLiteral("legacyEncodingCombo"));
 				QVERIFY(combo);
 
@@ -1354,6 +2396,7 @@ namespace
 				runtime.applyDefaultWorldOptions();
 
 				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
 				auto *separator = dialog.findChild<QLineEdit *>(QStringLiteral("commandStackCharacterEdit"));
 				QVERIFY(separator);
 				QCOMPARE(separator->maxLength(), 2);
@@ -1610,7 +2653,8 @@ namespace
 					WorldRuntime runtime;
 					configureRuntime(runtime);
 					WorldPreferencesDialog dialog(&runtime, nullptr);
-					QTableWidget          *table = findVariablesTable(dialog);
+					dialog.setInitialPage(WorldPreferencesDialog::PageVariables);
+					QTableWidget *table = findVariablesTable(dialog);
 					QVERIFY(table);
 					table->item(0, 1)->setText(QStringLiteral("20"));
 					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
@@ -1622,7 +2666,8 @@ namespace
 					WorldRuntime runtime;
 					configureRuntime(runtime);
 					WorldPreferencesDialog dialog(&runtime, nullptr);
-					QTableWidget          *table = findVariablesTable(dialog);
+					dialog.setInitialPage(WorldPreferencesDialog::PageVariables);
+					QTableWidget *table = findVariablesTable(dialog);
 					QVERIFY(table);
 					table->item(0, 1)->setText(QStringLiteral("20"));
 					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
@@ -1822,6 +2867,7 @@ namespace
 					widgets.editButton->click();
 					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
 					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
+					dialog.accept();
 
 					switch (kind)
 					{
@@ -2032,6 +3078,7 @@ namespace
 					widgets.editButton->click();
 					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
 					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
+					dialog.accept();
 
 					switch (kind)
 					{

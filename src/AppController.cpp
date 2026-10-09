@@ -83,6 +83,8 @@ extern "C"
 #include <QDialog>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -5000,43 +5002,6 @@ bool AppController::openWorldDocument(const QString &path)
 		runtime->setPluginInstallDeferred(true);
 		runtime->applyFromDocument(doc);
 		runtime->setWorldFilePath(normalized);
-		const auto &attrs            = runtime->worldAttributes();
-		const auto  useDefaultInput  = attrs.value(QStringLiteral("use_default_input_font"));
-		const auto  useDefaultOutput = attrs.value(QStringLiteral("use_default_output_font"));
-		const auto  useInput  = useDefaultInput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                        useDefaultInput == QStringLiteral("1") ||
-		                        useDefaultInput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		const auto  useOutput = useDefaultOutput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                        useDefaultOutput == QStringLiteral("1") ||
-		                        useDefaultOutput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		if (useInput)
-		{
-			const auto inputFont   = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
-			const auto inputHeight = getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-			const auto inputWeight = getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-			const auto inputItalic = getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
-			const auto inputCharset =
-			    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultInputFontCharset"));
-			if (!inputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("input_font_name"), inputFont);
-			runtime->setWorldAttribute(QStringLiteral("input_font_height"), QString::number(inputHeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_weight"), QString::number(inputWeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_italic"), QString::number(inputItalic));
-			runtime->setWorldAttribute(QStringLiteral("input_font_charset"), QString::number(inputCharset));
-		}
-		if (useOutput)
-		{
-			const auto     outputFont   = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
-			const auto     outputHeight = getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
-			constexpr auto outputWeight = 400;
-			const auto     outputCharset =
-			    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultOutputFontCharset"));
-			if (!outputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("output_font_name"), outputFont);
-			runtime->setWorldAttribute(QStringLiteral("output_font_height"), QString::number(outputHeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_weight"), QString::number(outputWeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_charset"), QString::number(outputCharset));
-		}
 		const auto regexpMatchEmpty = getGlobalOption(QStringLiteral("RegexpMatchEmpty")).toInt();
 		runtime->setWorldAttribute(QStringLiteral("regexp_match_empty"), QString::number(regexpMatchEmpty));
 		const auto notifyCannotConnect = getGlobalOption(QStringLiteral("NotifyIfCannotConnect")).toInt();
@@ -5047,7 +5012,12 @@ bool AppController::openWorldDocument(const QString &path)
 		runtime->setWorldAttribute(QStringLiteral("notify_on_disconnect"), QString::number(notifyDisconnect));
 		runtime->setWorldAttribute(QStringLiteral("error_notification_to_output"),
 		                           QString::number(errorToOutput));
-		applyConfiguredWorldDefaults(runtime);
+		if (QString defaultError; !applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError))
+		{
+			qWarning() << "Failed to load configured world defaults:" << defaultError;
+			runtime->outputText(
+			    QStringLiteral("Failed to load configured world defaults: %1").arg(defaultError), true, true);
+		}
 		runtime->applyRuntimeSettingsToPresentationViews();
 		m_mainWindow->refreshActionState();
 		const auto worldName = runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
@@ -5114,7 +5084,12 @@ bool AppController::openWorldDocument(const QString &path)
 	if (getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt() != 0)
 		window->showMaximized();
 	runtime->setPluginInstallDeferred(true);
-	applyConfiguredWorldDefaults(runtime);
+	if (QString defaultError; !applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError))
+	{
+		qWarning() << "Failed to load configured world defaults:" << defaultError;
+		runtime->outputText(QStringLiteral("Failed to load configured world defaults: %1").arg(defaultError),
+		                    true, true);
+	}
 	m_mainWindow->refreshActionState();
 	if (m_suppressAutoConnect)
 		return true;
@@ -5219,27 +5194,12 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 	runtime->setReconnectOnLinkFailure(getGlobalOption(QStringLiteral("ReconnectOnLinkFailure")).toInt() !=
 	                                   0);
 
-	const QString defaultInput    = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
-	const QString defaultOutput   = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
-	const QString defaultTriggers = getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
-	const QString defaultAliases  = getGlobalOption(QStringLiteral("DefaultAliasesFile")).toString();
-	const QString defaultTimers   = getGlobalOption(QStringLiteral("DefaultTimersFile")).toString();
-	const QString defaultMacros   = getGlobalOption(QStringLiteral("DefaultMacrosFile")).toString();
-	const QString defaultColours  = getGlobalOption(QStringLiteral("DefaultColoursFile")).toString();
+	const QString defaultInput  = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
+	const QString defaultOutput = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
 	if (!defaultInput.isEmpty())
 		runtime->setWorldAttribute(QStringLiteral("use_default_input_font"), QStringLiteral("1"));
 	if (!defaultOutput.isEmpty())
 		runtime->setWorldAttribute(QStringLiteral("use_default_output_font"), QStringLiteral("1"));
-	if (!defaultTriggers.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("1"));
-	if (!defaultAliases.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_aliases"), QStringLiteral("1"));
-	if (!defaultTimers.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_timers"), QStringLiteral("1"));
-	if (!defaultMacros.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_macros"), QStringLiteral("1"));
-	if (!defaultColours.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_colours"), QStringLiteral("1"));
 
 	const int regexpMatchEmpty = getGlobalOption(QStringLiteral("RegexpMatchEmpty")).toInt();
 	runtime->setWorldAttribute(QStringLiteral("regexp_match_empty"), QString::number(regexpMatchEmpty));
@@ -5253,34 +5213,191 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 	                           QString::number(errorToOutput));
 }
 
-void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
+bool AppController::loadWorldDefaultCollection(const WorldRuntime *runtime, const QString &optionName,
+                                               const bool                      useDefault,
+                                               std::unique_ptr<WorldDocument> &document, QString *error) const
 {
+	if (error)
+		error->clear();
+	document.reset();
 	if (!runtime)
-		return;
+	{
+		if (error)
+			*error = QStringLiteral("No world runtime is available.");
+		return false;
+	}
+
+	QString       preferenceName;
+	unsigned long loadMask = WorldDocument::XML_NO_PLUGINS;
+	if (optionName == QStringLiteral("use_default_triggers"))
+	{
+		preferenceName = QStringLiteral("DefaultTriggersFile");
+		loadMask |= WorldDocument::XML_TRIGGERS;
+	}
+	else if (optionName == QStringLiteral("use_default_aliases"))
+	{
+		preferenceName = QStringLiteral("DefaultAliasesFile");
+		loadMask |= WorldDocument::XML_ALIASES;
+	}
+	else if (optionName == QStringLiteral("use_default_timers"))
+	{
+		preferenceName = QStringLiteral("DefaultTimersFile");
+		loadMask |= WorldDocument::XML_TIMERS;
+	}
+	else if (optionName == QStringLiteral("use_default_macros"))
+	{
+		preferenceName = QStringLiteral("DefaultMacrosFile");
+		loadMask |= WorldDocument::XML_MACROS;
+	}
+	else if (optionName == QStringLiteral("use_default_colours"))
+	{
+		preferenceName = QStringLiteral("DefaultColoursFile");
+		loadMask |= WorldDocument::XML_COLOURS;
+	}
+	else
+	{
+		if (error)
+			*error = QStringLiteral("Unknown default collection option: %1").arg(optionName);
+		return false;
+	}
+
+	auto    loadedDocument = std::make_unique<WorldDocument>();
+	QString fileName;
+	if (useDefault)
+	{
+		const QString configured = getGlobalOption(preferenceName).toString().trimmed();
+		if (configured.isEmpty())
+		{
+			if (error)
+				*error = QStringLiteral("No default file is configured for %1.").arg(optionName);
+			return false;
+		}
+		fileName = makeAbsolutePath(configured);
+		loadMask |= WorldDocument::XML_IMPORT_MAIN_FILE_ONLY;
+	}
+	else
+	{
+		const QString persistedPath = runtime->worldFilePath().trimmed();
+		if (persistedPath.isEmpty())
+		{
+			document = std::move(loadedDocument);
+			return true;
+		}
+		QString pathError;
+		if (!QMudPluginPathUtils::resolveInsideQmudHome(runtime->startupDirectory(), persistedPath, &fileName,
+		                                                &pathError))
+		{
+			if (error)
+				*error = pathError;
+			return false;
+		}
+		loadMask |= WorldDocument::XML_INCLUDES;
+	}
+
+	if (!QFileInfo::exists(fileName))
+	{
+		if (error)
+		{
+			*error = QStringLiteral("The %1 file does not exist: %2")
+			             .arg(useDefault ? QStringLiteral("configured default") : QStringLiteral("world"),
+			                  QDir::toNativeSeparators(fileName));
+		}
+		return false;
+	}
+	loadedDocument->setLoadMask(loadMask);
+	if (!loadedDocument->loadFromFile(fileName))
+	{
+		if (error)
+		{
+			*error = QStringLiteral("Unable to load %1: %2")
+			             .arg(QDir::toNativeSeparators(fileName), loadedDocument->errorString());
+		}
+		return false;
+	}
+	const QString stateDir =
+	    makeAbsolutePath(getGlobalOption(QStringLiteral("StateFilesDirectory")).toString());
+	const QString absolutePluginsDir = makeAbsolutePath(m_pluginsDirectory);
+	if (!loadedDocument->expandIncludes(fileName, absolutePluginsDir, m_workingDir, stateDir))
+	{
+		if (error)
+		{
+			*error = QStringLiteral("Unable to load includes from %1: %2")
+			             .arg(QDir::toNativeSeparators(fileName), loadedDocument->errorString());
+		}
+		return false;
+	}
+	document = std::move(loadedDocument);
+	return true;
+}
+
+bool AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime, const QSet<QString> &optionFilter,
+                                                 const QMap<QString, QString> &optionValues,
+                                                 QString                      *error) const
+{
+	if (error)
+		error->clear();
+	if (!runtime)
+	{
+		if (error)
+			*error = QStringLiteral("No world runtime is available.");
+		return false;
+	}
+	if (optionFilter.isEmpty())
+	{
+		QStringList errors;
+		for (const QString &optionName :
+		     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+		      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+		      QStringLiteral("use_default_colours")})
+		{
+			if (!isEnabledFlag(runtime->worldAttributes().value(optionName)))
+				continue;
+			QString optionError;
+			if (!applyConfiguredWorldDefaults(runtime, {optionName}, optionValues, &optionError))
+				errors.push_back(optionError);
+		}
+		if (error)
+			*error = errors.join(QLatin1Char('\n'));
+		return errors.isEmpty();
+	}
 
 	const QMap<QString, QString> &attrs = runtime->worldAttributes();
-	const QString                 stateDir =
-	    makeAbsolutePath(getGlobalOption(QStringLiteral("StateFilesDirectory")).toString());
-
-	auto loadDefaultDoc = [&](const QString &prefKey, const unsigned long mask, WorldDocument &doc) -> bool
+	struct PreparedCollection
 	{
-		const QString configured = getGlobalOption(prefKey).toString().trimmed();
-		if (configured.isEmpty())
+			QString                        optionName;
+			std::unique_ptr<WorldDocument> document;
+	};
+	std::vector<PreparedCollection> prepared;
+
+	const auto                      enabled = [&attrs, &optionValues](const QString &optionName)
+	{
+		const auto candidate = optionValues.constFind(optionName);
+		return isEnabledFlag(candidate == optionValues.cend() ? attrs.value(optionName) : candidate.value());
+	};
+	const auto prepareCollection = [&](const QString &optionName) -> bool
+	{
+		if (!optionFilter.contains(optionName))
+			return true;
+		std::unique_ptr<WorldDocument> doc;
+		if (!loadWorldDefaultCollection(runtime, optionName, enabled(optionName), doc, error))
 			return false;
-		const QString fileName = makeAbsolutePath(configured);
-		if (!QFileInfo::exists(fileName))
-			return false;
-		doc.setLoadMask(mask | WorldDocument::XML_NO_PLUGINS | WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(fileName))
-			return false;
-		const QString absolutePluginsDir = makeAbsolutePath(m_pluginsDirectory);
-		return doc.expandIncludes(fileName, absolutePluginsDir, m_workingDir, stateDir);
+		prepared.push_back({optionName, std::move(doc)});
+		return true;
 	};
 
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_triggers"))))
+	if (!prepareCollection(QStringLiteral("use_default_triggers")) ||
+	    !prepareCollection(QStringLiteral("use_default_aliases")) ||
+	    !prepareCollection(QStringLiteral("use_default_timers")) ||
+	    !prepareCollection(QStringLiteral("use_default_macros")) ||
+	    !prepareCollection(QStringLiteral("use_default_colours")))
 	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultTriggersFile"), WorldDocument::XML_TRIGGERS, doc))
+		return false;
+	}
+
+	for (const PreparedCollection &collection : prepared)
+	{
+		const WorldDocument &doc = *collection.document;
+		if (collection.optionName == QStringLiteral("use_default_triggers"))
 		{
 			QList<WorldRuntime::Trigger> combined;
 			combined.reserve(doc.triggers().size());
@@ -5294,12 +5411,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setTriggers(combined);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_aliases"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultAliasesFile"), WorldDocument::XML_ALIASES, doc))
+		else if (collection.optionName == QStringLiteral("use_default_aliases"))
 		{
 			QList<WorldRuntime::Alias> combined;
 			combined.reserve(doc.aliases().size());
@@ -5313,12 +5425,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setAliases(combined);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_timers"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultTimersFile"), WorldDocument::XML_TIMERS, doc))
+		else if (collection.optionName == QStringLiteral("use_default_timers"))
 		{
 			QList<WorldRuntime::Timer> combined;
 			combined.reserve(doc.timers().size());
@@ -5332,12 +5439,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setTimers(combined);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_macros"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultMacrosFile"), WorldDocument::XML_MACROS, doc))
+		else if (collection.optionName == QStringLiteral("use_default_macros"))
 		{
 			QMap<QString, QString>           macroIndexByName;
 			const QList<WorldRuntime::Macro> existingMacros = runtime->macros();
@@ -5365,12 +5467,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setMacros(macros);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_colours"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultColoursFile"), WorldDocument::XML_COLOURS, doc))
+		else if (collection.optionName == QStringLiteral("use_default_colours"))
 		{
 			QList<WorldRuntime::Colour> colours;
 			colours.reserve(doc.colours().size());
@@ -5379,6 +5476,64 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			runtime->setColours(colours);
 		}
 	}
+	return true;
+}
+
+bool AppController::saveWorldBeforeDefaultOverride(WorldRuntime *runtime, QWidget *parent, QString *error)
+{
+	if (error)
+		error->clear();
+	if (!runtime)
+	{
+		if (error)
+			*error = QStringLiteral("No world runtime is available.");
+		return false;
+	}
+	if (m_mainWindow)
+	{
+		if (const WorldChildWindow *const child = m_mainWindow->findWorldChildWindow(runtime);
+		    child && child->autosaveInFlight())
+		{
+			return true;
+		}
+	}
+	if (!runtime->worldFileModified() && !runtime->variablesChanged())
+		return true;
+
+	QString path = runtime->worldFilePath().trimmed();
+	if (path.isEmpty())
+	{
+		QString initialDir = makeAbsolutePath(defaultWorldDirectory());
+		if (initialDir.isEmpty())
+			initialDir = m_fileBrowsingDir;
+		QString suggestedName = runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
+		if (suggestedName.isEmpty())
+			suggestedName = QStringLiteral("World");
+		static const auto invalid = QStringLiteral("<>\"|?:#%;/\\");
+		for (const QChar &ch : invalid)
+			suggestedName.replace(ch, QLatin1Char('_'));
+		if (!suggestedName.endsWith(QStringLiteral(".qdl"), Qt::CaseInsensitive))
+			suggestedName += QStringLiteral(".qdl");
+		const QString dialogPath =
+		    initialDir.isEmpty() ? suggestedName : QDir(initialDir).filePath(suggestedName);
+		const QString fileName = QFileDialog::getSaveFileName(
+		    parent ? parent : m_mainWindow, QStringLiteral("Save World"), dialogPath,
+		    QStringLiteral("World files (*.qdl *.mcl);;All files (*.*)"));
+		if (fileName.isEmpty())
+			return false;
+		path = QMudFileExtensions::replaceOrAppendExtension(fileName, QStringLiteral("qdl"));
+	}
+
+	QString saveError;
+	if (!runtime->saveWorldFile(path, &saveError))
+	{
+		if (error)
+			*error = saveError.isEmpty() ? QStringLiteral("Unable to save the world file.") : saveError;
+		return false;
+	}
+	runtime->setWorldFilePath(path);
+	m_fileBrowsingDir = QFileInfo(path).absolutePath();
+	return true;
 }
 
 void AppController::emitStartupBanner(WorldRuntime *runtime)
@@ -7605,40 +7760,8 @@ void AppController::loadGlobalPlugins(WorldRuntime *runtime, const std::function
 
 void AppController::applyFontPreferences() const
 {
-	const QString inputFont   = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
-	const QString outputFont  = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
-	const int     inputHeight = getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-	const int     inputWeight = getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-	const int     inputItalic = getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
-	const int     inputCharset =
-	    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultInputFontCharset"));
-	const int outputHeight = getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
-	const int outputCharset =
-	    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultOutputFontCharset"));
-
 	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		const QMap<QString, QString> &attrs = runtime->worldAttributes();
-		if (isEnabledFlag(attrs.value(QStringLiteral("use_default_input_font"))))
-		{
-			if (!inputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("input_font_name"), inputFont);
-			runtime->setWorldAttribute(QStringLiteral("input_font_height"), QString::number(inputHeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_weight"), QString::number(inputWeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_italic"), QString::number(inputItalic));
-			runtime->setWorldAttribute(QStringLiteral("input_font_charset"), QString::number(inputCharset));
-		}
-		if (isEnabledFlag(attrs.value(QStringLiteral("use_default_output_font"))))
-		{
-			constexpr int outputWeight = 400;
-			if (!outputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("output_font_name"), outputFont);
-			runtime->setWorldAttribute(QStringLiteral("output_font_height"), QString::number(outputHeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_weight"), QString::number(outputWeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_charset"), QString::number(outputCharset));
-		}
 		runtime->setFixedPitchFont(getGlobalOption(QStringLiteral("FixedPitchFont")).toString());
-	}
 }
 
 void AppController::applyChildWindowPreferences() const
@@ -9385,10 +9508,9 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!runtime || !view)
 			return;
 
+		WorldPreferencesDialog             dlg(runtime, view, m_mainWindow);
 		const WorldPreferencesDialog::Page page = QMudWorldPreferencesRouting::initialPageForCommand(
 		    cmdName, runtime->lastPreferencesPage(), isCommand);
-
-		WorldPreferencesDialog dlg(runtime, view, m_mainWindow);
 		dlg.setInitialPage(page);
 		dlg.exec();
 		m_mainWindow->updateStatusBar();
@@ -12417,8 +12539,24 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!runtime)
 			return;
 		runtime->applyDefaultWorldOptions();
+		QString    defaultError;
+		const bool defaultsLoaded = applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError);
+		runtime->refreshCommandProcessorOptions();
+		runtime->syncChatAcceptCallsWithPreferences();
 		runtime->applyRuntimeSettingsToPresentationViews();
-		m_mainWindow->showStatusMessage(QStringLiteral("Defaults reloaded."), 2000);
+		if (!defaultsLoaded)
+		{
+			qWarning() << "Failed to reload one or more configured world defaults:" << defaultError;
+			runtime->outputText(QStringLiteral("Failed to reload one or more configured world defaults:\n%1")
+			                        .arg(defaultError),
+			                    true, true);
+			m_mainWindow->showStatusMessage(QStringLiteral("Some configured defaults could not be reloaded."),
+			                                4000);
+		}
+		else
+		{
+			m_mainWindow->showStatusMessage(QStringLiteral("Defaults reloaded."), 2000);
+		}
 	}
 	else if (isCommand(QStringLiteral("WindowsSocketInfo")))
 	{
@@ -13930,7 +14068,12 @@ void AppController::handleQuickConnect()
 		child->setRuntime(runtime);
 		m_mainWindow->addMdiSubWindow(child);
 		runtime->setPluginInstallDeferred(true);
-		applyConfiguredWorldDefaults(runtime);
+		if (QString defaultError; !applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError))
+		{
+			qWarning() << "Failed to load configured world defaults:" << defaultError;
+			runtime->outputText(
+			    QStringLiteral("Failed to load configured world defaults: %1").arg(defaultError), true, true);
+		}
 		emitStartupBanner(runtime);
 		runtime->applyInitialStartPausedState();
 		createdRuntime = true;

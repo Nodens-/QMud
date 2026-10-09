@@ -698,6 +698,11 @@ bool WorldChildWindow::isPrimaryRuntimeBinding() const
 	return m_primaryRuntimeBinding;
 }
 
+bool WorldChildWindow::autosaveInFlight() const
+{
+	return m_autosaveInFlight;
+}
+
 WorldView *WorldChildWindow::view() const
 {
 	return m_view;

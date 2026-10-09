@@ -8036,6 +8036,17 @@ class WorldRuntime : public QObject
 				bool                   global{false};
 				std::optional<int>     dispatchSequenceOverride;
 		};
+		/**
+		 * @brief Runtime-owned collection whose persistence is controlled by a default override.
+		 */
+		enum class PersistedRuntimeCollection
+		{
+			Triggers,
+			Aliases,
+			Timers,
+			Macros,
+			Colours
+		};
 		struct SaveSnapshot
 		{
 				QString                   targetFilePath;
@@ -8054,7 +8065,23 @@ class WorldRuntime : public QObject
 				QList<Keypad>             keypadEntries;
 				QList<PrintingStyle>      printingStyles;
 				QList<SavePluginSnapshot> plugins;
+				bool                      serializeRuntimeTriggers{true};
+				bool                      serializeRuntimeAliases{true};
+				bool                      serializeRuntimeTimers{true};
+				bool                      serializeRuntimeMacros{true};
+				bool                      serializeRuntimeColours{true};
 		};
+		/**
+		 * @brief Returns whether a runtime collection belongs in the world file.
+		 * @param collection Runtime collection being queried.
+		 * @return `true` when the live runtime collection is persistent world data.
+		 */
+		[[nodiscard]] bool shouldSerializeRuntimeCollection(PersistedRuntimeCollection collection) const;
+		/**
+		 * @brief Marks a persistent runtime collection as modified when its default override is disabled.
+		 * @param collection Runtime collection that changed.
+		 */
+		void               markRuntimeCollectionModified(PersistedRuntimeCollection collection);
 		/**
 		 * @brief Builds immutable snapshot of current savable state.
 		 * @param fileName Target world file name.

@@ -37,6 +37,7 @@
 #include <QtSql/QSqlDatabase>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 class MainWindow;
 class ActivityDocument;
@@ -337,39 +338,66 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] QStringList                  activeOpenWorldLogFiles() const;
 		/**
-		 * @brief Applies configured default world options to runtime.
-		 * @param runtime Runtime instance to initialize.
+		 * @brief Loads one configured-default or persisted-world collection without applying it.
+		 * @param runtime Runtime providing persistence paths and include context.
+		 * @param optionName Canonical collection override option name.
+		 * @param useDefault Load the configured default when `true`, or the saved world collection otherwise.
+		 * @param document Receives the loaded collection document.
+		 * @param error Optional output error message.
+		 * @return `true` when the requested collection loaded successfully.
 		 */
-		void                                       applyConfiguredWorldDefaults(WorldRuntime *runtime) const;
+		bool loadWorldDefaultCollection(const WorldRuntime *runtime, const QString &optionName,
+		                                bool useDefault, std::unique_ptr<WorldDocument> &document,
+		                                QString *error = nullptr) const;
+		/**
+		 * @brief Loads and applies configured or persisted world collections.
+		 * @param runtime Runtime instance to update.
+		 * @param optionFilter Default-option names to apply atomically; empty independently applies every enabled
+		 * default so one invalid file cannot block the others.
+		 * @param optionValues Candidate override values used instead of the runtime attributes.
+		 * @param error Optional output error message.
+		 * @return `true` when every selected collection loaded and was applied.
+		 */
+		bool applyConfiguredWorldDefaults(WorldRuntime *runtime, const QSet<QString> &optionFilter = {},
+		                                  const QMap<QString, QString> &optionValues = {},
+		                                  QString                      *error        = nullptr) const;
+		/**
+		 * @brief Saves dirty world data before a runtime default override replaces a collection.
+		 * @param runtime Runtime whose current persistent state must be saved.
+		 * @param parent Parent for a required Save World dialog.
+		 * @param error Optional output error message; remains empty when Save World is cancelled.
+		 * @return `true` when no save was needed or the save completed.
+		 */
+		bool saveWorldBeforeDefaultOverride(WorldRuntime *runtime, QWidget *parent, QString *error = nullptr);
 		/**
 		 * @brief Returns next monotonically increasing unique number.
 		 * @return Unique number value.
 		 */
-		qint64                                     nextUniqueNumber();
+		qint64 nextUniqueNumber();
 		/**
 		 * @brief Seeds shared random generator.
 		 * @param seed Seed value.
 		 */
-		void                                       seedRandom(quint32 seed);
+		void   seedRandom(quint32 seed);
 		/**
 		 * @brief Seeds random generator from seed array.
 		 * @param values Seed values.
 		 */
-		void                                       seedRandomFromArray(const QVector<quint32> &values);
+		void   seedRandomFromArray(const QVector<quint32> &values);
 		/**
 		 * @brief Returns random value in [0,1).
 		 * @return Random unit value.
 		 */
-		double                                     nextRandomUnit();
+		double nextRandomUnit();
 		/**
 		 * @brief Creates activity document if not already present.
 		 */
-		void                                       ensureActivityDocument();
+		void   ensureActivityDocument();
 		/**
 		 * @brief Reacts to world script-file change notification.
 		 * @param runtime Runtime that reported script file change.
 		 */
-		void                                       processScriptFileChange(WorldRuntime *runtime);
+		void   processScriptFileChange(WorldRuntime *runtime);
 		/**
 		 * @brief Result summary returned by XML import operations.
 		 */

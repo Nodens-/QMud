@@ -220,6 +220,18 @@ class LuaCallbackRuntimeMutationAccess final
 		{
 			return runtime.timersMutable();
 		}
+		static void markTriggerCollectionModified(WorldRuntime &runtime)
+		{
+			runtime.markRuntimeCollectionModified(WorldRuntime::PersistedRuntimeCollection::Triggers);
+		}
+		static void markAliasCollectionModified(WorldRuntime &runtime)
+		{
+			runtime.markRuntimeCollectionModified(WorldRuntime::PersistedRuntimeCollection::Aliases);
+		}
+		static void markTimerCollectionModified(WorldRuntime &runtime)
+		{
+			runtime.markRuntimeCollectionModified(WorldRuntime::PersistedRuntimeCollection::Timers);
+		}
 		static WorldRuntime::Plugin *plugin(WorldRuntime &runtime, const QString &pluginId)
 		{
 			return runtime.pluginForIdMutable(pluginId);
@@ -6026,6 +6038,53 @@ namespace
 		PersistentMutation
 	};
 
+	/**
+	 * @brief Resolves whether a world-owned runtime collection is currently persisted.
+	 * @param engine Callback engine whose causal world-attribute view must be observed.
+	 * @param runtime Runtime targeted by the collection mutation.
+	 * @param overrideOption Default-override option controlling collection persistence.
+	 * @return `true` when mutations to the collection belong to the world file.
+	 */
+	bool callbackWorldCollectionIsPersisted(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+	                                        const QString &overrideOption)
+	{
+		return runtime && !isEnabledValue(resolveWorldAttributeValueForApi(engine, runtime, overrideOption));
+	}
+
+	/**
+	 * @brief Downgrades callback dirty-state publication for an overridden world collection.
+	 * @param engine Callback engine whose causal option state must be observed.
+	 * @param pluginId Empty for world-owned collections and non-empty for plugin-owned collections.
+	 * @param writeKind Requested cache write semantics.
+	 * @param overrideOption Default-override option controlling world collection persistence.
+	 * @return Effective cache write semantics for the mutation.
+	 */
+	CallbackCollectionCacheWriteKind
+	effectiveCallbackCollectionWriteKind(const LuaCallbackEngine *engine, const QString &pluginId,
+	                                     const CallbackCollectionCacheWriteKind writeKind,
+	                                     const QString                         &overrideOption)
+	{
+		if (writeKind != CallbackCollectionCacheWriteKind::PersistentMutation || !pluginId.isEmpty())
+			return writeKind;
+		return callbackWorldCollectionIsPersisted(
+		           engine, engine ? engine->worldRuntimeForBridgedCall() : nullptr, overrideOption)
+		           ? writeKind
+		           : CallbackCollectionCacheWriteKind::RuntimeMutation;
+	}
+
+	/**
+	 * @brief Publishes a callback-local world dirty flag only for a persisted collection mutation.
+	 * @param engine Callback engine whose causal dirty state is updated.
+	 * @param runtime Runtime targeted by the collection mutation.
+	 * @param overrideOption Default-override option controlling collection persistence.
+	 */
+	void markCallbackWorldCollectionModifiedSnapshot(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+	                                                 const QString &overrideOption)
+	{
+		if (callbackWorldCollectionIsPersisted(engine, runtime, overrideOption))
+			setCallbackWorldFileModifiedSnapshot(engine, true);
+	}
+
 	void cacheCallbackCollectionDerivedState(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                         const int count,
 	                                         int WorldRuntime::RuntimeCountersSnapshot::*worldCountMember,
@@ -6225,9 +6284,13 @@ namespace
 		if (writeKind != CallbackCollectionCacheWriteKind::Read)
 			context->triggerListCache.mutatedPluginIds.insert(pluginKey);
 		if (found && !pluginMissing)
+		{
+			const CallbackCollectionCacheWriteKind effectiveWriteKind = effectiveCallbackCollectionWriteKind(
+			    engine, pluginId, writeKind, QStringLiteral("use_default_triggers"));
 			cacheCallbackCollectionDerivedState(engine, pluginId, static_cast<int>(triggers.size()),
 			                                    &WorldRuntime::RuntimeCountersSnapshot::triggerCount, 9,
-			                                    writeKind);
+			                                    effectiveWriteKind);
+		}
 	}
 
 	bool tryResolveCallbackAliasListFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
@@ -6280,9 +6343,13 @@ namespace
 		if (writeKind != CallbackCollectionCacheWriteKind::Read)
 			context->aliasListCache.mutatedPluginIds.insert(pluginKey);
 		if (found && !pluginMissing)
+		{
+			const CallbackCollectionCacheWriteKind effectiveWriteKind = effectiveCallbackCollectionWriteKind(
+			    engine, pluginId, writeKind, QStringLiteral("use_default_aliases"));
 			cacheCallbackCollectionDerivedState(engine, pluginId, static_cast<int>(aliases.size()),
 			                                    &WorldRuntime::RuntimeCountersSnapshot::aliasCount, 10,
-			                                    writeKind);
+			                                    effectiveWriteKind);
+		}
 	}
 
 	bool tryResolveCallbackTimerListFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
@@ -6334,9 +6401,13 @@ namespace
 		if (writeKind != CallbackCollectionCacheWriteKind::Read)
 			context->timerListCache.mutatedPluginIds.insert(pluginKey);
 		if (found && !pluginMissing)
+		{
+			const CallbackCollectionCacheWriteKind effectiveWriteKind = effectiveCallbackCollectionWriteKind(
+			    engine, pluginId, writeKind, QStringLiteral("use_default_timers"));
 			cacheCallbackCollectionDerivedState(engine, pluginId, static_cast<int>(timers.size()),
 			                                    &WorldRuntime::RuntimeCountersSnapshot::timerCount, 11,
-			                                    writeKind);
+			                                    effectiveWriteKind);
+		}
 	}
 
 	bool tryResolveCallbackPluginSupportStatusFromCache(const LuaCallbackEngine *engine,
@@ -15376,7 +15447,7 @@ static int luaSetBoldColour(lua_State *L)
 	if (activeCallbackContextConst(engine) && index >= 1 && index <= 8)
 	{
 		cacheCallbackBoldAnsiColour(engine, index, colorValue(color));
-		setCallbackWorldFileModifiedSnapshot(engine, true);
+		markCallbackWorldCollectionModifiedSnapshot(engine, runtime, QStringLiteral("use_default_colours"));
 	}
 	return 0;
 }
@@ -17224,7 +17295,7 @@ static int luaSetCustomColourBackground(lua_State *L)
 	{
 		cacheCallbackCustomBackgroundColour(engine, index, colorValue(color));
 		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
-		setCallbackWorldFileModifiedSnapshot(engine, true);
+		markCallbackWorldCollectionModifiedSnapshot(engine, runtime, QStringLiteral("use_default_colours"));
 	}
 	return 0;
 }
@@ -17269,7 +17340,7 @@ static int luaSetCustomColourText(lua_State *L)
 	{
 		cacheCallbackCustomTextColour(engine, index, colorValue(color));
 		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
-		setCallbackWorldFileModifiedSnapshot(engine, true);
+		markCallbackWorldCollectionModifiedSnapshot(engine, runtime, QStringLiteral("use_default_colours"));
 	}
 	return 0;
 }
@@ -24273,7 +24344,7 @@ static int luaSetNormalColour(lua_State *L)
 	{
 		cacheCallbackNormalAnsiColour(engine, which, value);
 		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
-		setCallbackWorldFileModifiedSnapshot(engine, true);
+		markCallbackWorldCollectionModifiedSnapshot(engine, runtime, QStringLiteral("use_default_colours"));
 	}
 	return 0;
 }
@@ -28805,7 +28876,7 @@ static int luaSetCustomColourName(lua_State *L)
 		    engine, runtime, [index, name](WorldRuntime &targetRuntime)
 		    { static_cast<void>(targetRuntime.setCustomColourName(index, name)); });
 		cacheCallbackCustomColourName(engine, index, trimmed);
-		setCallbackWorldFileModifiedSnapshot(engine, true);
+		markCallbackWorldCollectionModifiedSnapshot(engine, runtime, QStringLiteral("use_default_colours"));
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -38742,7 +38813,7 @@ static void commitTriggerRuleMutations(WorldRuntime *runtime, const WorldRuntime
 	if (!runtime || changes.isEmpty())
 		return;
 	if (!plugin)
-		runtime->setWorldFileModified(true);
+		LuaCallbackRuntimeMutationAccess::markTriggerCollectionModified(*runtime);
 	runtime->markTriggerRuntimeStatesChanged(
 	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, changes);
 	runtime->markTriggerRulesChanged();
@@ -38768,7 +38839,7 @@ static void commitAliasRuleMutations(WorldRuntime *runtime, const WorldRuntime::
 	if (!runtime || changes.isEmpty())
 		return;
 	if (!plugin)
-		runtime->setWorldFileModified(true);
+		LuaCallbackRuntimeMutationAccess::markAliasCollectionModified(*runtime);
 	runtime->markAliasRuntimeStatesChanged(
 	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, changes);
 	runtime->markAliasRulesChanged();
@@ -38794,7 +38865,7 @@ static void commitTimerRuleMutations(WorldRuntime *runtime, const WorldRuntime::
 	if (!runtime || changes.isEmpty())
 		return;
 	if (!plugin)
-		runtime->setWorldFileModified(true);
+		LuaCallbackRuntimeMutationAccess::markTimerCollectionModified(*runtime);
 	runtime->markTimerRuntimeStatesChanged(
 	    plugin ? plugin->attributes.value(QStringLiteral("id")) : QString{}, changes);
 }
@@ -47146,7 +47217,8 @@ static int luaSetOption(lua_State *L)
 		lua_pushnumber(L, eUnknownOption);
 		return 1;
 	}
-	if (!pluginId.isEmpty() && option->flags & OPT_PLUGIN_CANNOT_WRITE)
+	if ((option->flags & OPT_CANNOT_WRITE) != 0 ||
+	    (!pluginId.isEmpty() && (option->flags & OPT_PLUGIN_CANNOT_WRITE) != 0))
 	{
 		lua_pushnumber(L, ePluginCannotSetOption);
 		return 1;
