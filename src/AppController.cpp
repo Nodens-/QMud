@@ -9990,8 +9990,6 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		auto                  triggers = runtime->triggers();
 		WorldRuntime::Trigger trigger;
 		auto                 &attrs = trigger.attributes;
-		attrs.insert(QStringLiteral("name"),
-		             QStringLiteral("*trigger%1").arg(WorldRuntime::getUniqueNumber()));
 		attrs.insert(QStringLiteral("match"), pattern);
 		attrs.insert(QStringLiteral("regexp"), QStringLiteral("1"));
 		attrs.insert(QStringLiteral("multi_line"), QStringLiteral("1"));
@@ -11373,7 +11371,6 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		QList<WorldRuntime::Trigger> triggers = runtime->triggers();
 		WorldRuntime::Trigger        trigger;
 		QMap<QString, QString>      &t = trigger.attributes;
-		t.insert(QStringLiteral("name"), QStringLiteral("*trigger%1").arg(WorldRuntime::getUniqueNumber()));
 		t.insert(QStringLiteral("match"), pattern);
 		t.insert(QStringLiteral("regexp"), QStringLiteral("1"));
 		t.insert(QStringLiteral("ignore_case"), dlg.matchCase() ? QStringLiteral("0") : QStringLiteral("1"));

@@ -23,10 +23,15 @@
 #include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 #include "dialogs/GeneratedNameDialog.h"
+#include "dialogs/HighlightPhraseDialog.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QAction>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
+#include <QComboBox>
 #include <QCoreApplication>
+#include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
@@ -37,7 +42,9 @@
 #include <QScopeGuard>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QTextEdit>
 #include <QThread>
+#include <QTimer>
 #include <QtTest/QTest>
 
 #include <algorithm>
@@ -134,11 +141,11 @@ end
 			bool       firstReusable  = first.state != nullptr;
 			bool       secondReusable = second.state != nullptr;
 			const auto releaseStates  = qScopeGuard(
-			    [&controller, first, second, &firstReusable, &secondReusable]
-			    {
-				    controller.releaseSpellCheckerState(second, secondReusable);
-				    controller.releaseSpellCheckerState(first, firstReusable);
-			    });
+                [&controller, first, second, &firstReusable, &secondReusable]
+                {
+                    controller.releaseSpellCheckerState(second, secondReusable);
+                    controller.releaseSpellCheckerState(first, firstReusable);
+                });
 			Q_UNUSED(releaseStates);
 			if (!first.state || !second.state || first.state == second.state)
 				return false;
@@ -392,11 +399,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-				    [&worldGuard]
-				    {
-					    if (worldGuard)
-						    worldGuard->setRuntime(nullptr);
-				    });
+                    [&worldGuard]
+                    {
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);
 				frame.show();
@@ -504,11 +511,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-				    [&worldGuard]
-				    {
-					    if (worldGuard)
-						    worldGuard->setRuntime(nullptr);
-				    });
+                    [&worldGuard]
+                    {
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
 				Q_UNUSED(unbindRuntime);
 				frame.addMdiSubWindow(world, true);
 				frame.show();
@@ -566,11 +573,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-				    [&worldGuard]
-				    {
-					    if (worldGuard)
-						    worldGuard->setRuntime(nullptr);
-				    });
+                    [&worldGuard]
+                    {
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
 				Q_UNUSED(unbindRuntime);
 				frame.addMdiSubWindow(world, true);
 				frame.show();
@@ -629,6 +636,100 @@ end
 			}
 
 			/**
+			 * @brief Verifies built-in trigger commands create ordinary unnamed runtime triggers.
+			 */
+			static void builtInTriggerCommandsCreateUnnamedTriggers()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+
+				auto *world = new WorldChildWindow(QStringLiteral("Trigger command world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+                    [&worldGuard]
+                    {
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
+				Q_UNUSED(unbindRuntime);
+				frame.addMdiSubWindow(world, true);
+				frame.resize(900, 600);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				bool handledHighlightDialog = false;
+				QTimer::singleShot(
+				    0, qApp,
+				    [&handledHighlightDialog]
+				    {
+					    auto *dialog =
+					        qobject_cast<HighlightPhraseDialog *>(QApplication::activeModalWidget());
+					    if (!dialog)
+					    {
+						    if (QWidget *modal = QApplication::activeModalWidget())
+							    modal->close();
+						    return;
+					    }
+					    auto *text    = dialog->findChild<QLineEdit *>();
+					    auto *colours = dialog->findChild<QComboBox *>();
+					    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+					    if (!text || !colours || !buttons || !buttons->button(QDialogButtonBox::Ok))
+					    {
+						    dialog->reject();
+						    return;
+					    }
+					    text->setText(QStringLiteral("warning"));
+					    colours->setCurrentIndex(1);
+					    handledHighlightDialog = true;
+					    buttons->button(QDialogButtonBox::Ok)->click();
+				    });
+				controller.onCommandTriggered(QStringLiteral("HighlightWord"));
+				QVERIFY(handledHighlightDialog);
+				QCOMPARE(runtime.triggers().size(), qsizetype{1});
+				const WorldRuntime::Trigger &highlight = runtime.triggers().constFirst();
+				QVERIFY(highlight.attributes.value(QStringLiteral("name")).isEmpty());
+				QCOMPARE(highlight.attributes.value(QStringLiteral("group")),
+				         QStringLiteral("Highlighted Words"));
+				QVERIFY(highlight.runtimeId != 0);
+				QVERIFY(highlight.runtimeLocationHandle != 0);
+
+				bool handledMultilineDialog = false;
+				QTimer::singleShot(
+				    0, qApp,
+				    [&handledMultilineDialog]
+				    {
+					    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+					    if (!dialog || dialog->windowTitle() != QStringLiteral("Multi-Line Trigger"))
+					    {
+						    if (QWidget *modal = QApplication::activeModalWidget())
+							    modal->close();
+						    return;
+					    }
+					    auto *text    = dialog->findChild<QTextEdit *>();
+					    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+					    if (!text || !buttons || !buttons->button(QDialogButtonBox::Ok))
+					    {
+						    dialog->reject();
+						    return;
+					    }
+					    text->setPlainText(QStringLiteral("first line\nsecond line"));
+					    handledMultilineDialog = true;
+					    buttons->button(QDialogButtonBox::Ok)->click();
+				    });
+				controller.onCommandTriggered(QStringLiteral("MultiLineTrigger"));
+				QVERIFY(handledMultilineDialog);
+				QCOMPARE(runtime.triggers().size(), qsizetype{2});
+				const WorldRuntime::Trigger &multiline = runtime.triggers().constLast();
+				QVERIFY(multiline.attributes.value(QStringLiteral("name")).isEmpty());
+				QCOMPARE(multiline.attributes.value(QStringLiteral("group")), QStringLiteral("Multi Line"));
+				QVERIFY(multiline.runtimeId != 0);
+				QVERIFY(multiline.runtimeLocationHandle != 0);
+			}
+
+			/**
 			 * @brief Verifies notepad Send To World targets its exact owner and terminates its partial prompt.
 			 */
 			static void ownedNotepadSendToWorldTerminatesPartialPrompt()
@@ -663,13 +764,13 @@ end
 				const QPointer decoyWorldGuard(decoyWorld);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntimes = qScopeGuard(
-				    [&decoyWorldGuard, &worldGuard]
-				    {
-					    if (decoyWorldGuard)
-						    decoyWorldGuard->setRuntime(nullptr);
-					    if (worldGuard)
-						    worldGuard->setRuntime(nullptr);
-				    });
+                    [&decoyWorldGuard, &worldGuard]
+                    {
+                        if (decoyWorldGuard)
+                            decoyWorldGuard->setRuntime(nullptr);
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
 				controller.setMainWindow(&frame);
 				frame.addMdiSubWindow(decoyWorld, true);
 				frame.addMdiSubWindow(world, true);
@@ -734,11 +835,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-				    [&worldGuard]
-				    {
-					    if (worldGuard)
-						    worldGuard->setRuntime(nullptr);
-				    });
+                    [&worldGuard]
+                    {
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
 				controller.setMainWindow(&frame);
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);
@@ -820,11 +921,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-				    [&worldGuard]
-				    {
-					    if (worldGuard)
-						    worldGuard->setRuntime(nullptr);
-				    });
+                    [&worldGuard]
+                    {
+                        if (worldGuard)
+                            worldGuard->setRuntime(nullptr);
+                    });
 				controller.setMainWindow(&frame);
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);
@@ -1030,6 +1131,7 @@ end
 				    &rejectedXmlImportLeavesWorldScriptStateUntouched,
 #endif
 				    &acceptedWorldCloseEndsScriptReloadSession,
+				    &builtInTriggerCommandsCreateUnnamedTriggers,
 				    &ownedNotepadSendToWorldTerminatesPartialPrompt,
 				    &textWindowActionsRequireRecordedLiveOwner,
 				    &packetDebugActionUsesOwnedTextWindow,
@@ -1038,9 +1140,9 @@ end
 				    &generatedNameSendTerminatesPartialPrompt,
 				};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-				static_assert(testFunctions.size() == 10);
+				static_assert(testFunctions.size() == 11);
 #else
-				static_assert(testFunctions.size() == 7);
+				static_assert(testFunctions.size() == 8);
 #endif
 			}
 	};
