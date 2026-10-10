@@ -129,6 +129,13 @@ void HighlightPhraseDialog::setOtherColours(const QColor &fore, const QColor &ba
 	updateSwatches();
 }
 
+void HighlightPhraseDialog::setSuggestedOtherColours(const QColor &fore, const QColor &back)
+{
+	m_otherForeground = fore;
+	m_otherBackground = back;
+	updateSwatches();
+}
+
 void HighlightPhraseDialog::setInitialText(const QString &text) const
 {
 	if (m_text)

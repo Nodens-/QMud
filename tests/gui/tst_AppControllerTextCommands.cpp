@@ -29,7 +29,6 @@
 #include <QAction>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
-#include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -141,11 +140,11 @@ end
 			bool       firstReusable  = first.state != nullptr;
 			bool       secondReusable = second.state != nullptr;
 			const auto releaseStates  = qScopeGuard(
-                [&controller, first, second, &firstReusable, &secondReusable]
-                {
-                    controller.releaseSpellCheckerState(second, secondReusable);
-                    controller.releaseSpellCheckerState(first, firstReusable);
-                });
+			    [&controller, first, second, &firstReusable, &secondReusable]
+			    {
+				    controller.releaseSpellCheckerState(second, secondReusable);
+				    controller.releaseSpellCheckerState(first, firstReusable);
+			    });
 			Q_UNUSED(releaseStates);
 			if (!first.state || !second.state || first.state == second.state)
 				return false;
@@ -399,11 +398,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-                    [&worldGuard]
-                    {
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);
 				frame.show();
@@ -511,11 +510,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-                    [&worldGuard]
-                    {
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				Q_UNUSED(unbindRuntime);
 				frame.addMdiSubWindow(world, true);
 				frame.show();
@@ -573,11 +572,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-                    [&worldGuard]
-                    {
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				Q_UNUSED(unbindRuntime);
 				frame.addMdiSubWindow(world, true);
 				frame.show();
@@ -649,11 +648,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-                    [&worldGuard]
-                    {
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				Q_UNUSED(unbindRuntime);
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);
@@ -661,31 +660,28 @@ end
 				QCoreApplication::processEvents();
 
 				bool handledHighlightDialog = false;
-				QTimer::singleShot(
-				    0, qApp,
-				    [&handledHighlightDialog]
-				    {
-					    auto *dialog =
-					        qobject_cast<HighlightPhraseDialog *>(QApplication::activeModalWidget());
-					    if (!dialog)
-					    {
-						    if (QWidget *modal = QApplication::activeModalWidget())
-							    modal->close();
-						    return;
-					    }
-					    auto *text    = dialog->findChild<QLineEdit *>();
-					    auto *colours = dialog->findChild<QComboBox *>();
-					    auto *buttons = dialog->findChild<QDialogButtonBox *>();
-					    if (!text || !colours || !buttons || !buttons->button(QDialogButtonBox::Ok))
-					    {
-						    dialog->reject();
-						    return;
-					    }
-					    text->setText(QStringLiteral("warning"));
-					    colours->setCurrentIndex(1);
-					    handledHighlightDialog = true;
-					    buttons->button(QDialogButtonBox::Ok)->click();
-				    });
+				QTimer::singleShot(0, qApp,
+				                   [&handledHighlightDialog]
+				                   {
+					                   auto *dialog = qobject_cast<HighlightPhraseDialog *>(
+					                       QApplication::activeModalWidget());
+					                   if (!dialog)
+					                   {
+						                   if (QWidget *modal = QApplication::activeModalWidget())
+							                   modal->close();
+						                   return;
+					                   }
+					                   auto *text    = dialog->findChild<QLineEdit *>();
+					                   auto *buttons = dialog->findChild<QDialogButtonBox *>();
+					                   if (!text || !buttons || !buttons->button(QDialogButtonBox::Ok))
+					                   {
+						                   dialog->reject();
+						                   return;
+					                   }
+					                   text->setText(QStringLiteral("warning"));
+					                   handledHighlightDialog = true;
+					                   buttons->button(QDialogButtonBox::Ok)->click();
+				                   });
 				controller.onCommandTriggered(QStringLiteral("HighlightWord"));
 				QVERIFY(handledHighlightDialog);
 				QCOMPARE(runtime.triggers().size(), qsizetype{1});
@@ -693,6 +689,11 @@ end
 				QVERIFY(highlight.attributes.value(QStringLiteral("name")).isEmpty());
 				QCOMPARE(highlight.attributes.value(QStringLiteral("group")),
 				         QStringLiteral("Highlighted Words"));
+				QCOMPARE(highlight.attributes.value(QStringLiteral("custom_colour")), QStringLiteral("17"));
+				QCOMPARE(highlight.attributes.value(QStringLiteral("other_text_colour")),
+				         QStringLiteral("#202020"));
+				QCOMPARE(highlight.attributes.value(QStringLiteral("other_back_colour")),
+				         QStringLiteral("#C9B458"));
 				QVERIFY(highlight.runtimeId != 0);
 				QVERIFY(highlight.runtimeLocationHandle != 0);
 
@@ -764,13 +765,13 @@ end
 				const QPointer decoyWorldGuard(decoyWorld);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntimes = qScopeGuard(
-                    [&decoyWorldGuard, &worldGuard]
-                    {
-                        if (decoyWorldGuard)
-                            decoyWorldGuard->setRuntime(nullptr);
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&decoyWorldGuard, &worldGuard]
+				    {
+					    if (decoyWorldGuard)
+						    decoyWorldGuard->setRuntime(nullptr);
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				controller.setMainWindow(&frame);
 				frame.addMdiSubWindow(decoyWorld, true);
 				frame.addMdiSubWindow(world, true);
@@ -835,11 +836,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-                    [&worldGuard]
-                    {
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				controller.setMainWindow(&frame);
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);
@@ -921,11 +922,11 @@ end
 				world->setRuntime(&runtime);
 				const QPointer worldGuard(world);
 				const auto     unbindRuntime = qScopeGuard(
-                    [&worldGuard]
-                    {
-                        if (worldGuard)
-                            worldGuard->setRuntime(nullptr);
-                    });
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
 				controller.setMainWindow(&frame);
 				frame.addMdiSubWindow(world, true);
 				frame.resize(900, 600);

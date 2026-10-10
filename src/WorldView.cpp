@@ -11395,15 +11395,12 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	const int  selectionEndLineZero   = nativeSelEndLine - 1;
 	const int  selectionStartColZero  = nativeSelStartColumn - 1;
 	const int  selectionEndColZero    = nativeSelEndColumn - 1;
-	QColor     selectionColour        = m_output->palette().color(QPalette::Highlight);
-	if (!selectionColour.isValid())
-		selectionColour = QColor(60, 120, 200);
-	selectionColour.setAlpha(110);
-	const bool      fadeEnabled                = m_fadeEnabled && !m_frozen;
-	const QDateTime fadeNow                    = fadeEnabled ? QDateTime::currentDateTimeUtc() : QDateTime{};
-	qint64          nextFadeUpdateMilliseconds = std::numeric_limits<qint64>::max();
-	const auto      lineOpacity = [this, fadeEnabled, &fadeNow,
-	                               &nextFadeUpdateMilliseconds](const QDateTime &timestamp) -> qreal
+	constexpr QColor selectionColour(201, 180, 88, 64);
+	const bool       fadeEnabled                = m_fadeEnabled && !m_frozen;
+	const QDateTime  fadeNow                    = fadeEnabled ? QDateTime::currentDateTimeUtc() : QDateTime{};
+	qint64           nextFadeUpdateMilliseconds = std::numeric_limits<qint64>::max();
+	const auto       lineOpacity = [this, fadeEnabled, &fadeNow,
+	                                &nextFadeUpdateMilliseconds](const QDateTime &timestamp) -> qreal
 	{
 		if (!fadeEnabled || !timestamp.isValid())
 			return 1.0;

@@ -11343,6 +11343,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		HighlightPhraseDialog dlg(m_mainWindow);
 		dlg.setCustomColours(customText, customBack, customNames);
 		dlg.setOtherColours(otherFore, otherBack);
+		dlg.setSuggestedOtherColours(QColor(32, 32, 32), QColor(201, 180, 88));
 		dlg.setInitialText(suggested);
 		dlg.setWholeWord(true);
 		dlg.setMatchCase(false);

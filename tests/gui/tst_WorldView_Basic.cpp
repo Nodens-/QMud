@@ -8320,6 +8320,90 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void nativeOutputRendererAppliesLowOpacityMutedYellowSelectionMask()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("output_text_colour"), QStringLiteral("#FFFFFF"));
+			setTestWorldAttribute(QStringLiteral("output_background_colour"), QStringLiteral("#000000"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+
+			QWidget *const nativeCanvas = findNativeOutputCanvas(view);
+			QVERIFY(nativeCanvas);
+			const QString           selectedText = QStringLiteral("MMMM    MMMM    MMMM    ");
+			WorldRuntime::StyleSpan span;
+			span.length    = boundedSizeToInt(selectedText.size());
+			span.fore      = QColor(QStringLiteral("#FF00FF"));
+			span.back      = QColor(QStringLiteral("#000000"));
+			span.bold      = true;
+			span.italic    = true;
+			span.underline = true;
+			runtimeOutputForTest(view).appendOutputTextStyled(selectedText, {span}, true);
+			QCoreApplication::processEvents();
+			constexpr int selectionStart = 8;
+			constexpr int selectionEnd   = 16;
+			view.selectOutputRange(0, selectionStart, selectionEnd);
+			nativeCanvas->repaint();
+
+			const QImage image = nativeCanvas->grab().toImage().convertToFormat(QImage::Format_ARGB32);
+			QVERIFY(!image.isNull());
+			auto canvasRangeRect = [&view, nativeCanvas](const int start, const int end, QRect &rangeRect)
+			{
+				rangeRect                   = {};
+				QTextBrowser *const browser = findVisibleOutputBrowser(view);
+				if (!browser)
+					return false;
+				for (int column = start; column < end; ++column)
+				{
+					QRect globalRect;
+					if (!view.nativeOutputCharacterRect(reinterpret_cast<WrapTextBrowser *>(browser),
+					                                    {0, column}, globalRect))
+						return false;
+					const QRect canvasRect(nativeCanvas->mapFromGlobal(globalRect.topLeft()),
+					                       globalRect.size());
+					rangeRect = rangeRect.united(canvasRect);
+				}
+				return !rangeRect.isEmpty();
+			};
+			QRect prefixRect;
+			QRect selectedRect;
+			QRect suffixRect;
+			QVERIFY(canvasRangeRect(1, selectionStart, prefixRect));
+			QVERIFY(canvasRangeRect(selectionStart + 1, selectionEnd, selectedRect));
+			QVERIFY(canvasRangeRect(selectionEnd + 1, boundedSizeToInt(selectedText.size()), suffixRect));
+			const QImage prefixImage   = image.copy(prefixRect.intersected(image.rect()));
+			const QImage selectedImage = image.copy(selectedRect.intersected(image.rect()));
+			const QImage suffixImage   = image.copy(suffixRect.intersected(image.rect()));
+			QVERIFY(!prefixImage.isNull());
+			QVERIFY(!selectedImage.isNull());
+			QVERIFY(!suffixImage.isNull());
+			constexpr QColor maskedBackground(50, 45, 22);
+			constexpr QColor maskedForeground(241, 45, 213);
+			constexpr QColor originalBackground(0, 0, 0);
+			constexpr QColor originalForeground(255, 0, 255);
+			QVERIFY(countPixelsNearColor(selectedImage, maskedBackground, 3) > 20);
+			QVERIFY(countPixelsNearColor(selectedImage, maskedForeground, 3) > 20);
+			for (const QImage &unselectedImage : {prefixImage, suffixImage})
+			{
+				QVERIFY(countPixelsNearColor(unselectedImage, originalBackground, 3) > 20);
+				QVERIFY(countPixelsNearColor(unselectedImage, originalForeground, 3) > 5);
+				QCOMPARE(countPixelsNearColor(unselectedImage, maskedBackground, 3), 0);
+				QCOMPARE(countPixelsNearColor(unselectedImage, maskedForeground, 3), 0);
+			}
+			const WorldRuntime::LineEntry &storedLine = runtimeForTest()->lines().constLast();
+			QCOMPARE(storedLine.spans.size(), qsizetype{1});
+			QCOMPARE(storedLine.spans.constFirst().fore, QColor(QStringLiteral("#FF00FF")));
+			QCOMPARE(storedLine.spans.constFirst().back, QColor(QStringLiteral("#000000")));
+			QVERIFY(storedLine.spans.constFirst().bold);
+			QVERIFY(storedLine.spans.constFirst().italic);
+			QVERIFY(storedLine.spans.constFirst().underline);
+			resetTestState();
+		}
+
 		void nativeOutputRendererLeavesSingleLongLineUnwrappedWithoutEmbeddedBreaks()
 		{
 			resetTestState();
