@@ -38,8 +38,9 @@ namespace QMudSingleInstanceIpc
 	 */
 	struct Request
 	{
-			Action  action{Action::Raise}; ///< Operation requested from the running instance.
-			QString fileAssociationPath;   ///< Exact native path supplied for an open request.
+			Action  action{Action::Raise};      ///< Operation requested from the running instance.
+			QString fileAssociationPath;        ///< Exact native path supplied for an open request.
+			bool    suppressAutoConnect{false}; ///< Suppress automatic connection for this open request.
 	};
 
 	/**

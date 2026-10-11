@@ -107,9 +107,11 @@ class AppController : public QObject
 
 		/**
 		 * @brief Creates application controller.
+		 * @param disableAutoConnectForExecution Whether preference-driven automatic connections are disabled for
+		 * this process execution.
 		 * @param parent Optional Qt parent object.
 		 */
-		explicit AppController(QObject *parent = nullptr);
+		explicit AppController(bool disableAutoConnectForExecution = false, QObject *parent = nullptr);
 
 		/**
 		 * @brief Starts initialization path with splash-screen flow.
@@ -156,34 +158,35 @@ class AppController : public QObject
 		/**
 		 * @brief Queues or dispatches one operating-system file-association request.
 		 * @param path Exact native file path supplied by the operating system.
+		 * @param suppressAutoConnect Suppress preference-driven automatic connection for this open request.
 		 * @return `true` when the request was queued or opened successfully.
 		 */
-		bool                         handleFileAssociationRequest(const QString &path);
+		bool        handleFileAssociationRequest(const QString &path, bool suppressAutoConnect = false);
 		/**
 		 * @brief Captures application-level file-open requests until startup is ready to open documents.
 		 * @param watched Object receiving the event.
 		 * @param event Event being delivered.
 		 * @return `true` when a local file-open request was consumed, including a rejected unsafe request.
 		 */
-		bool                         eventFilter(QObject *watched, QEvent *event) override;
+		bool        eventFilter(QObject *watched, QEvent *event) override;
 		/**
 		 * @brief Registers OS-level file associations.
 		 * @param errorMessage Optional output error message.
 		 * @return `true` on successful registration.
 		 */
-		static bool                  registerFileAssociations(QString *errorMessage = nullptr);
+		static bool registerFileAssociations(QString *errorMessage = nullptr);
 		/**
 		 * @brief Saves main window placement settings.
 		 */
-		void                         saveWindowPlacement() const;
+		void        saveWindowPlacement() const;
 		/**
 		 * @brief Saves view-related preference values.
 		 */
-		void                         saveViewPreferences();
+		void        saveViewPreferences();
 		/**
 		 * @brief Saves session-state data for reopen flows.
 		 */
-		void                         saveSessionState() const;
+		void        saveSessionState() const;
 		/**
 		 * @brief Persists open-world autosave and session state before normal shutdown.
 		 *
@@ -193,12 +196,12 @@ class AppController : public QObject
 		 * @param errorMessage Optional output error text when persistence fails.
 		 * @return `true` when all open-world shutdown state was saved successfully.
 		 */
-		[[nodiscard]] bool           saveOpenWorldStateBeforeShutdown(QString *errorMessage = nullptr) const;
+		[[nodiscard]] bool saveOpenWorldStateBeforeShutdown(QString *errorMessage = nullptr) const;
 		/**
 		 * @brief Sets activity document model instance.
 		 * @param doc Activity document pointer.
 		 */
-		void                         setActivityDocument(ActivityDocument *doc);
+		void               setActivityDocument(ActivityDocument *doc);
 		/**
 		 * @brief Returns current activity document model.
 		 * @return Activity document pointer, or `nullptr`.
@@ -536,6 +539,18 @@ class AppController : public QObject
 		{
 			Preserve,
 			Record
+		};
+		/** @brief Controls preference-driven automatic connection for one document open. */
+		enum class InitialAutoConnectPolicy
+		{
+			AllowIfEnabled,
+			Suppress
+		};
+		/** @brief One queued operating-system file request and its per-open connection policy. */
+		struct PendingFileAssociationRequest
+		{
+				QString path; ///< Exact native file path supplied by the operating system.
+				bool    suppressAutoConnect{false}; ///< Whether this open must skip automatic connection.
 		};
 
 		/**
@@ -921,9 +936,10 @@ class AppController : public QObject
 		/**
 		 * @brief Validates and opens one OS file request inside the captured QMud home directory.
 		 * @param path Native file path supplied by the operating system.
+		 * @param suppressAutoConnect Suppress preference-driven automatic connection for this open request.
 		 * @return `true` when the path passed containment checks and the document opened.
 		 */
-		bool dispatchFileAssociationRequest(const QString &path);
+		bool dispatchFileAssociationRequest(const QString &path, bool suppressAutoConnect = false);
 		/**
 		 * @brief Resolves an exact native file-association path and enforces the captured QMud-home boundary.
 		 * @param qmudHome Captured QMud home directory.
@@ -938,9 +954,11 @@ class AppController : public QObject
 		 * @brief Opens a document with an explicit recent-file update policy.
 		 * @param path Document path.
 		 * @param recentFileUpdate Recent-file update policy applied after a successful open.
+		 * @param autoConnectPolicy Preference-driven automatic-connect policy for this open.
 		 * @return `true` when the document opens successfully.
 		 */
-		bool                      openDocumentFile(const QString &path, RecentFileUpdate recentFileUpdate);
+		bool                      openDocumentFile(const QString &path, RecentFileUpdate recentFileUpdate,
+		                                           InitialAutoConnectPolicy autoConnectPolicy);
 		/**
 		 * @brief Opens multiple worlds with an explicit recent-file update policy.
 		 * @param items World file list.
@@ -953,9 +971,11 @@ class AppController : public QObject
 		 * @brief Opens one already-resolved document path with an explicit recent-file update policy.
 		 * @param resolvedPath Exact resolved document path.
 		 * @param recentFileUpdate Recent-file update policy applied after a successful open.
+		 * @param autoConnectPolicy Preference-driven automatic-connect policy for this open.
 		 * @return `true` when the document opens successfully.
 		 */
-		bool openResolvedDocumentFile(const QString &resolvedPath, RecentFileUpdate recentFileUpdate);
+		bool openResolvedDocumentFile(const QString &resolvedPath, RecentFileUpdate recentFileUpdate,
+		                              InitialAutoConnectPolicy autoConnectPolicy);
 		/**
 		 * @brief Moves one successfully opened document to the front of the persisted recent-file list.
 		 * @param resolvedPath Exact resolved document path.
@@ -1191,9 +1211,10 @@ class AppController : public QObject
 		/**
 		 * @brief Opens and initializes one world document.
 		 * @param path World-document path.
+		 * @param autoConnectPolicy Preference-driven automatic-connect policy for this open.
 		 * @return `true` when world document opens successfully.
 		 */
-		bool               openWorldDocument(const QString &path);
+		bool               openWorldDocument(const QString &path, InitialAutoConnectPolicy autoConnectPolicy);
 		/**
 		 * @brief Resolves world session-state directory under the data directory.
 		 * @return Absolute world session-state directory path.
@@ -1242,10 +1263,11 @@ class AppController : public QObject
 		 */
 		void        runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion) const;
 		/**
-		 * @brief Auto-connects runtime when settings request it.
+		 * @brief Auto-connects runtime when settings and execution policy request it.
 		 * @param runtime Runtime to auto-connect.
+		 * @param suppressForOpen Suppress automatic connection for this individual open request.
 		 */
-		void        maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		void        maybeAutoConnectWorld(WorldRuntime *runtime, bool suppressForOpen = false) const;
 		/**
 		 * @brief Displays the current tracked scrollback-restore count.
 		 */
@@ -1261,57 +1283,57 @@ class AppController : public QObject
 		QString     m_preferencesDatabaseName;
 		QString     m_locale;
 		QString     m_translatorFile;
-		QMap<QString, int>               m_globalIntPrefs;
-		QMap<QString, QString>           m_globalStringPrefs;
-		WorldViewGlobalSettings          m_worldViewGlobalSettings;
-		QString                          m_luaScript;
-		QString                          m_pluginsDirectory;
-		QString                          m_fixedPitchFont;
-		QString                          m_lastGlobalChangeFrom;
-		QString                          m_lastGlobalChangeTo;
-		QString                          m_lastGlobalReplaceFind;
-		QString                          m_lastGlobalReplaceReplace;
-		QString                          m_lastFunctionListFilter;
-		QString                          m_lastQuickConnectWorldName;
-		QString                          m_lastQuickConnectHost;
-		QString                          m_lastDebugWorldInput;
-		quint16                          m_lastQuickConnectPort{4000};
-		bool                             m_lastGlobalReplaceRegexp{false};
-		bool                             m_lastGlobalReplaceEachLine{false};
-		bool                             m_lastGlobalReplaceEscapeSequences{false};
-		QString                          m_lastMapperSpecialAction;
-		QString                          m_lastMapperSpecialReverse;
-		QString                          m_lastSendToAllWorlds;
-		QString                          m_asciiArtText;
-		QString                          m_printSetupPrinterName;
-		QPageLayout                      m_printSetupLayout;
-		bool                             m_echoSendToAll{true};
-		bool                             m_hasPrintSetup{false};
-		QStringList                      m_recallFindHistory;
-		QString                          m_recallLinePreamble;
-		bool                             m_recallMatchCase{false};
-		bool                             m_recallRegexp{false};
-		bool                             m_recallCommands{true};
-		bool                             m_recallOutput{true};
-		bool                             m_recallNotes{true};
-		QHash<class WorldRuntime *, int> m_savedWrapColumns;
-		bool                             m_autoOpen{true};
-		NewDocumentType                  m_typeOfNewDocument{eNormalNewDocument};
-		QSplashScreen                   *m_splash{nullptr};
-		bool                             m_deferMainWindowShowUntilSplash{false};
-		bool                             m_showMainWindowMaximizedAfterSplash{false};
-		bool                             m_splashMinDelayElapsed{false};
-		bool                             m_initializeFinished{false};
-		bool                             m_initializeSucceeded{false};
-		bool                             m_startupFinalized{false};
-		bool                             m_fileAssociationDispatchReady{false};
-		bool                             m_startupFirstTime{false};
-		QStringList                      m_pendingFileAssociationRequests;
-		bool                             m_startupNeedsUpgradeWelcome{false};
-		mutable bool                     m_deferUpgradeWelcomeUntilStartupRestores{false};
-		mutable bool                     m_startupRestoreDispatchComplete{false};
-		QTranslator                     *m_qtTranslator{nullptr};
-		lua_State                       *m_translatorLua{nullptr};
+		QMap<QString, int>                   m_globalIntPrefs;
+		QMap<QString, QString>               m_globalStringPrefs;
+		WorldViewGlobalSettings              m_worldViewGlobalSettings;
+		QString                              m_luaScript;
+		QString                              m_pluginsDirectory;
+		QString                              m_fixedPitchFont;
+		QString                              m_lastGlobalChangeFrom;
+		QString                              m_lastGlobalChangeTo;
+		QString                              m_lastGlobalReplaceFind;
+		QString                              m_lastGlobalReplaceReplace;
+		QString                              m_lastFunctionListFilter;
+		QString                              m_lastQuickConnectWorldName;
+		QString                              m_lastQuickConnectHost;
+		QString                              m_lastDebugWorldInput;
+		quint16                              m_lastQuickConnectPort{4000};
+		bool                                 m_lastGlobalReplaceRegexp{false};
+		bool                                 m_lastGlobalReplaceEachLine{false};
+		bool                                 m_lastGlobalReplaceEscapeSequences{false};
+		QString                              m_lastMapperSpecialAction;
+		QString                              m_lastMapperSpecialReverse;
+		QString                              m_lastSendToAllWorlds;
+		QString                              m_asciiArtText;
+		QString                              m_printSetupPrinterName;
+		QPageLayout                          m_printSetupLayout;
+		bool                                 m_echoSendToAll{true};
+		bool                                 m_hasPrintSetup{false};
+		QStringList                          m_recallFindHistory;
+		QString                              m_recallLinePreamble;
+		bool                                 m_recallMatchCase{false};
+		bool                                 m_recallRegexp{false};
+		bool                                 m_recallCommands{true};
+		bool                                 m_recallOutput{true};
+		bool                                 m_recallNotes{true};
+		QHash<class WorldRuntime *, int>     m_savedWrapColumns;
+		bool                                 m_autoOpen{true};
+		NewDocumentType                      m_typeOfNewDocument{eNormalNewDocument};
+		QSplashScreen                       *m_splash{nullptr};
+		bool                                 m_deferMainWindowShowUntilSplash{false};
+		bool                                 m_showMainWindowMaximizedAfterSplash{false};
+		bool                                 m_splashMinDelayElapsed{false};
+		bool                                 m_initializeFinished{false};
+		bool                                 m_initializeSucceeded{false};
+		bool                                 m_startupFinalized{false};
+		bool                                 m_fileAssociationDispatchReady{false};
+		bool                                 m_startupFirstTime{false};
+		QList<PendingFileAssociationRequest> m_pendingFileAssociationRequests;
+		bool                                 m_startupNeedsUpgradeWelcome{false};
+		mutable bool                         m_deferUpgradeWelcomeUntilStartupRestores{false};
+		mutable bool                         m_startupRestoreDispatchComplete{false};
+		QTranslator                         *m_qtTranslator{nullptr};
+		lua_State                           *m_translatorLua{nullptr};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		struct IdleSpellCheckerState
 		{
@@ -1355,6 +1377,7 @@ class AppController : public QObject
 		bool                             m_batchWorldListActivatedFirst{false};
 		int                              m_nextNewWorldActivationOverride{-1};
 		bool                             m_suppressAutoConnect{false};
+		const bool                       m_disableAutoConnectForExecution;
 		bool                             m_reloadInProgress{false};
 		QTimer                          *m_updateCheckTimer{nullptr};
 		QNetworkAccessManager           *m_updateNetworkManager{nullptr};

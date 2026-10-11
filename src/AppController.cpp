@@ -2365,7 +2365,8 @@ namespace
 
 AppController *AppController::s_instance = nullptr;
 
-AppController::AppController(QObject *parent) : QObject(parent)
+AppController::AppController(const bool disableAutoConnectForExecution, QObject *parent)
+    : QObject(parent), m_disableAutoConnectForExecution(disableAutoConnectForExecution)
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
@@ -2435,13 +2436,13 @@ bool AppController::eventFilter(QObject *watched, QEvent *event)
 	return true;
 }
 
-bool AppController::handleFileAssociationRequest(const QString &path)
+bool AppController::handleFileAssociationRequest(const QString &path, const bool suppressAutoConnect)
 {
 	if (path.isEmpty())
 		return false;
 	if (m_fileAssociationDispatchReady)
-		return dispatchFileAssociationRequest(path);
-	m_pendingFileAssociationRequests.push_back(path);
+		return dispatchFileAssociationRequest(path, suppressAutoConnect);
+	m_pendingFileAssociationRequests.push_back({path, suppressAutoConnect});
 	return true;
 }
 
@@ -3227,19 +3228,20 @@ void AppController::cleanupReloadStateOnNormalStartup() const
 
 bool AppController::openDocumentFile(const QString &path)
 {
-	return openDocumentFile(path, RecentFileUpdate::Preserve);
+	return openDocumentFile(path, RecentFileUpdate::Preserve, InitialAutoConnectPolicy::AllowIfEnabled);
 }
 
 bool AppController::openDocumentFileFromUserAction(const QString &path)
 {
-	return openDocumentFile(path, RecentFileUpdate::Record);
+	return openDocumentFile(path, RecentFileUpdate::Record, InitialAutoConnectPolicy::AllowIfEnabled);
 }
 
-bool AppController::openDocumentFile(const QString &path, const RecentFileUpdate recentFileUpdate)
+bool AppController::openDocumentFile(const QString &path, const RecentFileUpdate recentFileUpdate,
+                                     const InitialAutoConnectPolicy autoConnectPolicy)
 {
 	// Open-document flow with world/template routing.
 	if (path.isEmpty())
-		return openWorldDocument(QString());
+		return openWorldDocument(QString(), autoConnectPolicy);
 
 	QString normalized = path;
 #ifdef Q_OS_WIN
@@ -3250,15 +3252,17 @@ bool AppController::openDocumentFile(const QString &path, const RecentFileUpdate
 	auto resolvedPath = normalized;
 	if (const QFileInfo info(normalized); !info.isAbsolute())
 		resolvedPath = makeAbsolutePath(normalized);
-	return openResolvedDocumentFile(resolvedPath, recentFileUpdate);
+	return openResolvedDocumentFile(resolvedPath, recentFileUpdate, autoConnectPolicy);
 }
 
-bool AppController::openResolvedDocumentFile(const QString         &resolvedPath,
-                                             const RecentFileUpdate recentFileUpdate)
+bool AppController::openResolvedDocumentFile(const QString                 &resolvedPath,
+                                             const RecentFileUpdate         recentFileUpdate,
+                                             const InitialAutoConnectPolicy autoConnectPolicy)
 {
 	const auto suffix = QFileInfo(resolvedPath).suffix().toLower();
-	const auto opened = QMudFileExtensions::isWorldSuffix(suffix) ? openWorldDocument(resolvedPath)
-	                                                              : openTextDocument(resolvedPath);
+	const auto opened = QMudFileExtensions::isWorldSuffix(suffix)
+	                        ? openWorldDocument(resolvedPath, autoConnectPolicy)
+	                        : openTextDocument(resolvedPath);
 	if (!opened)
 	{
 		return false;
@@ -3348,7 +3352,8 @@ void AppController::openWorldsFromList(const QStringList &items, const bool acti
 
 	for (const QString &item : items)
 	{
-		const bool opened = openDocumentFile(item, recentFileUpdate);
+		const bool opened =
+		    openDocumentFile(item, recentFileUpdate, InitialAutoConnectPolicy::AllowIfEnabled);
 		if (!activateFirstOnly || !opened || firstOpenedRuntime != nullptr || !m_mainWindow)
 			continue;
 		if (WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
@@ -4813,7 +4818,8 @@ void AppController::setupStartupBehavior()
 	for (qsizetype index = args.size() - 1; index >= 1; --index)
 	{
 		const QString &argument = args.at(index);
-		if (argument.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
+		if (argument.compare(QStringLiteral("--no-autoconnect"), Qt::CaseInsensitive) == 0 ||
+		    argument.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
 		    argument.compare(QStringLiteral("--allow-multi-instance"), Qt::CaseInsensitive) == 0)
 		{
 			args.removeAt(index);
@@ -4885,7 +4891,7 @@ void AppController::setupStartupBehavior()
 	showTipAtStartup();
 }
 
-bool AppController::openWorldDocument(const QString &path)
+bool AppController::openWorldDocument(const QString &path, const InitialAutoConnectPolicy autoConnectPolicy)
 {
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
@@ -5061,21 +5067,24 @@ bool AppController::openWorldDocument(const QString &path)
 		const QPointer<WorldRuntime> runtimeGuard(runtime);
 		restoreWorldSessionStateAsync(
 		    runtime, window->view(), false,
-		    [this, runtimeGuard](const bool ok, const QString &error)
+		    [this, runtimeGuard, autoConnectPolicy](const bool ok, const QString &error)
 		    {
 			    if (!runtimeGuard)
 				    return;
 			    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
 			        ok, error,
 			        {
-			            [this, runtimeGuard]
+			            [this, runtimeGuard, autoConnectPolicy]
 			            {
 				            runWorldStartupPostRestore(runtimeGuard,
-				                                       [this, runtimeGuard]
+				                                       [this, runtimeGuard, autoConnectPolicy]
 				                                       {
 					                                       if (!runtimeGuard)
 						                                       return;
-					                                       maybeAutoConnectWorld(runtimeGuard);
+					                                       maybeAutoConnectWorld(
+					                                           runtimeGuard,
+					                                           autoConnectPolicy ==
+					                                               InitialAutoConnectPolicy::Suppress);
 				                                       });
 			            },
 			            {},
@@ -5118,22 +5127,24 @@ bool AppController::openWorldDocument(const QString &path)
 	const QPointer<WorldRuntime> runtimeGuard(runtime);
 	restoreWorldSessionStateAsync(
 	    runtime, window->view(), false,
-	    [this, runtimeGuard](const bool ok, const QString &error)
+	    [this, runtimeGuard, autoConnectPolicy](const bool ok, const QString &error)
 	    {
 		    if (!runtimeGuard)
 			    return;
 		    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
 		        ok, error,
 		        {
-		            [this, runtimeGuard]
+		            [this, runtimeGuard, autoConnectPolicy]
 		            {
-			            runWorldStartupPostRestore(runtimeGuard,
-			                                       [this, runtimeGuard]
-			                                       {
-				                                       if (!runtimeGuard)
-					                                       return;
-				                                       maybeAutoConnectWorld(runtimeGuard);
-			                                       });
+			            runWorldStartupPostRestore(
+			                runtimeGuard,
+			                [this, runtimeGuard, autoConnectPolicy]
+			                {
+				                if (!runtimeGuard)
+					                return;
+				                maybeAutoConnectWorld(runtimeGuard, autoConnectPolicy ==
+				                                                        InitialAutoConnectPolicy::Suppress);
+			                });
 		            },
 		            {},
 		            [runtimeGuard](const QString &restoreError)
@@ -5147,11 +5158,13 @@ bool AppController::openWorldDocument(const QString &path)
 	return true;
 }
 
-void AppController::maybeAutoConnectWorld(WorldRuntime *runtime) const
+void AppController::maybeAutoConnectWorld(WorldRuntime *runtime, const bool suppressForOpen) const
 {
 	if (!runtime)
 		return;
 	if (m_suppressAutoConnect)
+		return;
+	if (m_disableAutoConnectForExecution || suppressForOpen)
 		return;
 	if (getGlobalOption(QStringLiteral("AutoConnectWorlds")).toInt() == 0)
 		return;
@@ -8272,19 +8285,22 @@ void AppController::enableFileAssociationDispatch()
 {
 	while (!m_pendingFileAssociationRequests.isEmpty())
 	{
-		const QStringList pendingRequests = std::exchange(m_pendingFileAssociationRequests, {});
-		for (const QString &path : pendingRequests)
-			dispatchFileAssociationRequest(path);
+		const QList<PendingFileAssociationRequest> pendingRequests =
+		    std::exchange(m_pendingFileAssociationRequests, {});
+		for (const PendingFileAssociationRequest &request : pendingRequests)
+			dispatchFileAssociationRequest(request.path, request.suppressAutoConnect);
 	}
 	m_fileAssociationDispatchReady = true;
 }
 
-bool AppController::dispatchFileAssociationRequest(const QString &path)
+bool AppController::dispatchFileAssociationRequest(const QString &path, const bool suppressAutoConnect)
 {
 	QString resolvedPath;
 	if (!resolveFileAssociationFile(m_workingDir, path, &resolvedPath))
 		return false;
-	return openResolvedDocumentFile(resolvedPath, RecentFileUpdate::Record);
+	return openResolvedDocumentFile(resolvedPath, RecentFileUpdate::Record,
+	                                suppressAutoConnect ? InitialAutoConnectPolicy::Suppress
+	                                                    : InitialAutoConnectPolicy::AllowIfEnabled);
 }
 
 bool AppController::resolveFileAssociationFile(const QString &qmudHome, const QString &path,

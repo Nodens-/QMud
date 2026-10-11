@@ -168,16 +168,22 @@ namespace
 	{
 		QTest::addColumn<int>("action");
 		QTest::addColumn<QString>("path");
-		QTest::newRow("raise") << static_cast<int>(QMudSingleInstanceIpc::Action::Raise) << QString();
+		QTest::addColumn<bool>("suppressAutoConnect");
+		QTest::newRow("raise") << static_cast<int>(QMudSingleInstanceIpc::Action::Raise) << QString()
+		                       << false;
 		QTest::newRow("open-file-association")
 		    << static_cast<int>(QMudSingleInstanceIpc::Action::OpenFileAssociation)
-		    << QStringLiteral("/home/test/QMud Home/world.qdl");
+		    << QStringLiteral("/home/test/QMud Home/world.qdl") << false;
+		QTest::newRow("open-file-association-without-autoconnect")
+		    << static_cast<int>(QMudSingleInstanceIpc::Action::OpenFileAssociation)
+		    << QStringLiteral("/home/test/QMud Home/safe-world.qdl") << true;
 	}
 
 	void tst_SingleInstanceIpc::deliversAndAcknowledgesCompleteRequest()
 	{
 		QFETCH(int, action);
 		QFETCH(QString, path);
+		QFETCH(bool, suppressAutoConnect);
 		QTemporaryDir socketDirectory(socketDirectoryTemplate());
 		QVERIFY(socketDirectory.isValid());
 		const QString serverName = socketDirectory.filePath(QStringLiteral("socket"));
@@ -210,12 +216,13 @@ namespace
 		QMudSingleInstanceIpc::SendResult sendResult = QMudSingleInstanceIpc::SendResult::Failed;
 		QString                           errorMessage;
 		std::jthread                      sender(
-            [&]
-            {
-                sendResult = QMudSingleInstanceIpc::sendRequest(
-                    serverName, {expectedAction, path}, requestTimeoutMs, requestTimeoutMs, &errorMessage);
-                finished.store(true, std::memory_order_release);
-            });
+		    [&]
+		    {
+			    sendResult = QMudSingleInstanceIpc::sendRequest(
+			        serverName, {expectedAction, path, suppressAutoConnect}, requestTimeoutMs,
+			        requestTimeoutMs, &errorMessage);
+			    finished.store(true, std::memory_order_release);
+		    });
 
 		QTRY_VERIFY_WITH_TIMEOUT(finished.load(std::memory_order_acquire), 5000);
 		sender.join();
@@ -224,6 +231,8 @@ namespace
 		QVERIFY(received);
 		QCOMPARE(receivedRequest.action, expectedAction);
 		QCOMPARE(receivedRequest.fileAssociationPath, path);
+		QCOMPARE(receivedRequest.suppressAutoConnect,
+		         expectedAction == QMudSingleInstanceIpc::Action::OpenFileAssociation && suppressAutoConnect);
 		QTRY_VERIFY_WITH_TIMEOUT(acceptedSocket.isNull(), 1000);
 	}
 
@@ -235,16 +244,16 @@ namespace
 		QProcess      firstProcess;
 		QProcess      secondProcess;
 		const auto    stopProcesses = qScopeGuard(
-            [&firstProcess, &secondProcess]
-            {
-                for (QProcess *process : {&firstProcess, &secondProcess})
-                {
-                    if (process->state() == QProcess::NotRunning)
-                        continue;
-                    process->kill();
-                    static_cast<void>(process->waitForFinished(1000));
-                }
-            });
+		    [&firstProcess, &secondProcess]
+		    {
+			    for (QProcess *process : {&firstProcess, &secondProcess})
+			    {
+				    if (process->state() == QProcess::NotRunning)
+					    continue;
+				    process->kill();
+				    static_cast<void>(process->waitForFinished(1000));
+			    }
+		    });
 		startRaceHelper(firstProcess, serverName);
 		startRaceHelper(secondProcess, serverName);
 		const QDeadlineTimer readinessDeadline(3000);
@@ -316,7 +325,7 @@ namespace
 		QSignalSpy                     readyReadSpy(accepted, &QLocalSocket::readyRead);
 		const QString                  expectedPath = QStringLiteral("inside/QMud Home/world.qdl");
 		const QByteArray               frame        = QMudSingleInstanceIpc::encodeRequestFrame(
-            {QMudSingleInstanceIpc::Action::OpenFileAssociation, expectedPath});
+		    {QMudSingleInstanceIpc::Action::OpenFileAssociation, expectedPath});
 		QMudSingleInstanceIpc::receiveRequest(accepted,
 		                                      [&receivedCount, &receivedRequest](const auto &request)
 		                                      {
@@ -365,7 +374,7 @@ namespace
 
 		const QString          expectedPath = QStringLiteral("/home/test/QMud Home/world.qdl");
 		const QByteArray       frame        = QMudSingleInstanceIpc::encodeRequestFrame(
-            {QMudSingleInstanceIpc::Action::OpenFileAssociation, expectedPath});
+		    {QMudSingleInstanceIpc::Action::OpenFileAssociation, expectedPath});
 		QCOMPARE(client.write(frame), frame.size());
 		if (client.bytesToWrite() > 0)
 			QVERIFY(client.waitForBytesWritten(1000));

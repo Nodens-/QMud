@@ -10,6 +10,7 @@
 #include "MainFrame.h"
 #include "ReloadUtils.h"
 #include "WorldChildWindow.h"
+#include "WorldRuntime.h"
 
 #include <QCoreApplication>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -80,6 +81,8 @@ class tst_AppControllerFileOpen final : public QObject
 		static void userAndFileAssociationOpensUpdateRecentFiles();
 		/** @brief Verifies programmatic, automatic-startup, and reload-recovery opens preserve MRU entries. */
 		static void automaticAndProgrammaticOpensPreserveRecentFiles();
+		/** @brief Verifies execution and per-open overrides block only preference-driven automatic connection. */
+		static void autoConnectOverridesPreservePreference();
 };
 
 bool tst_AppControllerFileOpen::writeFile(const QString &path, const QByteArray &contents)
@@ -178,7 +181,12 @@ void tst_AppControllerFileOpen::startupFinalizationDrainsContainedRequestsInOrde
 	QCoreApplication::sendEvent(QCoreApplication::instance(), &firstRequest);
 	QCoreApplication::sendEvent(QCoreApplication::instance(), &outsideRequest);
 	QCoreApplication::sendEvent(QCoreApplication::instance(), &secondRequest);
-	QCOMPARE(controller.m_pendingFileAssociationRequests, QStringList({firstPath, outside, secondPath}));
+	QCOMPARE(controller.m_pendingFileAssociationRequests.size(), 3);
+	QCOMPARE(controller.m_pendingFileAssociationRequests.at(0).path, firstPath);
+	QCOMPARE(controller.m_pendingFileAssociationRequests.at(1).path, outside);
+	QCOMPARE(controller.m_pendingFileAssociationRequests.at(2).path, secondPath);
+	for (const auto &request : std::as_const(controller.m_pendingFileAssociationRequests))
+		QVERIFY(!request.suppressAutoConnect);
 	QVERIFY(openTextDocumentPaths(window).isEmpty());
 
 	controller.m_splashMinDelayElapsed = true;
@@ -397,6 +405,37 @@ void tst_AppControllerFileOpen::automaticAndProgrammaticOpensPreserveRecentFiles
 	QVERIFY(controller.openWorldForReloadRecovery(recoveredState, false, &recoveredRuntime));
 	QVERIFY(recoveredRuntime);
 	QCOMPARE(readRecentFiles(home), originalRecentFiles);
+}
+
+void tst_AppControllerFileOpen::autoConnectOverridesPreservePreference()
+{
+	{
+		AppController controller(true);
+		controller.m_globalIntPrefs.insert(QStringLiteral("AutoConnectWorlds"), 1);
+
+		WorldRuntime runtime;
+		runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("No Auto Connect"));
+		runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("127.0.0.1"));
+		runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("1"));
+
+		controller.maybeAutoConnectWorld(&runtime);
+		QVERIFY(!runtime.isConnecting());
+		QVERIFY(!runtime.isConnected());
+		QCOMPARE(controller.getGlobalOption(QStringLiteral("AutoConnectWorlds")).toInt(), 1);
+	}
+
+	AppController controller;
+	controller.m_globalIntPrefs.insert(QStringLiteral("AutoConnectWorlds"), 1);
+
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("No Auto Connect"));
+	runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("127.0.0.1"));
+	runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("1"));
+
+	controller.maybeAutoConnectWorld(&runtime, true);
+	QVERIFY(!runtime.isConnecting());
+	QVERIFY(!runtime.isConnected());
+	QCOMPARE(controller.getGlobalOption(QStringLiteral("AutoConnectWorlds")).toInt(), 1);
 }
 
 QTEST_MAIN(tst_AppControllerFileOpen)

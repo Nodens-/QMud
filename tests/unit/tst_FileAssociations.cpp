@@ -179,6 +179,9 @@ namespace
 		QCOMPARE(QMudFileExtensions::fileAssociationPathArgument(
 		             {QStringLiteral("QMud"), QStringLiteral("--noauto"), exactPath}),
 		         exactPath);
+		QCOMPARE(QMudFileExtensions::fileAssociationPathArgument(
+		             {QStringLiteral("QMud"), QStringLiteral("--no-autoconnect"), exactPath}),
+		         exactPath);
 		QVERIFY(QMudFileExtensions::fileAssociationPathArgument({QStringLiteral("QMud")}).isEmpty());
 		QVERIFY(QMudFileExtensions::fileAssociationPathArgument(
 		            {QStringLiteral("QMud"), QStringLiteral("file.txt")})
