@@ -2503,7 +2503,7 @@ void AppController::setMainWindow(MainWindow *window)
 		connect(m_mainWindow, &MainWindow::viewPreferenceChanged, this,
 		        [this](const QString &, int) { saveViewPreferences(); });
 		connect(m_mainWindow, &MainWindow::recentFileTriggered, this,
-		        [this](const QString &path) { openDocumentFile(path); });
+		        [this](const QString &path) { openDocumentFileFromUserAction(path); });
 	}
 }
 
@@ -3227,6 +3227,16 @@ void AppController::cleanupReloadStateOnNormalStartup() const
 
 bool AppController::openDocumentFile(const QString &path)
 {
+	return openDocumentFile(path, RecentFileUpdate::Preserve);
+}
+
+bool AppController::openDocumentFileFromUserAction(const QString &path)
+{
+	return openDocumentFile(path, RecentFileUpdate::Record);
+}
+
+bool AppController::openDocumentFile(const QString &path, const RecentFileUpdate recentFileUpdate)
+{
 	// Open-document flow with world/template routing.
 	if (path.isEmpty())
 		return openWorldDocument(QString());
@@ -3240,10 +3250,11 @@ bool AppController::openDocumentFile(const QString &path)
 	auto resolvedPath = normalized;
 	if (const QFileInfo info(normalized); !info.isAbsolute())
 		resolvedPath = makeAbsolutePath(normalized);
-	return openResolvedDocumentFile(resolvedPath);
+	return openResolvedDocumentFile(resolvedPath, recentFileUpdate);
 }
 
-bool AppController::openResolvedDocumentFile(const QString &resolvedPath)
+bool AppController::openResolvedDocumentFile(const QString         &resolvedPath,
+                                             const RecentFileUpdate recentFileUpdate)
 {
 	const auto suffix = QFileInfo(resolvedPath).suffix().toLower();
 	const auto opened = QMudFileExtensions::isWorldSuffix(suffix) ? openWorldDocument(resolvedPath)
@@ -3252,9 +3263,15 @@ bool AppController::openResolvedDocumentFile(const QString &resolvedPath)
 	{
 		return false;
 	}
+	if (recentFileUpdate == RecentFileUpdate::Record)
+		recordRecentFile(resolvedPath);
+	return true;
+}
 
-	// update MRU list
-	QSettings settings(iniFilePath(), QSettings::IniFormat);
+void AppController::recordRecentFile(const QString &resolvedPath) const
+{
+	const auto suffix = QFileInfo(resolvedPath).suffix().toLower();
+	QSettings  settings(iniFilePath(), QSettings::IniFormat);
 	settings.beginGroup(QStringLiteral("Recent File List"));
 	QStringList files;
 	QStringList fileKeys;
@@ -3307,10 +3324,15 @@ bool AppController::openResolvedDocumentFile(const QString &resolvedPath)
 	settings.endGroup();
 	if (m_mainWindow)
 		m_mainWindow->setRecentFiles(files);
-	return true;
 }
 
 void AppController::openWorldsFromList(const QStringList &items, const bool activateFirstOnly)
+{
+	openWorldsFromList(items, activateFirstOnly, RecentFileUpdate::Preserve);
+}
+
+void AppController::openWorldsFromList(const QStringList &items, const bool activateFirstOnly,
+                                       const RecentFileUpdate recentFileUpdate)
 {
 	if (items.isEmpty())
 		return;
@@ -3326,7 +3348,7 @@ void AppController::openWorldsFromList(const QStringList &items, const bool acti
 
 	for (const QString &item : items)
 	{
-		const bool opened = openDocumentFile(item);
+		const bool opened = openDocumentFile(item, recentFileUpdate);
 		if (!activateFirstOnly || !opened || firstOpenedRuntime != nullptr || !m_mainWindow)
 			continue;
 		if (WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
@@ -4856,7 +4878,7 @@ void AppController::setupStartupBehavior()
 		if (!worldList.isEmpty())
 		{
 			const auto items = splitSerializedWorldList(worldList);
-			openWorldsFromList(items, false);
+			openWorldsFromList(items, false, RecentFileUpdate::Preserve);
 		}
 	}
 
@@ -8262,7 +8284,7 @@ bool AppController::dispatchFileAssociationRequest(const QString &path)
 	QString resolvedPath;
 	if (!resolveFileAssociationFile(m_workingDir, path, &resolvedPath))
 		return false;
-	return openResolvedDocumentFile(resolvedPath);
+	return openResolvedDocumentFile(resolvedPath, RecentFileUpdate::Record);
 }
 
 bool AppController::resolveFileAssociationFile(const QString &qmudHome, const QString &path,
@@ -11677,7 +11699,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		const int previousActivationOverride = m_nextNewWorldActivationOverride;
 		if (QMudFileExtensions::isWorldSuffix(info.suffix().toLower()))
 			m_nextNewWorldActivationOverride = 1;
-		const bool opened = openDocumentFile(fileName);
+		const bool opened = openDocumentFileFromUserAction(fileName);
 		Q_UNUSED(opened);
 		m_nextNewWorldActivationOverride = previousActivationOverride;
 	}
@@ -11696,7 +11718,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (worldList.isEmpty())
 			return;
 		const auto items = splitSerializedWorldList(worldList);
-		openWorldsFromList(items, false);
+		openWorldsFromList(items, false, RecentFileUpdate::Record);
 		changeToStartupDirectory();
 	}
 	else if (cmdName == QStringLiteral("CloseWorld"))
@@ -12991,7 +13013,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (worldList.isEmpty())
 			return;
 		const QStringList items = splitSerializedWorldList(worldList);
-		openWorldsFromList(items, false);
+		openWorldsFromList(items, false, RecentFileUpdate::Record);
 
 		for (WorldRuntime *runtime : activeWorldRuntimes())
 			connectRuntime(runtime);

@@ -8,6 +8,7 @@
 
 #include "AppController.h"
 #include "MainFrame.h"
+#include "ReloadUtils.h"
 #include "WorldChildWindow.h"
 
 #include <QCoreApplication>
@@ -18,6 +19,8 @@
 #include <QFileOpenEvent>
 #include <QMdiArea>
 #include <QScopeGuard>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QSettings>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -55,6 +58,10 @@ class tst_AppControllerFileOpen final : public QObject
 		static bool        disableStartupTip(AppController &controller);
 		/** @brief Releases the test-owned preferences connection. */
 		static void        releasePreferencesConnection(AppController &controller);
+		/** @brief Replaces the persisted recent-file list beneath one isolated QMud home. */
+		static void        writeRecentFiles(const QString &home, const QStringList &files);
+		/** @brief Reads non-empty recent-file entries from one isolated QMud home. */
+		static QStringList readRecentFiles(const QString &home);
 
 	private slots:
 		/** @brief Verifies real startup finalization drains valid requests in arrival order. */
@@ -69,6 +76,10 @@ class tst_AppControllerFileOpen final : public QObject
 		static void symlinkEscapesAreRejected();
 		/** @brief Verifies non-local URLs are not treated as document paths. */
 		static void nonLocalUrlsAreIgnored();
+		/** @brief Verifies direct user and file-association opens update and deduplicate MRU entries. */
+		static void userAndFileAssociationOpensUpdateRecentFiles();
+		/** @brief Verifies programmatic, automatic-startup, and reload-recovery opens preserve MRU entries. */
+		static void automaticAndProgrammaticOpensPreserveRecentFiles();
 };
 
 bool tst_AppControllerFileOpen::writeFile(const QString &path, const QByteArray &contents)
@@ -111,6 +122,33 @@ void tst_AppControllerFileOpen::releasePreferencesConnection(AppController &cont
 	controller.m_db = QSqlDatabase();
 	controller.m_dbConnectionName.clear();
 	QSqlDatabase::removeDatabase(connectionName);
+}
+
+void tst_AppControllerFileOpen::writeRecentFiles(const QString &home, const QStringList &files)
+{
+	QSettings settings(QDir(home).filePath(QStringLiteral("QMud.conf")), QSettings::IniFormat);
+	settings.beginGroup(QStringLiteral("Recent File List"));
+	for (int i = 1; i <= 4; ++i)
+	{
+		settings.setValue(QStringLiteral("File%1").arg(i), i <= files.size() ? files.at(i - 1) : QString());
+	}
+	settings.endGroup();
+	settings.sync();
+}
+
+QStringList tst_AppControllerFileOpen::readRecentFiles(const QString &home)
+{
+	QSettings settings(QDir(home).filePath(QStringLiteral("QMud.conf")), QSettings::IniFormat);
+	settings.sync();
+	settings.beginGroup(QStringLiteral("Recent File List"));
+	QStringList files;
+	for (int i = 1; i <= 4; ++i)
+	{
+		if (const QString path = settings.value(QStringLiteral("File%1").arg(i)).toString(); !path.isEmpty())
+			files.push_back(path);
+	}
+	settings.endGroup();
+	return files;
 }
 
 void tst_AppControllerFileOpen::startupFinalizationDrainsContainedRequestsInOrder()
@@ -282,6 +320,83 @@ void tst_AppControllerFileOpen::nonLocalUrlsAreIgnored()
 	QCoreApplication::sendEvent(QCoreApplication::instance(), &request);
 	QVERIFY(!request.isAccepted());
 	QVERIFY(controller.m_pendingFileAssociationRequests.isEmpty());
+}
+
+void tst_AppControllerFileOpen::userAndFileAssociationOpensUpdateRecentFiles()
+{
+	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("tst_AppControllerFileOpen-XXXXXX")));
+	QVERIFY(directory.isValid());
+	const QString home            = QDir(directory.path()).filePath(QStringLiteral("home"));
+	const QString firstPath       = QDir(home).filePath(QStringLiteral("first.txt"));
+	const QString secondPath      = QDir(home).filePath(QStringLiteral("second.txt"));
+	const QString associationPath = QDir(home).filePath(QStringLiteral("association.txt"));
+	QVERIFY(QDir().mkpath(home));
+	QVERIFY(writeFile(firstPath, QByteArrayLiteral("first")));
+	QVERIFY(writeFile(secondPath, QByteArrayLiteral("second")));
+	QVERIFY(writeFile(associationPath, QByteArrayLiteral("association")));
+
+	AppController controller;
+	MainWindow    window;
+	controller.setMainWindow(&window);
+	controller.m_workingDir = home + QLatin1Char('/');
+
+	QVERIFY(controller.openDocumentFileFromUserAction(firstPath));
+	QVERIFY(controller.openDocumentFileFromUserAction(secondPath));
+	QVERIFY(controller.openDocumentFileFromUserAction(firstPath));
+	QCOMPARE(readRecentFiles(home),
+	         QStringList({QStringLiteral("./first.txt"), QStringLiteral("./second.txt")}));
+
+	controller.enableFileAssociationDispatch();
+	QVERIFY(controller.handleFileAssociationRequest(associationPath));
+	QCOMPARE(readRecentFiles(home),
+	         QStringList({QStringLiteral("./association.txt"), QStringLiteral("./first.txt"),
+	                      QStringLiteral("./second.txt")}));
+}
+
+void tst_AppControllerFileOpen::automaticAndProgrammaticOpensPreserveRecentFiles()
+{
+	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("tst_AppControllerFileOpen-XXXXXX")));
+	QVERIFY(directory.isValid());
+	const QString home             = QDir(directory.path()).filePath(QStringLiteral("home"));
+	const QString programmaticPath = QDir(home).filePath(QStringLiteral("programmatic.txt"));
+	const QString automaticOnePath = QDir(home).filePath(QStringLiteral("automatic-one.txt"));
+	const QString automaticTwoPath = QDir(home).filePath(QStringLiteral("automatic-two.txt"));
+	const QString recoveredPath    = QDir(home).filePath(QStringLiteral("worlds/recovered.qdl"));
+	QVERIFY(QDir().mkpath(QFileInfo(recoveredPath).absolutePath()));
+	QVERIFY(writeFile(programmaticPath, QByteArrayLiteral("programmatic")));
+	QVERIFY(writeFile(automaticOnePath, QByteArrayLiteral("automatic one")));
+	QVERIFY(writeFile(automaticTwoPath, QByteArrayLiteral("automatic two")));
+	QVERIFY(writeFile(recoveredPath, QByteArrayLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <world id="aaaaaaaaaaaaaaaaaaaaaaaa" name="Recovered" site="0.0.0.0" port="4000"/>
+</qmud>)xml")));
+
+	const QStringList originalRecentFiles = {
+	    QStringLiteral("./recent-one.qdl"), QStringLiteral("./recent-two.qdl"),
+	    QStringLiteral("./recent-three.qdl"), QStringLiteral("./recent-four.qdl")};
+	writeRecentFiles(home, originalRecentFiles);
+	const QString previousCurrentDirectory = QDir::currentPath();
+	QVERIFY(QDir::setCurrent(home));
+	const auto restoreCurrentDirectory =
+	    qScopeGuard([previousCurrentDirectory] { QDir::setCurrent(previousCurrentDirectory); });
+	Q_UNUSED(restoreCurrentDirectory);
+
+	AppController controller;
+	MainWindow    window;
+	controller.setMainWindow(&window);
+	controller.m_workingDir = home + QLatin1Char('/');
+
+	QVERIFY(controller.openDocumentFile(programmaticPath));
+	controller.openWorldsFromList({automaticOnePath, automaticTwoPath}, false);
+	QCOMPARE(readRecentFiles(home), originalRecentFiles);
+
+	controller.m_suppressAutoConnect = true;
+	ReloadWorldState recoveredState;
+	recoveredState.worldFilePath   = QStringLiteral("./worlds/recovered.qdl");
+	WorldRuntime *recoveredRuntime = nullptr;
+	QVERIFY(controller.openWorldForReloadRecovery(recoveredState, false, &recoveredRuntime));
+	QVERIFY(recoveredRuntime);
+	QCOMPARE(readRecentFiles(home), originalRecentFiles);
 }
 
 QTEST_MAIN(tst_AppControllerFileOpen)

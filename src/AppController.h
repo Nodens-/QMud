@@ -205,11 +205,17 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] ActivityDocument *activityDocument() const;
 		/**
-		 * @brief Opens world/text file based on extension/content.
+		 * @brief Opens a world or text file without changing the recent-file list.
 		 * @param path Document path.
 		 * @return `true` when document opens successfully.
 		 */
 		bool                            openDocumentFile(const QString &path);
+		/**
+		 * @brief Opens a world or text file selected by a direct user action and records it as recent.
+		 * @param path Document path selected by the user.
+		 * @return `true` when the document opens successfully.
+		 */
+		bool                            openDocumentFileFromUserAction(const QString &path);
 		/**
 		 * @brief Opens a plain text document in notepad/text view.
 		 * @param path Text document path.
@@ -219,7 +225,7 @@ class AppController : public QObject
 		[[nodiscard]] bool              openTextDocument(const QString &path,
 		                                                 WorldRuntime  *relatedRuntime = nullptr) const;
 		/**
-		 * @brief Opens multiple worlds from persisted list.
+		 * @brief Opens multiple worlds from a persisted list without changing the recent-file list.
 		 * @param items World file list.
 		 * @param activateFirstOnly Activate only the first opened world when `true`.
 		 */
@@ -525,6 +531,13 @@ class AppController : public QObject
 		void worldViewGlobalSettingsChanged();
 
 	private:
+		/** @brief Controls whether a successful document open changes the recent-file list. */
+		enum class RecentFileUpdate
+		{
+			Preserve,
+			Record
+		};
+
 		/**
 		 * @brief Refreshes the typed shared world-view settings from the global preference store.
 		 */
@@ -922,24 +935,45 @@ class AppController : public QObject
 		[[nodiscard]] static bool resolveFileAssociationFile(const QString &qmudHome, const QString &path,
 		                                                     QString *resolvedPath, QString *error = nullptr);
 		/**
-		 * @brief Opens one already-resolved document path without applying legacy path transformations.
-		 * @param resolvedPath Exact resolved document path.
+		 * @brief Opens a document with an explicit recent-file update policy.
+		 * @param path Document path.
+		 * @param recentFileUpdate Recent-file update policy applied after a successful open.
 		 * @return `true` when the document opens successfully.
 		 */
-		bool                      openResolvedDocumentFile(const QString &resolvedPath);
+		bool                      openDocumentFile(const QString &path, RecentFileUpdate recentFileUpdate);
+		/**
+		 * @brief Opens multiple worlds with an explicit recent-file update policy.
+		 * @param items World file list.
+		 * @param activateFirstOnly Activate only the first opened world when `true`.
+		 * @param recentFileUpdate Recent-file update policy applied after each successful open.
+		 */
+		void                      openWorldsFromList(const QStringList &items, bool activateFirstOnly,
+		                                             RecentFileUpdate recentFileUpdate);
+		/**
+		 * @brief Opens one already-resolved document path with an explicit recent-file update policy.
+		 * @param resolvedPath Exact resolved document path.
+		 * @param recentFileUpdate Recent-file update policy applied after a successful open.
+		 * @return `true` when the document opens successfully.
+		 */
+		bool openResolvedDocumentFile(const QString &resolvedPath, RecentFileUpdate recentFileUpdate);
+		/**
+		 * @brief Moves one successfully opened document to the front of the persisted recent-file list.
+		 * @param resolvedPath Exact resolved document path.
+		 */
+		void recordRecentFile(const QString &resolvedPath) const;
 		/**
 		 * @brief Parses reload startup arguments from process command line.
 		 */
-		void                      detectReloadStartupArguments();
+		void detectReloadStartupArguments();
 		/**
 		 * @brief Deletes stale reload state file when startup is not reload-mode.
 		 */
-		void                      cleanupReloadStateOnNormalStartup() const;
+		void cleanupReloadStateOnNormalStartup() const;
 		/**
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool                      recoverReloadStartupState();
+		bool recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
@@ -948,8 +982,8 @@ class AppController : public QObject
 		 * @param view Optional output world view pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool              openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
-		                                             WorldRuntime **runtime, WorldView **view = nullptr);
+		bool openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
+		                                WorldRuntime **runtime, WorldView **view = nullptr);
 		/**
 		 * @brief Creates another presentation for an existing runtime.
 		 * @param runtime Runtime shared by the new presentation.

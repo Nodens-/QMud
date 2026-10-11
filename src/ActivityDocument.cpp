@@ -45,5 +45,5 @@ void ActivityDocument::onFileOpen() const
 	if (fileName.isEmpty())
 		return;
 
-	m_app->openDocumentFile(fileName);
+	m_app->openDocumentFileFromUserAction(fileName);
 }
