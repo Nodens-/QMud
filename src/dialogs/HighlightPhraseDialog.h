@@ -45,6 +45,12 @@ class HighlightPhraseDialog : public QDialog
 		 */
 		void setOtherColours(const QColor &fore, const QColor &back);
 		/**
+		 * @brief Sets the initially suggested custom foreground/background colours.
+		 * @param fore Suggested foreground colour.
+		 * @param back Suggested background colour.
+		 */
+		void setSuggestedOtherColours(const QColor &fore, const QColor &back);
+		/**
 		 * @brief Sets initial phrase text.
 		 * @param text Initial phrase text.
 		 */
@@ -96,7 +102,7 @@ class HighlightPhraseDialog : public QDialog
 		 */
 		[[nodiscard]] QColor  otherBackColour() const;
 
-	protected:
+	public slots:
 		/**
 		 * @brief Validates and commits highlight phrase settings.
 		 */

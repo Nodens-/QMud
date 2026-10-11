@@ -1004,6 +1004,4 @@ namespace
 
 QTEST_MAIN(tst_NativePluginRegistry)
 
-#if __has_include("tst_NativePluginRegistry.moc")
 #include "tst_NativePluginRegistry.moc"
-#endif

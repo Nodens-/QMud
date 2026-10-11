@@ -303,6 +303,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldSessionStateUtils)
 
-#if __has_include("tst_WorldSessionStateUtils.moc")
 #include "tst_WorldSessionStateUtils.moc"
-#endif

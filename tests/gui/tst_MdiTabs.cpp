@@ -208,6 +208,4 @@ namespace
 
 QTEST_MAIN(tst_MdiTabs)
 
-#if __has_include("tst_MdiTabs.moc")
 #include "tst_MdiTabs.moc"
-#endif

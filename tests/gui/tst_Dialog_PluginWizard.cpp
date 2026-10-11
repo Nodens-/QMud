@@ -197,6 +197,4 @@ namespace
 
 QTEST_MAIN(tst_Dialog_PluginWizard)
 
-#if __has_include("tst_Dialog_PluginWizard.moc")
 #include "tst_Dialog_PluginWizard.moc"
-#endif

@@ -293,7 +293,6 @@ jobs:
                 runCoverage = files.some((file) => coveragePath(file.filename || ""));
               }
               if (runPipeline) {
-                addValidation("quick-tests", 90);
                 if (runCoverage) addValidation("coverage", 120);
                 addBuilds();
                 publishCiRelease = true;
@@ -565,7 +564,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="--coverage -fprofile-update=atomic" \
             -DCMAKE_EXE_LINKER_FLAGS=--coverage
           CCACHE_DISABLE=1 cmake --build /home/user/build --parallel
-          ctest --test-dir /home/user/build --output-on-failure --label-exclude slow
+          ctest --test-dir /home/user/build --output-on-failure
           mkdir -p /home/user/build/coverage-html
           gcovr --root /home/user/project --object-directory /home/user/build \
             --filter /home/user/project/src/ --print-summary \

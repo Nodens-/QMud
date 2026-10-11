@@ -139,6 +139,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_MemoryImageDecodeCacheUtils)
 
-#if __has_include("tst_MemoryImageDecodeCacheUtils.moc")
 #include "tst_MemoryImageDecodeCacheUtils.moc"
-#endif

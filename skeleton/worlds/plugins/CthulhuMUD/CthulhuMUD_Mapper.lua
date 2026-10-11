@@ -5,14 +5,13 @@ Adapted for CthulhuMUD and implemented:
 
 -Map Window mouse resizing.
 
--Excluded look from processing new room. This fixes the problem of losing map location on look
-while in duplicate marked unique UID rooms.
+-Look responses refresh changed room data without changing location or redrawing an unchanged map.
 
 -To be filled.
 
 -Need to also add extra documentation
 
-by Tanthul.
+by Tanthul, Nodens.
 
 
 CthulhuMUD Mapper
@@ -77,7 +76,7 @@ Date:   24th January 2020
 
 --]]
 
-CTHULHUMUD_MAPPER_LUA_VERSION = 4.1 -- version must agree with plugin version
+CTHULHUMUD_MAPPER_LUA_VERSION = 5.0 -- version must agree with plugin version
 
 -- The probability (in the range 0.0 to 1.0) that a line has to meet to be considered a certain line type.
 -- The higher, the stricter the requirement.
@@ -802,10 +801,138 @@ local function nomap_link_exists (id, kind, from, dir, to)
   return false
 end
 
+local RESPONSE_COMMAND_OTHER = { }
+local RESPONSE_COMMAND_REFRESH = { }
+
+local pending_response_commands = {}
+local pending_response_first = 1
+local pending_response_last = 0
+local active_response_command = nil
+local active_response_bound = false
+
+--- @brief Clears the movement currently associated with a room response.
+local function clear_active_movement ()
+  last_direction_moved = nil
+  from_room = nil
+  expected_exit = nil
+end
+
+--- @brief Clears every queued command and the response currently being processed.
+local function clear_command_response_state ()
+  pending_response_commands = {}
+  pending_response_first = 1
+  pending_response_last = 0
+  active_response_command = nil
+  active_response_bound = false
+  clear_active_movement ()
+end
+
+--- @brief Records a sent command in server processing order.
+--- @param command Canonical movement direction or a shared non-movement command marker.
+local function enqueue_pending_response_command (command)
+  pending_response_last = pending_response_last + 1
+  pending_response_commands [pending_response_last] = command
+end
+
+--- @brief Removes the oldest sent command awaiting a response.
+--- @return True followed by the command marker, or false when none is pending.
+local function dequeue_pending_response_command ()
+  if pending_response_first > pending_response_last then
+    return false, nil
+  end
+
+  local command = pending_response_commands [pending_response_first]
+  pending_response_commands [pending_response_first] = nil
+  pending_response_first = pending_response_first + 1
+  if pending_response_first > pending_response_last then
+    pending_response_first = 1
+    pending_response_last = 0
+  end
+  return true, command
+end
+
+--- @brief Returns the oldest sent command awaiting a response without removing it.
+--- @return The command marker, or nil when none is pending.
+local function peek_pending_response_command ()
+  if pending_response_first > pending_response_last then
+    return nil
+  end
+  return pending_response_commands [pending_response_first]
+end
+
+--- @brief Associates a movement command with the server response currently being processed.
+--- @param direction Canonical movement direction bound to the response.
+local function activate_response_movement (direction)
+  set_last_direction_moved (direction)
+  local current = get_current_room_ ("activate_response_movement")
+  if current and rooms [current] then
+    expected_exit = rooms [current].exits [direction]
+    if expected_exit then
+      set_from_room (current)
+    end -- if known exit
+  end -- if current room is mappable
+
+  INFO ("Processing queued movement", direction, "from", fixuid (current),
+        "with expected destination", fixuid (expected_exit))
+end
+
+--- @brief Binds an ordinary command when its response begins producing output.
+local function begin_non_mapper_response ()
+  if active_response_bound then
+    return
+  end
+
+  if peek_pending_response_command () ~= RESPONSE_COMMAND_OTHER then
+    return
+  end
+
+  clear_active_movement ()
+  active_response_bound = true
+
+  local has_command, command = dequeue_pending_response_command ()
+  assert (has_command and command == RESPONSE_COMMAND_OTHER)
+  active_response_command = command
+end
+
+--- @brief Binds the oldest queued command after the mapper recognizes a room or movement-failure response.
+local function bind_mapper_response ()
+  if active_response_bound then
+    return
+  end
+
+  clear_active_movement ()
+  active_response_bound = true
+
+  local has_command, command = dequeue_pending_response_command ()
+  if not has_command then
+    active_response_command = nil
+    return
+  end
+  active_response_command = command
+  if type (command) == "string" then
+    activate_response_movement (command)
+  end -- if movement response
+end
+
+--- @brief Completes the current server response at its prompt boundary.
+local function complete_server_response ()
+  active_response_command = nil
+  active_response_bound = false
+  clear_active_movement ()
+end
+
+--- @brief Reports whether the active response was caused by a room refresh command.
+--- @return True for a look-command response.
+local function response_is_room_refresh ()
+  return active_response_command == RESPONSE_COMMAND_REFRESH
+end
+
 -- Called by the XML alias: "mapper reset database".
 -- Clears mapping state (rooms/duplicates/nomap) from BOTH memory and SQLite.
 -- Does NOT touch corpus/training data.
 function mapper_reset_database ()
+  mapper.cancel_speedwalk ()
+
   -- clear in-memory state
   rooms = { }
   duplicates = { }
@@ -817,8 +944,7 @@ function mapper_reset_database ()
 
   current_room = nil
   last_drawn_id = nil
-  last_direction_moved = nil
-  from_room = nil
+  clear_command_response_state ()
 
   current_nomap_id = nil
   _pending_nomap_exit = nil
@@ -1123,6 +1249,7 @@ end -- f_handle_name
 -- -----------------------------------------------------------------
 -- prompt
 -- -----------------------------------------------------------------
+--- @brief Records the prompt and closes the current command response.
 function f_handle_prompt ()
   local lines = { }
   for _, line_info in ipairs (saved_lines) do
@@ -1143,6 +1270,7 @@ function f_handle_prompt ()
       process_new_room ()
     end -- if
   end -- if time to draw the map
+  complete_server_response ()
 end -- f_handle_prompt
 
 -- -----------------------------------------------------------------
@@ -1155,9 +1283,15 @@ end -- f_handle_ignore
 -- -----------------------------------------------------------------
 -- cannot move - cancel speedwalk
 -- -----------------------------------------------------------------
+--- @brief Handles a failed movement within the current command response.
 function f_cannot_move ()
-  mapper.cancel_speedwalk ()
-  set_last_direction_moved (nil)  -- therefore we haven't moved anywhere
+  bind_mapper_response ()
+  local direction = get_last_direction_moved ()
+  if direction then
+    mapper.cancel_speedwalk ()
+    INFO ("Discarding failed response movement", direction)
+  end -- if movement response
+  clear_active_movement ()
 end -- f_cannot_move
 
 -- -----------------------------------------------------------------
@@ -1973,6 +2107,8 @@ end -- toggle_learn_window
 function OnPluginInstall ()
 font_id = "f"
 
+  clear_command_response_state ()
+
   -- this table has the counters
   corpus = { }
 
@@ -2270,6 +2406,7 @@ end -- OnPluginInstall
 -- OnPluginClose
 -- -----------------------------------------------------------------
 function OnPluginClose ()
+  clear_command_response_state ()
   WindowShow (learn_window, false)
   WindowShow (win, false)
   mapper.hide ()  -- hide the map
@@ -2490,14 +2627,15 @@ end -- get_unique_styles
 -- process_new_room
 -- we have an exit line - work out where we are and what the exits are
 -- -----------------------------------------------------------------
+--- @brief Processes the completed room contained in the active command response.
 function process_new_room ()
+  bind_mapper_response ()
+
   if noprocess then
     description = nil
     description_styles = { }
     return
   end -- if
-
-  local from_room = get_from_room ("process_new_room")
 
   if override_contents ['description'] then
     description = override_contents ['description']
@@ -2526,15 +2664,22 @@ function process_new_room ()
     return
   end -- if no exits string
 
+  local room_refresh = response_is_room_refresh ()
+  local response_start_room = get_current_room_ ("process_new_room response start")
+  local from_room = get_from_room ("process_new_room")
+
   -- handle unmappable ([x]) via nomap table + draw-only node
   if room_unmappable then
 
     -- If we are already in nomap, do NOT record another "in" edge and do NOT create new ids.
     if get_current_room_ ("process_new_room") == NOMAP_DRAW_UID or last_drawn_id == NOMAP_DRAW_UID then
       set_current_room (NOMAP_DRAW_UID)
-      mapper.draw (NOMAP_DRAW_UID)
-      last_drawn_id = NOMAP_DRAW_UID
+      if not room_refresh then
+        mapper.draw (NOMAP_DRAW_UID)
+        last_drawn_id = NOMAP_DRAW_UID
+      end -- if the nomap presentation can have changed
       reset_room_tag_state ()
+      clear_active_movement ()
       return
     end
 
@@ -2570,6 +2715,7 @@ function process_new_room ()
       mapper.draw (NOMAP_DRAW_UID)
       last_drawn_id = NOMAP_DRAW_UID
       reset_room_tag_state ()
+      clear_active_movement ()
       return
     end
 
@@ -2611,8 +2757,7 @@ function process_new_room ()
     end
 
     -- prevent "stuck from_room" from being reused while inside nomap
-    set_from_room (nil)
-    set_last_direction_moved (nil)
+    clear_active_movement ()
 
     -- draw
     set_current_room (NOMAP_DRAW_UID)
@@ -2640,16 +2785,15 @@ function process_new_room ()
       nomap_overlay_clear ()
       current_nomap_id = nil
       _pending_nomap_exit = nil
-      set_from_room (nil)
-      set_last_direction_moved (nil)
+      clear_active_movement ()
     end
   end
 
   -- if we were previously in nomap and we are now in a real room via normal movement,
   -- record the exit out of nomap and then clear overlays.
   --
-  -- IMPORTANT: do NOT rely on from_room == NOMAP_DRAW_UID here, because when current_room is NOMAP_DRAW_UID
-  -- OnPluginSent may not be able to set from_room (rooms[NOMAP_DRAW_UID] doesn't exist).
+  -- IMPORTANT: do NOT rely on from_room == NOMAP_DRAW_UID here, because response-movement activation cannot set
+  -- from_room when the current room is the draw-only node (rooms[NOMAP_DRAW_UID] does not exist).
   if was_in_nomap and current_nomap_id and nomap[current_nomap_id] then
     local dir = get_last_direction_moved ()
     if dir then
@@ -2761,7 +2905,10 @@ function process_new_room ()
       INFO ("<<This is a duplicate room identified by hash " .. fixuid (uid) .. ">>")
       -- yes, so disregard the uid and work out where we came from
 
-      if not (from_room and get_last_direction_moved ()) then
+      if room_refresh and response_start_room and rooms [response_start_room] and
+         (response_start_room == current_room_hash or rooms [response_start_room].duplicate == current_room_hash) then
+        uid = response_start_room
+      elseif not (from_room and get_last_direction_moved ()) then
         -- make up some non-existent UID and give up
         uid = UNKNOWN_DUPLICATE_ROOM
         INFO ("Hit a duplicate room, but don't know where we came from, giving up.")
@@ -2830,8 +2977,10 @@ function process_new_room ()
 
 
   -- add room to rooms table if not already known
+  local room_changed = false
   if not rooms [uid] then
     INFO ("Mapper adding room " .. fixuid (uid))
+    room_changed = true
     rooms [uid] = {
         desc = description,
         exits = exits,
@@ -2854,6 +3003,7 @@ function process_new_room ()
       if not rooms [uid].exits [dir] then
         rooms [uid].exits [dir]  = "0"
         rooms [uid]._dirty = true
+        room_changed = true
         INFO ("Adding exit", dir)
       end -- if exit not there
     end -- for each exit we now about *now*
@@ -2871,25 +3021,33 @@ function process_new_room ()
   if description and rooms[uid].desc ~= description then
     rooms[uid].desc = description
     rooms[uid]._dirty = true
+    room_changed = true
   end
 
   -- update room name if possible
   if room_name and rooms[uid].name ~= room_name then
     rooms[uid].name = room_name
     rooms[uid]._dirty = true
+    room_changed = true
   end -- if
 
   -- update room area if it changed
   if area_name and rooms[uid].area ~= area_name then
     rooms[uid].area = area_name
     rooms[uid]._dirty = true
+    room_changed = true
   end
 
   INFO ("We are now in room " .. fixuid (uid))
   -- INFO ("Description: ", description)
 
-  -- save so we know current room later on
-  set_current_room (uid)
+  local same_room_refresh = room_refresh and response_start_room == uid
+  local unchanged_refresh = same_room_refresh and not room_changed
+
+  -- save so we know current room later on; an unchanged look has nothing to persist
+  if not unchanged_refresh then
+    set_current_room (uid)
+  end -- if location or room data changed
 
   -- show what we believe the current exits to be
   if config.SHOW_INFO then
@@ -2940,7 +3098,7 @@ function process_new_room ()
   end -- if
 
  -- portals/etc into a real room: if we were in nomap, do not create any nomap links; just clear state
-  if (not from_room) or (not get_last_direction_moved ()) then
+  if ((not from_room) or (not get_last_direction_moved ())) and not same_room_refresh then
     if current_nomap_id then
       nomap_overlay_clear ()
       current_nomap_id = nil
@@ -2951,15 +3109,17 @@ function process_new_room ()
     mapper.draw (_DUMMY_UID)
   end
 
-  mapper.draw (uid)
-  last_drawn_id = uid    -- in case they change the window size
+  if not unchanged_refresh then
+    mapper.draw (uid)
+    last_drawn_id = uid    -- in case they change the window size
+  end -- if the current presentation changed
 
   -- emergency fallback to stop lots of errors
   if not deduced_line_types [line_number] then
     deduced_line_types [line_number] = { }
   end -- if
 
-  deduced_line_types [line_number].draw = true
+  deduced_line_types [line_number].draw = not unchanged_refresh
   deduced_line_types [line_number].uid = get_current_room_ ("process_new_room")
   
   DEBUG "Finished processing new room"
@@ -2967,7 +3127,7 @@ function process_new_room ()
   room_name = nil
   exits_str = nil
   description = nil
-  set_last_direction_moved (nil)
+  clear_active_movement ()
   ignore_received = false
   override_line_type = nil
   override_line_contents = nil
@@ -3147,42 +3307,38 @@ function fix_up_exit ()
 
 
   -- clear for next time
-  set_last_direction_moved (nil)
-  set_from_room (nil)
+  clear_active_movement ()
 
 end -- fix_up_exit
 
 -- -----------------------------------------------------------------
--- try to detect when we send a movement command
+-- classify every sent command for its corresponding server response
 -- -----------------------------------------------------------------
 
+--- @brief Queues a sent command for association with its ordered server response.
+--- @param sText Exact command text sent to the server.
 function OnPluginSent (sText)
-  --if sText == "look" and not override_noprocess then
-  --  noprocess = true
-  --else
   if override_noprocess then
     override_noprocess = false
   end -- if
   noprocess = false
-  local current_room = get_current_room_ ("OnPluginSent")
-  
-  if valid_direction [sText] then
-    set_last_direction_moved (valid_direction [sText])
-    INFO ("current_room =", fixuid (current_room))
-    INFO ("Just moving", get_last_direction_moved ())
-    if current_room and rooms [current_room] then
-      expected_exit = rooms [current_room].exits [get_last_direction_moved ()]
-      if expected_exit then
-        set_from_room (current_room)
-      end -- if
-      INFO ("Expected exit for this in direction " .. get_last_direction_moved () .. " is to room", fixuid (expected_exit))
-    end -- if
-  else
-    -- any non-movement command (teleport/portal/etc) must not reuse stale movement state
-    set_last_direction_moved (nil)
-    set_from_room (nil)
-  end -- if
-  --end -- if
+
+  local command = RESPONSE_COMMAND_OTHER
+  local normalized = Trim (sText)
+  local direction
+  if #normalized <= 9 then
+    normalized = normalized:lower ()
+    direction = valid_direction [normalized]
+    if normalized == "look" or normalized == "l" then
+      command = RESPONSE_COMMAND_REFRESH
+    end -- if room refresh
+  end -- if short command requiring normalization
+
+  if direction then
+    command = direction
+    INFO ("Queued movement", direction)
+  end -- if movement command
+  enqueue_pending_response_command (command)
 end -- function
 
 -- -----------------------------------------------------------------
@@ -3191,11 +3347,10 @@ end -- function
 
 function OnPluginConnect ()
   mapper.cancel_speedwalk ()
-  set_from_room (nil)
+  clear_command_response_state ()
   room_name = nil
   exits_str = nil
   description = nil
-  set_last_direction_moved (nil)
   ignore_received = false
   override_line_type = nil
   override_line_contents = nil
@@ -3210,7 +3365,17 @@ end -- OnPluginConnect
 
 function OnPluginDisconnect ()
   mapper.cancel_speedwalk ()
+  clear_command_response_state ()
 end -- OnPluginDisconnect
+
+-- -----------------------------------------------------------------
+-- Plugin disabled while movement responses may still be pending
+-- -----------------------------------------------------------------
+
+function OnPluginDisable ()
+  mapper.cancel_speedwalk ()
+  clear_command_response_state ()
+end -- OnPluginDisable
 
 -- -----------------------------------------------------------------
 -- Callback to show part of the room description/name/notes, used by map_find
@@ -3409,6 +3574,11 @@ saved_lines = { }
 deduced_line_types = { }
 _xinfo_exits_block = false
 
+--- @brief Classifies one incoming server line and advances command-response state.
+--- @param name Trigger name supplied by the client.
+--- @param line Incoming line text.
+--- @param wildcards Trigger wildcard values.
+--- @param styles Style runs associated with the incoming line.
 function line_received (name, line, wildcards, styles)
 
   -- these need to be global, for use later on
@@ -3501,6 +3671,9 @@ end
     saved_lines = { }
   end -- if line type has changed
 
+  -- Ordinary commands bind when their response begins. Movement and refresh commands remain
+  -- queued until an existing mapper handler recognizes a room or movement-failure response.
+  begin_non_mapper_response ()
 
   table.insert (saved_lines, { line = line, styles = styles } )
 
@@ -4427,6 +4600,9 @@ function mapper_import (name, line, wildcards)
     return
   end
 
+  mapper.cancel_speedwalk ()
+  clear_command_response_state ()
+
   local in_rooms      = payload.rooms      or {}
   local in_duplicates = payload.duplicates or {}
   local in_nomap      = payload.nomap      or {}
@@ -4965,8 +5141,7 @@ function mark_duplicate_room (name, line, wildcards)
   duplicates [current_room_hash] = true -- this is a duplicated room
   mapper.mapprint (string.format ("Room %s now marked as being a duplicated one", fixuid (current_room_hash)))
   set_current_room (nil)  -- throw away incorrect UID
-  set_from_room (nil)
-  set_last_direction_moved (nil)
+  clear_command_response_state ()
 
   mapper.draw (UNKNOWN_DUPLICATE_ROOM)  -- draw with unknown room
 

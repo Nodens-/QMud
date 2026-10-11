@@ -254,6 +254,4 @@ namespace
 
 QTEST_MAIN(tst_WorldEditUtils)
 
-#if __has_include("tst_WorldEditUtils.moc")
 #include "tst_WorldEditUtils.moc"
-#endif

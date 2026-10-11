@@ -398,9 +398,9 @@ namespace
 
 				QCOMPARE(output, QByteArrayLiteral("prompt \n"));
 				QCOMPARE(spy.iacGaCount, 1);
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::IacGa);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::IacGa);
 				QCOMPARE(events.constFirst().option, static_cast<int>(GA));
 				QCOMPARE(events.constFirst().offset, static_cast<int>(QByteArrayLiteral("prompt ").size()));
 				expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedQuote);
@@ -421,9 +421,9 @@ namespace
 
 				QCOMPARE(output, QByteArrayLiteral("prompt \n"));
 				QCOMPARE(spy.iacGaCount, 1);
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::IacGa);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::IacGa);
 				QCOMPARE(events.constFirst().option, static_cast<int>(EOR));
 				QCOMPARE(events.constFirst().offset, static_cast<int>(QByteArrayLiteral("prompt ").size()));
 				expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
@@ -477,9 +477,9 @@ namespace
 				QCOMPARE(processor.processBytes(bytes({GA})), QByteArrayLiteral("\n"));
 
 				QCOMPARE(spy.iacGaCount, 1);
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::IacGa);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::IacGa);
 				QCOMPARE(events.constFirst().option, static_cast<int>(GA));
 				QCOMPARE(events.constFirst().offset, 0);
 				expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
@@ -620,6 +620,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Mxp)
 
-#if __has_include("tst_TelnetProcessor_Mxp.moc")
 #include "tst_TelnetProcessor_Mxp.moc"
-#endif

@@ -211,6 +211,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_PluginCallbackCatalogUtils)
 
-#if __has_include("tst_PluginCallbackCatalogUtils.moc")
 #include "tst_PluginCallbackCatalogUtils.moc"
-#endif

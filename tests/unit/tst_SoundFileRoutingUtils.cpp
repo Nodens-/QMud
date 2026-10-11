@@ -182,6 +182,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_SoundFileRoutingUtils)
 
-#if __has_include("tst_SoundFileRoutingUtils.moc")
 #include "tst_SoundFileRoutingUtils.moc"
-#endif

@@ -16,6 +16,8 @@ namespace
 	{
 			QMap<QString, QString> attributes;
 			QMap<QString, QString> children;
+			quint64                runtimeId{0};
+			quint64                runtimeLocationHandle{0};
 	};
 
 	struct VariableItem
@@ -55,7 +57,7 @@ namespace
 				int              duplicates = 0;
 				QString          error;
 
-				QVERIFY(!QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), false, false,
+				QVERIFY(!QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), false,
 				                                         &duplicates, &error));
 				QCOMPARE(error, QStringLiteral("Duplicate trigger label \"dup\""));
 				QCOMPARE(duplicates, 0);
@@ -70,7 +72,7 @@ namespace
 				int              duplicates = 0;
 				QString          error;
 
-				QVERIFY(QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), true, false,
+				QVERIFY(QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), true,
 				                                        &duplicates, &error));
 				QVERIFY(error.isEmpty());
 				QCOMPARE(duplicates, 1);
@@ -78,20 +80,20 @@ namespace
 				QCOMPARE(dest.front().children.value(QStringLiteral("send")), QStringLiteral("incoming"));
 			}
 
-			void namedDuplicatePasteDuplicateAppendsEntry()
+			void namedDuplicateOverwritePreservesRuntimeIdentity()
 			{
-				QList<NamedItem> dest{makeNamed(QStringLiteral("dup"), QStringLiteral("main"))};
-				QList<NamedItem> src{makeNamed(QStringLiteral("dup"), QStringLiteral("incoming"))};
+				NamedItem existing             = makeNamed(QStringLiteral("dup"), QStringLiteral("main"));
+				existing.runtimeId             = 17;
+				existing.runtimeLocationHandle = 29;
+				QList<NamedItem> dest{existing};
+				QList<NamedItem> src{makeNamed(QStringLiteral("DUP"), QStringLiteral("incoming"))};
 				int              duplicates = 0;
 				QString          error;
 
-				QVERIFY(QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), false, true,
+				QVERIFY(QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), true,
 				                                        &duplicates, &error));
-				QVERIFY(error.isEmpty());
-				QCOMPARE(duplicates, 1);
-				QCOMPARE(dest.size(), 2);
-				QCOMPARE(dest[0].children.value(QStringLiteral("send")), QStringLiteral("main"));
-				QCOMPARE(dest[1].children.value(QStringLiteral("send")), QStringLiteral("incoming"));
+				QCOMPARE(dest.front().runtimeId, quint64{17});
+				QCOMPARE(dest.front().runtimeLocationHandle, quint64{29});
 			}
 
 			void variablesDefaultModeReplacesAndCountsDifference()
@@ -100,7 +102,7 @@ namespace
 				QList<VariableItem> src{makeVariable(QStringLiteral("hp"), QStringLiteral("25"))};
 				int                 duplicates = 0;
 
-				QMudImportMerge::mergeVariables(dest, src, false, false, &duplicates);
+				QMudImportMerge::mergeVariables(dest, src, false, &duplicates);
 				QCOMPARE(duplicates, 1);
 				QCOMPARE(dest.size(), 1);
 				QCOMPARE(dest.front().content, QStringLiteral("25"));
@@ -112,24 +114,31 @@ namespace
 				QList<VariableItem> src{makeVariable(QStringLiteral("hp"), QStringLiteral("25"))};
 				int                 duplicates = 0;
 
-				QMudImportMerge::mergeVariables(dest, src, true, false, &duplicates);
+				QMudImportMerge::mergeVariables(dest, src, true, &duplicates);
 				QCOMPARE(duplicates, 1);
 				QCOMPARE(dest.size(), 1);
 				QCOMPARE(dest.front().content, QStringLiteral("25"));
 			}
 
-			void variablesPasteDuplicateModeAppendsAndCounts()
+			void pluginVariablesMergeCaseInsensitivelyWithoutChangingStoredName()
 			{
-				QList<VariableItem> dest{makeVariable(QStringLiteral("hp"), QStringLiteral("10"))};
-				QList<VariableItem> src{makeVariable(QStringLiteral("hp"), QStringLiteral("25"))};
-				int                 duplicates = 0;
+				QMap<QString, QString> dest{
+				    {QStringLiteral("Health"), QStringLiteral("10")}
+                };
+				const QList<QPair<QString, QString>> src{
+				    {QStringLiteral("health"), QStringLiteral("25")},
+				    {QStringLiteral("Mana"),   QStringLiteral("8") }
+                };
+				int duplicates = 0;
 
-				QMudImportMerge::mergeVariables(dest, src, false, true, &duplicates);
+				QMudImportMerge::mergePluginVariables(dest, src, true, &duplicates);
 				QCOMPARE(duplicates, 1);
 				QCOMPARE(dest.size(), 2);
-				QCOMPARE(dest[0].content, QStringLiteral("10"));
-				QCOMPARE(dest[1].content, QStringLiteral("25"));
+				QCOMPARE(dest.value(QStringLiteral("Health")), QStringLiteral("25"));
+				QVERIFY(!dest.contains(QStringLiteral("health")));
+				QCOMPARE(dest.value(QStringLiteral("Mana")), QStringLiteral("8"));
 			}
+
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};
 
@@ -137,6 +146,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_ImportMergeUtils)
 
-#if __has_include("tst_ImportMergeUtils.moc")
 #include "tst_ImportMergeUtils.moc"
-#endif

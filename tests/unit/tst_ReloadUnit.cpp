@@ -10,6 +10,9 @@
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
 #include <QtTest/QTest>
@@ -81,6 +84,7 @@ namespace
 				world.mccpWasActive             = true;
 				world.mccpDisableAttempted      = true;
 				world.mccpDisableSucceeded      = false;
+				world.nawsNegotiated            = true;
 				world.utf8Enabled               = true;
 				world.notes                     = QStringLiteral("test");
 				snapshot.worlds.push_back(world);
@@ -108,6 +112,28 @@ namespace
 				QVERIFY(parsed.worlds.at(0).mccpWasActive);
 				QVERIFY(parsed.worlds.at(0).mccpDisableAttempted);
 				QVERIFY(!parsed.worlds.at(0).mccpDisableSucceeded);
+				QVERIFY(parsed.worlds.at(0).nawsNegotiated);
+
+				QFile legacyFile(path);
+				QVERIFY(legacyFile.open(QIODevice::ReadOnly));
+				QJsonDocument legacyDocument = QJsonDocument::fromJson(legacyFile.readAll());
+				legacyFile.close();
+				QJsonObject legacyRoot   = legacyDocument.object();
+				QJsonArray  legacyWorlds = legacyRoot.value(QStringLiteral("worlds")).toArray();
+				QJsonObject legacyWorld  = legacyWorlds.at(0).toObject();
+				legacyWorld.remove(QStringLiteral("naws_negotiated"));
+				legacyWorlds.replace(0, legacyWorld);
+				legacyRoot.insert(QStringLiteral("worlds"), legacyWorlds);
+				QVERIFY(legacyFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+				const QByteArray legacyPayload = QJsonDocument(legacyRoot).toJson();
+				QCOMPARE(legacyFile.write(legacyPayload), legacyPayload.size());
+				legacyFile.close();
+
+				ReloadStateSnapshot legacyParsed;
+				QVERIFY(readReloadStateSnapshot(path, &legacyParsed, &error));
+				QVERIFY2(error.isEmpty(), qPrintable(error));
+				QCOMPARE(legacyParsed.schemaVersion, 1);
+				QVERIFY(!legacyParsed.worlds.at(0).nawsNegotiated);
 			}
 
 			void readDefaultsActiveWorldSequenceWhenFieldMissing()
@@ -831,6 +857,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_ReloadUnit)
 
-#if __has_include("tst_ReloadUnit.moc")
 #include "tst_ReloadUnit.moc"
-#endif

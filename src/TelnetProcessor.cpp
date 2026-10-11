@@ -17,6 +17,7 @@
 #include "helpers/EncodingUtils.h"
 
 #include <QList>
+#include <QScopeGuard>
 #include <QSet>
 #include <QString>
 #include <QtGlobal>
@@ -84,7 +85,6 @@ static constexpr unsigned char TTYPE_SEND                            = 1;
 static constexpr unsigned char START_TLS_FOLLOWS                     = 1;
 static constexpr int           MCCP_INFLATE_CHUNK_SIZE               = 8192;
 static constexpr int           kMaxMxpPendingBytes                   = 8192;
-static constexpr int           kMaxMxpCustomDefinitions              = 1024;
 static constexpr int           kMaxMxpAttlistBytes                   = 16384;
 static constexpr qsizetype     kRenegotiationAttemptLimit            = 10;
 static constexpr qint64        kRenegotiationWindowMilliseconds      = 60'000;
@@ -409,12 +409,15 @@ void TelnetProcessor::setNawsEnabled(const bool enabled)
 		return;
 
 	if (!enabled && m_nawsWanted)
-	{
 		sendIacWont(TELOPT_NAWS);
-		m_nawsWanted = false;
-	}
+	setNawsState(enabled, enabled && m_nawsWanted);
+}
 
-	m_naws = enabled;
+void TelnetProcessor::restoreNawsNegotiatedState(const bool negotiated)
+{
+	setNawsState(m_naws, negotiated);
+	if (isNawsNegotiated())
+		sendWindowSize();
 }
 
 void TelnetProcessor::setNegotiateOptionsOnce(const bool enabled)
@@ -541,15 +544,15 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpString.clear();
 	m_mxpEvents.clear();
 	m_mxpModeChanges.clear();
-	m_telnetPluginEvents.clear();
+	m_telnetStreamEvents.clear();
 	m_mxpEventSequence = 0;
 	m_mxpEnabled       = false;
 	m_puebloActive     = false;
 	m_mxpDefaultMode   = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 	m_mxpMode          = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
-	m_customElements.clear();
-	m_customEntities.clear();
-	m_nawsWanted          = false;
+	clearCustomElements();
+	clearCustomEntities();
+	setNawsState(m_naws, false);
 	m_compress            = false;
 	m_mccpType            = 0;
 	m_compressInitOk      = false;
@@ -757,7 +760,7 @@ void TelnetProcessor::handleWont(const unsigned char option)
 			m_callbacks.onNoEchoChanged(false);
 	}
 	if (option == TELOPT_NAWS)
-		m_nawsWanted = false;
+		setNawsState(m_naws, false);
 	if (option == TELOPT_START_TLS)
 	{
 		if (m_startTlsEnabled && !m_startTlsActive)
@@ -798,7 +801,7 @@ void TelnetProcessor::handleDo(const unsigned char option)
 		if (m_naws)
 		{
 			sendIacWill(option);
-			m_nawsWanted = true;
+			setNawsState(m_naws, true);
 			sendWindowSize();
 		}
 		else
@@ -858,7 +861,7 @@ void TelnetProcessor::handleDont(const unsigned char option)
 		m_ttypeSequence = 0;
 		break;
 	case TELOPT_NAWS:
-		m_nawsWanted = false;
+		setNawsState(m_naws, false);
 		break;
 	case TELOPT_START_TLS:
 		if (m_startTlsEnabled && !m_startTlsActive)
@@ -885,6 +888,10 @@ QByteArray TelnetProcessor::processBytes(const QByteArray              &data,
 	if (data.isEmpty() && m_pendingPacketTransformBytes.isEmpty())
 		return {};
 
+	const bool previousRecordStreamEvents  = m_recordTelnetStreamEvents;
+	m_recordTelnetStreamEvents             = true;
+	const auto restoreStreamEventRecording = qScopeGuard(
+	    [this, previousRecordStreamEvents] { m_recordTelnetStreamEvents = previousRecordStreamEvents; });
 	m_outputSize = 0;
 
 	QByteArray input = m_pendingPacketTransformBytes + data;
@@ -1159,10 +1166,10 @@ QByteArray TelnetProcessor::takeOutboundData()
 	return out;
 }
 
-QList<TelnetProcessor::TelnetPluginEvent> TelnetProcessor::takeTelnetPluginEvents()
+QList<TelnetProcessor::TelnetStreamEvent> TelnetProcessor::takeTelnetStreamEvents()
 {
-	QList<TelnetPluginEvent> events = m_telnetPluginEvents;
-	m_telnetPluginEvents.clear();
+	QList<TelnetStreamEvent> events = m_telnetStreamEvents;
+	m_telnetStreamEvents.clear();
 	return events;
 }
 
@@ -1189,9 +1196,51 @@ bool TelnetProcessor::getCustomEntityValue(const QByteArray &name, QByteArray &v
 	return true;
 }
 
-QMap<QByteArray, QByteArray> TelnetProcessor::customEntitySnapshot() const
+TelnetProcessor::CustomEntityMap TelnetProcessor::customEntitySnapshot() const
 {
 	return m_customEntities;
+}
+
+void TelnetProcessor::updateCustomEntity(const QByteArray &name, const QByteArray &value, const bool present)
+{
+	if (name.isEmpty())
+		return;
+	const auto existing = m_customEntities.constFind(name);
+	if (present)
+	{
+		if (existing != m_customEntities.constEnd() && existing.value() == value)
+			return;
+		m_customEntities.insert(name, value);
+	}
+	else
+	{
+		if (existing == m_customEntities.constEnd())
+			return;
+		m_customEntities.erase(existing);
+	}
+	if (m_callbacks.onCustomEntityChanged)
+		m_callbacks.onCustomEntityChanged(name, value, present);
+}
+
+void TelnetProcessor::clearCustomEntities()
+{
+	m_customEntities.clear();
+	if (m_callbacks.onCustomEntitiesCleared)
+		m_callbacks.onCustomEntitiesCleared();
+}
+
+void TelnetProcessor::clearCustomElements()
+{
+	if (m_customElements.isEmpty())
+		return;
+	m_customElements.clear();
+	notifyCustomElementsChanged();
+}
+
+void TelnetProcessor::notifyCustomElementsChanged(const QByteArray &name) const
+{
+	if (m_callbacks.onCustomElementsChanged)
+		m_callbacks.onCustomElementsChanged(name);
 }
 
 void TelnetProcessor::setCustomEntity(const QByteArray &name, const QByteArray &value)
@@ -1199,24 +1248,7 @@ void TelnetProcessor::setCustomEntity(const QByteArray &name, const QByteArray &
 	const QByteArray key = name.toLower();
 	if (key.isEmpty())
 		return;
-	if (value.isEmpty())
-		m_customEntities.remove(key);
-	else
-	{
-		if (!m_customEntities.contains(key) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
-		{
-			emitMxpDiagnosticLazy(
-			    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
-			    [key]
-			    {
-				    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring entity &%2;.")
-				        .arg(kMaxMxpCustomDefinitions)
-				        .arg(QString::fromLocal8Bit(key));
-			    });
-			return;
-		}
-		m_customEntities.insert(key, value);
-	}
+	updateCustomEntity(key, value, !value.isEmpty());
 }
 
 QByteArray TelnetProcessor::decodeIncomingMxpTextToInternalBytes(const QByteArray &bytes) const
@@ -1284,21 +1316,22 @@ bool TelnetProcessor::resolveEntityValue(const QByteArray &name, QByteArray &val
 	return resolveCustomEntityValue(name, value);
 }
 
+bool TelnetProcessor::resolveBuiltinEntityValue(const QByteArray &name, QByteArray &value)
+{
+	QByteArray builtin;
+	if (!resolveBuiltinEntity(name, builtin))
+		return false;
+	value = decodeBuiltinMxpTextToInternalBytes(builtin);
+	return !value.isEmpty();
+}
+
 bool TelnetProcessor::getCustomElementInfo(const QByteArray &name, CustomElementInfo &info) const
 {
 	const QByteArray key = name.toLower();
 	const auto       it  = m_customElements.constFind(key);
 	if (it == m_customElements.cend())
 		return false;
-	const auto &[elementName, elementOpen, elementCommand, elementTag, elementFlag, elementDefinition,
-	             elementAttributes] = it.value();
-	info.name                       = elementName;
-	info.open                       = elementOpen;
-	info.command                    = elementCommand;
-	info.tag                        = elementTag;
-	info.flag                       = elementFlag;
-	info.definition                 = elementDefinition;
-	info.attributes                 = elementAttributes;
+	info = it.value();
 	return true;
 }
 
@@ -1307,33 +1340,24 @@ QList<TelnetProcessor::CustomElementInfo> TelnetProcessor::customElementInfos() 
 	QList<CustomElementInfo> infos;
 	infos.reserve(m_customElements.size());
 	for (auto it = m_customElements.cbegin(); it != m_customElements.cend(); ++it)
-	{
-		const auto &[elementName, elementOpen, elementCommand, elementTag, elementFlag, elementDefinition,
-		             elementAttributes] = it.value();
-		CustomElementInfo info;
-		info.name       = elementName;
-		info.open       = elementOpen;
-		info.command    = elementCommand;
-		info.tag        = elementTag;
-		info.flag       = elementFlag;
-		info.definition = elementDefinition;
-		info.attributes = elementAttributes;
-		infos.push_back(info);
-	}
+		infos.push_back(it.value());
 	return infos;
+}
+
+TelnetProcessor::CustomElementMap TelnetProcessor::customElementSnapshot() const
+{
+	return m_customElements;
 }
 
 void TelnetProcessor::setCustomElementInfos(const QList<CustomElementInfo> &elements)
 {
-	m_customElements.clear();
+	CustomElementMap replacements;
 	for (const CustomElementInfo &info : elements)
 	{
 		const QByteArray lowerName = info.name.toLower();
 		if (lowerName.isEmpty())
 			continue;
-		if (!m_customElements.contains(lowerName) && m_customElements.size() >= kMaxMxpCustomDefinitions)
-			break;
-		CustomElement element;
+		CustomElementInfo element;
 		element.name       = lowerName;
 		element.open       = info.open;
 		element.command    = info.command;
@@ -1341,8 +1365,12 @@ void TelnetProcessor::setCustomElementInfos(const QList<CustomElementInfo> &elem
 		element.flag       = info.flag;
 		element.definition = info.definition;
 		element.attributes = info.attributes;
-		m_customElements.insert(lowerName, element);
+		replacements.insert(lowerName, element);
 	}
+	if (m_customElements == replacements)
+		return;
+	m_customElements = std::move(replacements);
+	notifyCustomElementsChanged();
 }
 
 TelnetProcessor::MxpSessionState TelnetProcessor::mxpSessionState() const
@@ -1686,7 +1714,21 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 {
 	QByteArray output;
 	output.reserve(data.size());
-	int  outputSize                   = m_outputSize;
+	int  outputSize       = m_outputSize;
+	auto appendOutputByte = [&](const char byte)
+	{
+		output.append(byte);
+		++outputSize;
+		m_outputSize = outputSize;
+	};
+	auto appendOutputBytes = [&](const QByteArray &bytes)
+	{
+		if (bytes.isEmpty())
+			return;
+		output.append(bytes);
+		outputSize += static_cast<int>(bytes.size());
+		m_outputSize = outputSize;
+	};
 	auto abortMxpCollectionOnOverflow = [this]
 	{
 		const char *phaseName = "token";
@@ -1843,11 +1885,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 					m_mxpPhase = MXP_NONE;
 					// here when entity collection complete
 					if (QByteArray resolved = mxpCollectedEntity(); !resolved.isEmpty())
-					{
-						output.append(resolved);
-						outputSize += static_cast<int>(resolved.size());
-						m_outputSize = outputSize;
-					}
+						appendOutputBytes(resolved);
 					m_mxpString.clear();
 					break;
 				case '&':
@@ -1913,9 +1951,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			if (m_mxpEnabled && !m_puebloActive && c == '\n')
 				mxpModeChange(-1);
 
-			output.append(static_cast<char>(c));
-			outputSize += 1;
-			m_outputSize = outputSize;
+			appendOutputByte(static_cast<char>(c));
 			break;
 
 		case HAVE_ESC:
@@ -1931,14 +1967,10 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				m_phase = NONE;
 				if (!m_ansiBuffer.isEmpty())
 				{
-					output.append(m_ansiBuffer);
-					outputSize += static_cast<int>(m_ansiBuffer.size());
-					m_outputSize = outputSize;
+					appendOutputBytes(m_ansiBuffer);
 					m_ansiBuffer.clear();
 				}
-				output.append(static_cast<char>(c));
-				outputSize += 1;
-				m_outputSize = outputSize;
+				appendOutputByte(static_cast<char>(c));
 			}
 			break;
 
@@ -1959,11 +1991,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				if (c == 'm')
 				{
 					if (!m_ansiBuffer.isEmpty())
-					{
-						output.append(m_ansiBuffer);
-						outputSize += static_cast<int>(m_ansiBuffer.size());
-						m_outputSize = outputSize;
-					}
+						appendOutputBytes(m_ansiBuffer);
 				}
 				else if (c == 'z') // MXP line security mode
 				{
@@ -1983,20 +2011,16 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			switch (c)
 			{
 			case IAC:
-				output.append(static_cast<char>(IAC));
+				appendOutputByte(static_cast<char>(IAC));
 				m_phase = NONE;
 				break;
 			case GA:
 			case EOR:
-				appendTelnetPluginEvent(TelnetPluginEvent::IacGa, c, {});
+				appendTelnetStreamEvent(TelnetStreamEvent::IacGa, c, {});
 				if (m_callbacks.onIacGa)
 					m_callbacks.onIacGa();
 				if (m_convertGAtoNewline)
-				{
-					output.append('\n');
-					outputSize += 1;
-					m_outputSize = outputSize;
-				}
+					appendOutputByte('\n');
 				m_phase = NONE;
 				break;
 			case SB:
@@ -2035,7 +2059,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			}
 
-			if (m_phase == HAVE_WILL || disposition == NegotiationDisposition::SettleAndSuppress)
+			if (m_phase == HAVE_WILL)
 				handleWill(c);
 			else
 				handleWont(c);
@@ -2056,7 +2080,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			}
 
-			if (m_phase == HAVE_DO || disposition == NegotiationDisposition::SettleAndSuppress)
+			if (m_phase == HAVE_DO)
 				handleDo(c);
 			else
 				handleDont(c);
@@ -2196,18 +2220,18 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			else if (m_subnegotiationType == TELOPT_MUD_SPECIFIC)
 			{
 				// stuff for Aardwolf (telopt 102) - call specific plugin handler: OnPluginTelnetOption
-				appendTelnetPluginEvent(TelnetPluginEvent::Option, m_subnegotiationType,
+				appendTelnetStreamEvent(TelnetStreamEvent::Option, m_subnegotiationType,
 				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetOption)
 					m_callbacks.onTelnetOption(m_subnegotiationData);
-				appendTelnetPluginEvent(TelnetPluginEvent::Subnegotiation, m_subnegotiationType,
+				appendTelnetStreamEvent(TelnetStreamEvent::Subnegotiation, m_subnegotiationType,
 				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetSubnegotiation)
 					m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
 			}
 			else
 			{
-				appendTelnetPluginEvent(TelnetPluginEvent::Subnegotiation, m_subnegotiationType,
+				appendTelnetStreamEvent(TelnetStreamEvent::Subnegotiation, m_subnegotiationType,
 				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetSubnegotiation)
 					m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
@@ -2487,16 +2511,29 @@ void TelnetProcessor::sendWindowSize()
 	m_outbound.append(response);
 }
 
-void TelnetProcessor::appendTelnetPluginEvent(const TelnetPluginEvent::Type type, const int option,
-                                              const QByteArray &data)
+void TelnetProcessor::setNawsState(const bool enabled, const bool wanted)
 {
-	TelnetPluginEvent event;
-	event.type     = type;
-	event.offset   = m_outputSize;
-	event.sequence = m_mxpEventSequence++;
-	event.option   = option;
-	event.data     = data;
-	m_telnetPluginEvents.append(event);
+	const bool wasNegotiated = isNawsNegotiated();
+	m_naws                   = enabled;
+	m_nawsWanted             = enabled && wanted;
+	const bool negotiated    = isNawsNegotiated();
+	if (negotiated != wasNegotiated && m_recordTelnetStreamEvents)
+		appendTelnetStreamEvent(TelnetStreamEvent::NawsNegotiatedChanged, TELOPT_NAWS, {}, negotiated);
+	if (negotiated != wasNegotiated && m_callbacks.onNawsNegotiatedChanged)
+		m_callbacks.onNawsNegotiatedChanged(negotiated);
+}
+
+void TelnetProcessor::appendTelnetStreamEvent(const TelnetStreamEvent::Type type, const int option,
+                                              const QByteArray &data, const bool negotiated)
+{
+	TelnetStreamEvent event;
+	event.type       = type;
+	event.offset     = m_outputSize;
+	event.sequence   = m_mxpEventSequence++;
+	event.option     = option;
+	event.data       = data;
+	event.negotiated = negotiated;
+	m_telnetStreamEvents.append(event);
 }
 
 QList<QByteArray> TelnetProcessor::effectiveCharsetNames() const
@@ -3071,7 +3108,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 	// blank contents deletes the entity
 	if (strEntityContents.isEmpty())
 	{
-		m_customEntities.remove(lowerName);
+		updateCustomEntity(lowerName, {}, false);
 		return;
 	}
 
@@ -3120,19 +3157,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 	flushRawRun();
 
 	// add entity to map
-	if (!m_customEntities.contains(lowerName) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
-	{
-		emitMxpDiagnosticLazy(
-		    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
-		    [lowerName]
-		    {
-			    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring entity &%2;.")
-			        .arg(kMaxMxpCustomDefinitions)
-			        .arg(QString::fromLocal8Bit(lowerName));
-		    });
-		return;
-	}
-	m_customEntities.insert(lowerName, strFixedValue);
+	updateCustomEntity(lowerName, strFixedValue, true);
 
 	// check they didn't supply any other arguments
 	mutableTagRemainder = trimMxp(mutableTagRemainder);
@@ -3155,7 +3180,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 		}
 		else if (strKeyword == "delete" || strKeyword == "remove")
 		{
-			m_customEntities.remove(lowerName);
+			updateCustomEntity(lowerName, {}, false);
 		}
 		else
 		{
@@ -3296,15 +3321,18 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 		return;
 	}
 
-	// if element already defined, delete old one
-	if (m_customElements.contains(lowerName))
-	{
-		m_customElements.remove(lowerName);
-	}
+	const auto existing = m_customElements.constFind(lowerName);
 	if (doDelete)
+	{
+		if (existing != m_customElements.constEnd())
+		{
+			m_customElements.erase(existing);
+			notifyCustomElementsChanged(lowerName);
+		}
 		return;
+	}
 
-	CustomElement element;
+	CustomElementInfo element;
 	element.name    = lowerName;
 	element.open    = getKeyword(args, QByteArrayLiteral("open"));
 	element.command = getKeyword(args, QByteArrayLiteral("empty"));
@@ -3333,19 +3361,10 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 		element.flag.replace(' ', '_');
 	}
 
-	if (!m_customElements.contains(lowerName) && m_customElements.size() >= kMaxMxpCustomDefinitions)
-	{
-		emitMxpDiagnosticLazy(
-		    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
-		    [lowerName]
-		    {
-			    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring element <%2>.")
-			        .arg(kMaxMxpCustomDefinitions)
-			        .arg(QString::fromLocal8Bit(lowerName));
-		    });
+	if (existing != m_customElements.constEnd() && existing.value() == element)
 		return;
-	}
 	m_customElements.insert(lowerName, element);
+	notifyCustomElementsChanged(lowerName);
 }
 
 // here for <!ATTLIST blah>
@@ -3416,10 +3435,10 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 		return;
 	} // end of no element matching
 
-	CustomElement   element = m_customElements.value(lowerName);
+	CustomElementInfo element = m_customElements.value(lowerName);
 
-	const qsizetype separatorBytes = element.attributes.isEmpty() ? 0 : 1;
-	const qsizetype appendBytes    = separatorBytes + tagRemainder.size();
+	const qsizetype   separatorBytes = element.attributes.isEmpty() ? 0 : 1;
+	const qsizetype   appendBytes    = separatorBytes + tagRemainder.size();
 	if (appendBytes > 0 && element.attributes.size() + appendBytes > kMaxMxpAttlistBytes)
 	{
 		emitMxpDiagnosticLazy(
@@ -3443,7 +3462,10 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 	else
 		element.attributes = tagRemainder;
 
+	if (m_customElements.value(lowerName) == element)
+		return;
 	m_customElements.insert(lowerName, element);
+	notifyCustomElementsChanged(lowerName);
 }
 
 bool TelnetProcessor::mxpOpen() const
@@ -3535,8 +3557,8 @@ void TelnetProcessor::mxpOn(const bool pueblo, const bool manual)
 	{
 		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 		m_mxpMode        = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
-		m_customElements.clear();
-		m_customEntities.clear();
+		clearCustomElements();
+		clearCustomEntities();
 	}
 
 	if (m_callbacks.onMxpStart)

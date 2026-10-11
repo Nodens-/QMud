@@ -90,6 +90,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_PluginBroadcastSelectionUtils)
 
-#if __has_include("tst_PluginBroadcastSelectionUtils.moc")
 #include "tst_PluginBroadcastSelectionUtils.moc"
-#endif

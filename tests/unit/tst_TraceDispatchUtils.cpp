@@ -104,6 +104,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TraceDispatchUtils)
 
-#if __has_include("tst_TraceDispatchUtils.moc")
 #include "tst_TraceDispatchUtils.moc"
-#endif

@@ -83,6 +83,4 @@ namespace
 
 QTEST_MAIN(tst_BraceMatch)
 
-#if __has_include("tst_BraceMatch.moc")
 #include "tst_BraceMatch.moc"
-#endif

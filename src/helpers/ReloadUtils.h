@@ -68,6 +68,7 @@ struct ReloadWorldState
 		bool               mccpWasActive{false};
 		bool               mccpDisableAttempted{false};
 		bool               mccpDisableSucceeded{false};
+		bool               nawsNegotiated{false};
 		bool               utf8Enabled{false};
 		QString            notes;
 };
@@ -174,10 +175,11 @@ struct ReloadMccpProbeIngressInput
 class ReloadSocketRecoveryOps
 {
 	public:
-		virtual ~ReloadSocketRecoveryOps() = default;
-		[[nodiscard]] virtual bool adoptConnectedSocketDescriptor(int descriptor, QString *errorMessage) = 0;
-		virtual void               markReloadReattachConnectActionsSuppressed()                          = 0;
-		[[nodiscard]] virtual bool consumeReloadReattachConnectActionsSuppressed()                       = 0;
+		virtual ~ReloadSocketRecoveryOps()                                               = default;
+		[[nodiscard]] virtual bool adoptConnectedSocketDescriptor(int descriptor, bool nawsNegotiated,
+		                                                          QString *errorMessage) = 0;
+		virtual void               markReloadReattachConnectActionsSuppressed()          = 0;
+		[[nodiscard]] virtual bool consumeReloadReattachConnectActionsSuppressed()       = 0;
 };
 
 /**

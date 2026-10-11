@@ -8,6 +8,7 @@
 
 #include <QFileInfo>
 
+#include "AcceptingWorldSocketService.h"
 #include "AppController.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
@@ -16,15 +17,20 @@
 #include "NameGeneration.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
+#include "WorldDocument.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 #include "dialogs/GeneratedNameDialog.h"
+#include "dialogs/HighlightPhraseDialog.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QAction>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QCoreApplication>
+#include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
@@ -35,7 +41,9 @@
 #include <QScopeGuard>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QTextEdit>
 #include <QThread>
+#include <QTimer>
 #include <QtTest/QTest>
 
 #include <algorithm>
@@ -101,7 +109,7 @@ class AppControllerTestAccess final
 			if (!engine || !executor)
 				return false;
 
-			runtime.setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function qmud_test_worker_spellcheck(value)
   return type(SpellCheck(value))
 end
@@ -410,17 +418,11 @@ end
 				    runtime.luaCallbackSnapshotForBridgedCall();
 				QVERIFY(commandSnapshot);
 				QVERIFY(commandSnapshot->hasCommandUiSnapshot);
-				QVERIFY(commandSnapshot->commandUiHasView);
-				QVERIFY(commandSnapshot->commandUiHasFrameData);
-				QCOMPARE(
-				    commandSnapshot->commandUiValues.value(QStringLiteral("commandInputText")).toString(),
-				    QStringLiteral("mispelt"));
-				QCOMPARE(commandSnapshot->commandUiValues.value(QStringLiteral("inputSelectionStartColumn"))
-				             .toInt(),
-				         4);
-				QCOMPARE(
-				    commandSnapshot->commandUiValues.value(QStringLiteral("inputSelectionEndColumn")).toInt(),
-				    0);
+				QVERIFY(commandSnapshot->commandUiSnapshotState.hasView);
+				QVERIFY(commandSnapshot->commandUiSnapshotState.hasFrameData);
+				QCOMPARE(commandSnapshot->commandUiSnapshotState.commandInputText, QStringLiteral("mispelt"));
+				QCOMPARE(commandSnapshot->commandUiSnapshotState.inputSelectionStartColumn, 4);
+				QCOMPARE(commandSnapshot->commandUiSnapshotState.inputSelectionEndColumn, 0);
 				hasFunction  = false;
 				suspended    = false;
 				resumeId     = 0;
@@ -490,6 +492,244 @@ end
 				QCOMPARE(AppControllerTestAccess::spellCheckerWorldCount(controller), 0);
 			}
 #endif
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			/**
+			 * @brief Verifies imported world script text replaces the live Lua state through the callback lane.
+			 */
+			static void generalXmlImportReloadsWorldScriptState()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+				WorldRuntimeTestAccess::initializeLuaScriptText(
+				    runtime, QStringLiteral("import_old_global = 'stale'"));
+				QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
+
+				auto *world = new WorldChildWindow(QStringLiteral("Imported script world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				Q_UNUSED(unbindRuntime);
+				frame.addMdiSubWindow(world, true);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				const QString                     xml = QStringLiteral(R"xml(
+<qmud>
+  <world>
+    <script><![CDATA[
+SetVariable("imported-script-used-fresh-state", tostring(import_old_global == nil))
+]]></script>
+  </world>
+</qmud>
+)xml");
+				const AppController::ImportResult result =
+				    controller.importXmlFromText(xml, WorldDocument::XML_GENERAL);
+				QVERIFY2(result.ok, qPrintable(result.errorMessage));
+				const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+				                                                    [](LuaCallbackEngine * /*unused*/){});
+				bool                                    followupCompleted = false;
+				runtime.dispatchLuaExecuteScriptAsync(
+				    worldEngine, QStringLiteral("local imported_script_loaded = true"),
+				    QStringLiteral("load imported world script"), LuaCallbackEvent::ScreenDraw, nullptr,
+				    false, false, 0, 0, [&followupCompleted](const bool ok) { followupCompleted = ok; });
+				QTRY_VERIFY_WITH_TIMEOUT(followupCompleted, 5000);
+				QTRY_COMPARE_WITH_TIMEOUT(
+				    runtime.variableSnapshot().value(QStringLiteral("imported-script-used-fresh-state")),
+				    QStringLiteral("true"), 5000);
+			}
+
+			/**
+			 * @brief Verifies a rejected multi-category import cannot change General state or the Lua engine.
+			 */
+			static void rejectedXmlImportLeavesWorldScriptStateUntouched()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Original world"));
+				const QString originalScript = QStringLiteral(R"lua(
+function record_atomic_import_generation()
+  SetVariable("atomic-import-generation", "original")
+end
+)lua");
+				runtime.setWorldMultilineAttribute(QStringLiteral("script"), originalScript);
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, originalScript);
+				QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
+
+				WorldRuntime::Trigger existingTrigger;
+				existingTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("duplicate"));
+				runtime.setTriggers({existingTrigger});
+
+				auto *world = new WorldChildWindow(QStringLiteral("Atomic import world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				Q_UNUSED(unbindRuntime);
+				frame.addMdiSubWindow(world, true);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				const QString                     xml    = QStringLiteral(R"xml(
+<qmud>
+  <world name="Replacement world">
+    <script><![CDATA[
+SetVariable("rejected-import-loaded", "yes")
+function record_atomic_import_generation()
+  SetVariable("atomic-import-generation", "replacement")
+end
+]]></script>
+  </world>
+  <triggers>
+    <trigger name="duplicate" enabled="1">
+      <send>replacement</send>
+    </trigger>
+  </triggers>
+</qmud>
+)xml");
+				const AppController::ImportResult result = controller.importXmlFromText(
+				    xml, WorldDocument::XML_GENERAL | WorldDocument::XML_TRIGGERS);
+				QVERIFY(!result.ok);
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("name")),
+				         QStringLiteral("Original world"));
+				QCOMPARE(runtime.worldMultilineAttributes().value(QStringLiteral("script")), originalScript);
+
+				const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+				                                                    [](LuaCallbackEngine * /*unused*/){});
+				bool                                    followupCompleted = false;
+				runtime.dispatchLuaExecuteScriptAsync(
+				    worldEngine, QStringLiteral("record_atomic_import_generation()"),
+				    QStringLiteral("verify rejected import script"), LuaCallbackEvent::ScreenDraw, nullptr,
+				    false, false, 0, 0, [&followupCompleted](const bool ok) { followupCompleted = ok; });
+				QTRY_VERIFY_WITH_TIMEOUT(followupCompleted, 5000);
+				QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("atomic-import-generation")),
+				         QStringLiteral("original"));
+				QVERIFY(!runtime.variableSnapshot().contains(QStringLiteral("rejected-import-loaded")));
+			}
+#endif
+
+			/** @brief Verifies only an accepted primary-world close ends its script-reload session. */
+			static void acceptedWorldCloseEndsScriptReloadSession()
+			{
+				WorldRuntime runtime;
+				auto         world = std::make_unique<WorldChildWindow>(QStringLiteral("Closing world"));
+				world->setAttribute(Qt::WA_DeleteOnClose, false);
+				world->setRuntime(&runtime);
+				QVERIFY(!runtime.worldSessionCloseStarted());
+				QVERIFY(world->close());
+				QVERIFY(runtime.worldSessionCloseStarted());
+				world->setRuntime(nullptr);
+				QVERIFY(runtime.worldSessionCloseStarted());
+			}
+
+			/**
+			 * @brief Verifies built-in trigger commands create ordinary unnamed runtime triggers.
+			 */
+			static void builtInTriggerCommandsCreateUnnamedTriggers()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+
+				auto *world = new WorldChildWindow(QStringLiteral("Trigger command world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				Q_UNUSED(unbindRuntime);
+				frame.addMdiSubWindow(world, true);
+				frame.resize(900, 600);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				bool handledHighlightDialog = false;
+				QTimer::singleShot(0, qApp,
+				                   [&handledHighlightDialog]
+				                   {
+					                   auto *dialog = qobject_cast<HighlightPhraseDialog *>(
+					                       QApplication::activeModalWidget());
+					                   if (!dialog)
+					                   {
+						                   if (QWidget *modal = QApplication::activeModalWidget())
+							                   modal->close();
+						                   return;
+					                   }
+					                   auto *text    = dialog->findChild<QLineEdit *>();
+					                   auto *buttons = dialog->findChild<QDialogButtonBox *>();
+					                   if (!text || !buttons || !buttons->button(QDialogButtonBox::Ok))
+					                   {
+						                   dialog->reject();
+						                   return;
+					                   }
+					                   text->setText(QStringLiteral("warning"));
+					                   handledHighlightDialog = true;
+					                   buttons->button(QDialogButtonBox::Ok)->click();
+				                   });
+				controller.onCommandTriggered(QStringLiteral("HighlightWord"));
+				QVERIFY(handledHighlightDialog);
+				QCOMPARE(runtime.triggers().size(), qsizetype{1});
+				const WorldRuntime::Trigger &highlight = runtime.triggers().constFirst();
+				QVERIFY(highlight.attributes.value(QStringLiteral("name")).isEmpty());
+				QCOMPARE(highlight.attributes.value(QStringLiteral("group")),
+				         QStringLiteral("Highlighted Words"));
+				QCOMPARE(highlight.attributes.value(QStringLiteral("custom_colour")), QStringLiteral("17"));
+				QCOMPARE(highlight.attributes.value(QStringLiteral("other_text_colour")),
+				         QStringLiteral("#202020"));
+				QCOMPARE(highlight.attributes.value(QStringLiteral("other_back_colour")),
+				         QStringLiteral("#C9B458"));
+				QVERIFY(highlight.runtimeId != 0);
+				QVERIFY(highlight.runtimeLocationHandle != 0);
+
+				bool handledMultilineDialog = false;
+				QTimer::singleShot(
+				    0, qApp,
+				    [&handledMultilineDialog]
+				    {
+					    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+					    if (!dialog || dialog->windowTitle() != QStringLiteral("Multi-Line Trigger"))
+					    {
+						    if (QWidget *modal = QApplication::activeModalWidget())
+							    modal->close();
+						    return;
+					    }
+					    auto *text    = dialog->findChild<QTextEdit *>();
+					    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+					    if (!text || !buttons || !buttons->button(QDialogButtonBox::Ok))
+					    {
+						    dialog->reject();
+						    return;
+					    }
+					    text->setPlainText(QStringLiteral("first line\nsecond line"));
+					    handledMultilineDialog = true;
+					    buttons->button(QDialogButtonBox::Ok)->click();
+				    });
+				controller.onCommandTriggered(QStringLiteral("MultiLineTrigger"));
+				QVERIFY(handledMultilineDialog);
+				QCOMPARE(runtime.triggers().size(), qsizetype{2});
+				const WorldRuntime::Trigger &multiline = runtime.triggers().constLast();
+				QVERIFY(multiline.attributes.value(QStringLiteral("name")).isEmpty());
+				QCOMPARE(multiline.attributes.value(QStringLiteral("group")), QStringLiteral("Multi Line"));
+				QVERIFY(multiline.runtimeId != 0);
+				QVERIFY(multiline.runtimeLocationHandle != 0);
+			}
+
 			/**
 			 * @brief Verifies notepad Send To World targets its exact owner and terminates its partial prompt.
 			 */
@@ -508,6 +748,7 @@ end
 					candidate->setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 					                             QStringLiteral("1"));
 					WorldRuntimeTestAccess::setConnectPhase(*candidate, WorldRuntime::eConnectConnectedToMud);
+					WorldRuntimeTestAccess::setSocket(*candidate, new AcceptingWorldSocketService(candidate));
 				}
 				const auto resetConnectPhase = qScopeGuard(
 				    [&decoyRuntime, &runtime]
@@ -746,6 +987,7 @@ end
 				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 				                          QStringLiteral("1"));
 				WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+				WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 				const auto resetConnectPhase = qScopeGuard(
 				    [&runtime]
 				    {
@@ -783,6 +1025,7 @@ end
 				                          QStringLiteral("1"));
 				runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("1000"));
 				WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+				WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 				const auto resetConnectPhase = qScopeGuard(
 				    [&runtime]
 				    {
@@ -826,6 +1069,7 @@ end
 				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 				                          QStringLiteral("1"));
 				WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+				WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 				const auto resetConnectPhase = qScopeGuard(
 				    [&runtime]
 				    {
@@ -884,7 +1128,11 @@ end
 				constexpr std::array testFunctions = {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 				    &spellCheckerStateProvidesRequiredUtilities,
+				    &generalXmlImportReloadsWorldScriptState,
+				    &rejectedXmlImportLeavesWorldScriptStateUntouched,
 #endif
+				    &acceptedWorldCloseEndsScriptReloadSession,
+				    &builtInTriggerCommandsCreateUnnamedTriggers,
 				    &ownedNotepadSendToWorldTerminatesPartialPrompt,
 				    &textWindowActionsRequireRecordedLiveOwner,
 				    &packetDebugActionUsesOwnedTextWindow,
@@ -893,9 +1141,9 @@ end
 				    &generatedNameSendTerminatesPartialPrompt,
 				};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-				static_assert(testFunctions.size() == 7);
+				static_assert(testFunctions.size() == 11);
 #else
-				static_assert(testFunctions.size() == 6);
+				static_assert(testFunctions.size() == 8);
 #endif
 			}
 	};
@@ -904,6 +1152,4 @@ end
 
 QTEST_MAIN(tst_AppControllerTextCommands)
 
-#if __has_include("tst_AppControllerTextCommands.moc")
 #include "tst_AppControllerTextCommands.moc"
-#endif

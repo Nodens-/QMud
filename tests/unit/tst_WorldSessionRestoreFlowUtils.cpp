@@ -202,6 +202,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldSessionRestoreFlowUtils)
 
-#if __has_include("tst_WorldSessionRestoreFlowUtils.moc")
 #include "tst_WorldSessionRestoreFlowUtils.moc"
-#endif

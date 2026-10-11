@@ -120,6 +120,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_RegexCompat)
 
-#if __has_include("tst_RegexCompat.moc")
 #include "tst_RegexCompat.moc"
-#endif

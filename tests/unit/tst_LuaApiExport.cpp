@@ -176,6 +176,4 @@ namespace
 
 QTEST_MAIN(tst_LuaApiExport)
 
-#if __has_include("tst_LuaApiExport.moc")
 #include "tst_LuaApiExport.moc"
-#endif

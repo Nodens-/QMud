@@ -452,6 +452,7 @@ set(QMUD_HEADERS
         ActivityWindow.h
         dialogs/ImportXmlDialog.h
         WorldDocument.h
+        XmlImportResult.h
         NativePluginRegistry.h
         WorldRuntime.h
         helpers/WorldRuntimeAttributeUtils.h
@@ -473,6 +474,7 @@ set(QMUD_HEADERS
         MxpDebugWindow.h
         BraceMatch.h
         LuaExecutor.h
+        LuaCallbackContinuation.h
         LuaExecutorWorker.h
         LuaCallbackEngine.h
         LuaApiExport.h

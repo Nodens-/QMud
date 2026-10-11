@@ -46,6 +46,7 @@ namespace
 
 	enum class LuaBridgeContextState
 	{
+		Starting,
 		Running,
 		Stopping,
 		Stopped
@@ -381,7 +382,8 @@ namespace
 			    if (const auto locked = weakContext.lock())
 			    {
 				    QMutexLocker finishedLocker(&locked->mutex);
-				    if (locked->state == LuaBridgeContextState::Running)
+				    if (locked->state == LuaBridgeContextState::Starting ||
+				        locked->state == LuaBridgeContextState::Running)
 					    locked->state = LuaBridgeContextState::Stopping;
 				    pendingRequests.swap(locked->queue);
 				    invokerToDelete     = locked->pumpInvoker.data();
@@ -451,59 +453,99 @@ namespace
 			    QStringLiteral("[QMud][LuaBridge] %1 failed for thread %2: unable to create bridge invoker")
 			        .arg(operationLabel, threadLabel(targetThread)));
 		}
-		Q_UNUSED(invoker);
-
 		QDeadlineTimer deadline(kLuaBridgeReadyTimeoutMs);
-		for (;;)
 		{
+			QMutexLocker locker(&context->mutex);
+			if (context->pumpInvoker.data() != invoker)
 			{
-				QMutexLocker          locker(&context->mutex);
-				QString               runnableReason;
-				LuaBridgeInvokeStatus runnableStatus = LuaBridgeInvokeStatus::UnknownFailure;
-				if (targetThreadRunnable(targetThread, runnableReason, runnableStatus))
+				return setLuaBridgeError(
+				    LuaBridgeInvokeStatus::BridgeInvokerUnavailable,
+				    QStringLiteral("[QMud][LuaBridge] %1 failed for thread %2: bridge invoker was "
+				                   "destroyed during endpoint startup")
+				        .arg(operationLabel, threadLabel(targetThread)));
+			}
+
+			QString               runnableReason;
+			LuaBridgeInvokeStatus runnableStatus = LuaBridgeInvokeStatus::UnknownFailure;
+			if (targetThreadRunnable(targetThread, runnableReason, runnableStatus))
+			{
+				context->state = LuaBridgeContextState::Running;
+				++context->wakeSerial;
+				context->wake.wakeAll();
+				return true;
+			}
+			if (targetThread == QThread::currentThread())
+			{
+				return setLuaBridgeError(runnableStatus,
+				                         QStringLiteral("[QMud][LuaBridge] %1 failed for thread %2: %3")
+				                             .arg(operationLabel, threadLabel(targetThread), runnableReason));
+			}
+
+			if (context->state != LuaBridgeContextState::Starting)
+			{
+				context->state             = LuaBridgeContextState::Starting;
+				const bool readinessPosted = QMetaObject::invokeMethod(
+				    invoker,
+				    [weakContext = std::weak_ptr<LuaBridgeThreadContext>(context), invoker]
+				    {
+					    const std::shared_ptr<LuaBridgeThreadContext> locked = weakContext.lock();
+					    if (!locked)
+						    return;
+					    QMutexLocker readyLocker(&locked->mutex);
+					    if (locked->state != LuaBridgeContextState::Starting ||
+					        locked->pumpInvoker.data() != invoker ||
+					        locked->thread.data() != QThread::currentThread())
+					    {
+						    return;
+					    }
+					    locked->state = LuaBridgeContextState::Running;
+					    ++locked->wakeSerial;
+					    locked->wake.wakeAll();
+				    },
+				    Qt::QueuedConnection);
+				if (!readinessPosted)
 				{
-					const bool wasRunning = context->state == LuaBridgeContextState::Running;
-					context->state        = LuaBridgeContextState::Running;
-					if (!wasRunning)
-					{
-						++context->wakeSerial;
-						context->wake.wakeAll();
-					}
-					return true;
-				}
-				if (context->state != LuaBridgeContextState::Stopped)
-				{
-					context->state      = LuaBridgeContextState::Stopped;
-					context->pumpPosted = false;
-				}
-				if (!targetThread->isRunning())
-				{
+					context->state = LuaBridgeContextState::Stopped;
+					++context->wakeSerial;
+					context->wake.wakeAll();
 					return setLuaBridgeError(
-					    LuaBridgeInvokeStatus::TargetThreadNotRunning,
-					    QStringLiteral(
-					        "[QMud][LuaBridge] %1 failed for thread %2: target thread is not running")
+					    LuaBridgeInvokeStatus::EnqueueFailed,
+					    QStringLiteral("[QMud][LuaBridge] %1 failed for thread %2: unable to queue bridge "
+					                   "endpoint readiness notification")
 					        .arg(operationLabel, threadLabel(targetThread)));
 				}
-				if (deadline.hasExpired())
-				{
-					const LuaBridgeInvokeStatus timeoutStatus =
-					    runnableStatus == LuaBridgeInvokeStatus::TargetThreadNoEventDispatcher
-					        ? LuaBridgeInvokeStatus::TargetThreadNoEventDispatcher
-					        : LuaBridgeInvokeStatus::BridgeEndpointNotReadyTimeout;
-					return setLuaBridgeError(
-					    timeoutStatus,
-					    QStringLiteral("[QMud][LuaBridge] %1 timed out waiting for bridge endpoint ready on "
-					                   "thread %2 (%3)")
-					        .arg(operationLabel, threadLabel(targetThread), runnableReason));
-				}
-				const qint64  remainingMs = qMax<qint64>(1, qMin<qint64>(deadline.remainingTime(), 100));
-				const quint64 wakeSerial  = context->wakeSerial;
-				if (remainingMs > 0 && context->state != LuaBridgeContextState::Running &&
-				    context->wakeSerial == wakeSerial)
-				{
-					context->wake.wait(&context->mutex, static_cast<unsigned long>(remainingMs));
-				}
 			}
+		}
+
+		for (;;)
+		{
+			QMutexLocker locker(&context->mutex);
+			if (context->state == LuaBridgeContextState::Running && context->pumpInvoker)
+				return true;
+			if (context->state == LuaBridgeContextState::Stopped || !targetThread->isRunning())
+			{
+				return setLuaBridgeError(
+				    LuaBridgeInvokeStatus::TargetThreadNotRunning,
+				    QStringLiteral("[QMud][LuaBridge] %1 failed for thread %2: target thread stopped "
+				                   "before bridge endpoint readiness")
+				        .arg(operationLabel, threadLabel(targetThread)));
+			}
+			if (deadline.hasExpired())
+			{
+				QString               runnableReason;
+				LuaBridgeInvokeStatus runnableStatus = LuaBridgeInvokeStatus::UnknownFailure;
+				static_cast<void>(targetThreadRunnable(targetThread, runnableReason, runnableStatus));
+				const LuaBridgeInvokeStatus timeoutStatus =
+				    runnableStatus == LuaBridgeInvokeStatus::TargetThreadNoEventDispatcher
+				        ? LuaBridgeInvokeStatus::TargetThreadNoEventDispatcher
+				        : LuaBridgeInvokeStatus::BridgeEndpointNotReadyTimeout;
+				return setLuaBridgeError(
+				    timeoutStatus,
+				    QStringLiteral("[QMud][LuaBridge] %1 timed out waiting for bridge endpoint ready on "
+				                   "thread %2 (%3)")
+				        .arg(operationLabel, threadLabel(targetThread), runnableReason));
+			}
+			context->wake.wait(&context->mutex, deadline);
 		}
 	}
 

@@ -11,6 +11,7 @@
 
 #include <QDateTime>
 #include <QFontMetrics>
+#include <QHash>
 #include <QImage>
 #include <QMap>
 #include <QPoint>
@@ -20,6 +21,7 @@
 #include <QString>
 
 #include <cmath>
+#include <optional>
 #include <utility>
 
 struct MiniWindow;
@@ -34,6 +36,8 @@ namespace MiniWindowUtils::Internal
  */
 struct MiniWindowHotspot
 {
+		/** Process-local identity retained by snapshots and renewed when an id is replaced. */
+		quint64 instanceId{0};
 		QRect   rect;
 		QString mouseOver;
 		QString cancelMouseOver;
@@ -49,7 +53,39 @@ struct MiniWindowHotspot
 		QString scrollwheelCallback;
 		int     outputActionType{0};
 		QString outputAction;
+
+		bool    operator==(const MiniWindowHotspot &) const = default;
 };
+
+/** Hotspot instance identities grouped by miniwindow and hotspot id. */
+using MiniWindowHotspotInstanceMap = QHash<QString, QHash<QString, quint64>>;
+
+/**
+ * @brief Final callback-local mutation of one hotspot, guarded by its captured instance identity.
+ */
+struct MiniWindowHotspotMutation
+{
+		quint64                          expectedInstanceId{0};
+		std::optional<MiniWindowHotspot> beforeHotspot;
+		std::optional<MiniWindowHotspot> hotspot;
+		bool                             outputGenerated{false};
+};
+
+/** Hotspot mutations grouped by miniwindow and hotspot id. */
+using MiniWindowHotspotMutationMap = QHash<QString, QHash<QString, MiniWindowHotspotMutation>>;
+
+/**
+ * @brief Result of applying one callback-local miniwindow state to the authoritative runtime.
+ */
+struct MiniWindowCommitOutcome
+{
+		bool    applied{false};
+		bool    exists{false};
+		quint64 runtimeId{0};
+};
+
+/** Miniwindow commit results keyed by window id. */
+using MiniWindowCommitOutcomeMap = QHash<QString, MiniWindowCommitOutcome>;
 
 constexpr int kMiniWindowDrawUnderneath   = 0x01;
 constexpr int kMiniWindowAbsoluteLocation = 0x02;
@@ -66,6 +102,8 @@ struct MiniWindowFont
 		QFontMetrics metrics{QFont()};
 		int          charset{1};
 		int          pitchAndFamily{0};
+
+		bool         operator==(const MiniWindowFont &) const = default;
 };
 
 /**
@@ -81,6 +119,8 @@ struct MiniWindowImage
 		int     bitmapWidthBytes{0};
 		int     bitmapPlanes{1};
 		int     bitmapBitsPixel{0};
+
+		bool    operator==(const MiniWindowImage &) const = default;
 };
 
 /**
@@ -88,6 +128,12 @@ struct MiniWindowImage
  */
 struct MiniWindow
 {
+		/** Process-local identity of this window instance. Renewed after deletion and recreation. */
+		quint64                          runtimeId{0};
+		/** Authoritative runtime mutation revision used to detect stale callback shadows. */
+		quint64                          mutationRevision{0};
+		/** Backing-surface revision retained across detached callback snapshots. */
+		quint64                          surfaceRevision{0};
 		QString                          name;
 		int                              width{0};
 		int                              height{0};
@@ -120,6 +166,8 @@ struct MiniWindow
 		QMap<QString, MiniWindowHotspot> hotspots;
 		QSet<QString>                    outputGeneratedHotspots;
 		quint64                          outputHotspotSerial{0};
+
+		bool                             operator==(const MiniWindow &) const = default;
 
 		/**
 		 * @brief Returns a copy with independent image backing stores.
@@ -202,14 +250,26 @@ struct MiniWindow
 		}
 
 		/**
-		 * @brief Replaces the high-DPI backing image and records its DPR.
+		 * @brief Returns the revision of the backing pixels.
+		 */
+		[[nodiscard]] quint64 backingSurfaceRevision() const
+		{
+			return surfaceRevision;
+		}
+
+		/**
+		 * @brief Replaces the opaque high-DPI backing image and records its DPR.
+		 * @param surface Replacement image, normalized to the native opaque backing format.
 		 */
 		void setBackingSurface(QImage surface)
 		{
 			const double normalizedRatio = normalizedDevicePixelRatio(surface.devicePixelRatio());
+			if (!surface.isNull() && surface.format() != QImage::Format_RGB32)
+				surface = surface.convertToFormat(QImage::Format_RGB32);
 			surface.setDevicePixelRatio(normalizedRatio);
 			devicePixelRatio = normalizedRatio;
 			m_surface        = std::move(surface);
+			markBackingSurfaceChanged();
 		}
 
 		/**
@@ -252,9 +312,10 @@ struct MiniWindow
 			temporarilyHide  = false;
 			show             = false;
 			devicePixelRatio = normalizedDevicePixelRatio(newDevicePixelRatio);
-			m_surface = QImage(backingStoreSize(width, height, devicePixelRatio), QImage::Format_ARGB32);
+			m_surface = QImage(backingStoreSize(width, height, devicePixelRatio), QImage::Format_RGB32);
 			m_surface.setDevicePixelRatio(devicePixelRatio);
 			m_surface.fill(background.isValid() ? background : QColor(0, 0, 0));
+			markBackingSurfaceChanged();
 			transparentSurfaceCache     = QImage();
 			transparentSurfaceSourceKey = 0;
 			transparentSurfaceKeyRgb    = 0;
@@ -290,7 +351,14 @@ struct MiniWindow
 		 */
 		[[nodiscard]] QImage &mutableBackingSurface()
 		{
+			markBackingSurfaceChanged();
 			return m_surface;
+		}
+
+		void markBackingSurfaceChanged()
+		{
+			if (++surfaceRevision == 0)
+				++surfaceRevision;
 		}
 
 		QImage m_surface;

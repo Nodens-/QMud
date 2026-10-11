@@ -32,7 +32,7 @@ namespace QMudAliasMatch
 {
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
 	                              const bool allowEmptyMatch, const int startOffset, qint64 *executionTimeNs,
-	                              int *matchAttempts)
+	                              int *matchAttempts, const QRegularExpression::MatchOptions matchOptions)
 	{
 		MatchResult out;
 		if (!regex.isValid())
@@ -43,7 +43,8 @@ namespace QMudAliasMatch
 		QElapsedTimer executionTimer;
 		if (executionTimeNs)
 			executionTimer.start();
-		const QRegularExpressionMatch match = regex.match(subject, startOffset);
+		const QRegularExpressionMatch match =
+		    regex.match(subject, startOffset, QRegularExpression::NormalMatch, matchOptions);
 		if (executionTimeNs)
 			*executionTimeNs += executionTimer.nsecsElapsed();
 

@@ -59,9 +59,9 @@ namespace
 				const QByteArray output = processor.processBytes(input);
 				QCOMPARE(output, QByteArrayLiteral("room text\r\nprompt"));
 
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.at(0).type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.at(0).type, TelnetProcessor::TelnetStreamEvent::Subnegotiation);
 				QCOMPARE(events.at(0).option, 201);
 				QCOMPARE(events.at(0).data, QByteArrayLiteral("room"));
 				QCOMPARE(events.at(0).offset, QByteArrayLiteral("room text\r\n").size());
@@ -89,10 +89,10 @@ namespace
 				    processor.processBytes(bytes({'a', IAC, SB, TELOPT_MUD_SPECIFIC, 'x', IAC, SE, 'b'}));
 				QCOMPARE(output, QByteArrayLiteral("ab"));
 
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 2);
-				QCOMPARE(events.at(0).type, TelnetProcessor::TelnetPluginEvent::Option);
-				QCOMPARE(events.at(1).type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.at(0).type, TelnetProcessor::TelnetStreamEvent::Option);
+				QCOMPARE(events.at(1).type, TelnetProcessor::TelnetStreamEvent::Subnegotiation);
 				QCOMPARE(events.at(0).offset, 1);
 				QCOMPARE(events.at(1).offset, 1);
 				QVERIFY(events.at(0).sequence < events.at(1).sequence);
@@ -129,9 +129,9 @@ namespace
 				QCOMPARE(seenPackets.constFirst(), secondPacket);
 				QVERIFY(!processor.isCompressing());
 
-				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				const QList<TelnetProcessor::TelnetStreamEvent> events = processor.takeTelnetStreamEvents();
 				QCOMPARE(events.size(), 1);
-				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetStreamEvent::Subnegotiation);
 				QCOMPARE(events.constFirst().option, 200);
 				QCOMPARE(events.constFirst().data, bytes({'a', IAC, SB, 86, 'b'}));
 			}
@@ -144,7 +144,7 @@ namespace
 
 				processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
 				QCOMPARE(spy.subnegotiations.size(), 0);
-				QVERIFY(processor.takeTelnetPluginEvents().isEmpty());
+				QVERIFY(processor.takeTelnetStreamEvents().isEmpty());
 				QVERIFY(!processor.takeOutboundData().isEmpty());
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
@@ -154,6 +154,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Subnegotiation)
 
-#if __has_include("tst_TelnetProcessor_Subnegotiation.moc")
 #include "tst_TelnetProcessor_Subnegotiation.moc"
-#endif

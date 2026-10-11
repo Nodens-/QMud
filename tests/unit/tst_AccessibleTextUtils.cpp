@@ -243,6 +243,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_AccessibleTextUtils)
 
-#if __has_include("tst_AccessibleTextUtils.moc")
 #include "tst_AccessibleTextUtils.moc"
-#endif

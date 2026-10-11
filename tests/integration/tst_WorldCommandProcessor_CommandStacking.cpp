@@ -136,6 +136,4 @@ namespace
 
 QTEST_MAIN(tst_WorldCommandProcessor_CommandStacking)
 
-#if __has_include("tst_WorldCommandProcessor_CommandStacking.moc")
 #include "tst_WorldCommandProcessor_CommandStacking.moc"
-#endif

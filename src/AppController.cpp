@@ -83,6 +83,8 @@ extern "C"
 #include <QDialog>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -140,7 +142,6 @@ extern "C"
 #include <QSysInfo>
 #include <QTableWidget>
 #include <QTemporaryDir>
-#include <QTemporaryFile>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextEdit>
@@ -188,6 +189,53 @@ extern "C"
 
 namespace
 {
+	bool worldLuaReloadNotificationTargetIsActive(const WorldRuntime *runtime, const WorldChildWindow *world,
+	                                              const MainWindow *mainWindow)
+	{
+		return runtime && world && mainWindow && !runtime->runtimeDestructionStarted() &&
+		       world->runtime() == runtime && world->isPrimaryRuntimeBinding() &&
+		       !runtime->worldSessionCloseStarted();
+	}
+
+	void queueWorldLuaScriptReload(WorldRuntime *runtime, WorldChildWindow *world, MainWindow *mainWindow,
+	                               QString script, const bool allowPackage, const bool loadScript,
+	                               QString successMessage)
+	{
+		if (!runtime)
+			return;
+		const QPointer<WorldRuntime>     runtimeGuard(runtime);
+		const QPointer<WorldChildWindow> worldGuard(world);
+		const QPointer<MainWindow>       mainWindowGuard(mainWindow);
+		runtime->reloadLuaScript(
+		    std::move(script), allowPackage, loadScript,
+		    [runtimeGuard, worldGuard, mainWindowGuard,
+		     successMessage = std::move(successMessage)](const bool loaded) mutable
+		    {
+			    if (loaded && successMessage.isEmpty())
+				    return;
+			    if (!worldLuaReloadNotificationTargetIsActive(runtimeGuard, worldGuard, mainWindowGuard))
+				    return;
+			    static_cast<void>(QMetaObject::invokeMethod(
+			        worldGuard.data(),
+			        [runtimeGuard, worldGuard, mainWindowGuard, loaded,
+			         successMessage = std::move(successMessage)]
+			        {
+				        if (!worldLuaReloadNotificationTargetIsActive(runtimeGuard, worldGuard,
+				                                                      mainWindowGuard))
+					        return;
+				        if (!loaded)
+				        {
+					        QMessageBox::warning(mainWindowGuard, QStringLiteral("Reload Script File"),
+					                             QStringLiteral("Failed to reload the script."));
+					        return;
+				        }
+				        if (!successMessage.isEmpty())
+					        mainWindowGuard->showStatusMessage(successMessage, 3000);
+			        },
+			        Qt::QueuedConnection));
+		    });
+	}
+
 	bool envFlagEnabled(const char *name)
 	{
 		const QString value = qmudEnvironmentVariable(QString::fromLatin1(name)).trimmed();
@@ -237,10 +285,10 @@ namespace
 			{
 			}
 
-			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor,
-			                                                  QString  *errorMessage) override
+			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
+			                                                  QString *errorMessage) override
 			{
-				return m_runtime.adoptConnectedSocketDescriptor(descriptor, errorMessage);
+				return m_runtime.adoptConnectedSocketDescriptor(descriptor, nawsNegotiated, errorMessage);
 			}
 
 			void markReloadReattachConnectActionsSuppressed() override
@@ -2321,6 +2369,7 @@ AppController::AppController(QObject *parent) : QObject(parent)
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
+	refreshWorldViewGlobalSettings();
 	if (QCoreApplication *application = QCoreApplication::instance())
 		application->installEventFilter(this);
 }
@@ -3135,6 +3184,7 @@ void AppController::runWorldStartupPostRestore(WorldRuntime *runtime, std::funct
 	}
 
 	emitStartupBanner(runtime);
+	runtime->applyInitialStartPausedState();
 	loadGlobalPlugins(
 	    runtime,
 	    [runtimeGuard = QPointer<WorldRuntime>(runtime), completion = std::move(completion)]() mutable
@@ -3425,6 +3475,11 @@ QVariant AppController::getGlobalOption(const QString &name) const
 	return {};
 }
 
+const WorldViewGlobalSettings &AppController::worldViewGlobalSettings() const noexcept
+{
+	return m_worldViewGlobalSettings;
+}
+
 QStringList AppController::globalOptionList()
 {
 	QStringList result;
@@ -3462,6 +3517,7 @@ void AppController::setGlobalOptionString(const QString &name, const QString &va
 		m_globalStringPrefs.insert(key, runtimeValue);
 	}
 	(void)dbWriteString(QStringLiteral("prefs"), key, storedValue);
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::setGlobalOptionInt(const QString &name, const int value)
@@ -3490,6 +3546,26 @@ void AppController::setGlobalOptionInt(const QString &name, const int value)
 		m_globalIntPrefs.insert(key, value);
 	}
 	(void)dbWriteInt(QStringLiteral("prefs"), key, value);
+	refreshWorldViewGlobalSettings();
+}
+
+void AppController::refreshWorldViewGlobalSettings()
+{
+	WorldViewGlobalSettings updated;
+	updated.wordDelimiters            = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
+	updated.doubleClickWordDelimiters = getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
+	updated.smoothScrolling           = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
+	updated.smootherScrolling         = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
+	updated.allTypingToCommandWindow =
+	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
+	updated.bleedBackground         = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+	updated.disableMiniWindowScaler = getGlobalOption(QStringLiteral("DisableWindowScaler")).toInt() != 0;
+	updated.splitViewDividerWidth =
+	    qBound(0, getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt(), 200);
+	if (updated == m_worldViewGlobalSettings)
+		return;
+	m_worldViewGlobalSettings = std::move(updated);
+	emit worldViewGlobalSettingsChanged();
 }
 
 QString AppController::makeAbsolutePath(const QString &fileName) const
@@ -4257,8 +4333,6 @@ WorldChildWindow *AppController::createWorldObserverWindow(WorldRuntime         
 		title = runtime->worldAttributes().value(QStringLiteral("name"), QStringLiteral("World"));
 	auto *window = new WorldChildWindow(title);
 	window->setRuntimeObserver(runtime);
-	if (WorldView *view = window->view())
-		view->restoreOutputFromPersistedLines(runtime->lines());
 	m_mainWindow->addMdiSubWindow(window);
 	if (source && source->isMaximized())
 		window->showMaximized();
@@ -4791,25 +4865,6 @@ void AppController::setupStartupBehavior()
 
 bool AppController::openWorldDocument(const QString &path)
 {
-	const bool allTypingToCommandWindow =
-	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
-	const QString wordDelimiters = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
-	const QString wordDelimitersDblClick =
-	    getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
-	const bool smoothScrolling   = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
-	const bool smootherScrolling = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
-	const bool bleedBackground   = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
-
-	auto       applyViewGlobalOptions = [&](WorldView *view)
-	{
-		if (!view)
-			return;
-		view->setAllTypingToCommandWindow(allTypingToCommandWindow);
-		view->setWordDelimiters(wordDelimiters, wordDelimitersDblClick);
-		view->setSmoothScrolling(smoothScrolling, smootherScrolling);
-		view->setBleedBackground(bleedBackground);
-	};
-
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
 		if (m_nextNewWorldActivationOverride >= 0)
@@ -4944,47 +4999,9 @@ bool AppController::openWorldDocument(const QString &path)
 		auto *window = new WorldChildWindow(title);
 		window->setRuntime(runtime);
 		m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
-		applyViewGlobalOptions(window->view());
 		runtime->setPluginInstallDeferred(true);
 		runtime->applyFromDocument(doc);
 		runtime->setWorldFilePath(normalized);
-		const auto &attrs            = runtime->worldAttributes();
-		const auto  useDefaultInput  = attrs.value(QStringLiteral("use_default_input_font"));
-		const auto  useDefaultOutput = attrs.value(QStringLiteral("use_default_output_font"));
-		const auto  useInput  = useDefaultInput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                        useDefaultInput == QStringLiteral("1") ||
-		                        useDefaultInput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		const auto  useOutput = useDefaultOutput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                        useDefaultOutput == QStringLiteral("1") ||
-		                        useDefaultOutput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		if (useInput)
-		{
-			const auto inputFont   = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
-			const auto inputHeight = getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-			const auto inputWeight = getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-			const auto inputItalic = getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
-			const auto inputCharset =
-			    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultInputFontCharset"));
-			if (!inputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("input_font_name"), inputFont);
-			runtime->setWorldAttribute(QStringLiteral("input_font_height"), QString::number(inputHeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_weight"), QString::number(inputWeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_italic"), QString::number(inputItalic));
-			runtime->setWorldAttribute(QStringLiteral("input_font_charset"), QString::number(inputCharset));
-		}
-		if (useOutput)
-		{
-			const auto     outputFont   = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
-			const auto     outputHeight = getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
-			constexpr auto outputWeight = 400;
-			const auto     outputCharset =
-			    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultOutputFontCharset"));
-			if (!outputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("output_font_name"), outputFont);
-			runtime->setWorldAttribute(QStringLiteral("output_font_height"), QString::number(outputHeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_weight"), QString::number(outputWeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_charset"), QString::number(outputCharset));
-		}
 		const auto regexpMatchEmpty = getGlobalOption(QStringLiteral("RegexpMatchEmpty")).toInt();
 		runtime->setWorldAttribute(QStringLiteral("regexp_match_empty"), QString::number(regexpMatchEmpty));
 		const auto notifyCannotConnect = getGlobalOption(QStringLiteral("NotifyIfCannotConnect")).toInt();
@@ -4995,9 +5012,13 @@ bool AppController::openWorldDocument(const QString &path)
 		runtime->setWorldAttribute(QStringLiteral("notify_on_disconnect"), QString::number(notifyDisconnect));
 		runtime->setWorldAttribute(QStringLiteral("error_notification_to_output"),
 		                           QString::number(errorToOutput));
-		applyConfiguredWorldDefaults(runtime);
-		if (auto *view = window->view())
-			view->applyRuntimeSettings();
+		if (QString defaultError; !applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError))
+		{
+			qWarning() << "Failed to load configured world defaults:" << defaultError;
+			runtime->outputText(
+			    QStringLiteral("Failed to load configured world defaults: %1").arg(defaultError), true, true);
+		}
+		runtime->applyRuntimeSettingsToPresentationViews();
 		m_mainWindow->refreshActionState();
 		const auto worldName = runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
 		if (!worldName.isEmpty())
@@ -5059,12 +5080,16 @@ bool AppController::openWorldDocument(const QString &path)
 	auto *window = new WorldChildWindow(title);
 	window->setRuntime(runtime);
 	m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
-	applyViewGlobalOptions(window->view());
 	restoreWorldWindowPlacement(window->windowTitle(), window);
 	if (getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt() != 0)
 		window->showMaximized();
 	runtime->setPluginInstallDeferred(true);
-	applyConfiguredWorldDefaults(runtime);
+	if (QString defaultError; !applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError))
+	{
+		qWarning() << "Failed to load configured world defaults:" << defaultError;
+		runtime->outputText(QStringLiteral("Failed to load configured world defaults: %1").arg(defaultError),
+		                    true, true);
+	}
 	m_mainWindow->refreshActionState();
 	if (m_suppressAutoConnect)
 		return true;
@@ -5169,27 +5194,12 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 	runtime->setReconnectOnLinkFailure(getGlobalOption(QStringLiteral("ReconnectOnLinkFailure")).toInt() !=
 	                                   0);
 
-	const QString defaultInput    = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
-	const QString defaultOutput   = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
-	const QString defaultTriggers = getGlobalOption(QStringLiteral("DefaultTriggersFile")).toString();
-	const QString defaultAliases  = getGlobalOption(QStringLiteral("DefaultAliasesFile")).toString();
-	const QString defaultTimers   = getGlobalOption(QStringLiteral("DefaultTimersFile")).toString();
-	const QString defaultMacros   = getGlobalOption(QStringLiteral("DefaultMacrosFile")).toString();
-	const QString defaultColours  = getGlobalOption(QStringLiteral("DefaultColoursFile")).toString();
+	const QString defaultInput  = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
+	const QString defaultOutput = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
 	if (!defaultInput.isEmpty())
 		runtime->setWorldAttribute(QStringLiteral("use_default_input_font"), QStringLiteral("1"));
 	if (!defaultOutput.isEmpty())
 		runtime->setWorldAttribute(QStringLiteral("use_default_output_font"), QStringLiteral("1"));
-	if (!defaultTriggers.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_triggers"), QStringLiteral("1"));
-	if (!defaultAliases.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_aliases"), QStringLiteral("1"));
-	if (!defaultTimers.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_timers"), QStringLiteral("1"));
-	if (!defaultMacros.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_macros"), QStringLiteral("1"));
-	if (!defaultColours.isEmpty())
-		runtime->setWorldAttribute(QStringLiteral("use_default_colours"), QStringLiteral("1"));
 
 	const int regexpMatchEmpty = getGlobalOption(QStringLiteral("RegexpMatchEmpty")).toInt();
 	runtime->setWorldAttribute(QStringLiteral("regexp_match_empty"), QString::number(regexpMatchEmpty));
@@ -5203,34 +5213,191 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 	                           QString::number(errorToOutput));
 }
 
-void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
+bool AppController::loadWorldDefaultCollection(const WorldRuntime *runtime, const QString &optionName,
+                                               const bool                      useDefault,
+                                               std::unique_ptr<WorldDocument> &document, QString *error) const
 {
+	if (error)
+		error->clear();
+	document.reset();
 	if (!runtime)
-		return;
+	{
+		if (error)
+			*error = QStringLiteral("No world runtime is available.");
+		return false;
+	}
+
+	QString       preferenceName;
+	unsigned long loadMask = WorldDocument::XML_NO_PLUGINS;
+	if (optionName == QStringLiteral("use_default_triggers"))
+	{
+		preferenceName = QStringLiteral("DefaultTriggersFile");
+		loadMask |= WorldDocument::XML_TRIGGERS;
+	}
+	else if (optionName == QStringLiteral("use_default_aliases"))
+	{
+		preferenceName = QStringLiteral("DefaultAliasesFile");
+		loadMask |= WorldDocument::XML_ALIASES;
+	}
+	else if (optionName == QStringLiteral("use_default_timers"))
+	{
+		preferenceName = QStringLiteral("DefaultTimersFile");
+		loadMask |= WorldDocument::XML_TIMERS;
+	}
+	else if (optionName == QStringLiteral("use_default_macros"))
+	{
+		preferenceName = QStringLiteral("DefaultMacrosFile");
+		loadMask |= WorldDocument::XML_MACROS;
+	}
+	else if (optionName == QStringLiteral("use_default_colours"))
+	{
+		preferenceName = QStringLiteral("DefaultColoursFile");
+		loadMask |= WorldDocument::XML_COLOURS;
+	}
+	else
+	{
+		if (error)
+			*error = QStringLiteral("Unknown default collection option: %1").arg(optionName);
+		return false;
+	}
+
+	auto    loadedDocument = std::make_unique<WorldDocument>();
+	QString fileName;
+	if (useDefault)
+	{
+		const QString configured = getGlobalOption(preferenceName).toString().trimmed();
+		if (configured.isEmpty())
+		{
+			if (error)
+				*error = QStringLiteral("No default file is configured for %1.").arg(optionName);
+			return false;
+		}
+		fileName = makeAbsolutePath(configured);
+		loadMask |= WorldDocument::XML_IMPORT_MAIN_FILE_ONLY;
+	}
+	else
+	{
+		const QString persistedPath = runtime->worldFilePath().trimmed();
+		if (persistedPath.isEmpty())
+		{
+			document = std::move(loadedDocument);
+			return true;
+		}
+		QString pathError;
+		if (!QMudPluginPathUtils::resolveInsideQmudHome(runtime->startupDirectory(), persistedPath, &fileName,
+		                                                &pathError))
+		{
+			if (error)
+				*error = pathError;
+			return false;
+		}
+		loadMask |= WorldDocument::XML_INCLUDES;
+	}
+
+	if (!QFileInfo::exists(fileName))
+	{
+		if (error)
+		{
+			*error = QStringLiteral("The %1 file does not exist: %2")
+			             .arg(useDefault ? QStringLiteral("configured default") : QStringLiteral("world"),
+			                  QDir::toNativeSeparators(fileName));
+		}
+		return false;
+	}
+	loadedDocument->setLoadMask(loadMask);
+	if (!loadedDocument->loadFromFile(fileName))
+	{
+		if (error)
+		{
+			*error = QStringLiteral("Unable to load %1: %2")
+			             .arg(QDir::toNativeSeparators(fileName), loadedDocument->errorString());
+		}
+		return false;
+	}
+	const QString stateDir =
+	    makeAbsolutePath(getGlobalOption(QStringLiteral("StateFilesDirectory")).toString());
+	const QString absolutePluginsDir = makeAbsolutePath(m_pluginsDirectory);
+	if (!loadedDocument->expandIncludes(fileName, absolutePluginsDir, m_workingDir, stateDir))
+	{
+		if (error)
+		{
+			*error = QStringLiteral("Unable to load includes from %1: %2")
+			             .arg(QDir::toNativeSeparators(fileName), loadedDocument->errorString());
+		}
+		return false;
+	}
+	document = std::move(loadedDocument);
+	return true;
+}
+
+bool AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime, const QSet<QString> &optionFilter,
+                                                 const QMap<QString, QString> &optionValues,
+                                                 QString                      *error) const
+{
+	if (error)
+		error->clear();
+	if (!runtime)
+	{
+		if (error)
+			*error = QStringLiteral("No world runtime is available.");
+		return false;
+	}
+	if (optionFilter.isEmpty())
+	{
+		QStringList errors;
+		for (const QString &optionName :
+		     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+		      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+		      QStringLiteral("use_default_colours")})
+		{
+			if (!isEnabledFlag(runtime->worldAttributes().value(optionName)))
+				continue;
+			QString optionError;
+			if (!applyConfiguredWorldDefaults(runtime, {optionName}, optionValues, &optionError))
+				errors.push_back(optionError);
+		}
+		if (error)
+			*error = errors.join(QLatin1Char('\n'));
+		return errors.isEmpty();
+	}
 
 	const QMap<QString, QString> &attrs = runtime->worldAttributes();
-	const QString                 stateDir =
-	    makeAbsolutePath(getGlobalOption(QStringLiteral("StateFilesDirectory")).toString());
-
-	auto loadDefaultDoc = [&](const QString &prefKey, const unsigned long mask, WorldDocument &doc) -> bool
+	struct PreparedCollection
 	{
-		const QString configured = getGlobalOption(prefKey).toString().trimmed();
-		if (configured.isEmpty())
+			QString                        optionName;
+			std::unique_ptr<WorldDocument> document;
+	};
+	std::vector<PreparedCollection> prepared;
+
+	const auto                      enabled = [&attrs, &optionValues](const QString &optionName)
+	{
+		const auto candidate = optionValues.constFind(optionName);
+		return isEnabledFlag(candidate == optionValues.cend() ? attrs.value(optionName) : candidate.value());
+	};
+	const auto prepareCollection = [&](const QString &optionName) -> bool
+	{
+		if (!optionFilter.contains(optionName))
+			return true;
+		std::unique_ptr<WorldDocument> doc;
+		if (!loadWorldDefaultCollection(runtime, optionName, enabled(optionName), doc, error))
 			return false;
-		const QString fileName = makeAbsolutePath(configured);
-		if (!QFileInfo::exists(fileName))
-			return false;
-		doc.setLoadMask(mask | WorldDocument::XML_NO_PLUGINS | WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(fileName))
-			return false;
-		const QString absolutePluginsDir = makeAbsolutePath(m_pluginsDirectory);
-		return doc.expandIncludes(fileName, absolutePluginsDir, m_workingDir, stateDir);
+		prepared.push_back({optionName, std::move(doc)});
+		return true;
 	};
 
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_triggers"))))
+	if (!prepareCollection(QStringLiteral("use_default_triggers")) ||
+	    !prepareCollection(QStringLiteral("use_default_aliases")) ||
+	    !prepareCollection(QStringLiteral("use_default_timers")) ||
+	    !prepareCollection(QStringLiteral("use_default_macros")) ||
+	    !prepareCollection(QStringLiteral("use_default_colours")))
 	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultTriggersFile"), WorldDocument::XML_TRIGGERS, doc))
+		return false;
+	}
+
+	for (const PreparedCollection &collection : prepared)
+	{
+		const WorldDocument &doc = *collection.document;
+		if (collection.optionName == QStringLiteral("use_default_triggers"))
 		{
 			QList<WorldRuntime::Trigger> combined;
 			combined.reserve(doc.triggers().size());
@@ -5244,12 +5411,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setTriggers(combined);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_aliases"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultAliasesFile"), WorldDocument::XML_ALIASES, doc))
+		else if (collection.optionName == QStringLiteral("use_default_aliases"))
 		{
 			QList<WorldRuntime::Alias> combined;
 			combined.reserve(doc.aliases().size());
@@ -5263,12 +5425,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setAliases(combined);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_timers"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultTimersFile"), WorldDocument::XML_TIMERS, doc))
+		else if (collection.optionName == QStringLiteral("use_default_timers"))
 		{
 			QList<WorldRuntime::Timer> combined;
 			combined.reserve(doc.timers().size());
@@ -5282,12 +5439,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setTimers(combined);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_macros"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultMacrosFile"), WorldDocument::XML_MACROS, doc))
+		else if (collection.optionName == QStringLiteral("use_default_macros"))
 		{
 			QMap<QString, QString>           macroIndexByName;
 			const QList<WorldRuntime::Macro> existingMacros = runtime->macros();
@@ -5315,12 +5467,7 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			}
 			runtime->setMacros(macros);
 		}
-	}
-
-	if (isEnabledFlag(attrs.value(QStringLiteral("use_default_colours"))))
-	{
-		if (WorldDocument doc;
-		    loadDefaultDoc(QStringLiteral("DefaultColoursFile"), WorldDocument::XML_COLOURS, doc))
+		else if (collection.optionName == QStringLiteral("use_default_colours"))
 		{
 			QList<WorldRuntime::Colour> colours;
 			colours.reserve(doc.colours().size());
@@ -5329,6 +5476,64 @@ void AppController::applyConfiguredWorldDefaults(WorldRuntime *runtime) const
 			runtime->setColours(colours);
 		}
 	}
+	return true;
+}
+
+bool AppController::saveWorldBeforeDefaultOverride(WorldRuntime *runtime, QWidget *parent, QString *error)
+{
+	if (error)
+		error->clear();
+	if (!runtime)
+	{
+		if (error)
+			*error = QStringLiteral("No world runtime is available.");
+		return false;
+	}
+	if (m_mainWindow)
+	{
+		if (const WorldChildWindow *const child = m_mainWindow->findWorldChildWindow(runtime);
+		    child && child->autosaveInFlight())
+		{
+			return true;
+		}
+	}
+	if (!runtime->worldFileModified() && !runtime->variablesChanged())
+		return true;
+
+	QString path = runtime->worldFilePath().trimmed();
+	if (path.isEmpty())
+	{
+		QString initialDir = makeAbsolutePath(defaultWorldDirectory());
+		if (initialDir.isEmpty())
+			initialDir = m_fileBrowsingDir;
+		QString suggestedName = runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
+		if (suggestedName.isEmpty())
+			suggestedName = QStringLiteral("World");
+		static const auto invalid = QStringLiteral("<>\"|?:#%;/\\");
+		for (const QChar &ch : invalid)
+			suggestedName.replace(ch, QLatin1Char('_'));
+		if (!suggestedName.endsWith(QStringLiteral(".qdl"), Qt::CaseInsensitive))
+			suggestedName += QStringLiteral(".qdl");
+		const QString dialogPath =
+		    initialDir.isEmpty() ? suggestedName : QDir(initialDir).filePath(suggestedName);
+		const QString fileName = QFileDialog::getSaveFileName(
+		    parent ? parent : m_mainWindow, QStringLiteral("Save World"), dialogPath,
+		    QStringLiteral("World files (*.qdl *.mcl);;All files (*.*)"));
+		if (fileName.isEmpty())
+			return false;
+		path = QMudFileExtensions::replaceOrAppendExtension(fileName, QStringLiteral("qdl"));
+	}
+
+	QString saveError;
+	if (!runtime->saveWorldFile(path, &saveError))
+	{
+		if (error)
+			*error = saveError.isEmpty() ? QStringLiteral("Unable to save the world file.") : saveError;
+		return false;
+	}
+	runtime->setWorldFilePath(path);
+	m_fileBrowsingDir = QFileInfo(path).absolutePath();
+	return true;
 }
 
 void AppController::emitStartupBanner(WorldRuntime *runtime)
@@ -7555,40 +7760,8 @@ void AppController::loadGlobalPlugins(WorldRuntime *runtime, const std::function
 
 void AppController::applyFontPreferences() const
 {
-	const QString inputFont   = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
-	const QString outputFont  = getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
-	const int     inputHeight = getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-	const int     inputWeight = getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-	const int     inputItalic = getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
-	const int     inputCharset =
-	    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultInputFontCharset"));
-	const int outputHeight = getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
-	const int outputCharset =
-	    dbOnlyGlobalIntValue(m_globalIntPrefs, QStringLiteral("DefaultOutputFontCharset"));
-
 	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		const QMap<QString, QString> &attrs = runtime->worldAttributes();
-		if (isEnabledFlag(attrs.value(QStringLiteral("use_default_input_font"))))
-		{
-			if (!inputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("input_font_name"), inputFont);
-			runtime->setWorldAttribute(QStringLiteral("input_font_height"), QString::number(inputHeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_weight"), QString::number(inputWeight));
-			runtime->setWorldAttribute(QStringLiteral("input_font_italic"), QString::number(inputItalic));
-			runtime->setWorldAttribute(QStringLiteral("input_font_charset"), QString::number(inputCharset));
-		}
-		if (isEnabledFlag(attrs.value(QStringLiteral("use_default_output_font"))))
-		{
-			constexpr int outputWeight = 400;
-			if (!outputFont.isEmpty())
-				runtime->setWorldAttribute(QStringLiteral("output_font_name"), outputFont);
-			runtime->setWorldAttribute(QStringLiteral("output_font_height"), QString::number(outputHeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_weight"), QString::number(outputWeight));
-			runtime->setWorldAttribute(QStringLiteral("output_font_charset"), QString::number(outputCharset));
-		}
 		runtime->setFixedPitchFont(getGlobalOption(QStringLiteral("FixedPitchFont")).toString());
-	}
 }
 
 void AppController::applyChildWindowPreferences() const
@@ -7627,20 +7800,9 @@ void AppController::applyTimerPreferences() const
 		m_mainWindow->setTimerInterval(timerInterval);
 }
 
-void AppController::applyWordDelimiterPreferences() const
+void AppController::applyWordDelimiterPreferences()
 {
-	const QString wordDelims    = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
-	const QString wordDelimsDbl = getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
-	if (!m_mainWindow)
-		return;
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setWordDelimiters(wordDelims, wordDelimsDbl);
-		}
-	}
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::applyEditorPreferences() const
@@ -7702,22 +7864,12 @@ void AppController::applyNotepadPreferences() const
 	                                      colorFromRef(notepadBack));
 }
 
-void AppController::applyListViewPreferences() const
+void AppController::applyListViewPreferences()
 {
-	const bool smoothScroll   = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
-	const bool smootherScroll = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
-	const bool gridLines      = getGlobalOption(QStringLiteral("ShowGridLinesInListViews")).toInt() != 0;
-	if (!m_mainWindow)
-		return;
-	m_mainWindow->setListViewGridLinesVisible(gridLines);
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setSmoothScrolling(smoothScroll, smootherScroll);
-		}
-	}
+	const bool gridLines = getGlobalOption(QStringLiteral("ShowGridLinesInListViews")).toInt() != 0;
+	if (m_mainWindow)
+		m_mainWindow->setListViewGridLinesVisible(gridLines);
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::applyInputPreferences() const
@@ -7743,19 +7895,9 @@ void AppController::applyNotificationPreferences() const
 	}
 }
 
-void AppController::applyTypingPreferences() const
+void AppController::applyTypingPreferences()
 {
-	const bool allTypingToCommand = getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
-	if (!m_mainWindow)
-		return;
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setAllTypingToCommandWindow(allTypingToCommand);
-		}
-	}
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::applyRegexPreferences() const
@@ -7895,11 +8037,7 @@ void AppController::applyFontMetricPreferences() const
 		    isEnabledFlag(attrs.value(QStringLiteral("use_default_output_font")));
 		if (!useDefaultInputFont && !useDefaultOutputFont)
 			continue;
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->applyRuntimeSettings();
-		}
+		runtime->applyRuntimeSettingsToPresentationViews();
 	}
 }
 
@@ -7942,21 +8080,9 @@ void AppController::applyMiscPreferences() const
 	m_mainWindow->setFlatToolbars(flat);
 }
 
-void AppController::applyRenderingPreferences() const
+void AppController::applyRenderingPreferences()
 {
-	const bool bleed                 = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
-	const int  splitViewDividerWidth = getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt();
-	if (!m_mainWindow)
-		return;
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setBleedBackground(bleed);
-		}
-		runtime->setPresentationSplitViewDividerWidth(splitViewDividerWidth);
-	}
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::saveWindowPlacement() const
@@ -8657,6 +8783,8 @@ void AppController::loadGlobalsFromDatabase()
 		m_luaScript = "-- Put Lua initialization code (eg. sandbox) here.\r\n"
 		              "-- Example sandbox can be found in the docs directory.\r\n";
 	} // end of needing to put something in sandbox
+
+	refreshWorldViewGlobalSettings();
 } // end of AppController::loadGlobalsFromDatabase
 
 int AppController::dbExecute(const QString &sql, const bool showError) const
@@ -9005,8 +9133,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!world)
 			return;
 		WorldRuntime *runtime = world->runtime();
-		WorldView    *view    = world->view();
-		if (!runtime || !view)
+		if (!runtime)
 			return;
 		if (const int wrapColumn = runtime->worldAttributes().value(QStringLiteral("wrap_column")).toInt();
 		    wrapColumn > 0)
@@ -9019,7 +9146,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			const int fallback = m_savedWrapColumns.value(runtime, 80);
 			runtime->setWorldAttribute(QStringLiteral("wrap_column"), QString::number(fallback));
 		}
-		view->applyRuntimeSettings();
+		runtime->applyRuntimeSettingsToPresentationViews();
 		m_mainWindow->updateStatusBar();
 		m_mainWindow->refreshActionState();
 	}
@@ -9272,8 +9399,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			if (!lua)
 				return;
 			runtime->setLastImmediateExpression(payload);
-			const bool executed =
-			    runtime->dispatchLuaExecuteScript(lua, payload, QStringLiteral("Immediate"));
+			const bool executed = runtime->dispatchLuaExecuteScript(lua, payload, QStringLiteral("Immediate"),
+			                                                        LuaCallbackEvent::None);
 			if (!executed)
 				QMessageBox::warning(m_mainWindow, QStringLiteral("Send To Script"),
 				                     QStringLiteral("Script execution failed."));
@@ -9357,21 +9484,15 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			scriptText = runtime->worldMultilineAttributes().value(QStringLiteral("script"));
 		}
 
-		runtime->setLuaScriptText(scriptText);
 		runtime->setScriptFileChanged(false);
-		if (LuaCallbackEngine *lua = runtime->luaCallbacks())
+		if (runtime->luaCallbacks())
 		{
 			int allowPackage = 1;
 			if (AppController *app = instance())
 				allowPackage = app->getGlobalOption(QStringLiteral("AllowLoadingDlls")).toInt();
-			runtime->applyPackageRestrictions(allowPackage != 0);
-			const bool loaded = runtime->dispatchLuaResetAndLoadScript(lua);
-			if (!loaded)
-			{
-				QMessageBox::warning(m_mainWindow, QStringLiteral("Reload Script File"),
-				                     QStringLiteral("Failed to reload the script."));
-				return;
-			}
+			queueWorldLuaScriptReload(runtime, world, m_mainWindow, std::move(scriptText), allowPackage != 0,
+			                          true, QStringLiteral("Script file reloaded."));
+			return;
 		}
 		m_mainWindow->showStatusMessage(QStringLiteral("Script file reloaded."), 3000);
 	}
@@ -9387,10 +9508,9 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!runtime || !view)
 			return;
 
+		WorldPreferencesDialog             dlg(runtime, view, m_mainWindow);
 		const WorldPreferencesDialog::Page page = QMudWorldPreferencesRouting::initialPageForCommand(
 		    cmdName, runtime->lastPreferencesPage(), isCommand);
-
-		WorldPreferencesDialog dlg(runtime, view, m_mainWindow);
 		dlg.setInitialPage(page);
 		dlg.exec();
 		m_mainWindow->updateStatusBar();
@@ -9436,7 +9556,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		if (WorldChildWindow *world = m_mainWindow->activeWorldChildWindow(); world)
+		if (WorldChildWindow *world = m_mainWindow->activeWorldPresentationWindow();
+		    world && world->isPrimaryRuntimeBinding())
 		{
 			if (WorldView *view = world->view(); view)
 			{
@@ -9462,7 +9583,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			--maxLine;
 		if (maxLine <= 0)
 			return;
-		int current = runtime->lastGoToLine();
+		int current = view->lastGoToLine();
 		if (current < 1 || current > maxLine)
 			current = qMin(maxLine, 1);
 		bool      ok   = false;
@@ -9472,7 +9593,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!ok)
 			return;
 		view->selectOutputLine(line - 1);
-		runtime->setLastGoToLine(line);
+		view->setLastGoToLine(line);
 	}
 	else if (cmdName == QStringLiteral("ActivityList"))
 	{
@@ -9680,7 +9801,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!m_mainWindow)
 			return;
 		QString selection;
-		if (auto *world = m_mainWindow->activeWorldChildWindow())
+		if (auto *world = m_mainWindow->activeWorldPresentationWindow())
 		{
 			if (auto *view = world->view())
 			{
@@ -9869,8 +9990,6 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		auto                  triggers = runtime->triggers();
 		WorldRuntime::Trigger trigger;
 		auto                 &attrs = trigger.attributes;
-		attrs.insert(QStringLiteral("name"),
-		             QStringLiteral("*trigger%1").arg(WorldRuntime::getUniqueNumber()));
 		attrs.insert(QStringLiteral("match"), pattern);
 		attrs.insert(QStringLiteral("regexp"), QStringLiteral("1"));
 		attrs.insert(QStringLiteral("multi_line"), QStringLiteral("1"));
@@ -9888,7 +10007,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
+		auto *world = m_mainWindow->activeWorldPresentationWindow();
 		if (!world)
 			return;
 		auto *runtime = world->runtime();
@@ -10554,8 +10673,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				        return;
 			        if (m_mainWindow)
 				        m_mainWindow->setStatusMessageNow(QStringLiteral("Executing immediate script"));
-			        const bool executed =
-			            runtime->dispatchLuaExecuteScript(lua, code, QStringLiteral("Immediate"));
+			        const bool executed = runtime->dispatchLuaExecuteScript(
+			            lua, code, QStringLiteral("Immediate"), LuaCallbackEvent::None);
 			        if (!executed)
 				        QMessageBox::warning(m_mainWindow, QStringLiteral("QMud"),
 				                             QStringLiteral("Immediate execution failed."));
@@ -11071,7 +11190,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
+		auto *world = m_mainWindow->activeWorldPresentationWindow();
 		if (!world)
 			return;
 		auto *view = world->view();
@@ -11090,7 +11209,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
+		auto *world = m_mainWindow->activeWorldPresentationWindow();
 		if (!world)
 			return;
 		auto *view = world->view();
@@ -11224,6 +11343,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		HighlightPhraseDialog dlg(m_mainWindow);
 		dlg.setCustomColours(customText, customBack, customNames);
 		dlg.setOtherColours(otherFore, otherBack);
+		dlg.setSuggestedOtherColours(QColor(32, 32, 32), QColor(201, 180, 88));
 		dlg.setInitialText(suggested);
 		dlg.setWholeWord(true);
 		dlg.setMatchCase(false);
@@ -11252,7 +11372,6 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		QList<WorldRuntime::Trigger> triggers = runtime->triggers();
 		WorldRuntime::Trigger        trigger;
 		QMap<QString, QString>      &t = trigger.attributes;
-		t.insert(QStringLiteral("name"), QStringLiteral("*trigger%1").arg(WorldRuntime::getUniqueNumber()));
 		t.insert(QStringLiteral("match"), pattern);
 		t.insert(QStringLiteral("regexp"), QStringLiteral("1"));
 		t.insert(QStringLiteral("ignore_case"), dlg.matchCase() ? QStringLiteral("0") : QStringLiteral("1"));
@@ -12356,7 +12475,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				}
 			}
 		}
-		else if (auto *world = m_mainWindow->activeWorldChildWindow())
+		else if (auto *world = m_mainWindow->activeWorldPresentationWindow())
 		{
 			if (auto *view = world->view())
 			{
@@ -12415,12 +12534,27 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!world)
 			return;
 		auto *runtime = world->runtime();
-		auto *view    = world->view();
-		if (!runtime || !view)
+		if (!runtime)
 			return;
 		runtime->applyDefaultWorldOptions();
-		view->applyRuntimeSettings();
-		m_mainWindow->showStatusMessage(QStringLiteral("Defaults reloaded."), 2000);
+		QString    defaultError;
+		const bool defaultsLoaded = applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError);
+		runtime->refreshCommandProcessorOptions();
+		runtime->syncChatAcceptCallsWithPreferences();
+		runtime->applyRuntimeSettingsToPresentationViews();
+		if (!defaultsLoaded)
+		{
+			qWarning() << "Failed to reload one or more configured world defaults:" << defaultError;
+			runtime->outputText(QStringLiteral("Failed to reload one or more configured world defaults:\n%1")
+			                        .arg(defaultError),
+			                    true, true);
+			m_mainWindow->showStatusMessage(QStringLiteral("Some configured defaults could not be reloaded."),
+			                                4000);
+		}
+		else
+		{
+			m_mainWindow->showStatusMessage(QStringLiteral("Defaults reloaded."), 2000);
+		}
 	}
 	else if (isCommand(QStringLiteral("WindowsSocketInfo")))
 	{
@@ -12771,10 +12905,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (payload.isEmpty())
 			return;
 
-		const bool wasSimulating = runtime->doingSimulate();
-		runtime->setDoingSimulate(true);
-		runtime->receiveRawData(payload);
-		runtime->setDoingSimulate(wasSimulating);
+		runtime->simulateInput(payload);
 	}
 	else if (cmdName == QStringLiteral("FullScreenMode"))
 	{
@@ -13396,7 +13527,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		WorldChildWindow *world      = m_mainWindow->activeWorldChildWindow();
+		WorldChildWindow *world      = m_mainWindow->activeWorldPresentationWindow();
 		TextChildWindow  *textWindow = m_mainWindow->activeTextChildWindow();
 		if (!world && !textWindow)
 			return;
@@ -13611,7 +13742,7 @@ void AppController::handleOutputFind(const bool again, const bool forceDirection
 {
 	if (!m_mainWindow)
 		return;
-	const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow();
+	const WorldChildWindow *world = m_mainWindow->activeWorldPresentationWindow();
 	if (!world)
 		return;
 	if (WorldView *view = world->view(); !view)
@@ -13835,7 +13966,7 @@ void AppController::handleCopy() const
 {
 	if (!m_mainWindow)
 		return;
-	const WorldChildWindow *child = m_mainWindow->activeWorldChildWindow();
+	const WorldChildWindow *child = m_mainWindow->activeWorldPresentationWindow();
 	if (!child)
 		return;
 	if (WorldView *view = child->view(); view)
@@ -13846,7 +13977,7 @@ void AppController::handleCopyAsHtml() const
 {
 	if (!m_mainWindow)
 		return;
-	const WorldChildWindow *child = m_mainWindow->activeWorldChildWindow();
+	const WorldChildWindow *child = m_mainWindow->activeWorldPresentationWindow();
 	if (!child)
 		return;
 	if (WorldView *view = child->view(); view)
@@ -13935,8 +14066,14 @@ void AppController::handleQuickConnect()
 		child->setRuntime(runtime);
 		m_mainWindow->addMdiSubWindow(child);
 		runtime->setPluginInstallDeferred(true);
-		applyConfiguredWorldDefaults(runtime);
+		if (QString defaultError; !applyConfiguredWorldDefaults(runtime, {}, {}, &defaultError))
+		{
+			qWarning() << "Failed to load configured world defaults:" << defaultError;
+			runtime->outputText(
+			    QStringLiteral("Failed to load configured world defaults: %1").arg(defaultError), true, true);
+		}
 		emitStartupBanner(runtime);
+		runtime->applyInitialStartPausedState();
 		createdRuntime = true;
 	}
 
@@ -14302,30 +14439,7 @@ void AppController::handleLogSession() const
 			bool wroteColourLine = false;
 			if (logHtml && logInColour && !entry.spans.isEmpty())
 			{
-				int       iCol    = 0;
-				const int textLen = static_cast<int>(entry.text.size());
-				for (const auto &span : entry.spans)
-				{
-					if (span.length <= 0 || iCol >= textLen)
-						continue;
-					const int     spanLen  = qMin(span.length, textLen - iCol);
-					const QString fragment = entry.text.mid(iCol, spanLen);
-					if (span.fore.isValid())
-					{
-						runtime->writeLog(QStringLiteral("<font color=\"#%1%2%3\">")
-						                      .arg(span.fore.red(), 2, 16, QLatin1Char('0'))
-						                      .arg(span.fore.green(), 2, 16, QLatin1Char('0'))
-						                      .arg(span.fore.blue(), 2, 16, QLatin1Char('0')));
-					}
-					if (span.underline)
-						runtime->writeLog(QStringLiteral("<u>"));
-					runtime->writeLog(fragment.toHtmlEscaped());
-					if (span.underline)
-						runtime->writeLog(QStringLiteral("</u>"));
-					if (span.fore.isValid())
-						runtime->writeLog(QStringLiteral("</font>"));
-					iCol += spanLen;
-				}
+				runtime->writeStyledHtmlLogText(entry.text, entry.spans);
 				runtime->writeLog(QStringLiteral("\n"));
 				wroteColourLine = true;
 			}
@@ -14909,6 +15023,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 		const bool connectedNow  = ctx.runtime->isConnected();
 		const bool connectingNow = ctx.runtime->isConnecting();
 		world.socketDescriptor   = ctx.runtime->nativeSocketDescriptor();
+		world.nawsNegotiated     = connectedNow && ctx.runtime->isNawsNegotiated();
 		const bool tlsEnabled =
 		    isEnabledFlag(ctx.runtime->worldAttributes().value(QStringLiteral("tls_encryption")));
 		if (!world.mccpDisableAttempted)
@@ -15085,27 +15200,42 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 		result.errorMessage = doc.errorString();
 		return result;
 	}
+	return applyImportedDocument(world, runtime, doc, mask);
+}
 
-	const bool allowOverwrite      = mask & WorldDocument::XML_OVERWRITE;
-	const bool allowPasteDuplicate = mask & WorldDocument::XML_PASTE_DUPLICATE;
-	auto       mergeNamedList      = [&](auto &dest, const auto &src, const QString &kind) -> bool
+AppController::ImportResult AppController::applyImportedDocument(WorldChildWindow    *world,
+                                                                 WorldRuntime        *runtime,
+                                                                 const WorldDocument &doc,
+                                                                 const unsigned long  mask)
+{
+	ImportResult result;
+	if (!world || !runtime)
 	{
-		return QMudImportMerge::mergeNamedList(dest, src, kind, allowOverwrite, allowPasteDuplicate,
-		                                       &result.duplicates, &result.errorMessage);
-	};
-
-	if (mask & WorldDocument::XML_GENERAL)
-	{
-		for (auto it = doc.worldAttributes().begin(); it != doc.worldAttributes().end(); ++it)
-			runtime->setWorldAttribute(it.key(), it.value());
-		for (auto it = doc.worldMultilineAttributes().begin(); it != doc.worldMultilineAttributes().end();
-		     ++it)
-			runtime->setWorldMultilineAttribute(it.key(), it.value());
+		result.errorMessage = QStringLiteral("No active world runtime available.");
+		return result;
 	}
 
+	const bool allowOverwrite = mask & WorldDocument::XML_OVERWRITE;
+	auto       mergeNamedList = [&](auto &dest, const auto &src, const QString &kind) -> bool
+	{
+		return QMudImportMerge::mergeNamedList(dest, src, kind, allowOverwrite, &result.duplicates,
+		                                       &result.errorMessage);
+	};
+
+	QList<WorldRuntime::Trigger>       mergedTriggers;
+	QList<WorldRuntime::Alias>         mergedAliases;
+	QList<WorldRuntime::Timer>         mergedTimers;
+	QList<WorldRuntime::Macro>         mergedMacros;
+	QList<WorldRuntime::Variable>      mergedVariables;
+	QList<WorldRuntime::Colour>        mergedColours;
+	QList<WorldRuntime::Keypad>        mergedKeypad;
+	QList<WorldRuntime::PrintingStyle> mergedPrinting;
+
+	// Prepare every selected category before changing the runtime. Named-list duplicate rejection must leave
+	// General settings, rules, variables, and the active script engine untouched.
 	if (mask & WorldDocument::XML_TRIGGERS)
 	{
-		QList<WorldRuntime::Trigger> merged = runtime->triggers();
+		mergedTriggers = runtime->triggers();
 		QList<WorldRuntime::Trigger> incoming;
 		incoming.reserve(doc.triggers().size());
 		for (const auto &[attributes, children, included] : doc.triggers())
@@ -15116,14 +15246,13 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 			trigger.included   = included;
 			incoming.push_back(trigger);
 		}
-		if (!mergeNamedList(merged, incoming, QStringLiteral("trigger")))
+		if (!mergeNamedList(mergedTriggers, incoming, QStringLiteral("trigger")))
 			return result;
-		runtime->setTriggers(merged);
 	}
 
 	if (mask & WorldDocument::XML_ALIASES)
 	{
-		QList<WorldRuntime::Alias> merged = runtime->aliases();
+		mergedAliases = runtime->aliases();
 		QList<WorldRuntime::Alias> incoming;
 		incoming.reserve(doc.aliases().size());
 		for (const auto &[attributes, children, included] : doc.aliases())
@@ -15134,14 +15263,13 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 			alias.included   = included;
 			incoming.push_back(alias);
 		}
-		if (!mergeNamedList(merged, incoming, QStringLiteral("alias")))
+		if (!mergeNamedList(mergedAliases, incoming, QStringLiteral("alias")))
 			return result;
-		runtime->setAliases(merged);
 	}
 
 	if (mask & WorldDocument::XML_TIMERS)
 	{
-		QList<WorldRuntime::Timer> merged = runtime->timers();
+		mergedTimers = runtime->timers();
 		QList<WorldRuntime::Timer> incoming;
 		incoming.reserve(doc.timers().size());
 		for (const auto &[attributes, children, included] : doc.timers())
@@ -15152,63 +15280,95 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 			timer.included   = included;
 			incoming.push_back(timer);
 		}
-		if (!mergeNamedList(merged, incoming, QStringLiteral("timer")))
+		if (!mergeNamedList(mergedTimers, incoming, QStringLiteral("timer")))
 			return result;
-		runtime->setTimers(merged);
 	}
 
 	if (mask & WorldDocument::XML_MACROS)
 	{
-		QList<WorldRuntime::Macro> merged = runtime->macros();
+		mergedMacros = runtime->macros();
 		QList<WorldRuntime::Macro> incoming;
 		incoming.reserve(doc.macros().size());
 		for (const auto &[attributes, children] : doc.macros())
 			incoming.push_back({attributes, children});
-		if (!mergeNamedList(merged, incoming, QStringLiteral("macro")))
+		if (!mergeNamedList(mergedMacros, incoming, QStringLiteral("macro")))
 			return result;
-		runtime->setMacros(merged);
 	}
 
 	if (mask & WorldDocument::XML_VARIABLES)
 	{
-		QList<WorldRuntime::Variable> merged = runtime->variables();
+		mergedVariables = runtime->variables();
 		QList<WorldRuntime::Variable> incoming;
 		incoming.reserve(doc.variables().size());
 		for (const auto &[attributes, content] : doc.variables())
 		{
 			incoming.push_back({attributes, content});
 		}
-		QMudImportMerge::mergeVariables(merged, incoming, allowOverwrite, allowPasteDuplicate,
-		                                &result.duplicates);
-		runtime->setVariables(merged);
+		QMudImportMerge::mergeVariables(mergedVariables, incoming, allowOverwrite, &result.duplicates);
 	}
 
 	if (mask & WorldDocument::XML_COLOURS)
 	{
-		QList<WorldRuntime::Colour> merged = runtime->colours();
+		mergedColours = runtime->colours();
 		for (const auto &[group, attributes] : doc.colours())
-			merged.push_back({group, attributes});
-		runtime->setColours(merged);
+			mergedColours.push_back({group, attributes});
 	}
 
 	if (mask & WorldDocument::XML_KEYPAD)
 	{
-		QList<WorldRuntime::Keypad> merged = runtime->keypadEntries();
+		mergedKeypad = runtime->keypadEntries();
 		for (const auto &[attributes, content] : doc.keypadEntries())
-			merged.push_back({attributes, content});
-		runtime->setKeypadEntries(merged);
+			mergedKeypad.push_back({attributes, content});
 	}
 
 	if (mask & WorldDocument::XML_PRINTING)
 	{
-		QList<WorldRuntime::PrintingStyle> merged = runtime->printingStyles();
+		mergedPrinting = runtime->printingStyles();
 		for (const auto &[group, attributes] : doc.printingStyles())
-			merged.push_back({group, attributes});
-		runtime->setPrintingStyles(merged);
+			mergedPrinting.push_back({group, attributes});
 	}
 
-	if (WorldView *view = world->view())
-		view->applyRuntimeSettings();
+	QString importedScriptText;
+	bool    reloadImportedScript = false;
+	if (mask & WorldDocument::XML_GENERAL)
+	{
+		const auto importedScript = doc.worldMultilineAttributes().constFind(QStringLiteral("script"));
+		reloadImportedScript =
+		    importedScript != doc.worldMultilineAttributes().cend() &&
+		    (!runtime->worldMultilineAttributes().contains(QStringLiteral("script")) ||
+		     runtime->worldMultilineAttributes().value(QStringLiteral("script")) != *importedScript);
+		if (reloadImportedScript)
+			importedScriptText = *importedScript;
+		for (auto it = doc.worldAttributes().begin(); it != doc.worldAttributes().end(); ++it)
+			runtime->setWorldAttribute(it.key(), it.value());
+		for (auto it = doc.worldMultilineAttributes().begin(); it != doc.worldMultilineAttributes().end();
+		     ++it)
+			runtime->setWorldMultilineAttribute(it.key(), it.value());
+	}
+	if (mask & WorldDocument::XML_TRIGGERS)
+		runtime->setTriggers(mergedTriggers);
+	if (mask & WorldDocument::XML_ALIASES)
+		runtime->setAliases(mergedAliases);
+	if (mask & WorldDocument::XML_TIMERS)
+		runtime->setTimers(mergedTimers);
+	if (mask & WorldDocument::XML_MACROS)
+		runtime->setMacros(mergedMacros);
+	if (mask & WorldDocument::XML_VARIABLES)
+		runtime->setVariables(mergedVariables);
+	if (mask & WorldDocument::XML_COLOURS)
+		runtime->setColours(mergedColours);
+	if (mask & WorldDocument::XML_KEYPAD)
+		runtime->setKeypadEntries(mergedKeypad);
+	if (mask & WorldDocument::XML_PRINTING)
+		runtime->setPrintingStyles(mergedPrinting);
+	if (reloadImportedScript && runtime->luaCallbacks())
+	{
+		const bool allowPackage = getGlobalOption(QStringLiteral("AllowLoadingDlls")).toInt() != 0;
+		queueWorldLuaScriptReload(runtime, world, m_mainWindow, std::move(importedScriptText), allowPackage,
+		                          false, {});
+	}
+
+	runtime->applyRuntimeSettingsToPresentationViews();
 	m_mainWindow->updateStatusBar();
 	m_mainWindow->refreshActionState();
 
@@ -15227,22 +15387,54 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 AppController::ImportResult AppController::importXmlFromText(const QString &xml, const unsigned long mask)
 {
 	ImportResult result;
+	if (!m_mainWindow)
+	{
+		result.errorMessage = QStringLiteral("No active window.");
+		return result;
+	}
+	WorldChildWindow *world = m_mainWindow->activeWorldChildWindow();
+	if (!world)
+	{
+		result.errorMessage = QStringLiteral("No active world to import into.");
+		return result;
+	}
+	return importXmlFromText(world->runtime(), xml, mask);
+}
+
+AppController::ImportResult AppController::importXmlFromText(WorldRuntime *runtime, const QString &xml,
+                                                             const unsigned long mask)
+{
+	ImportResult result;
 	if (xml.isEmpty())
 	{
 		result.errorMessage = QStringLiteral("Not in XML format");
 		return result;
 	}
-
-	QTemporaryFile tmp;
-	if (!tmp.open())
+	if (!m_mainWindow)
 	{
-		result.errorMessage = QStringLiteral("Unable to open temporary file for import.");
+		result.errorMessage = QStringLiteral("No active window.");
 		return result;
 	}
-	tmp.write(xml.toUtf8());
-	tmp.flush();
+	if (!runtime)
+	{
+		result.errorMessage = QStringLiteral("No world runtime available.");
+		return result;
+	}
+	WorldChildWindow *world = m_mainWindow->findWorldChildWindow(runtime);
+	if (!world)
+	{
+		result.errorMessage = QStringLiteral("The destination world is no longer open.");
+		return result;
+	}
 
-	return importXmlFromFile(tmp.fileName(), mask);
+	WorldDocument doc;
+	doc.setLoadMask(mask | WorldDocument::XML_NO_PLUGINS | WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
+	if (!doc.loadFromXml(xml))
+	{
+		result.errorMessage = doc.errorString();
+		return result;
+	}
+	return applyImportedDocument(world, runtime, doc, mask);
 }
 
 bool AppController::isSpellCheckerAvailable()

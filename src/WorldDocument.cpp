@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QXmlStreamReader>
 #include <algorithm>
 
@@ -363,6 +364,24 @@ static QString withLine(const QXmlStreamReader &reader, const QString &message)
 	return message;
 }
 
+template <typename Item>
+static void appendNamedItem(QList<Item> &items, QHash<QString, qsizetype> &indexByName, Item item,
+                            const WorldDocument::NamedDuplicatePolicy duplicatePolicy)
+{
+	const QString name = item.attributes.value(QStringLiteral("name")).trimmed();
+	if (!name.isEmpty() && duplicatePolicy == WorldDocument::NamedDuplicatePolicy::KeepLast)
+	{
+		const QString key = name.toCaseFolded();
+		if (const auto existing = indexByName.constFind(key); existing != indexByName.cend())
+		{
+			items[existing.value()] = std::move(item);
+			return;
+		}
+		indexByName.insert(key, items.size());
+	}
+	items.push_back(std::move(item));
+}
+
 WorldDocument::WorldDocument(QObject *parent) : QObject(parent)
 {
 }
@@ -405,12 +424,14 @@ bool WorldDocument::loadFromPluginFile(const QString &fileName)
 	return loadFromFileWithPolicy(fileName, PluginPolicy::RequirePlugin, false);
 }
 
+bool WorldDocument::loadFromXml(const QString &xmlText, const NamedDuplicatePolicy duplicatePolicy)
+{
+	return loadFromXmlWithPolicy(xmlText, PluginPolicy::AllowPlugins, false, duplicatePolicy);
+}
+
 bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy policy, bool includeContext)
 {
 	clearState();
-	m_loadedFromInclude      = includeContext;
-	m_pluginFile             = (policy == PluginPolicy::RequirePlugin);
-	m_pluginContentFinalized = false;
 
 	QFile file(fileName);
 	if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -425,15 +446,30 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 		return false;
 	}
 
+	return loadFromXmlWithPolicy(QString::fromUtf8(file.readAll()), policy, includeContext,
+	                             NamedDuplicatePolicy::KeepLast);
+}
+
+bool WorldDocument::loadFromXmlWithPolicy(const QString &xmlText, const PluginPolicy policy,
+                                          const bool                 includeContext,
+                                          const NamedDuplicatePolicy duplicatePolicy)
+{
+	clearState();
+	m_loadedFromInclude      = includeContext;
+	m_pluginFile             = (policy == PluginPolicy::RequirePlugin);
+	m_pluginContentFinalized = false;
+
 	// XML load path using QXmlStreamReader over sanitized input text.
-	const QByteArray rawBytes  = file.readAll();
-	const QString    xmlText   = QString::fromUtf8(rawBytes);
-	const QString    sanitized = sanitizeXmlForQt(xmlText);
-	QXmlStreamReader reader(sanitized);
+	const QString             sanitized = sanitizeXmlForQt(xmlText);
+	QXmlStreamReader          reader(sanitized);
 
-	bool             sawContent = false;
+	bool                      sawContent = false;
+	QHash<QString, qsizetype> triggerIndexByName;
+	QHash<QString, qsizetype> aliasIndexByName;
+	QHash<QString, qsizetype> timerIndexByName;
+	QHash<QString, qsizetype> variableIndexByName;
 
-	auto             parseChildren = [&reader]() -> QMap<QString, QString>
+	auto                      parseChildren = [&reader]() -> QMap<QString, QString>
 	{
 		QMap<QString, QString> children;
 		while (!reader.atEnd())
@@ -529,7 +565,7 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 						// child elements (eg. <send>...</send>)
 						trigger.children = parseChildren();
 						trigger.included = m_loadedFromInclude;
-						m_triggers.push_back(trigger);
+						appendNamedItem(m_triggers, triggerIndexByName, std::move(trigger), duplicatePolicy);
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("triggers"))
 						break;
@@ -553,7 +589,7 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 						// child elements (eg. <send>...</send>)
 						alias.children = parseChildren();
 						alias.included = m_loadedFromInclude;
-						m_aliases.push_back(alias);
+						appendNamedItem(m_aliases, aliasIndexByName, std::move(alias), duplicatePolicy);
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("aliases"))
 						break;
@@ -577,7 +613,7 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 						// child elements (eg. <send>...</send>)
 						timer.children = parseChildren();
 						timer.included = m_loadedFromInclude;
-						m_timers.push_back(timer);
+						appendNamedItem(m_timers, timerIndexByName, std::move(timer), duplicatePolicy);
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("timers"))
 						break;
@@ -644,7 +680,8 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 							variable.attributes.insert(attr.name().toString(), attr.value().toString());
 						}
 						variable.content = reader.readElementText(QXmlStreamReader::IncludeChildElements);
-						m_variables.push_back(variable);
+						appendNamedItem(m_variables, variableIndexByName, std::move(variable),
+						                duplicatePolicy);
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("variables"))
 						break;
@@ -1182,7 +1219,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 
 		const QString pluginFlag = include.attributes.value(QStringLiteral("plugin")).toLower();
 		const bool    isPlugin   = (pluginFlag == QStringLiteral("y") || pluginFlag == QStringLiteral("1") ||
-		                            pluginFlag == QStringLiteral("true"));
+                               pluginFlag == QStringLiteral("true"));
 		if (isPlugin != wantPlugins)
 			continue;
 		if (isPlugin)
@@ -1493,15 +1530,15 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 
 	const QString explicitRelativeLower      = explicitRelativeWithoutCurrentDir.toLower();
 	const bool    explicitStartsPortableRoot = explicitRelativeLower == QStringLiteral("worlds") ||
-	                                           explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
-	                                           explicitRelativeLower == QStringLiteral("logs") ||
-	                                           explicitRelativeLower.startsWith(QStringLiteral("logs/"));
+	                                        explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
+	                                        explicitRelativeLower == QStringLiteral("logs") ||
+	                                        explicitRelativeLower.startsWith(QStringLiteral("logs/"));
 
 	const QString normalizedLower    = nativeName.toLower();
 	const bool    startsPortableRoot = normalizedLower == QStringLiteral("worlds") ||
-	                                   normalizedLower.startsWith(QStringLiteral("worlds/")) ||
-	                                   normalizedLower == QStringLiteral("logs") ||
-	                                   normalizedLower.startsWith(QStringLiteral("logs/"));
+	                                normalizedLower.startsWith(QStringLiteral("worlds/")) ||
+	                                normalizedLower == QStringLiteral("logs") ||
+	                                normalizedLower.startsWith(QStringLiteral("logs/"));
 
 	if (isExplicitRelative)
 	{
@@ -1584,7 +1621,7 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 		QMap<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
+			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
@@ -1592,7 +1629,7 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 		for (const auto &item : src)
 		{
 			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toLower();
+			const QString key     = rawName.toCaseFolded();
 			if (key.isEmpty() || !indexByName.contains(key))
 			{
 				dest.push_back(item);
@@ -1633,7 +1670,7 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 		QMap<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
+			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
@@ -1641,7 +1678,7 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 		for (const auto &item : src)
 		{
 			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toLower();
+			const QString key     = rawName.toCaseFolded();
 			if (key.isEmpty() || !indexByName.contains(key))
 			{
 				dest.push_back(item);

@@ -26,13 +26,19 @@ and potential contributors need to fully understand them.
   that could be done out of order but that is an extension for a later time.
 - WorldRuntime state belongs to the runtime's QObject thread. GUI state belongs to the GUI thread. A Lua callback must
   not read or mutate either directly from a worker thread.
-- The callback lane preserves callback order. Do not bypass it with timers, polling, detached work, or an independent
+- The callback lane preserves causal order and the defined queue order within each ordering domain. Suspending a
+  callback releases the worker lane, so unrelated asynchronous callbacks may run before it resumes. Every continuation
+  must re-enter through the callback lane. Do not bypass it with timers, polling, detached work, or an independent
   callback queue.
 - Input-critical callbacks may require a completion result. Non-critical callbacks should remain asynchronous where
   their API contract permits it. Do not turn all callback dispatch into a blanket completion barrier.
 - An active callback must not introduce a synchronous cross-thread callback-worker-to-runtime or worker-to-GUI bridge.
-  That creates the runtime-waits-for-worker/worker-waits-for-runtime deadlock cycle. Reads use the dispatch snapshot
-  and/or callback-local caches. Writes use the deferred mutation journal. Modal GUI operations yield and resume.
+  That creates the runtime-waits-for-worker/worker-waits-for-runtime deadlock cycle. Reads normally use the dispatch
+  snapshot and callback-local caches, and writes normally use the deferred mutation journal. When a synchronous Lua API
+  requires work on the owning runtime, GUI, or nested Lua engine that cannot be satisfied by those mechanisms, the
+  callback must yield and resume through runtime-owned suspended-dispatch state. This includes modal GUI operations,
+  runtime and presentation snapshot refreshes, cross-world preparation, and nested CallPlugin() or broadcast
+  continuations.
 - The worker-thread executor is the only runtime and test dispatch path. LuaExecutorDirect is the worker lane's
   same-thread execution primitive; never install it as a runtime backend or instantiate it directly in tests.
 - Runtime mutations produced by a callback are recorded in call order and applied on the owning runtime thread. They
@@ -48,8 +54,15 @@ and potential contributors need to fully understand them.
 - When one recipient mutates state and later recipients remain, the mutation boundary is published, committed on the
   runtime thread, and the request snapshot is recaptured before the next recipient. Non-mutating recipients stay on
   the worker lane without needless recapture.
-- Modal APIs suspend the Lua coroutine, retain the original dispatch position and accumulated result, run the GUI
-  operation on the GUI thread, then resume the same callback. Never emulate this with a nested event loop or timer.
+- A yieldable callback operation suspends the current Lua coroutine and preserves its callback context, recipient
+  position, accumulated result, execution guards, and cancellation ownership. Pending mutations are published before
+  suspension. Required runtime, GUI, or nested-engine work runs on its owning execution context and resumption restores
+  the same coroutine and refreshes its snapshot when required. Repeated and nested yields propagate through the same
+  suspended-dispatch lifecycle. Never emulate this with a nested event loop or timer.
+- Deferred and resumed work must restore its captured runtime caller context and causal outbound scope. An outbound
+  command remains attached to its transaction so later causal output cannot overtake a suspended send decision or
+  OnPluginSent completion. Cancellation rejects pending transactions, and socket disconnect waits for staged writes and
+  their packet-debug publication.
 - Callback result aggregation, stop conditions, continuation behavior, fallbacks, and function-name requirements are
   defined by the single Lua batch-dispatch registry. Do not reproduce that policy in API-specific switches or tests.
 - Plugin IDs are canonicalized to lower case only while validating XML or decoding a plugin-facing API argument. Once

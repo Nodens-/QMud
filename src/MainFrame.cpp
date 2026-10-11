@@ -84,6 +84,20 @@ static int sizeToInt(const qsizetype value)
 	    qBound(static_cast<qsizetype>(0), value, static_cast<qsizetype>(std::numeric_limits<int>::max())));
 }
 
+static QRect luaCallbackValidWindowGeometry(const QRect &preferred, const QRect &fallback)
+{
+	return preferred.isValid() && !preferred.isNull() ? preferred : fallback;
+}
+
+static QRect luaCallbackScreenWindowGeometry(const QWidget *window, const QRect &geometry)
+{
+	if (!window)
+		return geometry;
+	QRect result = geometry;
+	result.moveTopLeft(window->mapToGlobal(result.topLeft()));
+	return result;
+}
+
 static bool isTrayOnlyIconPlacement()
 {
 	const AppController *app = AppController::instance();
@@ -158,6 +172,7 @@ void MainWindow::setLastNormalGeometry(const QRect &rect)
 void MainWindow::showEvent(QShowEvent *event)
 {
 	QMainWindow::showEvent(event);
+	m_luaCallbackMainWindowPresentationDirty = true;
 
 	if ((windowState() & (Qt::WindowMaximized | Qt::WindowMinimized | Qt::WindowFullScreen)) == 0)
 		m_lastNormalGeometry = geometry();
@@ -189,6 +204,7 @@ void MainWindow::showEvent(QShowEvent *event)
 void MainWindow::moveEvent(QMoveEvent *event)
 {
 	QMainWindow::moveEvent(event);
+	m_luaCallbackMainWindowPresentationDirty = true;
 	if ((windowState() & (Qt::WindowMaximized | Qt::WindowMinimized | Qt::WindowFullScreen)) == 0)
 		m_lastNormalGeometry = geometry();
 }
@@ -196,6 +212,7 @@ void MainWindow::moveEvent(QMoveEvent *event)
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
 	QMainWindow::resizeEvent(event);
+	m_luaCallbackMainWindowPresentationDirty = true;
 	if ((windowState() & (Qt::WindowMaximized | Qt::WindowMinimized | Qt::WindowFullScreen)) == 0)
 		m_lastNormalGeometry = geometry();
 	refreshWorldMiniWindows();
@@ -881,6 +898,8 @@ void MainWindow::buildMdiArea()
 
 	connect(m_mdiArea, &QMdiArea::subWindowActivated, this, &MainWindow::onMdiSubWindowActivated);
 	connect(&m_mdiTabs, &MdiTabs::windowActivationRequested, this, &MainWindow::activateMdiSubWindow);
+	connect(&m_mdiTabs, &MdiTabs::windowOrderChanged, this,
+	        [this] { m_luaCallbackMainWindowPresentationDirty = true; });
 }
 
 void MainWindow::buildStatusBar()
@@ -1408,10 +1427,14 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	const bool maximizeOnAdd =
 	    tabbedPresentationActive || textWindow || (world && world->isPrimaryRuntimeBinding());
 	m_mdiArea->addSubWindow(subWindow);
+	m_luaCallbackMainWindowPresentationDirty = true;
 	subWindow->installEventFilter(this);
 	connect(subWindow, &QObject::destroyed, this,
 	        [this](QObject *obj)
 	        {
+		        m_luaCallbackMainWindowPresentationDirty = true;
+		        m_luaCallbackUdpPresentationDirty        = true;
+		        m_luaCallbackUdpPresentationSnapshots.clear();
 		        if (m_lastActiveSubWindow && m_lastActiveSubWindow.data() == obj)
 			        m_lastActiveSubWindow.clear();
 		        if (!m_mdiArea)
@@ -1430,6 +1453,15 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 		subWindow->show();
 	if (world)
 	{
+		observeLuaCallbackPresentationRuntime(world->runtime());
+		connect(world, &WorldChildWindow::runtimeBindingChanged, this,
+		        [this, world]
+		        {
+			        observeLuaCallbackPresentationRuntime(world->runtime());
+			        invalidateLuaCallbackUdpPresentationSnapshot();
+		        });
+		connect(world, &WorldChildWindow::infoWindowShowCommandChanged, this,
+		        [this] { m_luaCallbackMainWindowPresentationDirty = true; });
 		connect(world, &QObject::destroyed, this,
 		        [this, world]
 		        {
@@ -1468,6 +1500,22 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 		if (mdiUpdatesEnabled)
 			m_mdiArea->viewport()->update();
 	}
+	updateWorldOutputPresentationExposure();
+}
+
+void MainWindow::observeLuaCallbackPresentationRuntime(const WorldRuntime *runtime)
+{
+	m_luaCallbackMainWindowPresentationDirty = true;
+	if (!runtime)
+		return;
+	connect(runtime, &WorldRuntime::worldAttributeChanged, this,
+	        &MainWindow::onLuaCallbackPresentationWorldAttributeChanged, Qt::UniqueConnection);
+}
+
+void MainWindow::onLuaCallbackPresentationWorldAttributeChanged(const QString &key) const
+{
+	if (key == QStringLiteral("id") || key == QStringLiteral("name"))
+		m_luaCallbackMainWindowPresentationDirty = true;
 }
 
 void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
@@ -1489,9 +1537,7 @@ WorldChildWindow *MainWindow::activeWorldChildWindow() const
 
 WorldChildWindow *MainWindow::activeWorldPresentationWindow() const
 {
-	if (!m_mdiArea)
-		return nullptr;
-	return qobject_cast<WorldChildWindow *>(m_mdiArea->activeSubWindow());
+	return qobject_cast<WorldChildWindow *>(currentOrLastActiveSubWindow());
 }
 
 TextChildWindow *MainWindow::activeTextChildWindow() const
@@ -2212,19 +2258,21 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 		}
 	}
 
-	WorldRuntime *activeRuntime = nullptr;
-	if (auto *world = qobject_cast<WorldChildWindow *>(window); world && world->isPrimaryRuntimeBinding())
+	QMdiSubWindow *const selectedWindow = window ? window : currentOrLastActiveSubWindow();
+	WorldRuntime        *activeRuntime  = nullptr;
+	if (auto *world = qobject_cast<WorldChildWindow *>(selectedWindow))
 		activeRuntime = world->runtime();
 	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 		if (entry.runtime)
 			entry.runtime->requestActiveState(entry.runtime == activeRuntime);
+	updateWorldOutputPresentationExposure();
 	refreshTitleBar();
-	if (activeRuntime)
+	if (window && activeRuntime)
 	{
 		if (AppController *app = AppController::instance())
 			app->processScriptFileChange(activeRuntime);
 	}
-	const auto *activeWorld = qobject_cast<WorldChildWindow *>(window);
+	const auto *activeWorld = qobject_cast<WorldChildWindow *>(selectedWindow);
 	setActiveShortcutAcceleratorRuntime(activeWorld && activeWorld->isPrimaryRuntimeBinding() ? activeRuntime
 	                                                                                          : nullptr);
 	updateStatusBar();
@@ -2233,12 +2281,11 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	updateActivityToolbarButtons();
 	m_mdiTabs.updateTabs();
 	applyInfoBarAppearance(activeRuntime);
-	if (auto *world = qobject_cast<WorldChildWindow *>(window))
+	if (window)
 	{
-		if (WorldView *view = world->view())
+		if (auto *world = qobject_cast<WorldChildWindow *>(selectedWindow); world && world->view())
 		{
-			view->primeNativeOutputCaches();
-			view->focusInput();
+			world->view()->focusInput();
 		}
 	}
 }
@@ -2281,15 +2328,17 @@ void MainWindow::setStatusMessage(const QString &msg) const
 
 void MainWindow::updateEditActions()
 {
-	const auto         *world       = activeWorldChildWindow();
-	const auto         *view        = world ? world->view() : nullptr;
-	const auto         *text        = activeTextChildWindow();
-	WorldRuntime *const textRuntime = resolveRuntimeForTextWindow(text);
+	const auto         *presentation = activeWorldPresentationWindow();
+	const auto         *view         = presentation ? presentation->view() : nullptr;
+	const auto         *world        = activeWorldChildWindow();
+	const auto         *commandView  = world ? world->view() : nullptr;
+	const auto         *text         = activeTextChildWindow();
+	WorldRuntime *const textRuntime  = resolveRuntimeForTextWindow(text);
 
 	const bool          canCopy         = view && (view->hasOutputSelection() || view->hasInputSelection());
 	const bool          canCopyHtml     = view && view->hasOutputSelection();
 	const bool          canFindAgain    = view && view->hasOutputFindHistory();
-	const bool          canClearHistory = view && view->hasCommandHistory();
+	const bool          canClearHistory = commandView && commandView->hasCommandHistory();
 	const bool          textContext     = text != nullptr;
 
 	if (QAction *a = actionForCommand(QStringLiteral("Copy")))
@@ -2359,15 +2408,12 @@ void MainWindow::refreshTitleBar()
 	const auto baseTitle = QStringLiteral("QMud");
 	QString    mainTitle;
 
-	if (m_mdiArea)
+	if (QMdiSubWindow *selectedWindow = currentOrLastActiveSubWindow())
 	{
-		if (QMdiSubWindow *active = m_mdiArea->activeSubWindow())
+		if (const auto *world = qobject_cast<WorldChildWindow *>(selectedWindow))
 		{
-			if (const auto *world = qobject_cast<WorldChildWindow *>(active))
-			{
-				if (const WorldRuntime *runtime = world->runtime())
-					mainTitle = runtime->mainTitleOverride();
-			}
+			if (const WorldRuntime *runtime = world->runtime())
+				mainTitle = runtime->mainTitleOverride();
 		}
 	}
 
@@ -2629,8 +2675,9 @@ void MainWindow::requestDeferredUiRefresh(const bool refreshStatus, const bool r
 void MainWindow::refreshActionState()
 {
 	const auto         *world         = activeWorldChildWindow();
+	const auto         *presentation  = activeWorldPresentationWindow();
 	const WorldRuntime *runtime       = world ? world->runtime() : nullptr;
-	auto               *view          = world ? world->view() : nullptr;
+	auto               *view          = presentation ? presentation->view() : nullptr;
 	auto               *text          = activeTextChildWindow();
 	const WorldRuntime *actionRuntime = runtime ? runtime : resolveRuntimeForTextWindow(text);
 
@@ -2643,7 +2690,7 @@ void MainWindow::refreshActionState()
 		QAction *freezeAction = m_actions.value(QStringLiteral("FreezeOutput"));
 		freezeAction->setCheckable(true);
 		freezeAction->setChecked(isFrozen);
-		freezeAction->setEnabled(view != nullptr);
+		freezeAction->setEnabled(presentation && presentation->isPrimaryRuntimeBinding() && view);
 	}
 	if (m_actions.contains(QStringLiteral("DebugPackets")))
 	{
@@ -2657,6 +2704,8 @@ void MainWindow::refreshActionState()
 	updateConnectionActions(runtime);
 	if (m_actions.contains(QStringLiteral("Preferences")))
 		m_actions.value(QStringLiteral("Preferences"))->setEnabled(hasWorld);
+	if (m_actions.contains(QStringLiteral("RecallText")))
+		m_actions.value(QStringLiteral("RecallText"))->setEnabled(hasWorld);
 	if (m_actions.contains(QStringLiteral("OpenWorldsInStartupList")))
 	{
 		bool enableStartup = false;
@@ -2767,7 +2816,7 @@ void MainWindow::onStatusFreezeDoubleClick()
 {
 	// Qt split-scrollback behavior: if split view is active, collapse back to
 	// the normal output path and jump to current output.
-	if (const auto *world = activeWorldChildWindow())
+	if (const auto *world = activeWorldPresentationWindow())
 	{
 		if (WorldView *view = world->view())
 		{
@@ -2821,7 +2870,9 @@ void MainWindow::updateActivityToolbarButtons()
 		m_worldActions.push_back(action);
 	}
 
-	const WorldChildWindow *activeWorld = activeWorldChildWindow();
+	const WorldRuntime *activeRuntime = nullptr;
+	if (const WorldChildWindow *activePresentation = activeWorldPresentationWindow())
+		activeRuntime = activePresentation->runtime();
 	for (int i = 0; i < m_worldActions.size(); ++i)
 	{
 		QAction *action = m_worldActions.at(i);
@@ -2831,7 +2882,7 @@ void MainWindow::updateActivityToolbarButtons()
 		action->setVisible(hasWorld);
 		action->setEnabled(hasWorld);
 		action->setCheckable(hasWorld);
-		action->setChecked(hasWorld && entries.at(i).window == activeWorld);
+		action->setChecked(hasWorld && entries.at(i).runtime == activeRuntime);
 		if (!hasWorld)
 			action->setChecked(false);
 	}
@@ -2920,6 +2971,122 @@ QList<TextChildWindow *> MainWindow::notepadWindows() const
 			entries.push_back(text);
 
 	return entries;
+}
+
+QSharedPointer<const LuaCallbackMainWindowPresentationSnapshot>
+MainWindow::luaCallbackMainWindowPresentationSnapshot() const
+{
+	if (!m_luaCallbackMainWindowPresentationDirty && m_luaCallbackMainWindowPresentationSnapshot)
+		return m_luaCallbackMainWindowPresentationSnapshot;
+
+	auto snapshot   = QSharedPointer<LuaCallbackMainWindowPresentationSnapshot>::create();
+	snapshot->frame = const_cast<MainWindow *>(this);
+	snapshot->mainWindowPositionsByMode.insert(0,
+	                                           luaCallbackValidWindowGeometry(normalGeometry(), geometry()));
+	snapshot->mainWindowPositionsByMode.insert(1,
+	                                           luaCallbackValidWindowGeometry(frameGeometry(), geometry()));
+
+	QHash<qulonglong, QPointer<WorldRuntime>> liveRuntimesByToken;
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
+	{
+		if (!entry.runtime)
+			continue;
+		LuaCallbackWorldRuntimeSnapshot world;
+		world.runtime = entry.runtime;
+		world.id      = entry.runtime->worldAttributeValue(QStringLiteral("id"));
+		world.name    = entry.runtime->worldAttributeValue(QStringLiteral("name"));
+		snapshot->worlds.push_back(std::move(world));
+		liveRuntimesByToken.insert(reinterpret_cast<quintptr>(entry.runtime), entry.runtime);
+	}
+
+	QHash<WorldRuntime *, int> worldOrdinals;
+	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	{
+		if (!entry.runtime || !entry.window)
+			continue;
+		LuaCallbackWorldWindowPositionSnapshot position;
+		position.runtime = entry.runtime;
+		position.ordinal = ++worldOrdinals[entry.runtime];
+		position.normalGeometry =
+		    luaCallbackValidWindowGeometry(entry.window->normalGeometry(), entry.window->geometry());
+		position.frameGeometry =
+		    luaCallbackValidWindowGeometry(entry.window->frameGeometry(), entry.window->geometry());
+		position.screenNormalGeometry =
+		    luaCallbackScreenWindowGeometry(entry.window, position.normalGeometry);
+		position.screenFrameGeometry = luaCallbackScreenWindowGeometry(entry.window, position.frameGeometry);
+		snapshot->worldWindows.push_back(std::move(position));
+	}
+
+	for (TextChildWindow *text : notepadWindows())
+	{
+		if (!text)
+			continue;
+		LuaCallbackNotepadSnapshot notepad;
+		const qulonglong           runtimeToken = text->property("worldRuntimeToken").toULongLong();
+		notepad.runtime                         = liveRuntimesByToken.value(runtimeToken);
+		notepad.worldId                         = text->property("worldId").toString().trimmed();
+		notepad.title                           = text->windowTitle();
+		notepad.geometry    = luaCallbackValidWindowGeometry(text->normalGeometry(), text->geometry());
+		notepad.hasGeometry = notepad.geometry.isValid();
+		notepad.hasEditor   = text->editor() != nullptr;
+		snapshot->notepads.push_back(std::move(notepad));
+	}
+
+	m_luaCallbackMainWindowPresentationSnapshot = std::move(snapshot);
+	m_luaCallbackMainWindowPresentationDirty    = false;
+	return m_luaCallbackMainWindowPresentationSnapshot;
+}
+
+QSharedPointer<const LuaCallbackUdpPresentationSnapshot>
+MainWindow::luaCallbackUdpPresentationSnapshot(const WorldRuntime *ownerRuntime) const
+{
+	if (m_luaCallbackUdpPresentationDirty)
+	{
+		m_luaCallbackUdpPresentationSnapshots.clear();
+		m_luaCallbackUdpPresentationDirty = false;
+	}
+	if (const auto cached = m_luaCallbackUdpPresentationSnapshots.constFind(ownerRuntime);
+	    cached != m_luaCallbackUdpPresentationSnapshots.constEnd())
+		return cached.value();
+
+	auto snapshot   = QSharedPointer<LuaCallbackUdpPresentationSnapshot>::create();
+	bool ownerFound = false;
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
+	{
+		if (!entry.runtime)
+			continue;
+		const QList<int> ports = entry.runtime->udpPortList();
+		for (const int port : ports)
+		{
+			snapshot->usedPorts.insert(port);
+			snapshot->usedPortReferenceCounts[port] += 1;
+		}
+		if (entry.runtime == ownerRuntime)
+		{
+			ownerFound                        = true;
+			snapshot->ports                   = ports;
+			snapshot->listenerPluginIdsByPort = entry.runtime->udpListenerPluginIdsByPort();
+		}
+	}
+	if (ownerRuntime && !ownerFound)
+	{
+		snapshot->ports                   = ownerRuntime->udpPortList();
+		snapshot->listenerPluginIdsByPort = ownerRuntime->udpListenerPluginIdsByPort();
+		for (const int port : snapshot->ports)
+		{
+			snapshot->usedPorts.insert(port);
+			snapshot->usedPortReferenceCounts[port] += 1;
+		}
+	}
+	std::ranges::sort(snapshot->ports);
+	m_luaCallbackUdpPresentationSnapshots.insert(ownerRuntime, snapshot);
+	return snapshot;
+}
+
+void MainWindow::invalidateLuaCallbackUdpPresentationSnapshot() const
+{
+	m_luaCallbackUdpPresentationDirty = true;
+	m_luaCallbackUdpPresentationSnapshots.clear();
 }
 
 void MainWindow::infoBarClear() const
@@ -3286,6 +3453,7 @@ void MainWindow::setTabbedWindowPresentationActive(const bool active)
 		m_mdiArea->setOption(QMdiArea::DontMaximizeSubWindowOnActivation, false);
 	}
 	m_mdiArea->setUpdatesEnabled(updatesEnabled);
+	updateWorldOutputPresentationExposure();
 	m_mdiTabs.updateTabs();
 	if (updatesEnabled)
 		m_mdiArea->viewport()->update();
@@ -3322,6 +3490,40 @@ void MainWindow::maximizeMdiSubWindows(QMdiSubWindow *preferredActiveWindow) con
 		if (subWindow && subWindow != preferredActiveWindow &&
 		    (!subWindow->isMaximized() || subWindow->isMinimized()))
 			subWindow->showMaximized();
+}
+
+void MainWindow::updateWorldOutputPresentationExposure() const
+{
+	if (!m_mdiArea)
+		return;
+	const bool                 tabbedPresentation = isTabbedWindowPresentationActive();
+	const QMdiSubWindow *const selectedWindow     = currentOrLastActiveSubWindow();
+	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	{
+		if (!entry.window)
+			continue;
+		WorldView *const view = entry.window->view();
+		if (!view)
+			continue;
+		const bool windowVisible = entry.window->isVisible() && !entry.window->isMinimized();
+		const bool exposed       = windowVisible && (!tabbedPresentation || entry.window == selectedWindow);
+		view->setOutputPresentationExposed(exposed);
+	}
+}
+
+void MainWindow::queueWorldOutputPresentationExposureUpdate()
+{
+	if (m_worldOutputPresentationExposureUpdateQueued)
+		return;
+	m_worldOutputPresentationExposureUpdateQueued = true;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    m_worldOutputPresentationExposureUpdateQueued = false;
+		    updateWorldOutputPresentationExposure();
+	    },
+	    Qt::QueuedConnection);
 }
 
 void MainWindow::queueMdiPresentationReconciliation()
@@ -3491,6 +3693,7 @@ void MainWindow::changeEvent(QEvent *event)
 	QMainWindow::changeEvent(event);
 	if (!event || event->type() != QEvent::WindowStateChange)
 		return;
+	m_luaCallbackMainWindowPresentationDirty = true;
 
 	if ((windowState() & (Qt::WindowMaximized | Qt::WindowMinimized | Qt::WindowFullScreen)) == 0)
 		m_lastNormalGeometry = geometry();
@@ -3503,6 +3706,18 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
 	if (!event)
 		return QMainWindow::eventFilter(watched, event);
+	if (const auto *widget = qobject_cast<QWidget *>(watched);
+	    widget && (widget == this || widget == m_centralContainer || widget == m_mdiArea ||
+	               widget == m_mainToolbarWidget || widget == m_worldToolbarWidget ||
+	               widget == m_activityToolbarWidget || widget == m_infoBarWidget ||
+	               widget == m_qtStatusBar || qobject_cast<const QMdiSubWindow *>(widget)))
+	{
+		if (event->type() == QEvent::Move || event->type() == QEvent::Resize ||
+		    event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+		    event->type() == QEvent::Close || event->type() == QEvent::WindowStateChange ||
+		    event->type() == QEvent::WindowTitleChange || event->type() == QEvent::DynamicPropertyChange)
+			m_luaCallbackMainWindowPresentationDirty = true;
+	}
 
 	if (event->type() == QEvent::KeyPress)
 	{
@@ -3545,10 +3760,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 	if (event->type() == QEvent::Close)
 	{
 		if (auto *closingSubWindow = qobject_cast<QMdiSubWindow *>(watched);
-		    closingSubWindow && m_mdiArea && m_mdiArea->activeSubWindow() == closingSubWindow)
+		    closingSubWindow && m_mdiArea && currentOrLastActiveSubWindow() == closingSubWindow)
 		{
 			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			m_tabActivationHistory.onCloseEvent(closingSubWindow, m_mdiArea->activeSubWindow(), windows);
+			m_tabActivationHistory.onCloseEvent(closingSubWindow, currentOrLastActiveSubWindow(), windows);
 		}
 	}
 
@@ -3557,6 +3772,16 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 		if (auto *subWindow = qobject_cast<QMdiSubWindow *>(watched);
 		    subWindow && m_mdiArea && m_mdiArea->subWindowList().contains(subWindow))
 			queueMdiPresentationReconciliation();
+	}
+	if (!m_mdiPresentationTransitionActive &&
+	    (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+	     event->type() == QEvent::WindowStateChange))
+	{
+		if (auto *subWindow = qobject_cast<QMdiSubWindow *>(watched);
+		    subWindow && m_mdiArea && m_mdiArea->subWindowList().contains(subWindow))
+		{
+			queueWorldOutputPresentationExposureUpdate();
+		}
 	}
 
 	if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)

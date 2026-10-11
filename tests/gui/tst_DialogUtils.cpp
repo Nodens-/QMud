@@ -49,15 +49,6 @@ namespace
 	};
 
 	/**
-	 * @brief Exposes valid highlight acceptance for non-modal testing.
-	 */
-	class TestHighlightPhraseDialog final : public HighlightPhraseDialog
-	{
-		public:
-			using HighlightPhraseDialog::accept;
-	};
-
-	/**
 	 * @brief Restores the process working directory after a fixture changes it.
 	 */
 	class CurrentDirectoryRestorer final
@@ -158,7 +149,7 @@ namespace
 					names.append(index == 0 ? QString() : QStringLiteral("Colour %1").arg(index + 1));
 				}
 
-				TestHighlightPhraseDialog dialog;
+				HighlightPhraseDialog dialog;
 				dialog.setCustomColours(textColours, backColours, names);
 				dialog.setOtherColours(QColor(80, 90, 100), QColor(110, 120, 130));
 				dialog.setInitialText(QStringLiteral("danger"));
@@ -441,6 +432,4 @@ namespace
 
 QTEST_MAIN(tst_DialogUtils)
 
-#if __has_include("tst_DialogUtils.moc")
 #include "tst_DialogUtils.moc"
-#endif

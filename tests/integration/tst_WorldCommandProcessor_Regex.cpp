@@ -84,6 +84,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Regex)
 
-#if __has_include("tst_WorldCommandProcessor_Regex.moc")
 #include "tst_WorldCommandProcessor_Regex.moc"
-#endif

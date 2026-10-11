@@ -152,6 +152,4 @@ namespace
 
 QTEST_GUILESS_MAIN(tst_WorldSocket_KeepAlive)
 
-#if __has_include("tst_WorldSocket_KeepAlive.moc")
 #include "tst_WorldSocket_KeepAlive.moc"
-#endif

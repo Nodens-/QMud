@@ -93,6 +93,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_NoteColourUtils)
 
-#if __has_include("tst_NoteColourUtils.moc")
 #include "tst_NoteColourUtils.moc"
-#endif

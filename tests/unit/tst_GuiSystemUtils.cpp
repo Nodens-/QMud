@@ -136,6 +136,4 @@ namespace
 
 QTEST_MAIN(tst_GuiSystemUtils)
 
-#if __has_include("tst_GuiSystemUtils.moc")
 #include "tst_GuiSystemUtils.moc"
-#endif

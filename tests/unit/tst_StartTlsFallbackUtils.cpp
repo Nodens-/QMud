@@ -68,6 +68,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_StartTlsFallbackUtils)
 
-#if __has_include("tst_StartTlsFallbackUtils.moc")
 #include "tst_StartTlsFallbackUtils.moc"
-#endif

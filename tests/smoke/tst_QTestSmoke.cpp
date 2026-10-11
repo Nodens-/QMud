@@ -39,6 +39,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_QTestSmoke)
 
-#if __has_include("tst_QTestSmoke.moc")
 #include "tst_QTestSmoke.moc"
-#endif

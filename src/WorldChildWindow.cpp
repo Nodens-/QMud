@@ -13,6 +13,7 @@
 #include "AppController.h"
 #include "DocConstants.h"
 #include "FileExtensions.h"
+#include "Flags.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "WorldCommandProcessor.h"
@@ -197,7 +198,10 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		{
 			QObject::disconnect(m_runtime, nullptr, m_view, nullptr);
 			QObject::disconnect(m_view, nullptr, m_runtime, nullptr);
-			m_view->setRuntime(nullptr);
+			if (m_primaryRuntimeBinding)
+				m_view->setRuntime(nullptr);
+			else
+				m_view->setRuntimeObserver(nullptr);
 		}
 		if (m_commandProcessor)
 		{
@@ -215,11 +219,18 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	m_runtime               = worldRuntime;
 	m_primaryRuntimeBinding = primary;
 	m_autosaveInFlight      = false;
+	emit runtimeBindingChanged();
 	refreshAutosaveTimer();
-	if (m_view)
-		m_view->setPassiveBufferView(!primary);
-	if (!worldRuntime || !m_view)
+	if (!m_view)
 		return;
+	if (!worldRuntime)
+	{
+		if (role == RuntimeBindingRole::Primary)
+			m_view->setRuntime(nullptr);
+		else
+			m_view->setRuntimeObserver(nullptr);
+		return;
+	}
 
 	if (const QString worldName = worldRuntime->worldAttributes().value(QStringLiteral("name"));
 	    !worldName.isEmpty())
@@ -292,19 +303,13 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	}
 	if (m_view)
 	{
-		connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
-		        [this]
-		        {
-			        if (m_view)
-				        m_view->onMiniWindowsChanged();
-		        });
 		if (primary)
 		{
-			connect(m_view, &WorldView::outputSelectionChanged, worldRuntime,
-			        [worldRuntime]
+			connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
+			        [this](const MiniWindowChangeEffects effects)
 			        {
-				        if (worldRuntime)
-					        worldRuntime->notifyOutputSelectionChanged();
+				        if (m_view)
+					        m_view->onMiniWindowsChanged(effects);
 			        });
 		}
 		connect(m_view, &WorldView::hyperlinkHighlighted, this,
@@ -693,6 +698,11 @@ bool WorldChildWindow::isPrimaryRuntimeBinding() const
 	return m_primaryRuntimeBinding;
 }
 
+bool WorldChildWindow::autosaveInFlight() const
+{
+	return m_autosaveInFlight;
+}
+
 WorldView *WorldChildWindow::view() const
 {
 	return m_view;
@@ -705,7 +715,10 @@ int WorldChildWindow::getInfoWindowShowCommand() const
 
 void WorldChildWindow::setInfoWindowShowCommand(const int command)
 {
+	if (m_infoWindowShowCommand == command)
+		return;
 	m_infoWindowShowCommand = command;
+	emit infoWindowShowCommandChanged();
 }
 
 void WorldChildWindow::handleAutosaveTick()
@@ -859,6 +872,8 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 	QMdiSubWindow::closeEvent(event);
 	if (!event->isAccepted())
 		return;
+	if (runtime)
+		runtime->beginWorldSessionClose();
 
 	for (const QPointer<WorldChildWindow> &observer : std::as_const(observers))
 		if (observer)
@@ -872,16 +887,16 @@ bool WorldChildWindow::event(QEvent *event)
 		if (event->type() == QEvent::WindowStateChange)
 		{
 			if (isMinimized())
-				m_infoWindowShowCommand = kWindowMinimize;
+				setInfoWindowShowCommand(kWindowMinimize);
 			else if (isMaximized())
-				m_infoWindowShowCommand = kWindowShowMaximized;
+				setInfoWindowShowCommand(kWindowShowMaximized);
 			else if (const auto *stateChange = dynamic_cast<QWindowStateChangeEvent *>(event);
 			         stateChange && (stateChange->oldState() & (Qt::WindowMinimized | Qt::WindowMaximized)))
-				m_infoWindowShowCommand = kWindowRestore;
+				setInfoWindowShowCommand(kWindowRestore);
 			else
-				m_infoWindowShowCommand = kWindowShowNormal;
+				setInfoWindowShowCommand(kWindowShowNormal);
 			if (m_view)
-				m_view->refreshMiniWindows(true);
+				m_view->synchronizeMiniWindowLayoutPolicyChange(true);
 			if (m_primaryRuntimeBinding)
 				runtime->notifyWorldOutputResized();
 		}

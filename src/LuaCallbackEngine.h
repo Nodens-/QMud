@@ -583,11 +583,25 @@ class LuaCallbackEngine
 		 * @brief Pushes the unified per-dispatch snapshot used by callback-scope read caches.
 		 * @param snapshot Snapshot captured on runtime thread for the active dispatch.
 		 */
-		void pushDispatchSnapshot(const QSharedPointer<const LuaCallbackSnapshot> &snapshot);
+		void        pushDispatchSnapshot(const QSharedPointer<const LuaCallbackSnapshot> &snapshot);
 		/**
 		 * @brief Pops the unified per-dispatch snapshot.
 		 */
-		void popDispatchSnapshot();
+		void        popDispatchSnapshot();
+		/**
+		 * @brief Pushes whether the current dispatch originated from a runtime callback.
+		 * @param originatedFromCallback Callback-origin state for the dispatch.
+		 */
+		static void pushDispatchCallbackOrigin(bool originatedFromCallback);
+		/**
+		 * @brief Pops the current dispatch callback-origin state.
+		 */
+		static void popDispatchCallbackOrigin();
+		/**
+		 * @brief Returns whether the current dispatch originated from a runtime callback.
+		 * @return `true` for callback-originated dispatches and their nested continuations.
+		 */
+		[[nodiscard]] static bool                               currentDispatchOriginatedFromCallback();
 		/**
 		 * @brief Returns the active unified per-dispatch snapshot.
 		 * @return Snapshot pointer, or `nullptr` when unset.
@@ -602,9 +616,14 @@ class LuaCallbackEngine
 		 * @brief Appends a deferred runtime mutation journal produced by callback scope teardown.
 		 * @param runtime Runtime that owns the mutations.
 		 * @param mutations Ordered mutation callables to execute on the runtime thread.
+		 * @param requiresCausalOrdering Whether callbacks raised by the batch must precede queued lane work.
+		 * @param windowAddHotspotReentryBlocked Whether callbacks raised by the batch inherit hotspot-add blocking.
+		 * @param mutationDependencies Identity dependencies shared by the producing callback chain.
 		 */
-		void appendDeferredRuntimeMutationBatch(class WorldRuntime              *runtime,
-		                                        QVector<std::function<void()>> &&mutations);
+		void                                                    appendDeferredRuntimeMutationBatch(
+		    class WorldRuntime *runtime, QVector<std::function<void()>> &&mutations,
+		    bool requiresCausalOrdering = true, bool windowAddHotspotReentryBlocked = false,
+		    std::shared_ptr<LuaCallbackMutationDependencyState> mutationDependencies = {});
 		/**
 		 * @brief Moves a nested callback mutation journal into the active outer callback result.
 		 * @param batch Batch produced by a nested callback dispatch. Consumed on success.
@@ -624,8 +643,10 @@ class LuaCallbackEngine
 		 * Sequential nested recipients use this immutable overlay while worker-side mutations are still
 		 * journaled and therefore cannot yet be read back from the runtime-owned stable base.
 		 */
-		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot> takeCompletedCallbackMutationSnapshot();
-		void storeCompletedCallbackMutationSnapshot(QSharedPointer<const LuaCallbackSnapshot> snapshot);
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot>
+		     takeCompletedCallbackMutationSnapshot(bool *presentationOnly = nullptr);
+		void storeCompletedCallbackMutationSnapshot(QSharedPointer<const LuaCallbackSnapshot> snapshot,
+		                                            bool presentationOnly);
 		/**
 		 * @brief Detaches external owners and resets all callback state for final teardown.
 		 * @return Deferred runtime cleanup produced while cancelling suspended callbacks.
@@ -672,10 +693,12 @@ class LuaCallbackEngine
 		 * @brief Resumes a callback previously suspended by a modal string-result API.
 		 * @param resumeId Suspended callback id.
 		 * @param result Modal result string to return to Lua.
+		 * @param callbackSnapshot Current request snapshot carrying any promoted output-anchor state.
 		 * @return Dispatch result carrying deferred mutations produced by resumed execution.
 		 */
-		[[nodiscard]] LuaBatchDispatchResult resumeSuspendedModalString(quint64        resumeId,
-		                                                                const QString &result);
+		[[nodiscard]] LuaBatchDispatchResult
+		resumeSuspendedModalString(quint64 resumeId, const QString &result,
+		                           const QSharedPointer<const LuaCallbackSnapshot> &callbackSnapshot = {});
 		/**
 		 * @brief Cancels a callback coroutine previously suspended by a modal API.
 		 * @param resumeId Suspended callback id.
@@ -692,6 +715,10 @@ class LuaCallbackEngine
 		 * @brief Registers world/runtime bindings into Lua globals.
 		 */
 		void                                               registerWorldBindings();
+		/**
+		 * @brief Publishes the current callback catalog when its observer payload changed.
+		 */
+		void                                               publishLuaCallbackCatalogIfChanged();
 
 		QString                                            m_script;
 		bool                                               m_scriptLoaded{false};
@@ -756,9 +783,16 @@ class LuaCallbackEngine
 		QSet<QString>                             m_luaFunctionsSet;
 		QSet<QString>                             m_observedPluginCallbacks;
 		QHash<QString, bool>                      m_observedPluginCallbackPresence;
+		bool                                      m_callbackCatalogPresentCallbacksDirty{true};
+		QString                                   m_reportedCallbackCatalogPluginId;
+		QSet<QString>                             m_reportedCallbackCatalogPresentCallbacks;
+		QSet<QString>                             m_reportedCallbackCatalogFunctions;
+		bool                                      m_reportedCallbackCatalogValid{false};
 		CallbackCatalogObserver                   m_callbackCatalogObserver;
 		QVector<LuaDeferredRuntimeMutationBatch>  m_deferredRuntimeMutationBatches;
 		QSharedPointer<const LuaCallbackSnapshot> m_completedCallbackMutationSnapshot;
+		bool         m_completedCallbackMutationSnapshotIsPresentationOnly{false};
+		mutable bool m_scriptLoadMutationSnapshotPending{false};
 		struct CachedLinePage
 		{
 				QPointer<WorldRuntime>                   runtime;

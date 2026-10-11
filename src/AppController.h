@@ -10,6 +10,9 @@
 #ifndef QMUD_APPCONTROLLER_H
 #define QMUD_APPCONTROLLER_H
 
+#include "WorldViewGlobalSettings.h"
+#include "XmlImportResult.h"
+
 #include "ColorPacking.h"
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QByteArray>
@@ -34,10 +37,12 @@
 #include <QtSql/QSqlDatabase>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 class MainWindow;
 class ActivityDocument;
 class WorldChildWindow;
+class WorldDocument;
 class WorldRuntime;
 class WorldView;
 class QMdiSubWindow;
@@ -243,29 +248,34 @@ class AppController : public QObject
 		 * @brief Returns default world-files directory path.
 		 * @return Default world directory path.
 		 */
-		[[nodiscard]] QString              defaultWorldDirectory() const;
+		[[nodiscard]] QString                        defaultWorldDirectory() const;
 		/**
 		 * @brief Returns ini/preferences file path.
 		 * @return INI/preferences database path.
 		 */
-		[[nodiscard]] QString              iniFilePath() const;
+		[[nodiscard]] QString                        iniFilePath() const;
 		/**
 		 * @brief Reads one global option value.
 		 * @param name Global option key.
 		 * @return Option value.
 		 */
-		[[nodiscard]] QVariant             getGlobalOption(const QString &name) const;
+		[[nodiscard]] QVariant                       getGlobalOption(const QString &name) const;
+		/**
+		 * @brief Returns the shared typed settings used by every world view.
+		 * @return Application-wide world-view settings.
+		 */
+		[[nodiscard]] const WorldViewGlobalSettings &worldViewGlobalSettings() const noexcept;
 		/**
 		 * @brief Returns list of known global option names.
 		 * @return Global option key list.
 		 */
-		static QStringList                 globalOptionList();
+		static QStringList                           globalOptionList();
 		/**
 		 * @brief Writes integer global option.
 		 * @param name Option key.
 		 * @param value Integer value.
 		 */
-		void                               setGlobalOptionInt(const QString &name, int value);
+		void                                         setGlobalOptionInt(const QString &name, int value);
 		/**
 		 * @brief Writes string global option.
 		 * @param name Option key.
@@ -328,56 +338,70 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] QStringList                  activeOpenWorldLogFiles() const;
 		/**
-		 * @brief Applies configured default world options to runtime.
-		 * @param runtime Runtime instance to initialize.
+		 * @brief Loads one configured-default or persisted-world collection without applying it.
+		 * @param runtime Runtime providing persistence paths and include context.
+		 * @param optionName Canonical collection override option name.
+		 * @param useDefault Load the configured default when `true`, or the saved world collection otherwise.
+		 * @param document Receives the loaded collection document.
+		 * @param error Optional output error message.
+		 * @return `true` when the requested collection loaded successfully.
 		 */
-		void                                       applyConfiguredWorldDefaults(WorldRuntime *runtime) const;
+		bool loadWorldDefaultCollection(const WorldRuntime *runtime, const QString &optionName,
+		                                bool useDefault, std::unique_ptr<WorldDocument> &document,
+		                                QString *error = nullptr) const;
+		/**
+		 * @brief Loads and applies configured or persisted world collections.
+		 * @param runtime Runtime instance to update.
+		 * @param optionFilter Default-option names to apply atomically; empty independently applies every enabled
+		 * default so one invalid file cannot block the others.
+		 * @param optionValues Candidate override values used instead of the runtime attributes.
+		 * @param error Optional output error message.
+		 * @return `true` when every selected collection loaded and was applied.
+		 */
+		bool applyConfiguredWorldDefaults(WorldRuntime *runtime, const QSet<QString> &optionFilter = {},
+		                                  const QMap<QString, QString> &optionValues = {},
+		                                  QString                      *error        = nullptr) const;
+		/**
+		 * @brief Saves dirty world data before a runtime default override replaces a collection.
+		 * @param runtime Runtime whose current persistent state must be saved.
+		 * @param parent Parent for a required Save World dialog.
+		 * @param error Optional output error message; remains empty when Save World is cancelled.
+		 * @return `true` when no save was needed or the save completed.
+		 */
+		bool saveWorldBeforeDefaultOverride(WorldRuntime *runtime, QWidget *parent, QString *error = nullptr);
 		/**
 		 * @brief Returns next monotonically increasing unique number.
 		 * @return Unique number value.
 		 */
-		qint64                                     nextUniqueNumber();
+		qint64 nextUniqueNumber();
 		/**
 		 * @brief Seeds shared random generator.
 		 * @param seed Seed value.
 		 */
-		void                                       seedRandom(quint32 seed);
+		void   seedRandom(quint32 seed);
 		/**
 		 * @brief Seeds random generator from seed array.
 		 * @param values Seed values.
 		 */
-		void                                       seedRandomFromArray(const QVector<quint32> &values);
+		void   seedRandomFromArray(const QVector<quint32> &values);
 		/**
 		 * @brief Returns random value in [0,1).
 		 * @return Random unit value.
 		 */
-		double                                     nextRandomUnit();
+		double nextRandomUnit();
 		/**
 		 * @brief Creates activity document if not already present.
 		 */
-		void                                       ensureActivityDocument();
+		void   ensureActivityDocument();
 		/**
 		 * @brief Reacts to world script-file change notification.
 		 * @param runtime Runtime that reported script file change.
 		 */
-		void                                       processScriptFileChange(WorldRuntime *runtime);
+		void   processScriptFileChange(WorldRuntime *runtime);
 		/**
 		 * @brief Result summary returned by XML import operations.
 		 */
-		struct ImportResult
-		{
-				bool    ok{false};
-				QString errorMessage;
-				int     triggers{0};
-				int     aliases{0};
-				int     timers{0};
-				int     macros{0};
-				int     variables{0};
-				int     colours{0};
-				int     keypad{0};
-				int     printing{0};
-				int     duplicates{0};
-		};
+		using ImportResult = XmlImportResult;
 
 		/**
 		 * @brief Result payload for command-line spell-check replacement decisions.
@@ -408,6 +432,14 @@ class AppController : public QObject
 		 * @return Import result payload.
 		 */
 		ImportResult importXmlFromText(const QString &xml, unsigned long mask);
+		/**
+		 * @brief Imports XML text into a specific world runtime.
+		 * @param runtime Destination world runtime.
+		 * @param xml XML payload text.
+		 * @param mask Import mask.
+		 * @return Import result payload.
+		 */
+		ImportResult importXmlFromText(WorldRuntime *runtime, const QString &xml, unsigned long mask);
 		/**
 		 * @brief Returns true when spell-check subsystem is available.
 		 * @return `true` when spell checker is available.
@@ -486,7 +518,17 @@ class AppController : public QObject
 		 */
 		void onCommandTriggered(const QString &cmdName);
 
+	signals:
+		/**
+		 * @brief Emitted after the shared world-view settings change.
+		 */
+		void worldViewGlobalSettingsChanged();
+
 	private:
+		/**
+		 * @brief Refreshes the typed shared world-view settings from the global preference store.
+		 */
+		void refreshWorldViewGlobalSettings();
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		enum class InteractiveSpellCheckMode
 		{
@@ -542,35 +584,45 @@ class AppController : public QObject
 		 */
 		void                   discardStaleSpellCheckerStatesForThread(const QThread *ownerThread);
 #endif
-		static AppController             *s_instance;
+		/**
+		 * @brief Applies an already parsed XML import to the active world.
+		 * @param world Active world child window.
+		 * @param runtime Active world runtime.
+		 * @param document Parsed XML document.
+		 * @param mask Import mask.
+		 * @return Import result payload.
+		 */
+		ImportResult          applyImportedDocument(WorldChildWindow *world, WorldRuntime *runtime,
+		                                            const WorldDocument &document, unsigned long mask);
+		static AppController *s_instance;
 		/**
 		 * @brief Database and preference loading helpers.
 		 * @return `true` when database opens successfully.
 		 */
-		bool                              openPreferencesDatabase();
+		bool                  openPreferencesDatabase();
 		/**
 		 * @brief Creates/updates preferences schema and seed rows.
 		 * @return Number of schema/population changes applied.
 		 */
-		[[nodiscard]] int                 populateDatabase() const;
+		[[nodiscard]] int     populateDatabase() const;
 		/**
 		 * @brief Loads global settings from preferences database.
 		 */
-		void                              loadGlobalsFromDatabase();
+		void                  loadGlobalsFromDatabase();
 		/**
 		 * @brief Returns count of pending DB changes.
 		 * @return Number of pending DB changes.
 		 */
-		[[nodiscard]] int                 dbChanges() const;
+		[[nodiscard]] int     dbChanges() const;
 		/**
 		 * @brief Initializes translation/localization subsystem.
 		 * @return `true` when i18n setup succeeds.
 		 */
-		bool                              setupI18N();
+		bool                  setupI18N();
 		/**
 		 * @brief Loads compass/map direction aliases.
 		 */
-		void                              loadMapDirections();
+		void                  loadMapDirections();
 		/**
 		 * @brief Finds configured map direction entry.
 		 * @param direction Direction token.
@@ -644,7 +696,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies word-delimiter preferences.
 		 */
-		void                              applyWordDelimiterPreferences() const;
+		void                              applyWordDelimiterPreferences();
 		/**
 		 * @brief Applies editor behavior preferences.
 		 */
@@ -664,7 +716,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies list view presentation settings.
 		 */
-		void                              applyListViewPreferences() const;
+		void                              applyListViewPreferences();
 		/**
 		 * @brief Applies input control settings.
 		 */
@@ -676,7 +728,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies typing behavior settings.
 		 */
-		void                              applyTypingPreferences() const;
+		void                              applyTypingPreferences();
 		/**
 		 * @brief Applies regex-engine preferences.
 		 */
@@ -719,7 +771,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies rendering pipeline preferences.
 		 */
-		void applyRenderingPreferences() const;
+		void applyRenderingPreferences();
 		/**
 		 * @brief Schedules or stops periodic update checks from preferences.
 		 */
@@ -1177,6 +1229,7 @@ class AppController : public QObject
 		QString     m_translatorFile;
 		QMap<QString, int>               m_globalIntPrefs;
 		QMap<QString, QString>           m_globalStringPrefs;
+		WorldViewGlobalSettings          m_worldViewGlobalSettings;
 		QString                          m_luaScript;
 		QString                          m_pluginsDirectory;
 		QString                          m_fixedPitchFont;

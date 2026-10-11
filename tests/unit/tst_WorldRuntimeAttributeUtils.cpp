@@ -63,6 +63,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldRuntimeAttributeUtils)
 
-#if __has_include("tst_WorldRuntimeAttributeUtils.moc")
 #include "tst_WorldRuntimeAttributeUtils.moc"
-#endif

@@ -313,6 +313,8 @@ require "copytable"
 rooms = {}
 areas = {}
 moves = {}
+local moves_first = 1
+local moves_last = 0
 
 local valid_direction = {
   n = "n",
@@ -417,6 +419,70 @@ function debugtprint (t)
   end -- if debugging
 end -- debugprint
 
+--- @brief Clears every pending movement and active movement state.
+local function clear_pending_moves ()
+  moves = { }
+  moves_first = 1
+  moves_last = 0
+  last_direction_moved = nil
+  from_room = nil
+  expected_exit = nil
+end
+
+--- @brief Reads the oldest movement awaiting a response.
+--- @return The pending movement record, or nil when the queue is empty.
+local function peek_pending_move ()
+  if moves_first > moves_last then
+    return nil
+  end
+  return moves [moves_first]
+end
+
+--- @brief Appends a movement in server processing order.
+--- @param move Pending movement record to enqueue.
+local function enqueue_pending_move (move)
+  moves_last = moves_last + 1
+  moves [moves_last] = move
+end
+
+--- @brief Removes the oldest movement awaiting a response.
+--- @return The pending movement record, or nil when the queue is empty.
+local function dequeue_pending_move ()
+  local move = peek_pending_move ()
+  if not move then
+    return nil
+  end
+
+  moves [moves_first] = nil
+  moves_first = moves_first + 1
+  if moves_first > moves_last then
+    moves_first = 1
+    moves_last = 0
+  end
+  return move
+end
+
+--- @brief Records the current room as the origin of the next movement.
+local function bind_pending_move_origin ()
+  local move = peek_pending_move ()
+  if move and not move.from then
+    move.from = current_room
+    if current_room and rooms [current_room] then
+      move.expected = rooms [current_room].exits [move.dir]
+    end -- if the origin is mapped
+  end -- if another movement is awaiting its response
+end
+
+--- @brief Discards movements too old to belong to the current room response.
+local function discard_expired_pending_moves ()
+  local move = peek_pending_move ()
+  while move and (move.time + 10) < os.time () do
+    debugprint ("Time-out! Removing pending move", move.dir)
+    dequeue_pending_move ()
+    move = peek_pending_move ()
+  end -- while expired movements remain
+end
+
 -- see table: cannot_move_messages
 function check_for_cannot_go (name, line, wildcards)
   if cannot_move_messages [line] then
@@ -424,14 +490,21 @@ function check_for_cannot_go (name, line, wildcards)
   end -- if
 end -- check_for_cannot_go
 
+--- @brief Consumes the failed movement and cancels an active speedwalk.
+--- @return Canonical failed direction, or nil when none was pending.
 function Cannot_Go ()
   debugprint ("Cannot go this way, cancelling speedwalk.")
   mapper.cancel_speedwalk ()
-  if #moves > 0 then
-    debugprint ("Removing the following outstanding moves ...")
-    debugtprint (moves)
-    moves = {}
-  end -- if
+  discard_expired_pending_moves ()
+  local failed_move = dequeue_pending_move ()
+  if failed_move then
+    debugprint ("Removing failed move", failed_move.dir)
+  end -- if a movement was pending
+  bind_pending_move_origin ()
+  last_direction_moved = nil
+  from_room = nil
+  expected_exit = nil
+  return failed_move and failed_move.dir or nil
 end -- Cannot_Go
 
 -- -----------------------------------------------------------------
@@ -530,12 +603,10 @@ function fix_up_exit ()
 
   -- discard old moves (maybe we logged out or something)
   -- we will allow 10 seconds from the time you move to when it happens
-  while #moves > 0 and (moves [1].time + 10) < os.time () do
-    debugprint ("Time-out! Removing move from", moves [1].from, "in direction", moves [1].dir)
-    table.remove (moves, 1)
-  end -- for
+  discard_expired_pending_moves ()
+  local move = peek_pending_move ()
 
-  if #moves == 0 then
+  if not move then
     debugprint "No outstanding moves."
     return
   end -- if
@@ -548,9 +619,9 @@ function fix_up_exit ()
   debugtprint (moves)
 
   -- get the earliest move we made
-  last_direction_moved = moves [1].dir
-  from_room = moves [1].from
-  table.remove (moves, 1)
+  last_direction_moved = move.dir
+  from_room = move.from
+  dequeue_pending_move ()
 
   -- where we were before
   local room = rooms [from_room]
@@ -649,21 +720,25 @@ end -- fix_up_exit
 -- -----------------------------------------------------------------
 
 function OnPluginSent (sText)
-  last_direction_moved = valid_direction [sText]
-  if last_direction_moved then
-    debugprint ("Just moved", last_direction_moved)
+  local direction = valid_direction [sText]
+  if direction then
+    debugprint ("Just moved", direction)
+    local expected = nil
     if current_room and rooms [current_room] then
-      expected_exit = rooms [current_room].exits [last_direction_moved]
+      expected = rooms [current_room].exits [direction]
+      expected_exit = expected
       debugprint ("expected exit for this direction is to room", expected_exit)
     end -- if have a current room
-    t = { dir = last_direction_moved, time = os.time () }
-    if #moves == 0 then
+    local t = { dir = direction, time = os.time () }
+    if not peek_pending_move () then
       t.from = current_room
+      t.expected = expected
     end -- if first stacked move
-    table.insert (moves, t)
+    enqueue_pending_move (t)
     debugtprint (t)
-    from_room = moves [1].from
-  end -- if  valid direction
+    local pending = peek_pending_move ()
+    from_room = pending and pending.from or nil
+  end -- if movement command
 end -- OnPluginSent
 
 
@@ -716,6 +791,8 @@ default_config = {
 
 function OnPluginInstall ()
 
+  clear_pending_moves ()
+
   config = {}  -- in case not found
 
   -- get saved configuration
@@ -747,6 +824,24 @@ function OnPluginInstall ()
   create_tables ()    -- create database structure if necessary
 
 end -- OnPluginInstall
+
+--- @brief Clears pending movement state after connecting.
+function OnPluginConnect ()
+  mapper.cancel_speedwalk ()
+  clear_pending_moves ()
+end -- OnPluginConnect
+
+--- @brief Clears pending movement state after disconnecting.
+function OnPluginDisconnect ()
+  mapper.cancel_speedwalk ()
+  clear_pending_moves ()
+end -- OnPluginDisconnect
+
+--- @brief Clears pending movement state when the plugin is disabled.
+function OnPluginDisable ()
+  mapper.cancel_speedwalk ()
+  clear_pending_moves ()
+end -- OnPluginDisable
 
 -- -----------------------------------------------------------------
 -- Plugin Save State
@@ -1451,11 +1546,11 @@ function Door_Closed (name, line, wildcards)
   -- make copy as we will be modifying it
   local dirs =  copytable.deep (available_directions)
 
-  Cannot_Go ()
+  local failed_direction = Cannot_Go ()
 
-  if last_direction_moved then
-    Send ("open " .. dirs [last_direction_moved])
-    Send (dirs [last_direction_moved])
+  if failed_direction then
+    Send ("open " .. dirs [failed_direction])
+    Send (dirs [failed_direction])
   end -- if
 
 end -- Door_Closed
@@ -1504,13 +1599,6 @@ function handleRoomDescription (desc)
   -- save so we know current room later on
   current_room = uid
 
-  for k, v in ipairs (moves) do
-    if v.from == nil then
-       v.from = current_room
-       break
-    end -- if
-  end -- for
-
   -- ColourNote ("rosybrown", "", roomdesc)
   -- ColourNote ("white", "olive", uid)
 
@@ -1552,9 +1640,15 @@ function handleRoomDescription (desc)
   end -- if
 
   -- try to work out where previous room's exit led
-  if room_changed and #moves > 0 then
+  discard_expired_pending_moves ()
+  local pending = peek_pending_move ()
+  if pending then
+    if not pending.from then
+      pending.from = current_room
+    end -- if mapping began before the first room was identified
     fix_up_exit ()
-  end -- exit was wrong
+    bind_pending_move_origin ()
+  end -- if a movement awaits this identified room
 
   -- call mapper to draw this rom
   mapper.draw (current_room)    -- redraw room with name

@@ -384,7 +384,7 @@ namespace
 
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 
 				QList<QSize> initialPageHints;
 				QList<QSize> initialComboHints;
@@ -1071,6 +1071,4 @@ namespace
 
 QTEST_MAIN(tst_Dialog_GlobalPreferencesUpdates)
 
-#if __has_include("tst_Dialog_GlobalPreferencesUpdates.moc")
 #include "tst_Dialog_GlobalPreferencesUpdates.moc"
-#endif

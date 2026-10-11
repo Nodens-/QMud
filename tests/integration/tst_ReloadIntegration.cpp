@@ -22,6 +22,7 @@ namespace
 			bool                   adoptResult{true};
 			bool                   connectResult{true};
 			bool                   suppressConnectActionsMarked{false};
+			bool                   adoptedNawsNegotiated{false};
 			int                    adoptedDescriptor{-1};
 			int                    connectCalls{0};
 			int                    closeCalls{0};
@@ -31,9 +32,11 @@ namespace
 			QStringList            events;
 			QMap<QString, QString> attrs;
 
-			bool adoptConnectedSocketDescriptor(const int descriptor, QString *errorMessage) override
+			bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
+			                                    QString *errorMessage) override
 			{
-				adoptedDescriptor = descriptor;
+				adoptedDescriptor     = descriptor;
+				adoptedNawsNegotiated = nawsNegotiated;
 				if (adoptResult)
 					return true;
 				if (errorMessage)
@@ -193,10 +196,12 @@ namespace
 				state.connectedAtReload = true;
 				state.socketDescriptor  = 42;
 				state.policy            = ReloadSocketPolicy::Reattach;
+				state.nawsNegotiated    = true;
 
 				const ReloadRecoverySocketDecision decision = applyReloadSocketRecovery(runtime, state);
 				QCOMPARE(decision.outcome, ReloadRecoverySocketOutcome::Reattached);
 				QCOMPARE(runtime.adoptedDescriptor, 42);
+				QVERIFY(runtime.adoptedNawsNegotiated);
 				QCOMPARE(runtime.connectCalls, 0);
 				QVERIFY(runtime.suppressConnectActionsMarked);
 				QVERIFY(runtime.events.isEmpty());
@@ -357,6 +362,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_ReloadIntegration)
 
-#if __has_include("tst_ReloadIntegration.moc")
 #include "tst_ReloadIntegration.moc"
-#endif

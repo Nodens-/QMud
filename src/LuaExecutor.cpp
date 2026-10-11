@@ -32,20 +32,27 @@ namespace
 		       pluginId == QStringLiteral("f67c4339ed0591a5b010d05b");
 	}
 
-	bool qmudMmStartupDiagIsLifecycleCallback(const QString &functionName)
+	bool qmudMmStartupDiagIsLifecycleCallback(const LuaCallbackEvent callbackEvent)
 	{
-		return functionName == QStringLiteral("OnPluginInstall") ||
-		       functionName == QStringLiteral("OnPluginEnable") ||
-		       functionName == QStringLiteral("OnPluginConnect") ||
-		       functionName == QStringLiteral("OnPluginDisable") ||
-		       functionName == QStringLiteral("OnPluginBroadcast") ||
-		       functionName == QStringLiteral("OnPluginTelnetRequest") ||
-		       functionName == QStringLiteral("OnPluginTelnetSubnegotiation");
+		switch (callbackEvent)
+		{
+		case LuaCallbackEvent::Install:
+		case LuaCallbackEvent::Enable:
+		case LuaCallbackEvent::Connect:
+		case LuaCallbackEvent::Disable:
+		case LuaCallbackEvent::Broadcast:
+		case LuaCallbackEvent::TelnetRequest:
+		case LuaCallbackEvent::TelnetSubnegotiation:
+			return true;
+		default:
+			return false;
+		}
 	}
 
-	bool qmudMmStartupDiagShouldLogEngine(const LuaCallbackEngine *engine, const QString &functionName)
+	bool qmudMmStartupDiagShouldLogEngine(const LuaCallbackEngine *engine,
+	                                      const LuaCallbackEvent   callbackEvent)
 	{
-		return engine && qmudMmStartupDiagIsLifecycleCallback(functionName) &&
+		return engine && qmudMmStartupDiagIsLifecycleCallback(callbackEvent) &&
 		       qmudMmStartupDiagIsWatchedPluginId(engine->pluginId());
 	}
 
@@ -74,29 +81,41 @@ namespace
 
 LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest &request) const
 {
-	LuaBatchDispatchResult    result;
+	LuaCallbackEngine::pushDispatchCallbackOrigin(request.callbackEvent != LuaCallbackEvent::None ||
+	                                              request.inheritedCallbackOrigin);
+	const auto popCallbackOrigin = qScopeGuard([] { LuaCallbackEngine::popDispatchCallbackOrigin(); });
+	LuaBatchDispatchResult                    result;
+	QSharedPointer<const LuaCallbackSnapshot> callbackSnapshot = request.callbackSnapshotArg;
+	const int                                 firstEngineIndex =
+	    std::clamp(request.firstEngineIndex, 0, static_cast<int>(request.engines.size()));
 	// The completed snapshot is an operation result, not persistent engine state. Clear every target
-	// once at the common dispatch entry so switch cases cannot drift by bypassing a per-invocation
-	// helper. This also isolates executor requests from public direct engine calls.
-	QSet<LuaCallbackEngine *> preparedEngines;
-	for (const auto &engine : request.engines)
+	// immediately before invoking it. Preparing recipients lazily avoids repeatedly walking an entire
+	// remaining range when successive recipients publish mutation boundaries.
+	const auto prepareEngine = [](LuaCallbackEngine *engine)
 	{
-		if (engine && !preparedEngines.contains(engine.data()))
-		{
-			preparedEngines.insert(engine.data());
+		if (engine)
 			static_cast<void>(engine->takeCompletedCallbackMutationSnapshot());
-		}
-	}
+	};
 	const auto collectMutationBoundaryResult = [&](LuaCallbackEngine *engine) -> bool
 	{
-		QVector<LuaDeferredRuntimeMutationBatch> batches    = engine->takeDeferredRuntimeMutationBatches();
-		const bool                               hasBatches = !batches.isEmpty();
-		auto       completedSnapshot                        = engine->takeCompletedCallbackMutationSnapshot();
-		const bool hasCompletedSnapshot                     = static_cast<bool>(completedSnapshot);
+		QVector<LuaDeferredRuntimeMutationBatch> batches = engine->takeDeferredRuntimeMutationBatches();
+		const bool                               hasSemanticBatches =
+		    std::ranges::any_of(batches, [](const LuaDeferredRuntimeMutationBatch &batch)
+		                        { return batch.requiresCausalOrdering; });
+		bool completedSnapshotIsPresentationOnly = false;
+		auto completedSnapshot =
+		    engine->takeCompletedCallbackMutationSnapshot(&completedSnapshotIsPresentationOnly);
+		const bool hasCompletedSnapshot = static_cast<bool>(completedSnapshot);
+		const bool hadSemanticBoundary  = luaBatchPublishedMutationBoundary(result);
 		if (completedSnapshot)
+		{
+			callbackSnapshot                      = completedSnapshot;
 			result.callbackSnapshotAfterMutations = std::move(completedSnapshot);
+			result.callbackSnapshotIsPresentationOnly =
+			    completedSnapshotIsPresentationOnly && !hadSemanticBoundary && !hasSemanticBatches;
+		}
 #ifndef NDEBUG
-		if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
+		if (qmudMmStartupDiagShouldLogEngine(engine, request.callbackEvent))
 		{
 			qInfo().noquote() << QStringLiteral(
 			                         "[QMud][MMStartupDiag] executor-deferred callback=%1 engine=%2 %3")
@@ -104,16 +123,17 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			                              qmudMmStartupDiagDeferredLabel(batches));
 		}
 #endif
-		result.deferredRuntimeMutationBatches += batches;
-		return hasBatches || hasCompletedSnapshot;
+		result.deferredRuntimeMutationBatches += std::move(batches);
+		return hasSemanticBatches || (hasCompletedSnapshot && !completedSnapshotIsPresentationOnly);
 	};
 	const auto invokeForEngine = [&](LuaCallbackEngine *engine, auto &&fn)
 	{
 		if (!engine)
 			return;
-		if (request.callbackSnapshotArg)
+		prepareEngine(engine);
+		if (callbackSnapshot)
 		{
-			engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard([engine] { engine->popDispatchSnapshot(); });
 			fn(engine);
 			static_cast<void>(collectMutationBoundaryResult(engine));
@@ -124,25 +144,27 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	};
 	const auto forEachEngine = [&](auto &&fn)
 	{
-		for (const auto &engine : request.engines)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
+			const auto &engine = request.engines.at(engineIndex);
 			invokeForEngine(engine.data(), fn);
 		}
 	};
 	const auto withFirstEngine = [&](auto &&fn) -> bool
 	{
-		return std::ranges::any_of(request.engines,
-		                           [&](const auto &engine)
-		                           {
-			                           if (!engine)
-				                           return false;
-			                           invokeForEngine(engine.data(), fn);
-			                           return true;
-		                           });
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
+		{
+			const auto &engine = request.engines.at(engineIndex);
+			if (!engine)
+				continue;
+			invokeForEngine(engine.data(), fn);
+			return true;
+		}
+		return false;
 	};
 	const auto withFirstEngineIndexed = [&](auto &&fn) -> bool
 	{
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			const auto &engine = request.engines.at(engineIndex);
 			if (!engine)
@@ -181,15 +203,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		result.boolResultValid  = true;
 		result.hasFunction      = false;
 		result.hasFunctionValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -205,7 +228,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    &modalRequest);
 			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
-			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
+			if (qmudMmStartupDiagShouldLogEngine(engine, request.callbackEvent))
 			{
 				qInfo().noquote() << QStringLiteral(
 				                         "[QMud][MMStartupDiag] executor-noargs callback=%1 engine=%2 "
@@ -245,15 +268,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		return result;
 	}
 	case LuaBatchDispatchKind::String:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -278,15 +302,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::StringStopOnFalse:
 		result.boolResult      = true;
 		result.boolResultValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -323,17 +348,18 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		result.boolResultValid  = true;
 		result.hasFunction      = false;
 		result.hasFunctionValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			if (result.boolResult)
 				break;
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -362,15 +388,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 		return result;
 	case LuaBatchDispatchKind::Bytes:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -394,15 +421,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		return result;
 	case LuaBatchDispatchKind::BytesInOut:
 		result.bytesResult = request.bytesArg;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -425,15 +453,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		return result;
 	case LuaBatchDispatchKind::StringInOut:
 		result.stringResult = request.stringArg;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -457,17 +486,18 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::NumberAndStringStopOnTrue:
 		result.boolResult      = false;
 		result.boolResultValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			if (result.boolResult)
 				break;
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -505,15 +535,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::NumberAndStringStopOnFalse:
 		result.boolResult      = true;
 		result.boolResultValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -551,15 +582,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 		return result;
 	case LuaBatchDispatchKind::NumberAndString:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -589,15 +621,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::TwoNumbersAndStringStopOnFalse:
 		result.boolResult      = true;
 		result.boolResultValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -630,15 +663,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 		return result;
 	case LuaBatchDispatchKind::TwoNumbersAndString:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -663,17 +697,18 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::NumberAndBytesStopOnTrue:
 		result.boolResult      = false;
 		result.boolResultValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			if (result.boolResult)
 				break;
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -688,7 +723,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    request.defaultResult, &suspended, &resumeId, &modalRequest);
 			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
-			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
+			if (qmudMmStartupDiagShouldLogEngine(engine, request.callbackEvent))
 			{
 				qInfo().noquote() << QStringLiteral(
 				                         "[QMud][MMStartupDiag] executor-number-bytes-stop-true callback=%1 "
@@ -718,15 +753,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 		return result;
 	case LuaBatchDispatchKind::NumberAndBytes:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -747,7 +783,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 #endif
 			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
-			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
+			if (qmudMmStartupDiagShouldLogEngine(engine, request.callbackEvent))
 			{
 				qInfo().noquote() << QStringLiteral(
 				                         "[QMud][MMStartupDiag] executor-number-bytes callback=%1 engine=%2 "
@@ -772,15 +808,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::NumberAndUtf8StringsCount:
 		result.countResult      = 0;
 		result.countResultValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -822,7 +859,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			}
 			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
-			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
+			if (qmudMmStartupDiagShouldLogEngine(engine, request.callbackEvent))
 			{
 				qInfo().noquote()
 				    << QStringLiteral(
@@ -853,15 +890,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::StringsAndWildcards:
 		result.hasFunction      = false;
 		result.hasFunctionValid = true;
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -874,7 +912,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			static_cast<void>(engine->callFunctionWithStringsAndWildcards(
 			    request.functionName, request.stringListArg, request.stringListArg2, request.mapArg,
 			    request.styleRunsArg ? request.styleRunsArg.data() : nullptr,
-			    request.callbackSnapshotArg ? request.callbackSnapshotArg.data() : nullptr, &hasFunction,
+			    callbackSnapshot ? callbackSnapshot.data() : nullptr, &hasFunction,
 			    request.hasActionSourceOverride ? request.actionSourceOverride : -1,
 			    request.triggerOutputReplacesMatchedLine, request.triggerMatchedLineBufferIndex,
 			    request.triggerMatchedLineAbsoluteNumber, &suspended, &resumeId, &modalRequest));
@@ -923,12 +961,41 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::ResetAndLoadScript:
 	{
 		result.boolResult = false;
-		static_cast<void>(withFirstEngine(
-		    [&](LuaCallbackEngine *engine)
-		    {
-			    engine->resetState();
-			    result.boolResult = engine->loadScript();
-		    }));
+		if (request.scriptReloadArg && request.scriptReloadArg->cancellationState &&
+		    request.scriptReloadArg->cancellationState->isCancelled())
+		{
+			result.boolResultValid = true;
+			return result;
+		}
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
+		{
+			const auto &engine = request.engines.at(engineIndex);
+			if (!engine)
+				continue;
+			prepareEngine(engine.data());
+			engine->resetState();
+			if (request.scriptReloadArg)
+			{
+				engine->setScriptText(request.scriptReloadArg->scriptText);
+				engine->applyPackageRestrictions(request.scriptReloadArg->allowPackage);
+			}
+			if (request.scriptReloadArg && !request.scriptReloadArg->loadScript)
+			{
+				result.boolResult = true;
+			}
+			else if (callbackSnapshot)
+			{
+				engine->pushDispatchSnapshot(callbackSnapshot);
+				const auto popSnapshot = qScopeGuard([engine] { engine->popDispatchSnapshot(); });
+				result.boolResult      = engine->loadScript();
+			}
+			else
+			{
+				result.boolResult = engine->loadScript();
+			}
+			static_cast<void>(collectMutationBoundaryResult(engine.data()));
+			break;
+		}
 		result.boolResultValid = true;
 		return result;
 	}
@@ -966,7 +1033,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		    [&](LuaCallbackEngine *engine)
 		    {
 #ifndef NDEBUG
-			    if (qmudMmStartupDiagShouldLogEngine(engine, QStringLiteral("OnPluginBroadcast")))
+			    if (qmudMmStartupDiagShouldLogEngine(engine, LuaCallbackEvent::Broadcast))
 			    {
 				    qInfo().noquote()
 				        << QStringLiteral(
@@ -979,10 +1046,12 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		    });
 		return result;
 	case LuaBatchDispatchKind::TeardownEnginesMany:
-		for (const auto &engine : request.engines)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
+			const auto &engine = request.engines.at(engineIndex);
 			if (!engine)
 				continue;
+			prepareEngine(engine.data());
 			result.deferredRuntimeMutationBatches += engine->teardown();
 		}
 		return result;
@@ -1001,8 +1070,8 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			result.marshallingError = static_cast<int>(CallPluginLuaMarshallingError::NoSuchRoutine);
 			return result;
 		}
-		const bool dispatched = withFirstEngine(
-		    [&](LuaCallbackEngine *engine)
+		const bool dispatched = withFirstEngineIndexed(
+		    [&](const int engineIndex, LuaCallbackEngine *engine)
 		    {
 			    if (!engine->loadScript())
 			    {
@@ -1032,12 +1101,12 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    quint64                              resumeId = 0;
 			    LuaPendingModalStringRequest         modalRequest;
 			    const CallPluginLuaMarshallingResult marshalling = engine->callPluginLuaWithMarshalling(
-			        request.luaStateArg, request.functionName, request.intArg1, {},
-			        request.callbackSnapshotArg, &suspended, &resumeId, &modalRequest,
-			        &linePresentationRequiresRefresh, &outputScrollPositionRequiresRefresh,
-			        &outputScrollPositionChanged, &commandUiPresentationRequiresRefresh,
-			        &globalPresentationRequiresRefresh, &commandHistoryChanged, &notepadPresentationChanged,
-			        &hasNotepadPresentationSnapshot, &notepadPresentationSnapshot);
+			        request.luaStateArg, request.functionName, request.intArg1, {}, callbackSnapshot,
+			        &suspended, &resumeId, &modalRequest, &linePresentationRequiresRefresh,
+			        &outputScrollPositionRequiresRefresh, &outputScrollPositionChanged,
+			        &commandUiPresentationRequiresRefresh, &globalPresentationRequiresRefresh,
+			        &commandHistoryChanged, &notepadPresentationChanged, &hasNotepadPresentationSnapshot,
+			        &notepadPresentationSnapshot);
 			    result.linePresentationRequiresRefresh      = linePresentationRequiresRefresh;
 			    result.outputScrollPositionRequiresRefresh  = outputScrollPositionRequiresRefresh;
 			    result.outputScrollPositionChanged          = outputScrollPositionChanged;
@@ -1053,7 +1122,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    result.marshallingSameState  = qmudLuaStatesShareMainThread(targetState, request.luaStateArg);
 			    if (suspended)
 			    {
-				    storeSuspension(0, resumeId, std::move(modalRequest));
+				    storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				    result.boolResultValid = false;
 				    return;
 			    }
@@ -1138,15 +1207,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		return result;
 	}
 	case LuaBatchDispatchKind::MxpStartUp:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -1167,15 +1237,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 		return result;
 	case LuaBatchDispatchKind::MxpShutDown:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -1219,15 +1290,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		return result;
 	}
 	case LuaBatchDispatchKind::MxpEndTag:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -1249,15 +1321,16 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 		return result;
 	case LuaBatchDispatchKind::MxpSetVariable:
-		for (int engineIndex = 0; engineIndex < request.engines.size(); ++engineIndex)
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
 		{
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.callbackSnapshotArg)
-				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
 			    {
 				    if (hasSnapshot)
 					    engine->popDispatchSnapshot();
@@ -1289,7 +1362,10 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::ResumeSuspendedModalString:
 		static_cast<void>(withFirstEngine(
 		    [&](LuaCallbackEngine *engine)
-		    { result = engine->resumeSuspendedModalString(request.modalResumeId, request.stringArg); }));
+		    {
+			    result = engine->resumeSuspendedModalString(request.modalResumeId, request.stringArg,
+			                                                callbackSnapshot);
+		    }));
 		return result;
 	}
 	return result;

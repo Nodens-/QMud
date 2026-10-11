@@ -114,6 +114,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_HyperlinkActionUtils)
 
-#if __has_include("tst_HyperlinkActionUtils.moc")
 #include "tst_HyperlinkActionUtils.moc"
-#endif

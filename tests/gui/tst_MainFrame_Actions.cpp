@@ -285,6 +285,4 @@ namespace
 
 QTEST_MAIN(tst_MainFrame_Actions)
 
-#if __has_include("tst_MainFrame_Actions.moc")
 #include "tst_MainFrame_Actions.moc"
-#endif

@@ -64,6 +64,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -79,7 +80,6 @@
 // ReSharper disable  once CppUnusedIncludeDirective
 #include <QStyleOptionSpinBox>
 #include <QTableWidget>
-#include <QTemporaryFile>
 #include <QTextCursor>
 #include <QTextEdit>
 #include <QTextStream>
@@ -162,6 +162,49 @@ static bool bringOwnedWindowToFrontByTitle(const QString &title)
 	}
 	return false;
 }
+
+struct WorldPreferencesDialog::WorkingLists
+{
+		struct Variable
+		{
+				WorldRuntime::Variable value;
+				QString                runtimeName;
+				bool                   presentInRuntime{false};
+				bool                   nameEdited{false};
+				bool                   valueEdited{false};
+		};
+
+		QList<WorldRuntime::Trigger> triggers;
+		QList<WorldRuntime::Alias>   aliases;
+		QList<WorldRuntime::Timer>   timers;
+		QList<WorldRuntime::Macro>   macros;
+		QList<WorldRuntime::Colour>  colours;
+		QList<Variable>              variables;
+		QSet<quint64>                initialTriggerIds;
+		QSet<quint64>                initialAliasIds;
+		QSet<quint64>                initialTimerIds;
+		QSet<quint64>                editedTriggerIds;
+		QSet<quint64>                editedAliasIds;
+		QSet<quint64>                editedTimerIds;
+		QSet<quint64>                deletedTriggerIds;
+		QSet<quint64>                deletedAliasIds;
+		QSet<quint64>                deletedTimerIds;
+		QSet<QString>                deletedVariableNames;
+		bool                         triggersStaged{false};
+		bool                         aliasesStaged{false};
+		bool                         timersStaged{false};
+		bool                         variablesStaged{false};
+		bool                         macrosStaged{false};
+		bool                         coloursStaged{false};
+		bool                         triggersInitialized{false};
+		bool                         aliasesInitialized{false};
+		bool                         timersInitialized{false};
+		bool                         variablesInitialized{false};
+		bool                         macrosInitialized{false};
+		bool                         triggersRestoredFromPersistence{false};
+		bool                         aliasesRestoredFromPersistence{false};
+		bool                         timersRestoredFromPersistence{false};
+};
 
 static QString canonicalSavePath(const QString &fileName, const QString &extensionLower)
 {
@@ -404,6 +447,58 @@ template <typename Rule> static int ruleIndexForRuntimeId(const QList<Rule> &rul
 			return index;
 	}
 	return -1;
+}
+
+template <typename Rule>
+static QList<Rule> mergeWorkingRules(const QList<Rule> &working, const QList<Rule> &current,
+                                     const QSet<quint64> &initialIds, const QSet<quint64> &editedIds,
+                                     const QSet<quint64> &deletedIds)
+{
+	QList<Rule>               merged;
+	QSet<quint64>             emittedIds;
+	QHash<quint64, qsizetype> currentIndexById;
+	merged.reserve(working.size() + current.size());
+	for (qsizetype index = 0; index < current.size(); ++index)
+		currentIndexById.insert(current.at(index).runtimeId, index);
+	for (const Rule &item : working)
+	{
+		if (deletedIds.contains(item.runtimeId))
+			continue;
+		if (const auto currentIndex = currentIndexById.constFind(item.runtimeId);
+		    currentIndex != currentIndexById.cend())
+		{
+			Rule resolved = current.at(currentIndex.value());
+			if (editedIds.contains(item.runtimeId))
+			{
+				if constexpr (std::is_same_v<Rule, WorldRuntime::Timer>)
+				{
+					const Rule beforeEdit = resolved;
+					resolved.attributes   = item.attributes;
+					resolved.children     = item.children;
+					const QMudTimerScheduling::TimerResetMutation reset{QDateTime::currentDateTime()};
+					static_cast<void>(QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(
+					    beforeEdit, resolved, reset));
+				}
+				else
+				{
+					resolved.attributes = item.attributes;
+					resolved.children   = item.children;
+				}
+			}
+			merged.push_back(std::move(resolved));
+		}
+		else if (!initialIds.contains(item.runtimeId))
+			merged.push_back(item);
+		else
+			continue;
+		emittedIds.insert(item.runtimeId);
+	}
+	for (const Rule &item : current)
+	{
+		if (!deletedIds.contains(item.runtimeId) && !emittedIds.contains(item.runtimeId))
+			merged.push_back(item);
+	}
+	return merged;
 }
 
 static long toColourRef(const QColor &colour)
@@ -1170,11 +1265,12 @@ static QString fixHtmlMultilineString(const QString &value)
 }
 
 WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView *view, QWidget *parent)
-    : QDialog(parent), m_runtime(runtime), m_view(view)
+    : QDialog(parent), m_runtime(runtime), m_view(view), m_workingLists(std::make_unique<WorkingLists>())
 {
 	setWindowTitle(QStringLiteral("World Configuration"));
 	resize(700, 520);
 	buildUi();
+	m_pagePopulationStates.fill(PagePopulationState::Unloaded, PageChat + 1);
 	setSizeGripEnabled(true);
 
 	if (AppController *app = AppController::instance())
@@ -1184,35 +1280,66 @@ WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView 
 		if (const QByteArray geometry = settings.value(QStringLiteral("Geometry")).toByteArray();
 		    !geometry.isEmpty())
 			restoreGeometry(geometry);
-		if (const int pageIndex = settings.value(QStringLiteral("PageIndex"), 0).toInt();
-		    m_pages && m_pageTree && pageIndex >= 0 && pageIndex < m_pages->count())
-			setInitialPage(static_cast<Page>(pageIndex));
+		if (m_runtime)
+		{
+			const QString worldId =
+			    m_runtime->worldAttributes().value(QStringLiteral("id")).trimmed().toLower();
+			if (!worldId.isEmpty())
+			{
+				settings.beginGroup(QStringLiteral("LastPageByWorld"));
+				if (settings.contains(worldId))
+				{
+					const int pageIndex = settings.value(worldId).toInt();
+					if (pageIndex >= PageGeneral && pageIndex <= PageChat && pageIndex != PageSound)
+						m_runtime->setLastPreferencesPage(pageIndex);
+				}
+				settings.endGroup();
+			}
+		}
 		settings.endGroup();
 
 		connect(this, &QDialog::finished, this,
-		        [this, app](int)
+		        [this, app](const int result)
 		        {
+			        cancelPendingPagePopulation();
 			        QSettings persistedSettings(app->iniFilePath(), QSettings::IniFormat);
 			        persistedSettings.beginGroup(QStringLiteral("WorldPreferencesDialog"));
 			        persistedSettings.setValue(QStringLiteral("Geometry"), saveGeometry());
-			        if (m_pages)
-				        persistedSettings.setValue(QStringLiteral("PageIndex"), m_pages->currentIndex());
+			        persistedSettings.remove(QStringLiteral("PageIndex"));
+			        if (m_runtime &&
+			            (result == QDialog::Accepted || !m_runtime->worldFilePath().trimmed().isEmpty()))
+			        {
+				        const QString worldId =
+				            m_runtime->worldAttributes().value(QStringLiteral("id")).trimmed().toLower();
+				        if (!worldId.isEmpty())
+				        {
+					        persistedSettings.beginGroup(QStringLiteral("LastPageByWorld"));
+					        persistedSettings.setValue(worldId, m_runtime->lastPreferencesPage());
+					        persistedSettings.endGroup();
+				        }
+			        }
 			        persistedSettings.endGroup();
 		        });
 	}
-	refreshDialogSizing();
 }
+
+WorldPreferencesDialog::~WorldPreferencesDialog() = default;
 
 bool WorldPreferencesDialog::event(QEvent *event)
 {
 	if (!event)
 		return QDialog::event(event);
 
-	const bool  firstShow              = event->type() == QEvent::Show && !m_initialDialogSizingFinalized;
-	const bool  applicationFontChanged = event->type() == QEvent::ApplicationFontChange;
-	const QSize sizeBeforeShow         = firstShow ? size() : QSize();
-	if (applicationFontChanged && m_initialDialogSizingFinalized && !m_dialogSizingRefreshPending)
+	const bool firstShow = event->type() == QEvent::Show && !m_initialDialogSizingFinalized;
+	const bool displayMetricsChanged =
+	    event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::FontChange ||
+	    event->type() == QEvent::StyleChange || event->type() == QEvent::ScreenChangeInternal ||
+	    event->type() == QEvent::DevicePixelRatioChange;
+	const QSize sizeBeforeShow = firstShow ? size() : QSize();
+	if (displayMetricsChanged && m_initialDialogSizingFinalized && !m_dialogSizingRefreshPending)
 		m_dialogSizeBeforeRefresh = size();
+	if (firstShow && m_pages)
+		ensurePagePopulated(static_cast<Page>(m_pages->currentIndex()));
 	const bool handled = QDialog::event(event);
 	if (firstShow)
 	{
@@ -1223,8 +1350,12 @@ bool WorldPreferencesDialog::event(QEvent *event)
 			if (nativeWindow->isExposed())
 				finalizeInitialDialogSizing();
 		}
+		else
+		{
+			QMetaObject::invokeMethod(this, [this] { finalizeInitialDialogSizing(); }, Qt::QueuedConnection);
+		}
 	}
-	if (applicationFontChanged && m_initialDialogSizingFinalized)
+	if (displayMetricsChanged && m_initialDialogSizingFinalized)
 		scheduleDialogSizingRefresh();
 	return handled;
 }
@@ -1277,15 +1408,8 @@ void WorldPreferencesDialog::refreshDialogSizing()
 		}
 		return minimum;
 	};
-	QSize pageMinimum;
 	if (m_pages)
-	{
 		m_pages->setMinimumSize(0, 0);
-		pageMinimum          = measurePages(-1);
-		const int frameWidth = m_pages->frameWidth();
-		pageMinimum          = pageMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
-		m_pages->setMinimumSize(pageMinimum);
-	}
 	if (m_pageTree)
 	{
 		m_pageTree->ensurePolished();
@@ -1325,10 +1449,8 @@ void WorldPreferencesDialog::refreshDialogSizing()
 		const int availablePageOuterWidth =
 		    qMax(1, preliminaryWidth - pageLeft - dialogLayout->contentsMargins().right());
 		const int availablePageWidth = qMax(1, availablePageOuterWidth - (frameWidth * 2));
-		QSize     widthAwareMinimum  = measurePages(availablePageWidth);
-		widthAwareMinimum =
-		    widthAwareMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
-		pageMinimum = pageMinimum.expandedTo(widthAwareMinimum);
+		QSize     pageMinimum        = measurePages(availablePageWidth);
+		pageMinimum = pageMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
 		pageMinimum.setWidth(qMin(pageMinimum.width(), availablePageOuterWidth));
 		m_pages->setMinimumSize(pageMinimum);
 		dialogLayout->invalidate();
@@ -1477,9 +1599,8 @@ void WorldPreferencesDialog::finalizeInitialDialogSizing()
 	if (m_initialDialogSizingFinalized)
 		return;
 	m_initialDialogSizingFinalized = true;
-	if (QWindow *const nativeWindow = windowHandle())
-		nativeWindow->removeEventFilter(this);
-	scheduleDialogSizingRefresh();
+	refreshDialogSizing();
+	scheduleRemainingPagePopulation();
 }
 
 void WorldPreferencesDialog::setInitialPage(const Page page)
@@ -1495,6 +1616,7 @@ void WorldPreferencesDialog::setInitialPage(const Page page)
 	QTreeWidgetItem *item = it.value();
 	if (!item)
 		return;
+	ensurePagePopulated(page);
 	if (QTreeWidgetItem *parent = item->parent())
 		parent->setExpanded(true);
 	m_pageTree->setCurrentItem(item);
@@ -1503,22 +1625,1838 @@ void WorldPreferencesDialog::setInitialPage(const Page page)
 		m_runtime->setLastPreferencesPage(index);
 }
 
+bool WorldPreferencesDialog::isPagePopulated(const Page page) const
+{
+	const int index = page;
+	return index >= 0 && index < m_pagePopulationStates.size() &&
+	       m_pagePopulationStates.at(index) == PagePopulationState::Populated;
+}
+
+void WorldPreferencesDialog::initializeWorkingList(const Page page) const
+{
+	if (!m_runtime || !m_workingLists)
+		return;
+
+	if (page == PageTriggers && !m_workingLists->triggersInitialized)
+	{
+		m_runtime->ensureWorldTriggerRuntimeIds();
+		m_workingLists->triggers = m_runtime->triggers();
+		for (const WorldRuntime::Trigger &trigger : std::as_const(m_workingLists->triggers))
+			m_workingLists->initialTriggerIds.insert(trigger.runtimeId);
+		m_workingLists->triggersInitialized = true;
+	}
+	else if (page == PageAliases && !m_workingLists->aliasesInitialized)
+	{
+		m_runtime->ensureWorldAliasRuntimeIds();
+		m_workingLists->aliases = m_runtime->aliases();
+		for (const WorldRuntime::Alias &alias : std::as_const(m_workingLists->aliases))
+			m_workingLists->initialAliasIds.insert(alias.runtimeId);
+		m_workingLists->aliasesInitialized = true;
+	}
+	else if (page == PageTimers && !m_workingLists->timersInitialized)
+	{
+		m_runtime->ensureWorldTimerRuntimeIds();
+		m_workingLists->timers = m_runtime->timers();
+		for (const WorldRuntime::Timer &timer : std::as_const(m_workingLists->timers))
+			m_workingLists->initialTimerIds.insert(timer.runtimeId);
+		m_workingLists->timersInitialized = true;
+	}
+	else if (page == PageVariables && !m_workingLists->variablesInitialized)
+	{
+		for (const WorldRuntime::Variable &variable : m_runtime->variables())
+		{
+			m_workingLists->variables.push_back(
+			    {variable, variable.attributes.value(QStringLiteral("name")), true, false, false});
+		}
+		m_workingLists->variablesInitialized = true;
+	}
+	else if (page == PageMacros && !m_workingLists->macrosInitialized)
+	{
+		m_workingLists->macros            = m_runtime->macros();
+		m_workingLists->macrosInitialized = true;
+	}
+}
+
+bool WorldPreferencesDialog::confirmDefaultOverrideEnable(const QString &optionName)
+{
+	QString   description;
+	QString   noun;
+	qsizetype count = 0;
+	if (optionName == QStringLiteral("use_default_triggers"))
+	{
+		noun  = QStringLiteral("trigger");
+		count = m_workingLists ? m_workingLists->triggers.size() : 0;
+	}
+	else if (optionName == QStringLiteral("use_default_aliases"))
+	{
+		noun  = QStringLiteral("alias");
+		count = m_workingLists ? m_workingLists->aliases.size() : 0;
+	}
+	else if (optionName == QStringLiteral("use_default_timers"))
+	{
+		noun  = QStringLiteral("timer");
+		count = m_workingLists ? m_workingLists->timers.size() : 0;
+	}
+	else if (optionName == QStringLiteral("use_default_macros"))
+	{
+		description = QStringLiteral("By checking the option \"Override with default macros\" the configured "
+		                             "defaults will temporarily "
+		                             "replace your macros at runtime. Your saved macros will be preserved "
+		                             "and restored when you uncheck "
+		                             "it.\n\nDo you want to continue?");
+	}
+	else if (optionName == QStringLiteral("use_default_colours"))
+	{
+		description = QStringLiteral("By checking the option \"Override with default colours\" the "
+		                             "configured defaults will temporarily "
+		                             "replace your colours at runtime. Your saved colours will be preserved "
+		                             "and restored when you uncheck "
+		                             "it.\n\nDo you want to continue?");
+	}
+	else
+	{
+		return true;
+	}
+
+	if (!noun.isEmpty())
+	{
+		if (count == 0)
+			return true;
+		QString plural;
+		if (count != 1)
+			plural = noun == QStringLiteral("alias") ? QStringLiteral("es") : QStringLiteral("s");
+		description = QStringLiteral(
+		                  "By checking the option \"Override with default %1s\" the configured defaults will "
+		                  "temporarily replace your %2 %1%3 at runtime. Your saved %1s will be preserved and "
+		                  "restored when you uncheck it.\n\nDo you want to continue?")
+		                  .arg(noun, QString::number(count), plural);
+	}
+
+	return QMessageBox::question(this, QStringLiteral("World Configuration"), description,
+	                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+}
+
+void WorldPreferencesDialog::resetDefaultOverrideEditor(const QString &optionName, const bool enabled,
+                                                        const WorldDocument *collectionDocument)
+{
+	if (!m_runtime || !m_workingLists)
+		return;
+
+	if (optionName == QStringLiteral("use_default_triggers"))
+	{
+		QList<WorldRuntime::Trigger> triggers;
+		if (collectionDocument)
+		{
+			triggers.reserve(collectionDocument->triggers().size());
+			for (const auto &[attributes, children, included] : collectionDocument->triggers())
+			{
+				WorldRuntime::Trigger trigger;
+				trigger.attributes = attributes;
+				trigger.children   = children;
+				trigger.included   = included;
+				trigger.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+				triggers.push_back(std::move(trigger));
+			}
+		}
+		else
+			triggers = m_runtime->triggers();
+		m_workingLists->triggers = std::move(triggers);
+		m_workingLists->initialTriggerIds.clear();
+		for (const WorldRuntime::Trigger &trigger : std::as_const(m_workingLists->triggers))
+			m_workingLists->initialTriggerIds.insert(trigger.runtimeId);
+		m_workingLists->editedTriggerIds.clear();
+		m_workingLists->deletedTriggerIds.clear();
+		m_workingLists->triggersStaged                  = false;
+		m_workingLists->triggersInitialized             = true;
+		m_workingLists->triggersRestoredFromPersistence = !enabled;
+		populateTriggers();
+	}
+	else if (optionName == QStringLiteral("use_default_aliases"))
+	{
+		QList<WorldRuntime::Alias> aliases;
+		if (collectionDocument)
+		{
+			aliases.reserve(collectionDocument->aliases().size());
+			for (const auto &[attributes, children, included] : collectionDocument->aliases())
+			{
+				WorldRuntime::Alias alias;
+				alias.attributes = attributes;
+				alias.children   = children;
+				alias.included   = included;
+				alias.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+				aliases.push_back(std::move(alias));
+			}
+		}
+		else
+			aliases = m_runtime->aliases();
+		m_workingLists->aliases = std::move(aliases);
+		m_workingLists->initialAliasIds.clear();
+		for (const WorldRuntime::Alias &alias : std::as_const(m_workingLists->aliases))
+			m_workingLists->initialAliasIds.insert(alias.runtimeId);
+		m_workingLists->editedAliasIds.clear();
+		m_workingLists->deletedAliasIds.clear();
+		m_workingLists->aliasesStaged                  = false;
+		m_workingLists->aliasesInitialized             = true;
+		m_workingLists->aliasesRestoredFromPersistence = !enabled;
+		populateAliases();
+	}
+	else if (optionName == QStringLiteral("use_default_timers"))
+	{
+		QList<WorldRuntime::Timer> timers;
+		if (collectionDocument)
+		{
+			timers.reserve(collectionDocument->timers().size());
+			for (const auto &[attributes, children, included] : collectionDocument->timers())
+			{
+				WorldRuntime::Timer timer;
+				timer.attributes = attributes;
+				timer.children   = children;
+				timer.included   = included;
+				timer.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+				timers.push_back(std::move(timer));
+			}
+		}
+		else
+			timers = m_runtime->timers();
+		m_workingLists->timers = std::move(timers);
+		m_workingLists->initialTimerIds.clear();
+		for (const WorldRuntime::Timer &timer : std::as_const(m_workingLists->timers))
+			m_workingLists->initialTimerIds.insert(timer.runtimeId);
+		m_workingLists->editedTimerIds.clear();
+		m_workingLists->deletedTimerIds.clear();
+		m_workingLists->timersStaged                  = false;
+		m_workingLists->timersInitialized             = true;
+		m_workingLists->timersRestoredFromPersistence = !enabled;
+		populateTimers();
+	}
+	else if (optionName == QStringLiteral("use_default_macros"))
+	{
+		QList<WorldRuntime::Macro> macros;
+		if (collectionDocument)
+		{
+			const QStringList macroNames = macroDescriptionList();
+			macros.reserve(collectionDocument->macros().size());
+			for (const auto &[attributes, children] : collectionDocument->macros())
+			{
+				WorldRuntime::Macro macro{attributes, children};
+				if (const qsizetype index =
+				        macroNames.indexOf(macro.attributes.value(QStringLiteral("name")).trimmed());
+				    index >= 0)
+				{
+					macro.attributes.insert(QStringLiteral("index"), QString::number(index));
+				}
+				macros.push_back(std::move(macro));
+			}
+		}
+		else
+			macros = m_runtime->macros();
+		m_workingLists->macros            = std::move(macros);
+		m_workingLists->macrosInitialized = true;
+		m_workingLists->macrosStaged      = false;
+		const QSignalBlocker blocker(m_useDefaultMacros);
+		populateMacros();
+		m_useDefaultMacros->setChecked(enabled);
+		m_pageAuxiliaryBaselines.insert(PageMacros, collectAuxiliaryPageValues(PageMacros));
+	}
+	else if (optionName == QStringLiteral("use_default_colours"))
+	{
+		QList<WorldRuntime::Colour> colours;
+		if (collectionDocument)
+		{
+			colours.reserve(collectionDocument->colours().size());
+			for (const auto &[group, attributes] : collectionDocument->colours())
+				colours.push_back({group, attributes});
+		}
+		else
+			colours = m_runtime->colours();
+		m_workingLists->colours       = std::move(colours);
+		m_workingLists->coloursStaged = true;
+		const QSignalBlocker blocker(m_useDefaultColours);
+		populateCustomColours();
+		populateAnsiColours();
+		m_useDefaultColours->setChecked(enabled);
+		m_pageAuxiliaryBaselines.insert(PageCustomColours, collectAuxiliaryPageValues(PageCustomColours));
+		m_pageAuxiliaryBaselines.insert(PageAnsiColours, collectAuxiliaryPageValues(PageAnsiColours));
+		m_workingLists->coloursStaged = false;
+	}
+	else if (optionName == QStringLiteral("use_default_input_font"))
+	{
+		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+		const AppController          *app   = AppController::instance();
+		if (m_inputFontName)
+			m_inputFontName->setText(enabled && app
+			                             ? app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString()
+			                             : attrs.value(QStringLiteral("input_font_name")));
+		if (m_inputFontHeight)
+			m_inputFontHeight->setValue(
+			    enabled && app ? app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt()
+			                   : attrs.value(QStringLiteral("input_font_height")).toInt());
+		m_inputFontWeight  = enabled && app
+		                         ? app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt()
+		                         : attrs.value(QStringLiteral("input_font_weight")).toInt();
+		m_inputFontItalic  = enabled && app
+		                         ? app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt() != 0
+		                         : qmudIsEnabledFlag(attrs.value(QStringLiteral("input_font_italic")));
+		m_inputFontCharset = enabled && app
+		                         ? app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt()
+		                         : attrs.value(QStringLiteral("input_font_charset")).toInt();
+		if (m_inputFontStyle && m_inputFontHeight)
+		{
+			m_inputFontStyle->setText(
+			    formatFontStyleText(m_inputFontHeight->value(), m_inputFontWeight, m_inputFontItalic));
+		}
+	}
+	else if (optionName == QStringLiteral("use_default_output_font"))
+	{
+		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+		const AppController          *app   = AppController::instance();
+		if (m_outputFontName)
+			m_outputFontName->setText(
+			    enabled && app ? app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString()
+			                   : attrs.value(QStringLiteral("output_font_name")));
+		if (m_outputFontHeight)
+			m_outputFontHeight->setValue(
+			    enabled && app ? app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt()
+			                   : attrs.value(QStringLiteral("output_font_height")).toInt());
+		m_outputFontWeight  = enabled ? 400 : attrs.value(QStringLiteral("output_font_weight")).toInt();
+		m_outputFontCharset = enabled && app
+		                          ? app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt()
+		                          : attrs.value(QStringLiteral("output_font_charset")).toInt();
+	}
+}
+
+void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionName, QCheckBox *checkBox,
+                                                         const bool enabled)
+{
+	if (!m_runtime || !checkBox || m_handlingDefaultOverrideToggle)
+		return;
+
+	Page page = PageGeneral;
+	if (optionName == QStringLiteral("use_default_triggers"))
+		page = PageTriggers;
+	else if (optionName == QStringLiteral("use_default_aliases"))
+		page = PageAliases;
+	else if (optionName == QStringLiteral("use_default_timers"))
+		page = PageTimers;
+	else if (optionName == QStringLiteral("use_default_macros"))
+		page = PageMacros;
+	else if (optionName == QStringLiteral("use_default_colours"))
+		page = PageAnsiColours;
+	else if (optionName == QStringLiteral("use_default_input_font"))
+		page = PageCommands;
+	else if (optionName == QStringLiteral("use_default_output_font"))
+		page = PageOutput;
+	if (!isPagePopulated(page))
+		return;
+
+	m_handlingDefaultOverrideToggle = true;
+	const auto handlingGuard        = qScopeGuard([this] { m_handlingDefaultOverrideToggle = false; });
+	const auto rejectTransition     = [checkBox, enabled]
+	{
+		const QSignalBlocker blocker(checkBox);
+		checkBox->setChecked(!enabled);
+	};
+
+	AppController *const app = AppController::instance();
+	if (!app)
+	{
+		rejectTransition();
+		QMessageBox::warning(this, QStringLiteral("World Configuration"),
+		                     QStringLiteral("The application controller is unavailable."));
+		return;
+	}
+
+	const bool collectionOverride = optionName != QStringLiteral("use_default_input_font") &&
+	                                optionName != QStringLiteral("use_default_output_font");
+	std::unique_ptr<WorldDocument> document;
+	QString                        transitionError;
+	if (collectionOverride &&
+	    !app->loadWorldDefaultCollection(m_runtime, optionName, enabled, document, &transitionError))
+	{
+		rejectTransition();
+		QMessageBox::warning(this, QStringLiteral("World Configuration"), transitionError);
+		return;
+	}
+	if (enabled && !collectionOverride)
+	{
+		const bool available = optionName == QStringLiteral("use_default_input_font")
+		                           ? hasDefaultInputFont()
+		                           : hasDefaultOutputFont();
+		if (!available)
+		{
+			rejectTransition();
+			QMessageBox::warning(this, QStringLiteral("World Configuration"),
+			                     QStringLiteral("No default font is configured."));
+			return;
+		}
+	}
+	if (enabled && !confirmDefaultOverrideEnable(optionName))
+	{
+		rejectTransition();
+		return;
+	}
+	if (enabled && !app->saveWorldBeforeDefaultOverride(m_runtime, this, &transitionError))
+	{
+		rejectTransition();
+		if (!transitionError.isEmpty())
+			QMessageBox::warning(this, QStringLiteral("World Configuration"), transitionError);
+		return;
+	}
+
+	resetDefaultOverrideEditor(optionName, enabled, document.get());
+	updateDefaultColoursState();
+	updateMacroControls();
+	updateAliasControls();
+	updateTriggerControls();
+	updateTimerControls();
+	updateInputFontControls();
+	updateOutputFontControls();
+}
+
+void WorldPreferencesDialog::ensurePagePopulated(const Page page)
+{
+	const int index = page;
+	if (index < PageGeneral || index > PageChat || page == PageSound ||
+	    m_pagePopulationStates.value(index, PagePopulationState::Unloaded) != PagePopulationState::Unloaded)
+	{
+		return;
+	}
+
+	m_pagePopulationStates[index] = PagePopulationState::Populating;
+	initializeWorkingList(page);
+	switch (page)
+	{
+	case PageGeneral:
+		populateGeneral();
+		break;
+	case PageCustomColours:
+		populateCustomColours();
+		break;
+	case PageLogging:
+		populateLogging();
+		break;
+	case PageAnsiColours:
+		if (!isPagePopulated(PageCustomColours))
+			populateCustomColours();
+		populateAnsiColours();
+		break;
+	case PageMacros:
+		populateMacros();
+		break;
+	case PageAliases:
+		populateAliases();
+		break;
+	case PageTriggers:
+		populateTriggers();
+		break;
+	case PageCommands:
+		populateCommands();
+		break;
+	case PageSendToWorld:
+		populateSendToWorld();
+		break;
+	case PageNotes:
+		populateNotes();
+		break;
+	case PageKeypad:
+		populateKeypad();
+		break;
+	case PagePaste:
+		populatePaste();
+		break;
+	case PageOutput:
+		populateSound();
+		populateOutput();
+		break;
+	case PageInfo:
+		populateInfo();
+		break;
+	case PageTimers:
+		populateTimers();
+		break;
+	case PageScripting:
+		if (!isPagePopulated(PageCustomColours))
+			populateCustomColours();
+		populateScripting();
+		break;
+	case PageVariables:
+		populateVariables();
+		break;
+	case PageAutoSay:
+		populateAutoSay();
+		break;
+	case PagePrinting:
+		populatePrinting();
+		break;
+	case PageConnecting:
+		populateConnecting();
+		break;
+	case PageMxp:
+		populateMxp();
+		break;
+	case PageChat:
+		populateChat();
+		break;
+	case PageSound:
+		break;
+	}
+	updateRuleViewModes();
+	capturePageBaseline(page);
+	m_pagePopulationStates[index] = PagePopulationState::Populated;
+	if (m_pages && m_pages->widget(index))
+		m_pages->widget(index)->setProperty("qmud_page_populated", true);
+}
+
+void WorldPreferencesDialog::scheduleRemainingPagePopulation()
+{
+	if (m_pagePopulationScheduled)
+		return;
+	if (m_pendingPagePopulation.isEmpty())
+	{
+		for (int index = PageGeneral; index <= PageChat; ++index)
+		{
+			const auto page = static_cast<Page>(index);
+			if (page != PageSound && page != PageInfo && !isPagePopulated(page))
+				m_pendingPagePopulation.push_back(page);
+		}
+		if (!isPagePopulated(PageInfo))
+			m_pendingPagePopulation.push_back(PageInfo);
+	}
+	if (m_pendingPagePopulation.isEmpty())
+		return;
+
+	m_pagePopulationScheduled = true;
+	const quint64 generation  = ++m_pagePopulationGeneration;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this, generation]
+	    {
+		    if (generation != m_pagePopulationGeneration)
+			    return;
+		    m_pagePopulationScheduled = false;
+		    populateNextPendingPage();
+	    },
+	    Qt::QueuedConnection);
+}
+
+void WorldPreferencesDialog::populateNextPendingPage()
+{
+	while (!m_pendingPagePopulation.isEmpty())
+	{
+		const Page page = m_pendingPagePopulation.takeFirst();
+		if (isPagePopulated(page))
+			continue;
+		ensurePagePopulated(page);
+		break;
+	}
+	if (!m_pendingPagePopulation.isEmpty())
+		scheduleRemainingPagePopulation();
+}
+
+void WorldPreferencesDialog::cancelPendingPagePopulation()
+{
+	++m_pagePopulationGeneration;
+	m_pagePopulationScheduled = false;
+	m_pendingPagePopulation.clear();
+}
+
+std::optional<WorldPreferencesDialog::Page> WorldPreferencesDialog::pageForWorldOption(const QString &key,
+                                                                                       const bool multiline)
+{
+	Q_UNUSED(multiline)
+	static const QHash<QString, Page> owners = []
+	{
+		QHash<QString, Page> result;
+		auto                 add = [&result](const Page page, const std::initializer_list<const char *> keys)
+		{
+			for (const char *keyName : keys)
+				result.insert(QString::fromLatin1(keyName), page);
+		};
+		add(PageGeneral,
+		    {"name", "site", "port", "tls_encryption", "tls_method", "tls_disable_certificate_validation",
+		     "save_world_automatically", "autosave_minutes", "proxy_type", "proxy_server", "proxy_port",
+		     "proxy_username", "proxy_password"});
+		add(PageOutput, {"beep_sound",
+		                 "new_activity_sound",
+		                 "play_sounds_in_background",
+		                 "wrap_column",
+		                 "max_output_lines",
+		                 "wrap",
+		                 "auto_wrap_window_width",
+		                 "line_information",
+		                 "start_paused",
+		                 "auto_pause",
+		                 "unpause_on_send",
+		                 "keep_pause_at_bottom",
+		                 "do_not_show_outstanding_lines",
+		                 "indent_paras",
+		                 "alternative_inverse",
+		                 "enable_beeps",
+		                 "disable_compression",
+		                 "flash_taskbar_icon",
+		                 "show_bold",
+		                 "show_italic",
+		                 "show_underline",
+		                 "use_default_output_font",
+		                 "output_font_name",
+		                 "output_font_height",
+		                 "output_font_weight",
+		                 "output_font_charset",
+		                 "line_spacing",
+		                 "pixel_offset",
+		                 "naws",
+		                 "terminal_identification",
+		                 "show_connect_disconnect",
+		                 "copy_selection_to_clipboard",
+		                 "auto_copy_to_clipboard_in_html",
+		                 "utf_8",
+		                 "legacy_encoding",
+		                 "carriage_return_clears_line",
+		                 "convert_ga_to_newline",
+		                 "send_keep_alives",
+		                 "persist_output_buffer",
+		                 "tool_tip_visible_time",
+		                 "tool_tip_start_time",
+		                 "fade_output_buffer_after_seconds",
+		                 "fade_output_opacity_percent",
+		                 "fade_output_seconds"});
+		add(PageLogging, {"log_output", "log_input", "log_notes", "log_html", "log_raw", "log_in_colour",
+		                  "write_world_name_to_log", "log_rotate_mb", "log_rotate_gzip", "auto_log_file_name",
+		                  "log_file_preamble", "log_file_postamble", "log_line_preamble_output",
+		                  "log_line_preamble_input", "log_line_preamble_notes", "log_line_postamble_output",
+		                  "log_line_postamble_input", "log_line_postamble_notes"});
+		add(PageAnsiColours, {"use_default_colours", "custom_16_is_default_colour"});
+		add(PageMacros, {"use_default_macros"});
+		add(PageCommands, {"arrows_change_history",
+		                   "arrow_keys_wrap",
+		                   "arrow_recalls_partial",
+		                   "alt_arrow_recalls_partial",
+		                   "keep_commands_on_same_line",
+		                   "confirm_before_replacing_typing",
+		                   "escape_deletes_input",
+		                   "double_click_inserts",
+		                   "double_click_sends",
+		                   "save_deleted_command",
+		                   "partial_save_character_threshold",
+		                   "ctrl_z_goes_to_end_of_buffer",
+		                   "ctrl_p_goes_to_previous_command",
+		                   "ctrl_n_goes_to_next_command",
+		                   "ctrl_backspace_deletes_last_word",
+		                   "enable_command_stack",
+		                   "command_stack_character",
+		                   "enable_speed_walk",
+		                   "speed_walk_prefix",
+		                   "speed_walk_filler",
+		                   "speed_walk_delay",
+		                   "display_my_input",
+		                   "history_lines",
+		                   "persist_command_history",
+		                   "always_record_command_history",
+		                   "do_not_add_macros_to_command_history",
+		                   "auto_resize_command_window",
+		                   "auto_resize_minimum_lines",
+		                   "auto_resize_maximum_lines",
+		                   "auto_repeat",
+		                   "lower_case_tab_completion",
+		                   "tab_completion_excludes_symbol_prefix",
+		                   "tab_completion_excludes_symbol_suffix",
+		                   "translate_german",
+		                   "spell_check_on_send",
+		                   "translate_backslash_sequences",
+		                   "tab_completion_defaults",
+		                   "tab_completion_lines",
+		                   "tab_completion_space",
+		                   "use_default_input_font",
+		                   "input_font_name",
+		                   "input_font_height",
+		                   "input_font_weight",
+		                   "input_font_italic",
+		                   "input_font_charset",
+		                   "no_echo_off",
+		                   "echo_force_terminates_partial_prompts",
+		                   "enable_spam_prevention",
+		                   "spam_line_count",
+		                   "spam_message",
+		                   "input_text_colour",
+		                   "input_background_colour",
+		                   "echo_colour"});
+		add(PageAliases,
+		    {"enable_aliases", "use_default_aliases", "treeview_aliases", "default_alias_expand_variables",
+		     "default_alias_ignore_case", "default_alias_keep_evaluating", "default_alias_regexp",
+		     "default_alias_send_to", "default_alias_sequence", "filter_aliases"});
+		add(PageTriggers,
+		    {"enable_triggers", "enable_trigger_sounds", "use_default_triggers", "treeview_triggers",
+		     "default_trigger_expand_variables", "default_trigger_ignore_case",
+		     "default_trigger_keep_evaluating", "default_trigger_regexp", "default_trigger_send_to",
+		     "default_trigger_sequence", "filter_triggers"});
+		add(PageTimers, {"enable_timers", "use_default_timers", "treeview_timers", "default_timer_send_to",
+		                 "filter_timers"});
+		add(PageScripting, {"enable_scripts",
+		                    "script_language",
+		                    "script_filename",
+		                    "script_prefix",
+		                    "script_editor",
+		                    "editor_window_name",
+		                    "edit_script_with_notepad",
+		                    "script_reload_option",
+		                    "note_text_colour",
+		                    "warn_if_scripting_inactive",
+		                    "script_errors_to_output_window",
+		                    "log_script_errors",
+		                    "on_world_open",
+		                    "on_world_close",
+		                    "on_world_connect",
+		                    "on_world_disconnect",
+		                    "on_world_save",
+		                    "on_world_get_focus",
+		                    "on_world_lose_focus",
+		                    "on_mxp_start",
+		                    "on_mxp_stop",
+		                    "on_mxp_open_tag",
+		                    "on_mxp_close_tag",
+		                    "on_mxp_set_variable",
+		                    "on_mxp_error"});
+		add(PageVariables, {"filter_variables"});
+		add(PageSendToWorld,
+		    {"send_to_world_file_preamble", "send_to_world_file_postamble", "send_to_world_line_preamble",
+		     "send_to_world_line_postamble", "confirm_on_send", "send_file_commented_softcode",
+		     "send_file_delay", "send_file_delay_per_lines", "send_echo"});
+		add(PageNotes, {"notes"});
+		add(PageKeypad, {"keypad_enable", "keypad_ctrl_view"});
+		add(PagePaste, {"paste_preamble", "paste_postamble", "paste_line_preamble", "paste_line_postamble",
+		                "confirm_on_paste", "paste_commented_softcode", "paste_delay",
+		                "paste_delay_per_lines", "paste_echo"});
+		add(PageInfo, {"id"});
+		add(PageAutoSay, {"enable_auto_say", "re_evaluate_auto_say", "autosay_exclude_non_alpha",
+		                  "autosay_exclude_macros", "auto_say_string", "auto_say_override_prefix"});
+		add(PageConnecting, {"player", "password", "connect_text", "connect_method", "connect_delay",
+		                     "automatically_protect_against_telnet_option_renegotiation_loops",
+		                     "only_negotiate_telnet_options_once"});
+		add(PageMxp,
+		    {"use_mxp", "mxp_debug_level", "detect_pueblo", "hyperlink_colour", "use_custom_link_colour",
+		     "mud_can_change_link_colour", "underline_hyperlinks", "mud_can_remove_underline",
+		     "hyperlink_adds_to_command_history", "echo_hyperlink_in_output_window",
+		     "ignore_mxp_colour_changes", "send_mxp_afk_response", "mud_can_change_options"});
+		add(PageChat, {"chat_name", "auto_allow_snooping", "accept_chat_connections", "chat_port",
+		               "validate_incoming_chat_calls", "ignore_chat_colours", "chat_message_prefix",
+		               "chat_max_lines_per_message", "chat_max_bytes_per_message", "chat_file_save_directory",
+		               "auto_allow_files", "chat_foreground_colour", "chat_background_colour"});
+		return result;
+	}();
+
+	const auto owner = owners.constFind(key);
+	if (owner == owners.cend())
+		return std::nullopt;
+	return owner.value();
+}
+
+QMap<QString, QString> WorldPreferencesDialog::collectAuxiliaryPageValues(const Page page) const
+{
+	QMap<QString, QString> values;
+	if (page == PageCustomColours)
+	{
+		for (int index = 0; index < m_customColourNames.size(); ++index)
+		{
+			const QString prefix = QStringLiteral("custom/%1/").arg(index);
+			if (m_customColourNames.value(index))
+				values.insert(prefix + QStringLiteral("name"), m_customColourNames.at(index)->text());
+			values.insert(prefix + QStringLiteral("text"),
+			              formatColourValue(swatchButtonColour(m_customTextSwatches.value(index))));
+			values.insert(prefix + QStringLiteral("back"),
+			              formatColourValue(swatchButtonColour(m_customBackSwatches.value(index))));
+		}
+	}
+	else if (page == PageAnsiColours)
+	{
+		for (int index = 0; index < 8; ++index)
+		{
+			values.insert(QStringLiteral("ansi/normal/%1").arg(index),
+			              formatColourValue(swatchButtonColour(m_ansiNormalSwatches.value(index))));
+			values.insert(QStringLiteral("ansi/bold/%1").arg(index),
+			              formatColourValue(swatchButtonColour(m_ansiBoldSwatches.value(index))));
+		}
+	}
+	else if (page == PageMacros && m_macrosTable)
+	{
+		for (int row = 0; row < m_macrosTable->rowCount(); ++row)
+		{
+			QTableWidgetItem *const nameItem = m_macrosTable->item(row, 0);
+			if (!nameItem)
+				continue;
+			bool      ok         = false;
+			const int macroIndex = nameItem->data(Qt::UserRole).toInt(&ok);
+			if (!ok)
+				continue;
+			const QString prefix = QStringLiteral("macro/%1/").arg(macroIndex);
+			if (const auto *typeCombo = qobject_cast<QComboBox *>(m_macrosTable->cellWidget(row, 1)))
+				values.insert(prefix + QStringLiteral("type"), typeCombo->currentData().toString());
+			if (const QTableWidgetItem *sendItem = m_macrosTable->item(row, 2))
+				values.insert(prefix + QStringLiteral("send"), sendItem->text());
+		}
+	}
+	else if (page == PageKeypad)
+	{
+		QMap<QString, QString> keypadValues = m_keypadValues;
+		const bool             ctrlView     = m_keypadControl && m_keypadControl->isChecked();
+		for (auto it = m_keypadFields.cbegin(); it != m_keypadFields.cend(); ++it)
+		{
+			const QString name = ctrlView ? QStringLiteral("Ctrl+%1").arg(it.key()) : it.key();
+			keypadValues.insert(name, it.value() ? it.value()->text() : QString());
+		}
+		for (auto it = keypadValues.cbegin(); it != keypadValues.cend(); ++it)
+			values.insert(QStringLiteral("keypad/") + it.key(), it.value());
+	}
+	else if (page == PagePrinting)
+	{
+		for (int groupIndex = 0; groupIndex < 2; ++groupIndex)
+		{
+			const QString group     = groupIndex == 0 ? QStringLiteral("normal") : QStringLiteral("bold");
+			const auto   &bold      = groupIndex == 0 ? m_printingNormalBold : m_printingBoldBold;
+			const auto   &italic    = groupIndex == 0 ? m_printingNormalItalic : m_printingBoldItalic;
+			const auto   &underline = groupIndex == 0 ? m_printingNormalUnderline : m_printingBoldUnderline;
+			for (int index = 0; index < 8; ++index)
+			{
+				const QString prefix = QStringLiteral("printing/%1/%2/").arg(group).arg(index);
+				values.insert(prefix + QStringLiteral("bold"),
+				              bold.value(index) && bold.at(index)->isChecked() ? QStringLiteral("1")
+				                                                               : QStringLiteral("0"));
+				values.insert(prefix + QStringLiteral("italic"),
+				              italic.value(index) && italic.at(index)->isChecked() ? QStringLiteral("1")
+				                                                                   : QStringLiteral("0"));
+				values.insert(prefix + QStringLiteral("underline"),
+				              underline.value(index) && underline.at(index)->isChecked()
+				                  ? QStringLiteral("1")
+				                  : QStringLiteral("0"));
+			}
+		}
+	}
+	return values;
+}
+
+void WorldPreferencesDialog::capturePageBaseline(const Page page)
+{
+	const OptionValues candidates = collectWorldOptionValues();
+	OptionValues       baseline;
+	for (auto it = candidates.attributes.cbegin(); it != candidates.attributes.cend(); ++it)
+	{
+		if (const auto owner = pageForWorldOption(it.key(), false); owner && *owner == page)
+			baseline.attributes.insert(it.key(), it.value());
+	}
+	for (auto it = candidates.multilineAttributes.cbegin(); it != candidates.multilineAttributes.cend(); ++it)
+	{
+		if (const auto owner = pageForWorldOption(it.key(), true); owner && *owner == page)
+			baseline.multilineAttributes.insert(it.key(), it.value());
+	}
+	m_pageOptionBaselines[page] = std::move(baseline);
+	m_pageAuxiliaryBaselines.insert(page, collectAuxiliaryPageValues(page));
+}
+
+bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidationScope scope)
+{
+	if (!m_workingLists)
+		return true;
+
+	const bool includeTriggers =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Triggers;
+	const bool includeAliases =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Aliases;
+	const bool includeTimers =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Timers;
+	const bool includeVariables =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Variables;
+
+	QList<WorldRuntime::Trigger> triggers;
+	QList<WorldRuntime::Alias>   aliases;
+	QList<WorldRuntime::Timer>   timers;
+	QList<ResolvedVariable>      variables;
+	if (includeTriggers)
+	{
+		triggers =
+		    m_runtime && !m_workingLists->triggersRestoredFromPersistence
+		        ? mergeWorkingRules(m_workingLists->triggers, m_runtime->triggers(),
+		                            m_workingLists->initialTriggerIds, m_workingLists->editedTriggerIds,
+		                            m_workingLists->deletedTriggerIds)
+		        : m_workingLists->triggers;
+	}
+	if (includeAliases)
+	{
+		aliases = m_runtime && !m_workingLists->aliasesRestoredFromPersistence
+		              ? mergeWorkingRules(m_workingLists->aliases, m_runtime->aliases(),
+		                                  m_workingLists->initialAliasIds, m_workingLists->editedAliasIds,
+		                                  m_workingLists->deletedAliasIds)
+		              : m_workingLists->aliases;
+	}
+	if (includeTimers)
+	{
+		timers = m_runtime && !m_workingLists->timersRestoredFromPersistence
+		             ? mergeWorkingRules(m_workingLists->timers, m_runtime->timers(),
+		                                 m_workingLists->initialTimerIds, m_workingLists->editedTimerIds,
+		                                 m_workingLists->deletedTimerIds)
+		             : m_workingLists->timers;
+	}
+	if (includeVariables)
+		variables = effectiveWorkingVariables();
+
+	for (const ResolvedVariable &variable : variables)
+	{
+		if (!variable.attributes.value(QStringLiteral("name")).trimmed().isEmpty())
+			continue;
+		QMessageBox::information(this, QStringLiteral("Variables"),
+		                         QStringLiteral("Variable names cannot be blank."), QMessageBox::Ok);
+		setInitialPage(PageVariables);
+		return false;
+	}
+
+	auto duplicateLines = [](const auto &items, auto itemValue) -> QStringList
+	{
+		struct NameCount
+		{
+				QString displayName;
+				int     count{0};
+		};
+		QMap<QString, NameCount> counts;
+		for (const auto &item : items)
+		{
+			const QString name = itemValue(item).attributes.value(QStringLiteral("name")).trimmed();
+			if (name.isEmpty())
+				continue;
+			NameCount &entry = counts[name.toCaseFolded()];
+			if (entry.displayName.isEmpty())
+				entry.displayName = name;
+			++entry.count;
+		}
+		QStringList lines;
+		for (const NameCount &entry : std::as_const(counts))
+		{
+			if (entry.count > 1)
+				lines.push_back(QStringLiteral("  %1 named %2").arg(entry.count).arg(entry.displayName));
+		}
+		return lines;
+	};
+
+	QStringList sections;
+	auto        appendSection = [&sections](const QString &heading, const QStringList &lines)
+	{
+		if (!lines.isEmpty())
+			sections.push_back(heading + QLatin1Char('\n') + lines.join(QLatin1Char('\n')));
+	};
+	if (includeTriggers)
+		appendSection(QStringLiteral("Triggers"),
+		              duplicateLines(triggers, [](const auto &item) -> const auto & { return item; }));
+	if (includeAliases)
+		appendSection(QStringLiteral("Aliases"),
+		              duplicateLines(aliases, [](const auto &item) -> const auto & { return item; }));
+	if (includeTimers)
+		appendSection(QStringLiteral("Timers"),
+		              duplicateLines(timers, [](const auto &item) -> const auto & { return item; }));
+	if (includeVariables)
+		appendSection(QStringLiteral("Variables"),
+		              duplicateLines(variables, [](const auto &item) -> const auto & { return item; }));
+	if (sections.isEmpty())
+		return true;
+
+	QMessageBox::information(this, QStringLiteral("Duplicate names"),
+	                         QStringLiteral("Named rules and variables should be unique:\n\n") +
+	                             sections.join(QStringLiteral("\n\n")),
+	                         QMessageBox::Ok);
+	return false;
+}
+
+QList<WorldPreferencesDialog::ResolvedVariable> WorldPreferencesDialog::effectiveWorkingVariables() const
+{
+	if (!m_workingLists)
+		return {};
+	if (!m_runtime)
+	{
+		QList<ResolvedVariable> variables;
+		variables.reserve(m_workingLists->variables.size());
+		for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+			variables.push_back({working.value.attributes, working.value.content});
+		return variables;
+	}
+
+	const QList<WorldRuntime::Variable> current = m_runtime->variables();
+	QList<ResolvedVariable>             resolved;
+	QSet<QString>                       emittedRuntimeNames;
+	QHash<QString, qsizetype>           currentIndexByName;
+	resolved.reserve(m_workingLists->variables.size() + current.size());
+	for (qsizetype index = 0; index < current.size(); ++index)
+	{
+		const QString key =
+		    current.at(index).attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+		currentIndexByName.insert(key, index);
+	}
+	for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+	{
+		ResolvedVariable value{working.value.attributes, working.value.content};
+		if (working.presentInRuntime)
+		{
+			const QString runtimeKey   = working.runtimeName.trimmed().toCaseFolded();
+			const auto    currentIndex = currentIndexByName.constFind(runtimeKey);
+			if (currentIndex == currentIndexByName.cend())
+				continue;
+			const WorldRuntime::Variable &currentValue = current.at(currentIndex.value());
+			value                                      = {currentValue.attributes, currentValue.content};
+			if (working.nameEdited)
+				value.attributes.insert(QStringLiteral("name"),
+				                        working.value.attributes.value(QStringLiteral("name")));
+			if (working.valueEdited)
+				value.content = working.value.content;
+			emittedRuntimeNames.insert(runtimeKey);
+		}
+		resolved.push_back(std::move(value));
+	}
+	for (const WorldRuntime::Variable &candidate : current)
+	{
+		const QString key = candidate.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+		if (!m_workingLists->deletedVariableNames.contains(key) && !emittedRuntimeNames.contains(key))
+			resolved.push_back({candidate.attributes, candidate.content});
+	}
+	return resolved;
+}
+
+void WorldPreferencesDialog::commitWorkingListChanges(const QSet<QString> &suppressedDefaultOptions) const
+{
+	if (!m_runtime || !m_workingLists)
+		return;
+
+	if (m_workingLists->triggersStaged &&
+	    !suppressedDefaultOptions.contains(QStringLiteral("use_default_triggers")))
+	{
+		if (m_workingLists->triggersRestoredFromPersistence)
+			m_runtime->setTriggers(m_workingLists->triggers);
+		else
+			m_runtime->setTriggers(mergeWorkingRules(
+			    m_workingLists->triggers, m_runtime->triggers(), m_workingLists->initialTriggerIds,
+			    m_workingLists->editedTriggerIds, m_workingLists->deletedTriggerIds));
+	}
+	if (m_workingLists->aliasesStaged &&
+	    !suppressedDefaultOptions.contains(QStringLiteral("use_default_aliases")))
+	{
+		if (m_workingLists->aliasesRestoredFromPersistence)
+			m_runtime->setAliases(m_workingLists->aliases);
+		else
+			m_runtime->setAliases(mergeWorkingRules(
+			    m_workingLists->aliases, m_runtime->aliases(), m_workingLists->initialAliasIds,
+			    m_workingLists->editedAliasIds, m_workingLists->deletedAliasIds));
+	}
+	if (m_workingLists->timersStaged &&
+	    !suppressedDefaultOptions.contains(QStringLiteral("use_default_timers")))
+	{
+		if (m_workingLists->timersRestoredFromPersistence)
+			m_runtime->setTimers(m_workingLists->timers);
+		else
+			m_runtime->setTimers(mergeWorkingRules(
+			    m_workingLists->timers, m_runtime->timers(), m_workingLists->initialTimerIds,
+			    m_workingLists->editedTimerIds, m_workingLists->deletedTimerIds));
+	}
+	if (m_workingLists->variablesStaged)
+	{
+		const QList<ResolvedVariable> resolved = effectiveWorkingVariables();
+		QList<WorldRuntime::Variable> variables;
+		variables.reserve(resolved.size());
+		for (const ResolvedVariable &variable : resolved)
+			variables.push_back({variable.attributes, variable.content});
+		m_runtime->setVariables(variables);
+	}
+	if (m_workingLists->macrosStaged &&
+	    !suppressedDefaultOptions.contains(QStringLiteral("use_default_macros")))
+		m_runtime->setMacros(m_workingLists->macros);
+	if (m_workingLists->coloursStaged &&
+	    !suppressedDefaultOptions.contains(QStringLiteral("use_default_colours")))
+		m_runtime->setColours(m_workingLists->colours);
+}
+
+WorldPreferencesDialog::OptionValues WorldPreferencesDialog::collectWorldOptionValues() const
+{
+	OptionValues values;
+	auto         readSwatchValue = [](const QLineEdit *edit) -> QString
+	{
+		if (!edit)
+			return {};
+		QString stored = edit->property("colour_value").toString();
+		if (!stored.isEmpty())
+			return stored;
+		return edit->text();
+	};
+	if (m_worldName)
+		values.attributes.insert(QStringLiteral("name"), m_worldName->text().trimmed());
+	if (m_infoWorldId && !m_infoWorldId->text().trimmed().isEmpty())
+		values.attributes.insert(QStringLiteral("id"), m_infoWorldId->text().trimmed());
+	if (m_host)
+	{
+		const QString host = m_host->text().trimmed();
+		values.attributes.insert(QStringLiteral("site"), host);
+	}
+	if (m_port)
+		values.attributes.insert(QStringLiteral("port"), QString::number(m_port->value()));
+	if (m_tlsEncryption)
+		values.attributes.insert(QStringLiteral("tls_encryption"),
+		                         boolAttributeValue(m_tlsEncryption->isChecked()));
+	if (m_tlsMethod)
+		values.attributes.insert(QStringLiteral("tls_method"),
+		                         QString::number(m_tlsMethod->currentData().toInt()));
+	if (m_tlsDisableCertificateValidation)
+		values.attributes.insert(QStringLiteral("tls_disable_certificate_validation"),
+		                         boolAttributeValue(m_tlsDisableCertificateValidation->isChecked()));
+	if (m_saveWorldAutomatically)
+		values.attributes.insert(QStringLiteral("save_world_automatically"),
+		                         m_saveWorldAutomatically->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_autosaveMinutes)
+		values.attributes.insert(QStringLiteral("autosave_minutes"),
+		                         QString::number(m_autosaveMinutes->value()));
+	if (m_proxyType)
+		values.attributes.insert(QStringLiteral("proxy_type"),
+		                         QString::number(m_proxyType->currentData().toInt()));
+	if (m_proxyServer)
+		values.attributes.insert(QStringLiteral("proxy_server"), m_proxyServer->text().trimmed());
+	if (m_proxyPort)
+		values.attributes.insert(QStringLiteral("proxy_port"), QString::number(m_proxyPort->value()));
+	values.attributes.insert(QStringLiteral("proxy_username"), m_proxyUsername);
+	values.attributes.insert(QStringLiteral("proxy_password"), m_proxyPassword);
+
+	if (m_beepSound)
+		values.attributes.insert(QStringLiteral("beep_sound"), m_beepSound->text());
+	if (m_newActivitySound)
+		values.attributes.insert(QStringLiteral("new_activity_sound"), m_newActivitySound->text());
+	if (m_playSoundsInBackground)
+		values.attributes.insert(QStringLiteral("play_sounds_in_background"),
+		                         boolAttributeValue(m_playSoundsInBackground->isChecked()));
+
+	if (m_logOutput)
+		values.attributes.insert(QStringLiteral("log_output"),
+		                         m_logOutput->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_logInput)
+		values.attributes.insert(QStringLiteral("log_input"),
+		                         m_logInput->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_logNotes)
+		values.attributes.insert(QStringLiteral("log_notes"),
+		                         m_logNotes->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_logHtml)
+		values.attributes.insert(QStringLiteral("log_html"),
+		                         m_logHtml->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_logRaw)
+		values.attributes.insert(QStringLiteral("log_raw"),
+		                         m_logRaw->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_logInColour)
+		values.attributes.insert(QStringLiteral("log_in_colour"),
+		                         m_logInColour->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_useDefaultColours)
+		values.attributes.insert(QStringLiteral("use_default_colours"), m_useDefaultColours->isChecked()
+		                                                                    ? QStringLiteral("1")
+		                                                                    : QStringLiteral("0"));
+	if (m_useDefaultMacros)
+		values.attributes.insert(QStringLiteral("use_default_macros"),
+		                         m_useDefaultMacros->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_custom16IsDefaultColour)
+		values.attributes.insert(QStringLiteral("custom_16_is_default_colour"),
+		                         m_custom16IsDefaultColour->isChecked() ? QStringLiteral("1")
+		                                                                : QStringLiteral("0"));
+	if (m_writeWorldNameToLog)
+		values.attributes.insert(QStringLiteral("write_world_name_to_log"), m_writeWorldNameToLog->isChecked()
+		                                                                        ? QStringLiteral("1")
+		                                                                        : QStringLiteral("0"));
+	if (m_logRotateMb)
+		values.attributes.insert(QStringLiteral("log_rotate_mb"), QString::number(m_logRotateMb->value()));
+	if (m_logRotateGzip)
+		values.attributes.insert(QStringLiteral("log_rotate_gzip"),
+		                         m_logRotateGzip->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_autoLogFileName)
+		values.attributes.insert(QStringLiteral("auto_log_file_name"), m_autoLogFileName->text());
+	if (m_logFilePreamble)
+		values.multilineAttributes.insert(QStringLiteral("log_file_preamble"),
+		                                  m_logFilePreamble->toPlainText());
+	if (m_logFilePostamble)
+		values.multilineAttributes.insert(QStringLiteral("log_file_postamble"),
+		                                  m_logFilePostamble->toPlainText());
+	if (m_logLinePreambleOutput)
+		values.attributes.insert(QStringLiteral("log_line_preamble_output"), m_logLinePreambleOutput->text());
+	if (m_logLinePreambleInput)
+		values.attributes.insert(QStringLiteral("log_line_preamble_input"), m_logLinePreambleInput->text());
+	if (m_logLinePreambleNotes)
+		values.attributes.insert(QStringLiteral("log_line_preamble_notes"), m_logLinePreambleNotes->text());
+	if (m_logLinePostambleOutput)
+		values.attributes.insert(QStringLiteral("log_line_postamble_output"),
+		                         m_logLinePostambleOutput->text());
+	if (m_logLinePostambleInput)
+		values.attributes.insert(QStringLiteral("log_line_postamble_input"), m_logLinePostambleInput->text());
+	if (m_logLinePostambleNotes)
+		values.attributes.insert(QStringLiteral("log_line_postamble_notes"), m_logLinePostambleNotes->text());
+
+	if (m_wrapColumn)
+		values.attributes.insert(QStringLiteral("wrap_column"), QString::number(m_wrapColumn->value()));
+	if (m_maxLines)
+	{
+		const QString maxLinesValue = QString::number(m_maxLines->value());
+		values.attributes.insert(QStringLiteral("max_output_lines"), maxLinesValue);
+	}
+	if (m_wrapOutput)
+		values.attributes.insert(QStringLiteral("wrap"),
+		                         m_wrapOutput->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_autoWrapWindow)
+		values.attributes.insert(QStringLiteral("auto_wrap_window_width"),
+		                         m_autoWrapWindow->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_lineInformation)
+		values.attributes.insert(QStringLiteral("line_information"),
+		                         m_lineInformation->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_startPaused)
+		values.attributes.insert(QStringLiteral("start_paused"),
+		                         m_startPaused->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_autoPause)
+		values.attributes.insert(QStringLiteral("auto_pause"),
+		                         m_autoPause->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_unpauseOnSend)
+		values.attributes.insert(QStringLiteral("unpause_on_send"),
+		                         m_unpauseOnSend->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_keepPauseAtBottomOption)
+		values.attributes.insert(QStringLiteral("keep_pause_at_bottom"),
+		                         boolAttributeValue(m_keepPauseAtBottomOption->isChecked()));
+	if (m_doNotShowOutstandingLines)
+		values.attributes.insert(QStringLiteral("do_not_show_outstanding_lines"),
+		                         boolAttributeValue(m_doNotShowOutstandingLines->isChecked()));
+	if (m_indentParas)
+		values.attributes.insert(QStringLiteral("indent_paras"),
+		                         m_indentParas->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_alternativeInverse)
+		values.attributes.insert(QStringLiteral("alternative_inverse"), m_alternativeInverse->isChecked()
+		                                                                    ? QStringLiteral("1")
+		                                                                    : QStringLiteral("0"));
+	if (m_enableBeeps)
+		values.attributes.insert(QStringLiteral("enable_beeps"),
+		                         m_enableBeeps->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_disableCompression)
+		values.attributes.insert(QStringLiteral("disable_compression"), m_disableCompression->isChecked()
+		                                                                    ? QStringLiteral("1")
+		                                                                    : QStringLiteral("0"));
+	if (m_flashIcon)
+		values.attributes.insert(QStringLiteral("flash_taskbar_icon"),
+		                         m_flashIcon->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_showBold)
+		values.attributes.insert(QStringLiteral("show_bold"),
+		                         m_showBold->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_showItalic)
+		values.attributes.insert(QStringLiteral("show_italic"),
+		                         m_showItalic->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_showUnderline)
+		values.attributes.insert(QStringLiteral("show_underline"),
+		                         m_showUnderline->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_useDefaultOutputFont)
+		values.attributes.insert(QStringLiteral("use_default_output_font"),
+		                         m_useDefaultOutputFont->isChecked() ? QStringLiteral("1")
+		                                                             : QStringLiteral("0"));
+	if (m_outputFontName)
+		values.attributes.insert(QStringLiteral("output_font_name"), m_outputFontName->text());
+	if (m_outputFontHeight)
+		values.attributes.insert(QStringLiteral("output_font_height"),
+		                         QString::number(m_outputFontHeight->value()));
+	values.attributes.insert(QStringLiteral("output_font_weight"), QString::number(m_outputFontWeight));
+	values.attributes.insert(QStringLiteral("output_font_charset"), QString::number(m_outputFontCharset));
+	if (m_lineSpacing)
+		values.attributes.insert(QStringLiteral("line_spacing"), QString::number(m_lineSpacing->value()));
+	if (m_pixelOffset)
+		values.attributes.insert(QStringLiteral("pixel_offset"), QString::number(m_pixelOffset->value()));
+	if (m_naws)
+		values.attributes.insert(QStringLiteral("naws"),
+		                         m_naws->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_terminalIdentification)
+		values.attributes.insert(QStringLiteral("terminal_identification"), m_terminalIdentification->text());
+	if (m_showConnectDisconnect)
+		values.attributes.insert(QStringLiteral("show_connect_disconnect"),
+		                         m_showConnectDisconnect->isChecked() ? QStringLiteral("1")
+		                                                              : QStringLiteral("0"));
+	if (m_copySelectionToClipboard)
+		values.attributes.insert(QStringLiteral("copy_selection_to_clipboard"),
+		                         m_copySelectionToClipboard->isChecked() ? QStringLiteral("1")
+		                                                                 : QStringLiteral("0"));
+	if (m_autoCopyHtml)
+		values.attributes.insert(QStringLiteral("auto_copy_to_clipboard_in_html"),
+		                         m_autoCopyHtml->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_utf8)
+		values.attributes.insert(QStringLiteral("utf_8"),
+		                         m_utf8->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_legacyEncoding)
+		values.attributes.insert(QStringLiteral("legacy_encoding"),
+		                         m_legacyEncoding->currentData().toString());
+	if (m_carriageReturnClearsLine)
+		values.attributes.insert(QStringLiteral("carriage_return_clears_line"),
+		                         m_carriageReturnClearsLine->isChecked() ? QStringLiteral("1")
+		                                                                 : QStringLiteral("0"));
+	if (m_convertGaToNewline)
+		values.attributes.insert(QStringLiteral("convert_ga_to_newline"), m_convertGaToNewline->isChecked()
+		                                                                      ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_sendKeepAlives)
+		values.attributes.insert(QStringLiteral("send_keep_alives"),
+		                         m_sendKeepAlives->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_persistOutputBuffer)
+		values.attributes.insert(QStringLiteral("persist_output_buffer"),
+		                         boolAttributeValue(m_persistOutputBuffer->isChecked()));
+	if (m_toolTipVisibleTime)
+		values.attributes.insert(QStringLiteral("tool_tip_visible_time"),
+		                         QString::number(m_toolTipVisibleTime->value()));
+	if (m_toolTipStartTime)
+		values.attributes.insert(QStringLiteral("tool_tip_start_time"),
+		                         QString::number(m_toolTipStartTime->value()));
+	if (m_fadeOutputBufferAfterSeconds)
+		values.attributes.insert(QStringLiteral("fade_output_buffer_after_seconds"),
+		                         QString::number(m_fadeOutputBufferAfterSeconds->value()));
+	if (m_fadeOutputOpacityPercent)
+		values.attributes.insert(QStringLiteral("fade_output_opacity_percent"),
+		                         QString::number(m_fadeOutputOpacityPercent->value()));
+	if (m_fadeOutputSeconds)
+		values.attributes.insert(QStringLiteral("fade_output_seconds"),
+		                         QString::number(m_fadeOutputSeconds->value()));
+
+	if (m_arrowsChangeHistory)
+		values.attributes.insert(QStringLiteral("arrows_change_history"), m_arrowsChangeHistory->isChecked()
+		                                                                      ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_arrowKeysWrap)
+		values.attributes.insert(QStringLiteral("arrow_keys_wrap"),
+		                         m_arrowKeysWrap->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_arrowRecallsPartial)
+		values.attributes.insert(QStringLiteral("arrow_recalls_partial"), m_arrowRecallsPartial->isChecked()
+		                                                                      ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_altArrowRecallsPartial)
+		values.attributes.insert(QStringLiteral("alt_arrow_recalls_partial"),
+		                         m_altArrowRecallsPartial->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_keepCommandsOnSameLine)
+		values.attributes.insert(QStringLiteral("keep_commands_on_same_line"),
+		                         m_keepCommandsOnSameLine->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_confirmBeforeReplacingTyping)
+		values.attributes.insert(QStringLiteral("confirm_before_replacing_typing"),
+		                         m_confirmBeforeReplacingTyping->isChecked() ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_escapeDeletesInput)
+		values.attributes.insert(QStringLiteral("escape_deletes_input"), m_escapeDeletesInput->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_doubleClickInserts)
+		values.attributes.insert(QStringLiteral("double_click_inserts"), m_doubleClickInserts->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_doubleClickSends)
+		values.attributes.insert(QStringLiteral("double_click_sends"),
+		                         m_doubleClickSends->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_saveDeletedCommand)
+		values.attributes.insert(QStringLiteral("save_deleted_command"), m_saveDeletedCommand->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_partialSaveCharacterThreshold)
+		values.attributes.insert(QStringLiteral("partial_save_character_threshold"),
+		                         QString::number(m_partialSaveCharacterThreshold->value()));
+	if (m_ctrlZToEnd)
+		values.attributes.insert(QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+		                         m_ctrlZToEnd->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_ctrlPToPrev)
+		values.attributes.insert(QStringLiteral("ctrl_p_goes_to_previous_command"),
+		                         m_ctrlPToPrev->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_ctrlNToNext)
+		values.attributes.insert(QStringLiteral("ctrl_n_goes_to_next_command"),
+		                         m_ctrlNToNext->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_ctrlBackspaceDeletesLastWord)
+		values.attributes.insert(QStringLiteral("ctrl_backspace_deletes_last_word"),
+		                         boolAttributeValue(m_ctrlBackspaceDeletesLastWord->isChecked()));
+	if (m_enableCommandStack)
+		values.attributes.insert(QStringLiteral("enable_command_stack"), m_enableCommandStack->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_commandStackCharacter)
+	{
+		QString value = m_commandStackCharacter->text();
+		if (m_enableCommandStack && !m_enableCommandStack->isChecked() && value.isEmpty())
+			value = QStringLiteral(" ");
+		values.attributes.insert(QStringLiteral("command_stack_character"), value);
+	}
+	if (m_enableSpeedWalk)
+		values.attributes.insert(QStringLiteral("enable_speed_walk"),
+		                         m_enableSpeedWalk->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_speedWalkPrefix)
+		values.attributes.insert(QStringLiteral("speed_walk_prefix"), m_speedWalkPrefix->text());
+	if (m_speedWalkFiller)
+		values.attributes.insert(QStringLiteral("speed_walk_filler"), m_speedWalkFiller->text());
+	if (m_speedWalkDelay)
+		values.attributes.insert(QStringLiteral("speed_walk_delay"),
+		                         QString::number(m_speedWalkDelay->value()));
+	if (m_displayMyInput)
+		values.attributes.insert(QStringLiteral("display_my_input"),
+		                         m_displayMyInput->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_historyLines)
+		values.attributes.insert(QStringLiteral("history_lines"), QString::number(m_historyLines->value()));
+	if (m_persistCommandHistory)
+		values.attributes.insert(QStringLiteral("persist_command_history"),
+		                         boolAttributeValue(m_persistCommandHistory->isChecked()));
+	if (m_alwaysRecordCommandHistory)
+		values.attributes.insert(QStringLiteral("always_record_command_history"),
+		                         boolAttributeValue(m_alwaysRecordCommandHistory->isChecked()));
+	if (m_doNotAddMacrosToCommandHistory)
+		values.attributes.insert(QStringLiteral("do_not_add_macros_to_command_history"),
+		                         boolAttributeValue(m_doNotAddMacrosToCommandHistory->isChecked()));
+	if (m_autoResizeCommandWindow)
+		values.attributes.insert(QStringLiteral("auto_resize_command_window"),
+		                         boolAttributeValue(m_autoResizeCommandWindow->isChecked()));
+	if (m_autoResizeMinimumLines)
+		values.attributes.insert(QStringLiteral("auto_resize_minimum_lines"),
+		                         QString::number(m_autoResizeMinimumLines->value()));
+	if (m_autoResizeMaximumLines)
+		values.attributes.insert(QStringLiteral("auto_resize_maximum_lines"),
+		                         QString::number(m_autoResizeMaximumLines->value()));
+	if (m_autoRepeat)
+		values.attributes.insert(QStringLiteral("auto_repeat"),
+		                         m_autoRepeat->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_lowerCaseTabCompletion)
+		values.attributes.insert(QStringLiteral("lower_case_tab_completion"),
+		                         m_lowerCaseTabCompletion->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_tabCompletionExcludesSymbolPrefix)
+		values.attributes.insert(QStringLiteral("tab_completion_excludes_symbol_prefix"),
+		                         m_tabCompletionExcludesSymbolPrefix->isChecked() ? QStringLiteral("1")
+		                                                                          : QStringLiteral("0"));
+	if (m_tabCompletionExcludesSymbolSuffix)
+		values.attributes.insert(QStringLiteral("tab_completion_excludes_symbol_suffix"),
+		                         m_tabCompletionExcludesSymbolSuffix->isChecked() ? QStringLiteral("1")
+		                                                                          : QStringLiteral("0"));
+	if (m_translateGerman)
+		values.attributes.insert(QStringLiteral("translate_german"),
+		                         m_translateGerman->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_spellCheckOnSend)
+		values.attributes.insert(QStringLiteral("spell_check_on_send"),
+		                         m_spellCheckOnSend->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_translateBackslash)
+		values.attributes.insert(QStringLiteral("translate_backslash_sequences"),
+		                         m_translateBackslash->isChecked() ? QStringLiteral("1")
+		                                                           : QStringLiteral("0"));
+	if (m_tabCompletionDefaults)
+		values.multilineAttributes.insert(QStringLiteral("tab_completion_defaults"),
+		                                  m_tabCompletionDefaults->toPlainText());
+	if (m_tabCompletionLines)
+		values.attributes.insert(QStringLiteral("tab_completion_lines"),
+		                         QString::number(m_tabCompletionLines->value()));
+	if (m_tabCompletionSpace)
+		values.attributes.insert(QStringLiteral("tab_completion_space"), m_tabCompletionSpace->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_useDefaultInputFont)
+		values.attributes.insert(QStringLiteral("use_default_input_font"), m_useDefaultInputFont->isChecked()
+		                                                                       ? QStringLiteral("1")
+		                                                                       : QStringLiteral("0"));
+	if (m_inputFontName)
+		values.attributes.insert(QStringLiteral("input_font_name"), m_inputFontName->text());
+	if (m_inputFontHeight)
+		values.attributes.insert(QStringLiteral("input_font_height"),
+		                         QString::number(m_inputFontHeight->value()));
+	values.attributes.insert(QStringLiteral("input_font_weight"), QString::number(m_inputFontWeight));
+	values.attributes.insert(QStringLiteral("input_font_italic"),
+	                         m_inputFontItalic ? QStringLiteral("1") : QStringLiteral("0"));
+	values.attributes.insert(QStringLiteral("input_font_charset"), QString::number(m_inputFontCharset));
+	if (m_noEchoOff)
+		values.attributes.insert(QStringLiteral("no_echo_off"),
+		                         m_noEchoOff->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_echoForceTerminatesPartialPrompts)
+		values.attributes.insert(QStringLiteral("echo_force_terminates_partial_prompts"),
+		                         m_echoForceTerminatesPartialPrompts->isChecked() ? QStringLiteral("1")
+		                                                                          : QStringLiteral("0"));
+	if (m_enableSpamPrevention)
+		values.attributes.insert(QStringLiteral("enable_spam_prevention"), m_enableSpamPrevention->isChecked()
+		                                                                       ? QStringLiteral("1")
+		                                                                       : QStringLiteral("0"));
+	if (m_spamLineCount)
+		values.attributes.insert(QStringLiteral("spam_line_count"),
+		                         QString::number(m_spamLineCount->value()));
+	if (m_spamMessage)
+		values.attributes.insert(QStringLiteral("spam_message"), m_spamMessage->text());
+	if (m_inputTextColour)
+		values.attributes.insert(QStringLiteral("input_text_colour"), m_inputTextColour->text());
+	if (m_inputBackColour)
+		values.attributes.insert(QStringLiteral("input_background_colour"), m_inputBackColour->text());
+	if (m_echoColour)
+		values.attributes.insert(QStringLiteral("echo_colour"),
+		                         QString::number(m_echoColour->currentIndex()));
+
+	if (m_enableAliases)
+		values.attributes.insert(QStringLiteral("enable_aliases"),
+		                         m_enableAliases->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_useDefaultAliases)
+		values.attributes.insert(QStringLiteral("use_default_aliases"), m_useDefaultAliases->isChecked()
+		                                                                    ? QStringLiteral("1")
+		                                                                    : QStringLiteral("0"));
+	if (m_aliasTreeView)
+		values.attributes.insert(QStringLiteral("treeview_aliases"),
+		                         m_aliasTreeView->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_defaultAliasExpandVariables)
+		values.attributes.insert(QStringLiteral("default_alias_expand_variables"),
+		                         boolAttributeValue(m_defaultAliasExpandVariables->isChecked()));
+	if (m_defaultAliasIgnoreCase)
+		values.attributes.insert(QStringLiteral("default_alias_ignore_case"),
+		                         boolAttributeValue(m_defaultAliasIgnoreCase->isChecked()));
+	if (m_defaultAliasKeepEvaluating)
+		values.attributes.insert(QStringLiteral("default_alias_keep_evaluating"),
+		                         boolAttributeValue(m_defaultAliasKeepEvaluating->isChecked()));
+	if (m_defaultAliasRegexp)
+		values.attributes.insert(QStringLiteral("default_alias_regexp"),
+		                         boolAttributeValue(m_defaultAliasRegexp->isChecked()));
+	if (m_defaultAliasSendTo)
+		values.attributes.insert(QStringLiteral("default_alias_send_to"),
+		                         QString::number(m_defaultAliasSendTo->value()));
+	if (m_defaultAliasSequence)
+		values.attributes.insert(QStringLiteral("default_alias_sequence"),
+		                         QString::number(m_defaultAliasSequence->value()));
+	if (m_enableTriggers)
+		values.attributes.insert(QStringLiteral("enable_triggers"),
+		                         m_enableTriggers->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_enableTriggerSounds)
+		values.attributes.insert(QStringLiteral("enable_trigger_sounds"), m_enableTriggerSounds->isChecked()
+		                                                                      ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_useDefaultTriggers)
+		values.attributes.insert(QStringLiteral("use_default_triggers"), m_useDefaultTriggers->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_triggerTreeView)
+		values.attributes.insert(QStringLiteral("treeview_triggers"),
+		                         m_triggerTreeView->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_defaultTriggerExpandVariables)
+		values.attributes.insert(QStringLiteral("default_trigger_expand_variables"),
+		                         boolAttributeValue(m_defaultTriggerExpandVariables->isChecked()));
+	if (m_defaultTriggerIgnoreCase)
+		values.attributes.insert(QStringLiteral("default_trigger_ignore_case"),
+		                         boolAttributeValue(m_defaultTriggerIgnoreCase->isChecked()));
+	if (m_defaultTriggerKeepEvaluating)
+		values.attributes.insert(QStringLiteral("default_trigger_keep_evaluating"),
+		                         boolAttributeValue(m_defaultTriggerKeepEvaluating->isChecked()));
+	if (m_defaultTriggerRegexp)
+		values.attributes.insert(QStringLiteral("default_trigger_regexp"),
+		                         boolAttributeValue(m_defaultTriggerRegexp->isChecked()));
+	if (m_defaultTriggerSendTo)
+		values.attributes.insert(QStringLiteral("default_trigger_send_to"),
+		                         QString::number(m_defaultTriggerSendTo->value()));
+	if (m_defaultTriggerSequence)
+		values.attributes.insert(QStringLiteral("default_trigger_sequence"),
+		                         QString::number(m_defaultTriggerSequence->value()));
+	if (m_enableTimers)
+		values.attributes.insert(QStringLiteral("enable_timers"),
+		                         m_enableTimers->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_useDefaultTimers)
+		values.attributes.insert(QStringLiteral("use_default_timers"),
+		                         m_useDefaultTimers->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_timerTreeView)
+		values.attributes.insert(QStringLiteral("treeview_timers"),
+		                         m_timerTreeView->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_defaultTimerSendTo)
+		values.attributes.insert(QStringLiteral("default_timer_send_to"),
+		                         QString::number(m_defaultTimerSendTo->value()));
+
+	if (m_enableScripts)
+		values.attributes.insert(QStringLiteral("enable_scripts"),
+		                         m_enableScripts->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_scriptLanguage && m_scriptLanguage->currentIndex() >= 0)
+		values.attributes.insert(QStringLiteral("script_language"),
+		                         m_scriptLanguage->currentData().toString());
+	if (m_scriptFile)
+		values.attributes.insert(QStringLiteral("script_filename"), m_scriptFile->text());
+	if (m_scriptPrefix)
+		values.attributes.insert(QStringLiteral("script_prefix"), m_scriptPrefix->text());
+	if (m_scriptEditor)
+		values.attributes.insert(QStringLiteral("script_editor"), m_scriptEditor->text());
+	if (m_editorWindowName)
+		values.attributes.insert(QStringLiteral("editor_window_name"), m_editorWindowName->text());
+	if (m_editScriptWithNotepad)
+		values.attributes.insert(QStringLiteral("edit_script_with_notepad"),
+		                         m_editScriptWithNotepad->isChecked() ? QStringLiteral("1")
+		                                                              : QStringLiteral("0"));
+	if (m_scriptReloadOption)
+		values.attributes.insert(QStringLiteral("script_reload_option"),
+		                         QString::number(m_scriptReloadOption->currentData().toInt()));
+	if (m_scriptTextColour && m_scriptTextColour->currentIndex() >= 0)
+	{
+		const int     notePublicIndex = qBound(0, m_scriptTextColour->currentIndex(), MAX_CUSTOM);
+		const QString encoded         = QMudNoteColour::worldAttributeFromPublicIndex(notePublicIndex);
+		values.attributes.insert(QStringLiteral("note_text_colour"), encoded);
+	}
+	if (m_warnIfScriptingInactive)
+		values.attributes.insert(QStringLiteral("warn_if_scripting_inactive"),
+		                         m_warnIfScriptingInactive->isChecked() ? QStringLiteral("1")
+		                                                                : QStringLiteral("0"));
+	if (m_scriptErrorsToOutput)
+		values.attributes.insert(QStringLiteral("script_errors_to_output_window"),
+		                         m_scriptErrorsToOutput->isChecked() ? QStringLiteral("1")
+		                                                             : QStringLiteral("0"));
+	if (m_logScriptErrors)
+		values.attributes.insert(QStringLiteral("log_script_errors"),
+		                         boolAttributeValue(m_logScriptErrors->isChecked()));
+	if (m_onWorldOpen)
+		values.attributes.insert(QStringLiteral("on_world_open"), m_onWorldOpen->text().trimmed());
+	if (m_onWorldClose)
+		values.attributes.insert(QStringLiteral("on_world_close"), m_onWorldClose->text().trimmed());
+	if (m_onWorldConnect)
+		values.attributes.insert(QStringLiteral("on_world_connect"), m_onWorldConnect->text().trimmed());
+	if (m_onWorldDisconnect)
+		values.attributes.insert(QStringLiteral("on_world_disconnect"),
+		                         m_onWorldDisconnect->text().trimmed());
+	if (m_onWorldSave)
+		values.attributes.insert(QStringLiteral("on_world_save"), m_onWorldSave->text().trimmed());
+	if (m_onWorldGetFocus)
+		values.attributes.insert(QStringLiteral("on_world_get_focus"), m_onWorldGetFocus->text().trimmed());
+	if (m_onWorldLoseFocus)
+		values.attributes.insert(QStringLiteral("on_world_lose_focus"), m_onWorldLoseFocus->text().trimmed());
+	if (m_onMxpStart)
+		values.attributes.insert(QStringLiteral("on_mxp_start"), m_onMxpStart->text().trimmed());
+	if (m_onMxpStop)
+		values.attributes.insert(QStringLiteral("on_mxp_stop"), m_onMxpStop->text().trimmed());
+	if (m_onMxpOpenTag)
+		values.attributes.insert(QStringLiteral("on_mxp_open_tag"), m_onMxpOpenTag->text().trimmed());
+	if (m_onMxpCloseTag)
+		values.attributes.insert(QStringLiteral("on_mxp_close_tag"), m_onMxpCloseTag->text().trimmed());
+	if (m_onMxpSetVariable)
+		values.attributes.insert(QStringLiteral("on_mxp_set_variable"), m_onMxpSetVariable->text().trimmed());
+	if (m_onMxpError)
+		values.attributes.insert(QStringLiteral("on_mxp_error"), m_onMxpError->text().trimmed());
+
+	values.multilineAttributes.insert(QStringLiteral("filter_triggers"), m_triggerFilterText);
+	values.multilineAttributes.insert(QStringLiteral("filter_aliases"), m_aliasFilterText);
+	values.multilineAttributes.insert(QStringLiteral("filter_timers"), m_timerFilterText);
+	values.multilineAttributes.insert(QStringLiteral("filter_variables"), m_variableFilterText);
+
+	if (m_sendToWorldFilePreamble)
+		values.multilineAttributes.insert(QStringLiteral("send_to_world_file_preamble"),
+		                                  m_sendToWorldFilePreamble->toPlainText());
+	if (m_sendToWorldFilePostamble)
+		values.multilineAttributes.insert(QStringLiteral("send_to_world_file_postamble"),
+		                                  m_sendToWorldFilePostamble->toPlainText());
+	if (m_sendToWorldLinePreamble)
+		values.attributes.insert(QStringLiteral("send_to_world_line_preamble"),
+		                         m_sendToWorldLinePreamble->text());
+	if (m_sendToWorldLinePostamble)
+		values.attributes.insert(QStringLiteral("send_to_world_line_postamble"),
+		                         m_sendToWorldLinePostamble->text());
+	if (m_sendConfirm)
+		values.attributes.insert(QStringLiteral("confirm_on_send"),
+		                         m_sendConfirm->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_sendCommentedSoftcode)
+		values.attributes.insert(QStringLiteral("send_file_commented_softcode"),
+		                         m_sendCommentedSoftcode->isChecked() ? QStringLiteral("1")
+		                                                              : QStringLiteral("0"));
+	if (m_sendLineDelay)
+		values.attributes.insert(QStringLiteral("send_file_delay"),
+		                         QString::number(m_sendLineDelay->value()));
+	if (m_sendDelayPerLines)
+		values.attributes.insert(QStringLiteral("send_file_delay_per_lines"),
+		                         QString::number(m_sendDelayPerLines->value()));
+	if (m_sendEcho)
+		values.attributes.insert(QStringLiteral("send_echo"),
+		                         m_sendEcho->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+
+	if (m_notes)
+		values.multilineAttributes.insert(QStringLiteral("notes"), m_notes->toPlainText());
+
+	if (m_keypadEnabled)
+		values.attributes.insert(QStringLiteral("keypad_enable"),
+		                         m_keypadEnabled->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_keypadControl)
+		values.attributes.insert(QStringLiteral("keypad_ctrl_view"),
+		                         m_keypadControl->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+
+	if (m_pastePreamble)
+		values.multilineAttributes.insert(QStringLiteral("paste_preamble"), m_pastePreamble->toPlainText());
+	if (m_pastePostamble)
+		values.multilineAttributes.insert(QStringLiteral("paste_postamble"), m_pastePostamble->toPlainText());
+	if (m_pasteLinePreamble)
+		values.attributes.insert(QStringLiteral("paste_line_preamble"), m_pasteLinePreamble->text());
+	if (m_pasteLinePostamble)
+		values.attributes.insert(QStringLiteral("paste_line_postamble"), m_pasteLinePostamble->text());
+	if (m_confirmOnPaste)
+		values.attributes.insert(QStringLiteral("confirm_on_paste"),
+		                         m_confirmOnPaste->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_commentedSoftcodePaste)
+		values.attributes.insert(QStringLiteral("paste_commented_softcode"),
+		                         m_commentedSoftcodePaste->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_pasteLineDelay)
+		values.attributes.insert(QStringLiteral("paste_delay"), QString::number(m_pasteLineDelay->value()));
+	if (m_pasteDelayPerLines)
+		values.attributes.insert(QStringLiteral("paste_delay_per_lines"),
+		                         QString::number(m_pasteDelayPerLines->value()));
+	if (m_pasteEcho)
+		values.attributes.insert(QStringLiteral("paste_echo"),
+		                         m_pasteEcho->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+
+	if (m_enableAutoSay)
+		values.attributes.insert(QStringLiteral("enable_auto_say"),
+		                         m_enableAutoSay->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_reEvaluateAutoSay)
+		values.attributes.insert(QStringLiteral("re_evaluate_auto_say"), m_reEvaluateAutoSay->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_autoSayExcludeNonAlpha)
+		values.attributes.insert(QStringLiteral("autosay_exclude_non_alpha"),
+		                         m_autoSayExcludeNonAlpha->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_autoSayExcludeMacros)
+		values.attributes.insert(QStringLiteral("autosay_exclude_macros"), m_autoSayExcludeMacros->isChecked()
+		                                                                       ? QStringLiteral("1")
+		                                                                       : QStringLiteral("0"));
+	if (m_autoSayString)
+		values.attributes.insert(QStringLiteral("auto_say_string"), m_autoSayString->text());
+	if (m_autoSayOverridePrefix)
+		values.attributes.insert(QStringLiteral("auto_say_override_prefix"), m_autoSayOverridePrefix->text());
+
+	if (m_playerName)
+		values.attributes.insert(QStringLiteral("player"), m_playerName->text().trimmed());
+	if (m_password)
+		values.attributes.insert(QStringLiteral("password"), m_password->text());
+	if (m_connectText)
+		values.multilineAttributes.insert(QStringLiteral("connect_text"), m_connectText->toPlainText());
+	if (m_connectMethod && m_connectMethod->currentIndex() >= 0)
+		values.attributes.insert(QStringLiteral("connect_method"),
+		                         QString::number(m_connectMethod->currentData().toInt()));
+	if (m_connectDelay)
+		values.attributes.insert(QStringLiteral("connect_delay"), QString::number(m_connectDelay->value()));
+	if (m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops)
+	{
+		values.attributes.insert(
+		    QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"),
+		    m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked() ? QStringLiteral("1")
+		                                                                             : QStringLiteral("0"));
+	}
+	if (m_onlyNegotiateTelnetOptionsOnce)
+		values.attributes.insert(QStringLiteral("only_negotiate_telnet_options_once"),
+		                         m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
+		                                                                       : QStringLiteral("0"));
+
+	if (m_useMxp && m_useMxp->currentIndex() >= 0)
+		values.attributes.insert(QStringLiteral("use_mxp"), m_useMxp->currentData().toString());
+	if (m_mxpDebugLevel && m_mxpDebugLevel->currentIndex() >= 0)
+		values.attributes.insert(QStringLiteral("mxp_debug_level"),
+		                         m_mxpDebugLevel->currentData().toString());
+	if (m_detectPueblo)
+		values.attributes.insert(QStringLiteral("detect_pueblo"),
+		                         m_detectPueblo->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_hyperlinkColour)
+		values.attributes.insert(QStringLiteral("hyperlink_colour"), readSwatchValue(m_hyperlinkColour));
+	if (m_useCustomLinkColour)
+		values.attributes.insert(QStringLiteral("use_custom_link_colour"), m_useCustomLinkColour->isChecked()
+		                                                                       ? QStringLiteral("1")
+		                                                                       : QStringLiteral("0"));
+	if (m_mudCanChangeLinkColour)
+		values.attributes.insert(QStringLiteral("mud_can_change_link_colour"),
+		                         m_mudCanChangeLinkColour->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_underlineHyperlinks)
+		values.attributes.insert(QStringLiteral("underline_hyperlinks"), m_underlineHyperlinks->isChecked()
+		                                                                     ? QStringLiteral("1")
+		                                                                     : QStringLiteral("0"));
+	if (m_mudCanRemoveUnderline)
+		values.attributes.insert(QStringLiteral("mud_can_remove_underline"),
+		                         m_mudCanRemoveUnderline->isChecked() ? QStringLiteral("1")
+		                                                              : QStringLiteral("0"));
+	if (m_hyperlinkAddsToCommandHistory)
+		values.attributes.insert(QStringLiteral("hyperlink_adds_to_command_history"),
+		                         m_hyperlinkAddsToCommandHistory->isChecked() ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_echoHyperlinkInOutput)
+		values.attributes.insert(QStringLiteral("echo_hyperlink_in_output_window"),
+		                         m_echoHyperlinkInOutput->isChecked() ? QStringLiteral("1")
+		                                                              : QStringLiteral("0"));
+	if (m_ignoreMxpColourChanges)
+		values.attributes.insert(QStringLiteral("ignore_mxp_colour_changes"),
+		                         m_ignoreMxpColourChanges->isChecked() ? QStringLiteral("1")
+		                                                               : QStringLiteral("0"));
+	if (m_sendMxpAfkResponse)
+		values.attributes.insert(QStringLiteral("send_mxp_afk_response"), m_sendMxpAfkResponse->isChecked()
+		                                                                      ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_mudCanChangeOptions)
+		values.attributes.insert(QStringLiteral("mud_can_change_options"), m_mudCanChangeOptions->isChecked()
+		                                                                       ? QStringLiteral("1")
+		                                                                       : QStringLiteral("0"));
+
+	if (m_chatName)
+		values.attributes.insert(QStringLiteral("chat_name"), m_chatName->text());
+	if (m_autoAllowSnooping)
+		values.attributes.insert(QStringLiteral("auto_allow_snooping"), m_autoAllowSnooping->isChecked()
+		                                                                    ? QStringLiteral("1")
+		                                                                    : QStringLiteral("0"));
+	if (m_acceptIncomingChatConnections)
+		values.attributes.insert(QStringLiteral("accept_chat_connections"),
+		                         m_acceptIncomingChatConnections->isChecked() ? QStringLiteral("1")
+		                                                                      : QStringLiteral("0"));
+	if (m_incomingChatPort)
+		values.attributes.insert(QStringLiteral("chat_port"), QString::number(m_incomingChatPort->value()));
+	if (m_validateIncomingCalls)
+		values.attributes.insert(QStringLiteral("validate_incoming_chat_calls"),
+		                         m_validateIncomingCalls->isChecked() ? QStringLiteral("1")
+		                                                              : QStringLiteral("0"));
+	if (m_ignoreChatColours)
+		values.attributes.insert(QStringLiteral("ignore_chat_colours"), m_ignoreChatColours->isChecked()
+		                                                                    ? QStringLiteral("1")
+		                                                                    : QStringLiteral("0"));
+	if (m_chatMessagePrefix)
+		values.attributes.insert(QStringLiteral("chat_message_prefix"), m_chatMessagePrefix->text());
+	if (m_maxChatLines)
+		values.attributes.insert(QStringLiteral("chat_max_lines_per_message"),
+		                         QString::number(m_maxChatLines->value()));
+	if (m_maxChatBytes)
+		values.attributes.insert(QStringLiteral("chat_max_bytes_per_message"),
+		                         QString::number(m_maxChatBytes->value()));
+	if (m_chatSaveDirectory)
+		values.attributes.insert(QStringLiteral("chat_file_save_directory"), m_chatSaveDirectory->text());
+	if (m_autoAllowFiles)
+		values.attributes.insert(QStringLiteral("auto_allow_files"),
+		                         m_autoAllowFiles->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_chatTextColour)
+		values.attributes.insert(QStringLiteral("chat_foreground_colour"), readSwatchValue(m_chatTextColour));
+	if (m_chatBackColour)
+		values.attributes.insert(QStringLiteral("chat_background_colour"), readSwatchValue(m_chatBackColour));
+	return values;
+}
+
 void WorldPreferencesDialog::accept()
 {
-	QMap<QString, QString> worldAttributesBeforeApply;
-	QMap<QString, QString> worldMultilineBeforeApply;
+	cancelPendingPagePopulation();
+	bool       accepted                  = false;
+	const auto resumePopulationOnFailure = qScopeGuard(
+	    [this, &accepted]
+	    {
+		    if (!accepted && isVisible())
+			    scheduleRemainingPagePopulation();
+	    });
+	const OptionValues     candidates = collectWorldOptionValues();
+	QMap<QString, QString> pendingAttributes;
+	QMap<QString, QString> pendingMultilineAttributes;
+	for (auto pageIt = m_pageOptionBaselines.cbegin(); pageIt != m_pageOptionBaselines.cend(); ++pageIt)
+	{
+		for (auto it = pageIt->attributes.cbegin(); it != pageIt->attributes.cend(); ++it)
+		{
+			const auto candidate = candidates.attributes.constFind(it.key());
+			if (candidate != candidates.attributes.cend() && candidate.value() != it.value())
+				pendingAttributes.insert(it.key(), candidate.value());
+		}
+		for (auto it = pageIt->multilineAttributes.cbegin(); it != pageIt->multilineAttributes.cend(); ++it)
+		{
+			const auto candidate = candidates.multilineAttributes.constFind(it.key());
+			if (candidate != candidates.multilineAttributes.cend() && candidate.value() != it.value())
+				pendingMultilineAttributes.insert(it.key(), candidate.value());
+		}
+	}
+
 	if (m_runtime)
 	{
-		auto readSwatchValue = [](const QLineEdit *edit) -> QString
-		{
-			if (!edit)
-				return {};
-			QString stored = edit->property("colour_value").toString();
-			if (!stored.isEmpty())
-				return stored;
-			return edit->text();
-		};
-		if (m_worldName && m_worldName->text().trimmed().isEmpty())
+		const QSet<QString> generalValidationKeys = {QStringLiteral("name"), QStringLiteral("site"),
+		                                             QStringLiteral("port")};
+		const bool          incompleteNewWorld =
+		    isPagePopulated(PageGeneral) &&
+		    (m_runtime->worldAttributes().value(QStringLiteral("name")).trimmed().isEmpty() ||
+		     m_runtime->worldAttributes().value(QStringLiteral("site")).trimmed().isEmpty() ||
+		     m_runtime->worldAttributes().value(QStringLiteral("port")).toInt() == 0);
+		const bool validateGeneral =
+		    incompleteNewWorld ||
+		    std::ranges::any_of(generalValidationKeys, [&pendingAttributes](const QString &key)
+		                        { return pendingAttributes.contains(key); });
+		if (validateGeneral && m_worldName && m_worldName->text().trimmed().isEmpty())
 		{
 			QMessageBox::warning(this, QStringLiteral("World Configuration"),
 			                     QStringLiteral("Your world name cannot be blank.\n\n"
@@ -1526,94 +3464,25 @@ void WorldPreferencesDialog::accept()
 			                                    "port number before tabbing to other configuration screens"));
 			return;
 		}
-		if (m_host && m_host->text().trimmed().isEmpty())
+		if (validateGeneral && m_host && m_host->text().trimmed().isEmpty())
 		{
 			QMessageBox::warning(this, QStringLiteral("World Configuration"),
 			                     QStringLiteral("The world IP address cannot be blank."));
 			return;
 		}
-		if (m_port && m_port->value() == 0)
+		if (validateGeneral && m_port && m_port->value() == 0)
 		{
 			QMessageBox::warning(this, QStringLiteral("World Configuration"),
 			                     QStringLiteral("The world port number must be specified."));
 			return;
 		}
-		if (m_useDefaultColours && m_useDefaultColours->isChecked() &&
-		    m_useDefaultColours->isChecked() != m_initialUseDefaultColours && hasDefaultColoursFile())
+		const auto anyAttributePending = [&pendingAttributes](const std::initializer_list<const char *> keys)
 		{
-			const QMessageBox::StandardButton result = QMessageBox::question(
-			    this, QStringLiteral("World Configuration"),
-			    QStringLiteral("By checking the option \"Override with default colours\" "
-			                   " your existing colours will be PERMANENTLY discarded next time "
-			                   "you open this world.\n\nAre you SURE you want to do this?"),
-			    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-			if (result != QMessageBox::Yes)
-				return;
-		}
-		if (m_useDefaultMacros && m_useDefaultMacros->isChecked() &&
-		    m_useDefaultMacros->isChecked() != m_initialUseDefaultMacros && hasDefaultMacrosFile())
-		{
-			const QMessageBox::StandardButton result = QMessageBox::question(
-			    this, QStringLiteral("World Configuration"),
-			    QStringLiteral("By checking the option \"Override with default macros\" "
-			                   " your existing macros will be PERMANENTLY discarded next time "
-			                   "you open this world.\n\nAre you SURE you want to do this?"),
-			    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-			if (result != QMessageBox::Yes)
-				return;
-		}
-		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() &&
-		    m_useDefaultTriggers->isChecked() != m_initialUseDefaultTriggers && hasDefaultTriggersFile())
-		{
-			if (const qsizetype count = m_runtime->triggers().size(); count > 0)
-			{
-				const QMessageBox::StandardButton result = QMessageBox::question(
-				    this, QStringLiteral("World Configuration"),
-				    QStringLiteral("By checking the option \"Override with default triggers\" "
-				                   " your existing %1 trigger%2 will be PERMANENTLY discarded next time "
-				                   "you open this world.\n\nAre you SURE you want to do this?")
-				        .arg(count)
-				        .arg(count == 1 ? QString() : QStringLiteral("s")),
-				    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-				if (result != QMessageBox::Yes)
-					return;
-			}
-		}
-		if (m_useDefaultAliases && m_useDefaultAliases->isChecked() &&
-		    m_useDefaultAliases->isChecked() != m_initialUseDefaultAliases && hasDefaultAliasesFile())
-		{
-			if (const qsizetype count = m_runtime->aliases().size(); count > 0)
-			{
-				const QMessageBox::StandardButton result = QMessageBox::question(
-				    this, QStringLiteral("World Configuration"),
-				    QStringLiteral("By checking the option \"Override with default aliases\" "
-				                   " your existing %1 alias%2 will be PERMANENTLY discarded next time "
-				                   "you open this world.\n\nAre you SURE you want to do this?")
-				        .arg(count)
-				        .arg(count == 1 ? QString() : QStringLiteral("es")),
-				    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-				if (result != QMessageBox::Yes)
-					return;
-			}
-		}
-		if (m_useDefaultTimers && m_useDefaultTimers->isChecked() &&
-		    m_useDefaultTimers->isChecked() != m_initialUseDefaultTimers && hasDefaultTimersFile())
-		{
-			if (const qsizetype count = m_runtime->timers().size(); count > 0)
-			{
-				const QMessageBox::StandardButton result = QMessageBox::question(
-				    this, QStringLiteral("World Configuration"),
-				    QStringLiteral("By checking the option \"Override with default timers\" "
-				                   " your existing %1 timer%2 will be PERMANENTLY discarded next time "
-				                   "you open this world.\n\nAre you SURE you want to do this?")
-				        .arg(count)
-				        .arg(count == 1 ? QString() : QStringLiteral("s")),
-				    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-				if (result != QMessageBox::Yes)
-					return;
-			}
-		}
-		if (m_proxyType)
+			return std::ranges::any_of(keys, [&pendingAttributes](const char *key)
+			                           { return pendingAttributes.contains(QString::fromLatin1(key)); });
+		};
+		if (m_proxyType && anyAttributePending({"proxy_type", "proxy_server", "proxy_port", "proxy_username",
+		                                        "proxy_password"}))
 		{
 			if (const int proxyType = m_proxyType->currentData().toInt();
 			    proxyType == eProxyServerSocks4 || proxyType == eProxyServerSocks5)
@@ -1634,7 +3503,7 @@ void WorldPreferencesDialog::accept()
 				}
 			}
 		}
-		if (m_connectMethod && m_playerName)
+		if (m_connectMethod && m_playerName && anyAttributePending({"connect_method", "player", "password"}))
 		{
 			if (const int method = m_connectMethod->currentData().toInt();
 			    method != eNoAutoConnect && m_playerName->text().trimmed().isEmpty())
@@ -1644,7 +3513,8 @@ void WorldPreferencesDialog::accept()
 				return;
 			}
 		}
-		if (m_enableCommandStack && m_commandStackCharacter)
+		if (m_enableCommandStack && m_commandStackCharacter &&
+		    anyAttributePending({"enable_command_stack", "command_stack_character"}))
 		{
 			if (m_enableCommandStack->isChecked())
 			{
@@ -1658,7 +3528,8 @@ void WorldPreferencesDialog::accept()
 				}
 			}
 		}
-		if (m_enableSpeedWalk && m_speedWalkPrefix)
+		if (m_enableSpeedWalk && m_speedWalkPrefix &&
+		    anyAttributePending({"enable_speed_walk", "speed_walk_prefix"}))
 		{
 			if (m_enableSpeedWalk->isChecked() && m_speedWalkPrefix->text().isEmpty())
 			{
@@ -1667,7 +3538,7 @@ void WorldPreferencesDialog::accept()
 				return;
 			}
 		}
-		if (m_enableAutoSay && m_autoSayString)
+		if (m_enableAutoSay && m_autoSayString && anyAttributePending({"enable_auto_say", "auto_say_string"}))
 		{
 			if (m_enableAutoSay->isChecked() && m_autoSayString->text().trimmed().isEmpty())
 			{
@@ -1676,7 +3547,7 @@ void WorldPreferencesDialog::accept()
 				return;
 			}
 		}
-		if (m_maxLines)
+		if (m_maxLines && pendingAttributes.contains(QStringLiteral("max_output_lines")))
 		{
 			const int oldLines = worldMaxOutputLines(m_runtime->worldAttributes());
 			if (const int newLines = m_maxLines->value(); newLines != oldLines && newLines > 1000)
@@ -1702,7 +3573,7 @@ void WorldPreferencesDialog::accept()
 				}
 			}
 		}
-		if (m_logOutput && m_logRaw)
+		if (m_logOutput && m_logRaw && anyAttributePending({"log_output", "log_raw"}))
 		{
 			if (!m_logOutput->isChecked() && !m_logRaw->isChecked())
 			{
@@ -1714,823 +3585,102 @@ void WorldPreferencesDialog::accept()
 					return;
 			}
 		}
+		if (m_workingLists->triggersStaged && !validateWorkingListNames(WorkingListValidationScope::Triggers))
+			return;
+		if (m_workingLists->aliasesStaged && !validateWorkingListNames(WorkingListValidationScope::Aliases))
+			return;
+		if (m_workingLists->timersStaged && !validateWorkingListNames(WorkingListValidationScope::Timers))
+			return;
+		if (m_workingLists->variablesStaged &&
+		    !validateWorkingListNames(WorkingListValidationScope::Variables))
+			return;
+		QSet<QString> changedOverrideOptions;
+		for (const QString &key :
+		     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+		      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+		      QStringLiteral("use_default_colours"), QStringLiteral("use_default_input_font"),
+		      QStringLiteral("use_default_output_font")})
+		{
+			if (pendingAttributes.contains(key))
+				changedOverrideOptions.insert(key);
+		}
+		QSet<QString> changedDefaultOptions;
+		QSet<QString> suppressedDefaultOptions;
+		for (const QString &key :
+		     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+		      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+		      QStringLiteral("use_default_colours")})
+		{
+			if (changedOverrideOptions.contains(key))
+				changedDefaultOptions.insert(key);
+		}
+		for (const QString &key :
+		     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
+		      QStringLiteral("use_default_timers"), QStringLiteral("use_default_macros"),
+		      QStringLiteral("use_default_colours"), QStringLiteral("use_default_input_font"),
+		      QStringLiteral("use_default_output_font")})
+		{
+			const auto candidate = candidates.attributes.constFind(key);
+			if (candidate != candidates.attributes.cend() && qmudIsEnabledFlag(candidate.value()))
+				suppressedDefaultOptions.insert(key);
+		}
+		if (suppressedDefaultOptions.contains(QStringLiteral("use_default_input_font")))
+		{
+			for (const QString &key :
+			     {QStringLiteral("input_font_name"), QStringLiteral("input_font_height"),
+			      QStringLiteral("input_font_weight"), QStringLiteral("input_font_italic"),
+			      QStringLiteral("input_font_charset")})
+			{
+				pendingAttributes.remove(key);
+			}
+		}
+		if (suppressedDefaultOptions.contains(QStringLiteral("use_default_output_font")))
+		{
+			for (const QString &key :
+			     {QStringLiteral("output_font_name"), QStringLiteral("output_font_height"),
+			      QStringLiteral("output_font_weight"), QStringLiteral("output_font_charset")})
+			{
+				pendingAttributes.remove(key);
+			}
+		}
+		if (!changedDefaultOptions.isEmpty())
+		{
+			AppController *const app = AppController::instance();
+			if (!app)
+			{
+				QMessageBox::warning(this, QStringLiteral("World Configuration"),
+				                     QStringLiteral("The application controller is unavailable."));
+				return;
+			}
+			QString loadError;
+			if (!app->applyConfiguredWorldDefaults(m_runtime, changedDefaultOptions, pendingAttributes,
+			                                       &loadError))
+			{
+				QMessageBox::warning(this, QStringLiteral("World Configuration"), loadError);
+				return;
+			}
+		}
+		const bool workingListsChanged = m_workingLists->triggersStaged || m_workingLists->aliasesStaged ||
+		                                 m_workingLists->timersStaged || m_workingLists->variablesStaged ||
+		                                 m_workingLists->macrosStaged || m_workingLists->coloursStaged;
+		commitWorkingListChanges(suppressedDefaultOptions);
 
-		worldAttributesBeforeApply          = m_runtime->worldAttributes();
-		worldMultilineBeforeApply           = m_runtime->worldMultilineAttributes();
-		const bool    hadLogOpenBeforeApply = m_runtime->isLogOpen();
-		const QString previousAutoLogFileName =
+		const QMap<QString, QString> worldAttributesBeforeApply = m_runtime->worldAttributes();
+		const QMap<QString, QString> worldMultilineBeforeApply  = m_runtime->worldMultilineAttributes();
+		const bool                   hadLogOpenBeforeApply      = m_runtime->isLogOpen();
+		const QString                previousAutoLogFileName =
 		    worldAttributesBeforeApply.value(QStringLiteral("auto_log_file_name"));
 
-		if (m_worldName)
-			m_runtime->setWorldAttribute(QStringLiteral("name"), m_worldName->text().trimmed());
-		if (m_infoWorldId && !m_infoWorldId->text().trimmed().isEmpty())
-			m_runtime->setWorldAttribute(QStringLiteral("id"), m_infoWorldId->text().trimmed());
-		if (m_host)
+		for (auto it = pendingAttributes.cbegin(); it != pendingAttributes.cend(); ++it)
+			m_runtime->setWorldAttribute(it.key(), it.value());
+		for (auto it = pendingMultilineAttributes.cbegin(); it != pendingMultilineAttributes.cend(); ++it)
+			m_runtime->setWorldMultilineAttribute(it.key(), it.value());
+		if (pendingAttributes.contains(QStringLiteral("note_text_colour")))
 		{
-			const QString host = m_host->text().trimmed();
-			m_runtime->setWorldAttribute(QStringLiteral("site"), host);
-		}
-		if (m_port)
-			m_runtime->setWorldAttribute(QStringLiteral("port"), QString::number(m_port->value()));
-		if (m_tlsEncryption)
-			m_runtime->setWorldAttribute(QStringLiteral("tls_encryption"),
-			                             boolAttributeValue(m_tlsEncryption->isChecked()));
-		if (m_tlsMethod)
-			m_runtime->setWorldAttribute(QStringLiteral("tls_method"),
-			                             QString::number(m_tlsMethod->currentData().toInt()));
-		if (m_tlsDisableCertificateValidation)
-			m_runtime->setWorldAttribute(QStringLiteral("tls_disable_certificate_validation"),
-			                             boolAttributeValue(m_tlsDisableCertificateValidation->isChecked()));
-		if (m_saveWorldAutomatically)
-			m_runtime->setWorldAttribute(QStringLiteral("save_world_automatically"),
-			                             m_saveWorldAutomatically->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_autosaveMinutes)
-			m_runtime->setWorldAttribute(QStringLiteral("autosave_minutes"),
-			                             QString::number(m_autosaveMinutes->value()));
-		if (m_proxyType)
-			m_runtime->setWorldAttribute(QStringLiteral("proxy_type"),
-			                             QString::number(m_proxyType->currentData().toInt()));
-		if (m_proxyServer)
-			m_runtime->setWorldAttribute(QStringLiteral("proxy_server"), m_proxyServer->text().trimmed());
-		if (m_proxyPort)
-			m_runtime->setWorldAttribute(QStringLiteral("proxy_port"), QString::number(m_proxyPort->value()));
-		m_runtime->setWorldAttribute(QStringLiteral("proxy_username"), m_proxyUsername);
-		m_runtime->setWorldAttribute(QStringLiteral("proxy_password"), m_proxyPassword);
-
-		if (m_beepSound)
-			m_runtime->setWorldAttribute(QStringLiteral("beep_sound"), m_beepSound->text());
-		if (m_newActivitySound)
-			m_runtime->setWorldAttribute(QStringLiteral("new_activity_sound"), m_newActivitySound->text());
-		if (m_playSoundsInBackground)
-			m_runtime->setWorldAttribute(QStringLiteral("play_sounds_in_background"),
-			                             boolAttributeValue(m_playSoundsInBackground->isChecked()));
-
-		if (m_logOutput)
-			m_runtime->setWorldAttribute(QStringLiteral("log_output"), m_logOutput->isChecked()
-			                                                               ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_logInput)
-			m_runtime->setWorldAttribute(QStringLiteral("log_input"),
-			                             m_logInput->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_logNotes)
-			m_runtime->setWorldAttribute(QStringLiteral("log_notes"),
-			                             m_logNotes->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_logHtml)
-			m_runtime->setWorldAttribute(QStringLiteral("log_html"),
-			                             m_logHtml->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_logRaw)
-			m_runtime->setWorldAttribute(QStringLiteral("log_raw"),
-			                             m_logRaw->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_logInColour)
-			m_runtime->setWorldAttribute(QStringLiteral("log_in_colour"), m_logInColour->isChecked()
-			                                                                  ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_useDefaultColours)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_colours"),
-			                             m_useDefaultColours->isChecked() ? QStringLiteral("1")
-			                                                              : QStringLiteral("0"));
-		if (m_useDefaultMacros)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_macros"), m_useDefaultMacros->isChecked()
-			                                                                       ? QStringLiteral("1")
-			                                                                       : QStringLiteral("0"));
-		if (m_custom16IsDefaultColour)
-			m_runtime->setWorldAttribute(QStringLiteral("custom_16_is_default_colour"),
-			                             m_custom16IsDefaultColour->isChecked() ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_writeWorldNameToLog)
-			m_runtime->setWorldAttribute(QStringLiteral("write_world_name_to_log"),
-			                             m_writeWorldNameToLog->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_logRotateMb)
-			m_runtime->setWorldAttribute(QStringLiteral("log_rotate_mb"),
-			                             QString::number(m_logRotateMb->value()));
-		if (m_logRotateGzip)
-			m_runtime->setWorldAttribute(QStringLiteral("log_rotate_gzip"), m_logRotateGzip->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_autoLogFileName)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_log_file_name"), m_autoLogFileName->text());
-		if (m_logFilePreamble)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("log_file_preamble"),
-			                                      m_logFilePreamble->toPlainText());
-		if (m_logFilePostamble)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("log_file_postamble"),
-			                                      m_logFilePostamble->toPlainText());
-		if (m_logLinePreambleOutput)
-			m_runtime->setWorldAttribute(QStringLiteral("log_line_preamble_output"),
-			                             m_logLinePreambleOutput->text());
-		if (m_logLinePreambleInput)
-			m_runtime->setWorldAttribute(QStringLiteral("log_line_preamble_input"),
-			                             m_logLinePreambleInput->text());
-		if (m_logLinePreambleNotes)
-			m_runtime->setWorldAttribute(QStringLiteral("log_line_preamble_notes"),
-			                             m_logLinePreambleNotes->text());
-		if (m_logLinePostambleOutput)
-			m_runtime->setWorldAttribute(QStringLiteral("log_line_postamble_output"),
-			                             m_logLinePostambleOutput->text());
-		if (m_logLinePostambleInput)
-			m_runtime->setWorldAttribute(QStringLiteral("log_line_postamble_input"),
-			                             m_logLinePostambleInput->text());
-		if (m_logLinePostambleNotes)
-			m_runtime->setWorldAttribute(QStringLiteral("log_line_postamble_notes"),
-			                             m_logLinePostambleNotes->text());
-
-		if (m_wrapColumn)
-			m_runtime->setWorldAttribute(QStringLiteral("wrap_column"),
-			                             QString::number(m_wrapColumn->value()));
-		if (m_maxLines)
-		{
-			const QString maxLinesValue = QString::number(m_maxLines->value());
-			m_runtime->setWorldAttribute(QStringLiteral("max_output_lines"), maxLinesValue);
-		}
-		if (m_wrapOutput)
-			m_runtime->setWorldAttribute(QStringLiteral("wrap"), m_wrapOutput->isChecked()
-			                                                         ? QStringLiteral("1")
-			                                                         : QStringLiteral("0"));
-		if (m_autoWrapWindow)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_wrap_window_width"),
-			                             m_autoWrapWindow->isChecked() ? QStringLiteral("1")
-			                                                           : QStringLiteral("0"));
-		if (m_lineInformation)
-			m_runtime->setWorldAttribute(QStringLiteral("line_information"), m_lineInformation->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_startPaused)
-			m_runtime->setWorldAttribute(QStringLiteral("start_paused"), m_startPaused->isChecked()
-			                                                                 ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_autoPause)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_pause"), m_autoPause->isChecked()
-			                                                               ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_unpauseOnSend)
-			m_runtime->setWorldAttribute(QStringLiteral("unpause_on_send"), m_unpauseOnSend->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_keepPauseAtBottomOption)
-			m_runtime->setWorldAttribute(QStringLiteral("keep_pause_at_bottom"),
-			                             boolAttributeValue(m_keepPauseAtBottomOption->isChecked()));
-		if (m_doNotShowOutstandingLines)
-			m_runtime->setWorldAttribute(QStringLiteral("do_not_show_outstanding_lines"),
-			                             boolAttributeValue(m_doNotShowOutstandingLines->isChecked()));
-		if (m_indentParas)
-			m_runtime->setWorldAttribute(QStringLiteral("indent_paras"), m_indentParas->isChecked()
-			                                                                 ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_alternativeInverse)
-			m_runtime->setWorldAttribute(QStringLiteral("alternative_inverse"),
-			                             m_alternativeInverse->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_enableBeeps)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_beeps"), m_enableBeeps->isChecked()
-			                                                                 ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_disableCompression)
-			m_runtime->setWorldAttribute(QStringLiteral("disable_compression"),
-			                             m_disableCompression->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_flashIcon)
-			m_runtime->setWorldAttribute(QStringLiteral("flash_taskbar_icon"), m_flashIcon->isChecked()
-			                                                                       ? QStringLiteral("1")
-			                                                                       : QStringLiteral("0"));
-		if (m_showBold)
-			m_runtime->setWorldAttribute(QStringLiteral("show_bold"),
-			                             m_showBold->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_showItalic)
-			m_runtime->setWorldAttribute(QStringLiteral("show_italic"), m_showItalic->isChecked()
-			                                                                ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_showUnderline)
-			m_runtime->setWorldAttribute(QStringLiteral("show_underline"), m_showUnderline->isChecked()
-			                                                                   ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_useDefaultOutputFont)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_output_font"),
-			                             m_useDefaultOutputFont->isChecked() ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_outputFontName)
-			m_runtime->setWorldAttribute(QStringLiteral("output_font_name"), m_outputFontName->text());
-		if (m_outputFontHeight)
-			m_runtime->setWorldAttribute(QStringLiteral("output_font_height"),
-			                             QString::number(m_outputFontHeight->value()));
-		m_runtime->setWorldAttribute(QStringLiteral("output_font_weight"),
-		                             QString::number(m_outputFontWeight));
-		m_runtime->setWorldAttribute(QStringLiteral("output_font_charset"),
-		                             QString::number(m_outputFontCharset));
-		if (m_lineSpacing)
-			m_runtime->setWorldAttribute(QStringLiteral("line_spacing"),
-			                             QString::number(m_lineSpacing->value()));
-		if (m_pixelOffset)
-			m_runtime->setWorldAttribute(QStringLiteral("pixel_offset"),
-			                             QString::number(m_pixelOffset->value()));
-		if (m_naws)
-			m_runtime->setWorldAttribute(QStringLiteral("naws"),
-			                             m_naws->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_terminalIdentification)
-			m_runtime->setWorldAttribute(QStringLiteral("terminal_identification"),
-			                             m_terminalIdentification->text());
-		if (m_showConnectDisconnect)
-			m_runtime->setWorldAttribute(QStringLiteral("show_connect_disconnect"),
-			                             m_showConnectDisconnect->isChecked() ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_copySelectionToClipboard)
-			m_runtime->setWorldAttribute(QStringLiteral("copy_selection_to_clipboard"),
-			                             m_copySelectionToClipboard->isChecked() ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_autoCopyHtml)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_copy_to_clipboard_in_html"),
-			                             m_autoCopyHtml->isChecked() ? QStringLiteral("1")
-			                                                         : QStringLiteral("0"));
-		if (m_utf8)
-			m_runtime->setWorldAttribute(QStringLiteral("utf_8"),
-			                             m_utf8->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_legacyEncoding)
-			m_runtime->setWorldAttribute(QStringLiteral("legacy_encoding"),
-			                             m_legacyEncoding->currentData().toString());
-		if (m_carriageReturnClearsLine)
-			m_runtime->setWorldAttribute(QStringLiteral("carriage_return_clears_line"),
-			                             m_carriageReturnClearsLine->isChecked() ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_convertGaToNewline)
-			m_runtime->setWorldAttribute(QStringLiteral("convert_ga_to_newline"),
-			                             m_convertGaToNewline->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_sendKeepAlives)
-			m_runtime->setWorldAttribute(QStringLiteral("send_keep_alives"), m_sendKeepAlives->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_persistOutputBuffer)
-			m_runtime->setWorldAttribute(QStringLiteral("persist_output_buffer"),
-			                             boolAttributeValue(m_persistOutputBuffer->isChecked()));
-		if (m_toolTipVisibleTime)
-			m_runtime->setWorldAttribute(QStringLiteral("tool_tip_visible_time"),
-			                             QString::number(m_toolTipVisibleTime->value()));
-		if (m_toolTipStartTime)
-			m_runtime->setWorldAttribute(QStringLiteral("tool_tip_start_time"),
-			                             QString::number(m_toolTipStartTime->value()));
-		if (m_fadeOutputBufferAfterSeconds)
-			m_runtime->setWorldAttribute(QStringLiteral("fade_output_buffer_after_seconds"),
-			                             QString::number(m_fadeOutputBufferAfterSeconds->value()));
-		if (m_fadeOutputOpacityPercent)
-			m_runtime->setWorldAttribute(QStringLiteral("fade_output_opacity_percent"),
-			                             QString::number(m_fadeOutputOpacityPercent->value()));
-		if (m_fadeOutputSeconds)
-			m_runtime->setWorldAttribute(QStringLiteral("fade_output_seconds"),
-			                             QString::number(m_fadeOutputSeconds->value()));
-
-		if (m_arrowsChangeHistory)
-			m_runtime->setWorldAttribute(QStringLiteral("arrows_change_history"),
-			                             m_arrowsChangeHistory->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_arrowKeysWrap)
-			m_runtime->setWorldAttribute(QStringLiteral("arrow_keys_wrap"), m_arrowKeysWrap->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_arrowRecallsPartial)
-			m_runtime->setWorldAttribute(QStringLiteral("arrow_recalls_partial"),
-			                             m_arrowRecallsPartial->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_altArrowRecallsPartial)
-			m_runtime->setWorldAttribute(QStringLiteral("alt_arrow_recalls_partial"),
-			                             m_altArrowRecallsPartial->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_keepCommandsOnSameLine)
-			m_runtime->setWorldAttribute(QStringLiteral("keep_commands_on_same_line"),
-			                             m_keepCommandsOnSameLine->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_confirmBeforeReplacingTyping)
-			m_runtime->setWorldAttribute(QStringLiteral("confirm_before_replacing_typing"),
-			                             m_confirmBeforeReplacingTyping->isChecked() ? QStringLiteral("1")
-			                                                                         : QStringLiteral("0"));
-		if (m_escapeDeletesInput)
-			m_runtime->setWorldAttribute(QStringLiteral("escape_deletes_input"),
-			                             m_escapeDeletesInput->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_doubleClickInserts)
-			m_runtime->setWorldAttribute(QStringLiteral("double_click_inserts"),
-			                             m_doubleClickInserts->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_doubleClickSends)
-			m_runtime->setWorldAttribute(QStringLiteral("double_click_sends"), m_doubleClickSends->isChecked()
-			                                                                       ? QStringLiteral("1")
-			                                                                       : QStringLiteral("0"));
-		if (m_saveDeletedCommand)
-			m_runtime->setWorldAttribute(QStringLiteral("save_deleted_command"),
-			                             m_saveDeletedCommand->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_partialSaveCharacterThreshold)
-			m_runtime->setWorldAttribute(QStringLiteral("partial_save_character_threshold"),
-			                             QString::number(m_partialSaveCharacterThreshold->value()));
-		if (m_ctrlZToEnd)
-			m_runtime->setWorldAttribute(QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
-			                             m_ctrlZToEnd->isChecked() ? QStringLiteral("1")
-			                                                       : QStringLiteral("0"));
-		if (m_ctrlPToPrev)
-			m_runtime->setWorldAttribute(QStringLiteral("ctrl_p_goes_to_previous_command"),
-			                             m_ctrlPToPrev->isChecked() ? QStringLiteral("1")
-			                                                        : QStringLiteral("0"));
-		if (m_ctrlNToNext)
-			m_runtime->setWorldAttribute(QStringLiteral("ctrl_n_goes_to_next_command"),
-			                             m_ctrlNToNext->isChecked() ? QStringLiteral("1")
-			                                                        : QStringLiteral("0"));
-		if (m_ctrlBackspaceDeletesLastWord)
-			m_runtime->setWorldAttribute(QStringLiteral("ctrl_backspace_deletes_last_word"),
-			                             boolAttributeValue(m_ctrlBackspaceDeletesLastWord->isChecked()));
-		if (m_enableCommandStack)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_command_stack"),
-			                             m_enableCommandStack->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_commandStackCharacter)
-		{
-			QString value = m_commandStackCharacter->text();
-			if (m_enableCommandStack && !m_enableCommandStack->isChecked() && value.isEmpty())
-				value = QStringLiteral(" ");
-			m_runtime->setWorldAttribute(QStringLiteral("command_stack_character"), value);
-		}
-		if (m_enableSpeedWalk)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_speed_walk"), m_enableSpeedWalk->isChecked()
-			                                                                      ? QStringLiteral("1")
-			                                                                      : QStringLiteral("0"));
-		if (m_speedWalkPrefix)
-			m_runtime->setWorldAttribute(QStringLiteral("speed_walk_prefix"), m_speedWalkPrefix->text());
-		if (m_speedWalkFiller)
-			m_runtime->setWorldAttribute(QStringLiteral("speed_walk_filler"), m_speedWalkFiller->text());
-		if (m_speedWalkDelay)
-			m_runtime->setWorldAttribute(QStringLiteral("speed_walk_delay"),
-			                             QString::number(m_speedWalkDelay->value()));
-		if (m_displayMyInput)
-			m_runtime->setWorldAttribute(QStringLiteral("display_my_input"), m_displayMyInput->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_historyLines)
-			m_runtime->setWorldAttribute(QStringLiteral("history_lines"),
-			                             QString::number(m_historyLines->value()));
-		if (m_persistCommandHistory)
-			m_runtime->setWorldAttribute(QStringLiteral("persist_command_history"),
-			                             boolAttributeValue(m_persistCommandHistory->isChecked()));
-		if (m_alwaysRecordCommandHistory)
-			m_runtime->setWorldAttribute(QStringLiteral("always_record_command_history"),
-			                             boolAttributeValue(m_alwaysRecordCommandHistory->isChecked()));
-		if (m_doNotAddMacrosToCommandHistory)
-			m_runtime->setWorldAttribute(QStringLiteral("do_not_add_macros_to_command_history"),
-			                             boolAttributeValue(m_doNotAddMacrosToCommandHistory->isChecked()));
-		if (m_autoResizeCommandWindow)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_resize_command_window"),
-			                             boolAttributeValue(m_autoResizeCommandWindow->isChecked()));
-		if (m_autoResizeMinimumLines)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_resize_minimum_lines"),
-			                             QString::number(m_autoResizeMinimumLines->value()));
-		if (m_autoResizeMaximumLines)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_resize_maximum_lines"),
-			                             QString::number(m_autoResizeMaximumLines->value()));
-		if (m_autoRepeat)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_repeat"), m_autoRepeat->isChecked()
-			                                                                ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_lowerCaseTabCompletion)
-			m_runtime->setWorldAttribute(QStringLiteral("lower_case_tab_completion"),
-			                             m_lowerCaseTabCompletion->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_tabCompletionExcludesSymbolPrefix)
-			m_runtime->setWorldAttribute(
-			    QStringLiteral("tab_completion_excludes_symbol_prefix"),
-			    m_tabCompletionExcludesSymbolPrefix->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_tabCompletionExcludesSymbolSuffix)
-			m_runtime->setWorldAttribute(
-			    QStringLiteral("tab_completion_excludes_symbol_suffix"),
-			    m_tabCompletionExcludesSymbolSuffix->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_translateGerman)
-			m_runtime->setWorldAttribute(QStringLiteral("translate_german"), m_translateGerman->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_spellCheckOnSend)
-			m_runtime->setWorldAttribute(QStringLiteral("spell_check_on_send"),
-			                             m_spellCheckOnSend->isChecked() ? QStringLiteral("1")
-			                                                             : QStringLiteral("0"));
-		if (m_translateBackslash)
-			m_runtime->setWorldAttribute(QStringLiteral("translate_backslash_sequences"),
-			                             m_translateBackslash->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_tabCompletionDefaults)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("tab_completion_defaults"),
-			                                      m_tabCompletionDefaults->toPlainText());
-		if (m_tabCompletionLines)
-			m_runtime->setWorldAttribute(QStringLiteral("tab_completion_lines"),
-			                             QString::number(m_tabCompletionLines->value()));
-		if (m_tabCompletionSpace)
-			m_runtime->setWorldAttribute(QStringLiteral("tab_completion_space"),
-			                             m_tabCompletionSpace->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_useDefaultInputFont)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_input_font"),
-			                             m_useDefaultInputFont->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_inputFontName)
-			m_runtime->setWorldAttribute(QStringLiteral("input_font_name"), m_inputFontName->text());
-		if (m_inputFontHeight)
-			m_runtime->setWorldAttribute(QStringLiteral("input_font_height"),
-			                             QString::number(m_inputFontHeight->value()));
-		m_runtime->setWorldAttribute(QStringLiteral("input_font_weight"), QString::number(m_inputFontWeight));
-		m_runtime->setWorldAttribute(QStringLiteral("input_font_italic"),
-		                             m_inputFontItalic ? QStringLiteral("1") : QStringLiteral("0"));
-		m_runtime->setWorldAttribute(QStringLiteral("input_font_charset"),
-		                             QString::number(m_inputFontCharset));
-		if (m_noEchoOff)
-			m_runtime->setWorldAttribute(QStringLiteral("no_echo_off"), m_noEchoOff->isChecked()
-			                                                                ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_echoForceTerminatesPartialPrompts)
-			m_runtime->setWorldAttribute(
-			    QStringLiteral("echo_force_terminates_partial_prompts"),
-			    m_echoForceTerminatesPartialPrompts->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-		if (m_enableSpamPrevention)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_spam_prevention"),
-			                             m_enableSpamPrevention->isChecked() ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_spamLineCount)
-			m_runtime->setWorldAttribute(QStringLiteral("spam_line_count"),
-			                             QString::number(m_spamLineCount->value()));
-		if (m_spamMessage)
-			m_runtime->setWorldAttribute(QStringLiteral("spam_message"), m_spamMessage->text());
-		if (m_inputTextColour)
-			m_runtime->setWorldAttribute(QStringLiteral("input_text_colour"), m_inputTextColour->text());
-		if (m_inputBackColour)
-			m_runtime->setWorldAttribute(QStringLiteral("input_background_colour"),
-			                             m_inputBackColour->text());
-		if (m_echoColour)
-			m_runtime->setWorldAttribute(QStringLiteral("echo_colour"),
-			                             QString::number(m_echoColour->currentIndex()));
-
-		if (m_enableAliases)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_aliases"), m_enableAliases->isChecked()
-			                                                                   ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_useDefaultAliases)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_aliases"),
-			                             m_useDefaultAliases->isChecked() ? QStringLiteral("1")
-			                                                              : QStringLiteral("0"));
-		if (m_aliasTreeView)
-			m_runtime->setWorldAttribute(QStringLiteral("treeview_aliases"), m_aliasTreeView->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_defaultAliasExpandVariables)
-			m_runtime->setWorldAttribute(QStringLiteral("default_alias_expand_variables"),
-			                             boolAttributeValue(m_defaultAliasExpandVariables->isChecked()));
-		if (m_defaultAliasIgnoreCase)
-			m_runtime->setWorldAttribute(QStringLiteral("default_alias_ignore_case"),
-			                             boolAttributeValue(m_defaultAliasIgnoreCase->isChecked()));
-		if (m_defaultAliasKeepEvaluating)
-			m_runtime->setWorldAttribute(QStringLiteral("default_alias_keep_evaluating"),
-			                             boolAttributeValue(m_defaultAliasKeepEvaluating->isChecked()));
-		if (m_defaultAliasRegexp)
-			m_runtime->setWorldAttribute(QStringLiteral("default_alias_regexp"),
-			                             boolAttributeValue(m_defaultAliasRegexp->isChecked()));
-		if (m_defaultAliasSendTo)
-			m_runtime->setWorldAttribute(QStringLiteral("default_alias_send_to"),
-			                             QString::number(m_defaultAliasSendTo->value()));
-		if (m_defaultAliasSequence)
-			m_runtime->setWorldAttribute(QStringLiteral("default_alias_sequence"),
-			                             QString::number(m_defaultAliasSequence->value()));
-		if (m_enableTriggers)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_triggers"), m_enableTriggers->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_enableTriggerSounds)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_trigger_sounds"),
-			                             m_enableTriggerSounds->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_useDefaultTriggers)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_triggers"),
-			                             m_useDefaultTriggers->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_triggerTreeView)
-			m_runtime->setWorldAttribute(QStringLiteral("treeview_triggers"), m_triggerTreeView->isChecked()
-			                                                                      ? QStringLiteral("1")
-			                                                                      : QStringLiteral("0"));
-		if (m_defaultTriggerExpandVariables)
-			m_runtime->setWorldAttribute(QStringLiteral("default_trigger_expand_variables"),
-			                             boolAttributeValue(m_defaultTriggerExpandVariables->isChecked()));
-		if (m_defaultTriggerIgnoreCase)
-			m_runtime->setWorldAttribute(QStringLiteral("default_trigger_ignore_case"),
-			                             boolAttributeValue(m_defaultTriggerIgnoreCase->isChecked()));
-		if (m_defaultTriggerKeepEvaluating)
-			m_runtime->setWorldAttribute(QStringLiteral("default_trigger_keep_evaluating"),
-			                             boolAttributeValue(m_defaultTriggerKeepEvaluating->isChecked()));
-		if (m_defaultTriggerRegexp)
-			m_runtime->setWorldAttribute(QStringLiteral("default_trigger_regexp"),
-			                             boolAttributeValue(m_defaultTriggerRegexp->isChecked()));
-		if (m_defaultTriggerSendTo)
-			m_runtime->setWorldAttribute(QStringLiteral("default_trigger_send_to"),
-			                             QString::number(m_defaultTriggerSendTo->value()));
-		if (m_defaultTriggerSequence)
-			m_runtime->setWorldAttribute(QStringLiteral("default_trigger_sequence"),
-			                             QString::number(m_defaultTriggerSequence->value()));
-		if (m_enableTimers)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_timers"), m_enableTimers->isChecked()
-			                                                                  ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_useDefaultTimers)
-			m_runtime->setWorldAttribute(QStringLiteral("use_default_timers"), m_useDefaultTimers->isChecked()
-			                                                                       ? QStringLiteral("1")
-			                                                                       : QStringLiteral("0"));
-		if (m_timerTreeView)
-			m_runtime->setWorldAttribute(QStringLiteral("treeview_timers"), m_timerTreeView->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_defaultTimerSendTo)
-			m_runtime->setWorldAttribute(QStringLiteral("default_timer_send_to"),
-			                             QString::number(m_defaultTimerSendTo->value()));
-
-		if (m_enableScripts)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_scripts"), m_enableScripts->isChecked()
-			                                                                   ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_scriptLanguage && m_scriptLanguage->currentIndex() >= 0)
-			m_runtime->setWorldAttribute(QStringLiteral("script_language"),
-			                             m_scriptLanguage->currentData().toString());
-		if (m_scriptFile)
-			m_runtime->setWorldAttribute(QStringLiteral("script_filename"), m_scriptFile->text());
-		if (m_scriptPrefix)
-			m_runtime->setWorldAttribute(QStringLiteral("script_prefix"), m_scriptPrefix->text());
-		if (m_scriptEditor)
-			m_runtime->setWorldAttribute(QStringLiteral("script_editor"), m_scriptEditor->text());
-		if (m_editorWindowName)
-			m_runtime->setWorldAttribute(QStringLiteral("editor_window_name"), m_editorWindowName->text());
-		if (m_editScriptWithNotepad)
-			m_runtime->setWorldAttribute(QStringLiteral("edit_script_with_notepad"),
-			                             m_editScriptWithNotepad->isChecked() ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_scriptReloadOption)
-			m_runtime->setWorldAttribute(QStringLiteral("script_reload_option"),
-			                             QString::number(m_scriptReloadOption->currentData().toInt()));
-		if (m_scriptTextColour && m_scriptTextColour->currentIndex() >= 0)
-		{
-			const int     notePublicIndex = qBound(0, m_scriptTextColour->currentIndex(), MAX_CUSTOM);
-			const QString encoded         = QMudNoteColour::worldAttributeFromPublicIndex(notePublicIndex);
-			m_runtime->setWorldAttribute(QStringLiteral("note_text_colour"), encoded);
+			const int notePublicIndex = QMudNoteColour::publicIndexFromWorldAttribute(
+			    pendingAttributes.value(QStringLiteral("note_text_colour")));
 			m_runtime->setNoteTextColour(notePublicIndex);
 		}
-		if (m_warnIfScriptingInactive)
-			m_runtime->setWorldAttribute(QStringLiteral("warn_if_scripting_inactive"),
-			                             m_warnIfScriptingInactive->isChecked() ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_scriptErrorsToOutput)
-			m_runtime->setWorldAttribute(QStringLiteral("script_errors_to_output_window"),
-			                             m_scriptErrorsToOutput->isChecked() ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_logScriptErrors)
-			m_runtime->setWorldAttribute(QStringLiteral("log_script_errors"),
-			                             boolAttributeValue(m_logScriptErrors->isChecked()));
-		if (m_onWorldOpen)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_open"), m_onWorldOpen->text().trimmed());
-		if (m_onWorldClose)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_close"), m_onWorldClose->text().trimmed());
-		if (m_onWorldConnect)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_connect"),
-			                             m_onWorldConnect->text().trimmed());
-		if (m_onWorldDisconnect)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_disconnect"),
-			                             m_onWorldDisconnect->text().trimmed());
-		if (m_onWorldSave)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_save"), m_onWorldSave->text().trimmed());
-		if (m_onWorldGetFocus)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_get_focus"),
-			                             m_onWorldGetFocus->text().trimmed());
-		if (m_onWorldLoseFocus)
-			m_runtime->setWorldAttribute(QStringLiteral("on_world_lose_focus"),
-			                             m_onWorldLoseFocus->text().trimmed());
-		if (m_onMxpStart)
-			m_runtime->setWorldAttribute(QStringLiteral("on_mxp_start"), m_onMxpStart->text().trimmed());
-		if (m_onMxpStop)
-			m_runtime->setWorldAttribute(QStringLiteral("on_mxp_stop"), m_onMxpStop->text().trimmed());
-		if (m_onMxpOpenTag)
-			m_runtime->setWorldAttribute(QStringLiteral("on_mxp_open_tag"), m_onMxpOpenTag->text().trimmed());
-		if (m_onMxpCloseTag)
-			m_runtime->setWorldAttribute(QStringLiteral("on_mxp_close_tag"),
-			                             m_onMxpCloseTag->text().trimmed());
-		if (m_onMxpSetVariable)
-			m_runtime->setWorldAttribute(QStringLiteral("on_mxp_set_variable"),
-			                             m_onMxpSetVariable->text().trimmed());
-		if (m_onMxpError)
-			m_runtime->setWorldAttribute(QStringLiteral("on_mxp_error"), m_onMxpError->text().trimmed());
-
-		m_runtime->setWorldMultilineAttribute(QStringLiteral("filter_triggers"), m_triggerFilterText);
-		m_runtime->setWorldMultilineAttribute(QStringLiteral("filter_aliases"), m_aliasFilterText);
-		m_runtime->setWorldMultilineAttribute(QStringLiteral("filter_timers"), m_timerFilterText);
-		m_runtime->setWorldMultilineAttribute(QStringLiteral("filter_variables"), m_variableFilterText);
-
-		if (m_sendToWorldFilePreamble)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("send_to_world_file_preamble"),
-			                                      m_sendToWorldFilePreamble->toPlainText());
-		if (m_sendToWorldFilePostamble)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("send_to_world_file_postamble"),
-			                                      m_sendToWorldFilePostamble->toPlainText());
-		if (m_sendToWorldLinePreamble)
-			m_runtime->setWorldAttribute(QStringLiteral("send_to_world_line_preamble"),
-			                             m_sendToWorldLinePreamble->text());
-		if (m_sendToWorldLinePostamble)
-			m_runtime->setWorldAttribute(QStringLiteral("send_to_world_line_postamble"),
-			                             m_sendToWorldLinePostamble->text());
-		if (m_sendConfirm)
-			m_runtime->setWorldAttribute(QStringLiteral("confirm_on_send"), m_sendConfirm->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_sendCommentedSoftcode)
-			m_runtime->setWorldAttribute(QStringLiteral("send_file_commented_softcode"),
-			                             m_sendCommentedSoftcode->isChecked() ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_sendLineDelay)
-			m_runtime->setWorldAttribute(QStringLiteral("send_file_delay"),
-			                             QString::number(m_sendLineDelay->value()));
-		if (m_sendDelayPerLines)
-			m_runtime->setWorldAttribute(QStringLiteral("send_file_delay_per_lines"),
-			                             QString::number(m_sendDelayPerLines->value()));
-		if (m_sendEcho)
-			m_runtime->setWorldAttribute(QStringLiteral("send_echo"),
-			                             m_sendEcho->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
-
-		if (m_notes)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("notes"), m_notes->toPlainText());
-
-		if (m_keypadEnabled)
-			m_runtime->setWorldAttribute(QStringLiteral("keypad_enable"), m_keypadEnabled->isChecked()
-			                                                                  ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_keypadControl)
-			m_runtime->setWorldAttribute(QStringLiteral("keypad_ctrl_view"), m_keypadControl->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-
-		if (m_pastePreamble)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("paste_preamble"),
-			                                      m_pastePreamble->toPlainText());
-		if (m_pastePostamble)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("paste_postamble"),
-			                                      m_pastePostamble->toPlainText());
-		if (m_pasteLinePreamble)
-			m_runtime->setWorldAttribute(QStringLiteral("paste_line_preamble"), m_pasteLinePreamble->text());
-		if (m_pasteLinePostamble)
-			m_runtime->setWorldAttribute(QStringLiteral("paste_line_postamble"),
-			                             m_pasteLinePostamble->text());
-		if (m_confirmOnPaste)
-			m_runtime->setWorldAttribute(QStringLiteral("confirm_on_paste"), m_confirmOnPaste->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_commentedSoftcodePaste)
-			m_runtime->setWorldAttribute(QStringLiteral("paste_commented_softcode"),
-			                             m_commentedSoftcodePaste->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_pasteLineDelay)
-			m_runtime->setWorldAttribute(QStringLiteral("paste_delay"),
-			                             QString::number(m_pasteLineDelay->value()));
-		if (m_pasteDelayPerLines)
-			m_runtime->setWorldAttribute(QStringLiteral("paste_delay_per_lines"),
-			                             QString::number(m_pasteDelayPerLines->value()));
-		if (m_pasteEcho)
-			m_runtime->setWorldAttribute(QStringLiteral("paste_echo"), m_pasteEcho->isChecked()
-			                                                               ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-
-		if (m_enableAutoSay)
-			m_runtime->setWorldAttribute(QStringLiteral("enable_auto_say"), m_enableAutoSay->isChecked()
-			                                                                    ? QStringLiteral("1")
-			                                                                    : QStringLiteral("0"));
-		if (m_reEvaluateAutoSay)
-			m_runtime->setWorldAttribute(QStringLiteral("re_evaluate_auto_say"),
-			                             m_reEvaluateAutoSay->isChecked() ? QStringLiteral("1")
-			                                                              : QStringLiteral("0"));
-		if (m_autoSayExcludeNonAlpha)
-			m_runtime->setWorldAttribute(QStringLiteral("autosay_exclude_non_alpha"),
-			                             m_autoSayExcludeNonAlpha->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_autoSayExcludeMacros)
-			m_runtime->setWorldAttribute(QStringLiteral("autosay_exclude_macros"),
-			                             m_autoSayExcludeMacros->isChecked() ? QStringLiteral("1")
-			                                                                 : QStringLiteral("0"));
-		if (m_autoSayString)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_say_string"), m_autoSayString->text());
-		if (m_autoSayOverridePrefix)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_say_override_prefix"),
-			                             m_autoSayOverridePrefix->text());
-
-		if (m_playerName)
-			m_runtime->setWorldAttribute(QStringLiteral("player"), m_playerName->text().trimmed());
-		if (m_password)
-			m_runtime->setWorldAttribute(QStringLiteral("password"), m_password->text());
-		if (m_connectText)
-			m_runtime->setWorldMultilineAttribute(QStringLiteral("connect_text"),
-			                                      m_connectText->toPlainText());
-		if (m_connectMethod && m_connectMethod->currentIndex() >= 0)
-			m_runtime->setWorldAttribute(QStringLiteral("connect_method"),
-			                             QString::number(m_connectMethod->currentData().toInt()));
-		if (m_connectDelay)
-			m_runtime->setWorldAttribute(QStringLiteral("connect_delay"),
-			                             QString::number(m_connectDelay->value()));
-		if (m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops)
-		{
-			m_runtime->setWorldAttribute(
-			    QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"),
-			    m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked()
-			        ? QStringLiteral("1")
-			        : QStringLiteral("0"));
-		}
-		if (m_onlyNegotiateTelnetOptionsOnce)
-			m_runtime->setWorldAttribute(QStringLiteral("only_negotiate_telnet_options_once"),
-			                             m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
-			                                                                           : QStringLiteral("0"));
-
-		if (m_useMxp && m_useMxp->currentIndex() >= 0)
-			m_runtime->setWorldAttribute(QStringLiteral("use_mxp"), m_useMxp->currentData().toString());
-		if (m_mxpDebugLevel && m_mxpDebugLevel->currentIndex() >= 0)
-			m_runtime->setWorldAttribute(QStringLiteral("mxp_debug_level"),
-			                             m_mxpDebugLevel->currentData().toString());
-		if (m_detectPueblo)
-			m_runtime->setWorldAttribute(QStringLiteral("detect_pueblo"), m_detectPueblo->isChecked()
-			                                                                  ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_hyperlinkColour)
-			m_runtime->setWorldAttribute(QStringLiteral("hyperlink_colour"),
-			                             readSwatchValue(m_hyperlinkColour));
-		if (m_useCustomLinkColour)
-			m_runtime->setWorldAttribute(QStringLiteral("use_custom_link_colour"),
-			                             m_useCustomLinkColour->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_mudCanChangeLinkColour)
-			m_runtime->setWorldAttribute(QStringLiteral("mud_can_change_link_colour"),
-			                             m_mudCanChangeLinkColour->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_underlineHyperlinks)
-			m_runtime->setWorldAttribute(QStringLiteral("underline_hyperlinks"),
-			                             m_underlineHyperlinks->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-		if (m_mudCanRemoveUnderline)
-			m_runtime->setWorldAttribute(QStringLiteral("mud_can_remove_underline"),
-			                             m_mudCanRemoveUnderline->isChecked() ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_hyperlinkAddsToCommandHistory)
-			m_runtime->setWorldAttribute(QStringLiteral("hyperlink_adds_to_command_history"),
-			                             m_hyperlinkAddsToCommandHistory->isChecked() ? QStringLiteral("1")
-			                                                                          : QStringLiteral("0"));
-		if (m_echoHyperlinkInOutput)
-			m_runtime->setWorldAttribute(QStringLiteral("echo_hyperlink_in_output_window"),
-			                             m_echoHyperlinkInOutput->isChecked() ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_ignoreMxpColourChanges)
-			m_runtime->setWorldAttribute(QStringLiteral("ignore_mxp_colour_changes"),
-			                             m_ignoreMxpColourChanges->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
-		if (m_sendMxpAfkResponse)
-			m_runtime->setWorldAttribute(QStringLiteral("send_mxp_afk_response"),
-			                             m_sendMxpAfkResponse->isChecked() ? QStringLiteral("1")
-			                                                               : QStringLiteral("0"));
-		if (m_mudCanChangeOptions)
-			m_runtime->setWorldAttribute(QStringLiteral("mud_can_change_options"),
-			                             m_mudCanChangeOptions->isChecked() ? QStringLiteral("1")
-			                                                                : QStringLiteral("0"));
-
-		if (m_chatName)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_name"), m_chatName->text());
-		if (m_autoAllowSnooping)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_allow_snooping"),
-			                             m_autoAllowSnooping->isChecked() ? QStringLiteral("1")
-			                                                              : QStringLiteral("0"));
-		if (m_acceptIncomingChatConnections)
-			m_runtime->setWorldAttribute(QStringLiteral("accept_chat_connections"),
-			                             m_acceptIncomingChatConnections->isChecked() ? QStringLiteral("1")
-			                                                                          : QStringLiteral("0"));
-		if (m_incomingChatPort)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_port"),
-			                             QString::number(m_incomingChatPort->value()));
-		if (m_validateIncomingCalls)
-			m_runtime->setWorldAttribute(QStringLiteral("validate_incoming_chat_calls"),
-			                             m_validateIncomingCalls->isChecked() ? QStringLiteral("1")
-			                                                                  : QStringLiteral("0"));
-		if (m_ignoreChatColours)
-			m_runtime->setWorldAttribute(QStringLiteral("ignore_chat_colours"),
-			                             m_ignoreChatColours->isChecked() ? QStringLiteral("1")
-			                                                              : QStringLiteral("0"));
-		if (m_chatMessagePrefix)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_message_prefix"), m_chatMessagePrefix->text());
-		if (m_maxChatLines)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_max_lines_per_message"),
-			                             QString::number(m_maxChatLines->value()));
-		if (m_maxChatBytes)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_max_bytes_per_message"),
-			                             QString::number(m_maxChatBytes->value()));
-		if (m_chatSaveDirectory)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_file_save_directory"),
-			                             m_chatSaveDirectory->text());
-		if (m_autoAllowFiles)
-			m_runtime->setWorldAttribute(QStringLiteral("auto_allow_files"), m_autoAllowFiles->isChecked()
-			                                                                     ? QStringLiteral("1")
-			                                                                     : QStringLiteral("0"));
-		if (m_chatTextColour)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_foreground_colour"),
-			                             readSwatchValue(m_chatTextColour));
-		if (m_chatBackColour)
-			m_runtime->setWorldAttribute(QStringLiteral("chat_background_colour"),
-			                             readSwatchValue(m_chatBackColour));
 
 		const QString updatedAutoLogFileName =
 		    m_runtime->worldAttributes().value(QStringLiteral("auto_log_file_name"));
@@ -2612,33 +3762,36 @@ void WorldPreferencesDialog::accept()
 				}
 			}
 		}
-	}
-
-	applyListEdits();
-	if (AppController *app = AppController::instance())
-		app->applyConfiguredWorldDefaults(m_runtime);
-	m_runtime->refreshCommandProcessorOptions();
-	m_runtime->syncChatAcceptCallsWithPreferences();
-
-	if (m_view)
-	{
-		const QSet<QString> changedViewAttributeKeys = WorldView::changedRuntimeSettingsAttributeKeys(
-		    worldAttributesBeforeApply, m_runtime->worldAttributes());
-		const QSet<QString> changedViewMultilineKeys =
-		    WorldView::changedRuntimeSettingsMultilineAttributeKeys(
-		        worldMultilineBeforeApply, m_runtime->worldMultilineAttributes(), worldAttributesBeforeApply,
-		        m_runtime->worldAttributes());
-		if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
+		const QSet<QString> changedAuxiliaryDomains = applyListEdits(suppressedDefaultOptions);
+		if (!pendingAttributes.isEmpty() || !pendingMultilineAttributes.isEmpty() ||
+		    !changedAuxiliaryDomains.isEmpty() || workingListsChanged)
 		{
-			const bool needsFullRebuild =
-			    WorldView::runtimeSettingsNeedFullRebuild(changedViewAttributeKeys, changedViewMultilineKeys);
-			if (needsFullRebuild)
-				m_view->applyRuntimeSettings();
-			else
-				m_view->applyRuntimeSettingsWithoutOutputRebuild();
+			m_runtime->refreshCommandProcessorOptions();
+		}
+		if (pendingAttributes.contains(QStringLiteral("accept_chat_connections")) ||
+		    pendingAttributes.contains(QStringLiteral("chat_port")))
+		{
+			m_runtime->syncChatAcceptCallsWithPreferences();
+		}
+
+		if (m_view)
+		{
+			const QSet<QString> changedViewAttributeKeys = WorldView::changedRuntimeSettingsAttributeKeys(
+			    worldAttributesBeforeApply, m_runtime->worldAttributes());
+			const QSet<QString> changedViewMultilineKeys =
+			    WorldView::changedRuntimeSettingsMultilineAttributeKeys(
+			        worldMultilineBeforeApply, m_runtime->worldMultilineAttributes(),
+			        worldAttributesBeforeApply, m_runtime->worldAttributes());
+			if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
+			{
+				const bool needsFullRebuild = WorldView::runtimeSettingsNeedFullRebuild(
+				    changedViewAttributeKeys, changedViewMultilineKeys);
+				m_runtime->applyRuntimeSettingsToPresentationViews(needsFullRebuild);
+			}
 		}
 	}
 
+	accepted = true;
 	QDialog::accept();
 }
 
@@ -2729,8 +3882,8 @@ void WorldPreferencesDialog::updateOutputFontControls() const
 		return;
 	const bool hasDefault = hasDefaultOutputFont();
 	if (m_useDefaultOutputFont)
-		m_useDefaultOutputFont->setEnabled(hasDefault);
-	const bool usingDefault = m_useDefaultOutputFont && m_useDefaultOutputFont->isChecked() && hasDefault;
+		m_useDefaultOutputFont->setEnabled(hasDefault || m_useDefaultOutputFont->isChecked());
+	const bool usingDefault = m_useDefaultOutputFont && m_useDefaultOutputFont->isChecked();
 	m_outputFontButton->setEnabled(!usingDefault || !hasDefault);
 }
 
@@ -2738,8 +3891,11 @@ void WorldPreferencesDialog::updateDefaultColoursState()
 {
 	const bool hasDefaults = hasDefaultColoursFile();
 	if (m_useDefaultColours)
-		m_useDefaultColours->setEnabled(hasDefaults);
-	const bool allowEdits = !m_useDefaultColours || !m_useDefaultColours->isChecked() || !hasDefaults;
+		m_useDefaultColours->setEnabled(hasDefaults || m_useDefaultColours->isChecked());
+	const bool allowEdits = !m_useDefaultColours || !m_useDefaultColours->isChecked();
+	for (QLineEdit *name : m_customColourNames)
+		if (name)
+			name->setEnabled(allowEdits);
 	for (QPushButton *swatch : m_customTextSwatches)
 		if (swatch)
 			swatch->setEnabled(allowEdits);
@@ -2752,12 +3908,16 @@ void WorldPreferencesDialog::updateDefaultColoursState()
 	for (QPushButton *swatch : m_ansiBoldSwatches)
 		if (swatch)
 			swatch->setEnabled(allowEdits);
-	if (m_ansiSwap)
-		m_ansiSwap->setEnabled(allowEdits);
-	if (m_ansiLoad)
-		m_ansiLoad->setEnabled(allowEdits);
-	if (m_ansiDefaults)
-		m_ansiDefaults->setEnabled(allowEdits);
+	for (QPushButton *control :
+	     {m_customDefaults,  m_customLighter,   m_customDarker,   m_customMoreColour,  m_customLessColour,
+	      m_customInvert,    m_customSwap,      m_customRandom,   m_ansiNormalLighter, m_ansiNormalDarker,
+	      m_ansiBoldLighter, m_ansiBoldDarker,  m_ansiDefaults,   m_ansiSwap,          m_ansiInvert,
+	      m_ansiLighter,     m_ansiDarker,      m_ansiMoreColour, m_ansiLessColour,    m_ansiRandom,
+	      m_ansiLoad,        m_copyAnsiToCustom})
+	{
+		if (control)
+			control->setEnabled(allowEdits);
+	}
 }
 
 void WorldPreferencesDialog::updateInputFontControls() const
@@ -2766,8 +3926,8 @@ void WorldPreferencesDialog::updateInputFontControls() const
 		return;
 	const bool hasDefault = hasDefaultInputFont();
 	if (m_useDefaultInputFont)
-		m_useDefaultInputFont->setEnabled(hasDefault);
-	const bool usingDefault = m_useDefaultInputFont && m_useDefaultInputFont->isChecked() && hasDefault;
+		m_useDefaultInputFont->setEnabled(hasDefault || m_useDefaultInputFont->isChecked());
+	const bool usingDefault = m_useDefaultInputFont && m_useDefaultInputFont->isChecked();
 	m_inputFontButton->setEnabled(!usingDefault || !hasDefault);
 }
 
@@ -2785,8 +3945,8 @@ void WorldPreferencesDialog::updateMacroControls() const
 	if (!m_useDefaultMacros)
 		return;
 	const bool hasDefaults = hasDefaultMacrosFile();
-	m_useDefaultMacros->setEnabled(hasDefaults);
-	const bool allowEdit = !m_useDefaultMacros->isChecked() || !hasDefaults;
+	m_useDefaultMacros->setEnabled(hasDefaults || m_useDefaultMacros->isChecked());
+	const bool allowEdit = !m_useDefaultMacros->isChecked();
 	if (m_macrosTable)
 		m_macrosTable->setEnabled(allowEdit);
 	if (m_editMacroButton)
@@ -2809,8 +3969,8 @@ void WorldPreferencesDialog::updateAliasControls() const
 	const int  row         = selectedRow(m_aliasesTable);
 	const bool hasDefaults = hasDefaultAliasesFile();
 	if (m_useDefaultAliases)
-		m_useDefaultAliases->setEnabled(hasDefaults);
-	const bool usingDefault = m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaults;
+		m_useDefaultAliases->setEnabled(hasDefaults || m_useDefaultAliases->isChecked());
+	const bool usingDefault = m_useDefaultAliases && m_useDefaultAliases->isChecked();
 	const bool allowEdit    = !usingDefault;
 	if (m_addAliasButton)
 		m_addAliasButton->setEnabled(allowEdit);
@@ -2844,8 +4004,8 @@ void WorldPreferencesDialog::updateTriggerControls() const
 	const int  row         = selectedRow(m_triggersTable);
 	const bool hasDefaults = hasDefaultTriggersFile();
 	if (m_useDefaultTriggers)
-		m_useDefaultTriggers->setEnabled(hasDefaults);
-	const bool usingDefault = m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaults;
+		m_useDefaultTriggers->setEnabled(hasDefaults || m_useDefaultTriggers->isChecked());
+	const bool usingDefault = m_useDefaultTriggers && m_useDefaultTriggers->isChecked();
 	const bool allowEdit    = !usingDefault;
 	if (m_addTriggerButton)
 		m_addTriggerButton->setEnabled(allowEdit);
@@ -2879,8 +4039,8 @@ void WorldPreferencesDialog::updateTimerControls() const
 	const int  row         = selectedRow(m_timersTable);
 	const bool hasDefaults = hasDefaultTimersFile();
 	if (m_useDefaultTimers)
-		m_useDefaultTimers->setEnabled(hasDefaults);
-	const bool usingDefault = m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaults;
+		m_useDefaultTimers->setEnabled(hasDefaults || m_useDefaultTimers->isChecked());
+	const bool usingDefault = m_useDefaultTimers && m_useDefaultTimers->isChecked();
 	const bool allowEdit    = !usingDefault;
 	if (m_addTimerButton)
 		m_addTimerButton->setEnabled(allowEdit);
@@ -3203,199 +4363,219 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 	m_notesFindIndex = indexInt;
 }
 
-void WorldPreferencesDialog::applyListEdits()
+QSet<QString> WorldPreferencesDialog::applyListEdits(const QSet<QString> &suppressedDefaultOptions) const
 {
+	QSet<QString> changedDomains;
 	if (!m_runtime)
-		return;
+		return changedDomains;
 
-	bool                        coloursChanged = false;
+	auto changedAuxiliaryValues = [this](const Page page)
+	{
+		QMap<QString, QString>       changed;
+		const QMap<QString, QString> current  = collectAuxiliaryPageValues(page);
+		const QMap<QString, QString> baseline = m_pageAuxiliaryBaselines.value(page);
+		for (auto it = baseline.cbegin(); it != baseline.cend(); ++it)
+		{
+			const auto currentValue = current.constFind(it.key());
+			if (currentValue != current.cend() && currentValue.value() != it.value())
+				changed.insert(it.key(), currentValue.value());
+		}
+		return changed;
+	};
+
 	QList<WorldRuntime::Colour> colours        = m_runtime->colours();
-	if (!m_customColourNames.isEmpty() && m_customColourNames.size() == m_customTextSwatches.size() &&
-	    m_customColourNames.size() == m_customBackSwatches.size())
+	bool                        coloursChanged = false;
+	if (m_workingLists && m_workingLists->coloursStaged)
+		changedDomains.insert(QStringLiteral("colours"));
+	auto ensureColour = [&colours](const QString &group, const int sequence) -> WorldRuntime::Colour &
 	{
-		for (int i = 0; i < m_customColourNames.size(); ++i)
+		for (WorldRuntime::Colour &colour : colours)
 		{
-			const QString seq      = QString::number(i + 1);
-			const QString seqIndex = QString::number(i);
-			const QString name     = m_customColourNames[i] ? m_customColourNames[i]->text() : QString();
-			const QString text     = formatColourValue(swatchButtonColour(m_customTextSwatches.value(i)));
-			const QString back     = formatColourValue(swatchButtonColour(m_customBackSwatches.value(i)));
-			bool          found    = false;
-			for (auto &colour : colours)
+			bool sequenceOk = false;
+			if (colour.group == group &&
+			    colour.attributes.value(QStringLiteral("seq")).toInt(&sequenceOk) == sequence && sequenceOk)
 			{
-				if (colour.group != QMudColourGroup::kCustom)
-					continue;
-				bool      sequenceOk = false;
-				const int sequence   = colour.attributes.value(QStringLiteral("seq")).toInt(&sequenceOk);
-				if (!sequenceOk || sequence != i + 1)
-					continue;
-				found = true;
-				if (colour.attributes.value(QStringLiteral("seq")) != seq ||
-				    colour.attributes.value(QStringLiteral("text")) != text ||
-				    colour.attributes.value(QStringLiteral("back")) != back ||
-				    colour.attributes.value(QStringLiteral("name")) != name ||
-				    colour.attributes.value(QStringLiteral("seq_index")) != seqIndex)
-				{
-					colour.attributes.insert(QStringLiteral("seq"), seq);
-					colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
-					colour.attributes.insert(QStringLiteral("text"), text);
-					colour.attributes.insert(QStringLiteral("back"), back);
-					colour.attributes.insert(QStringLiteral("name"), name);
-					coloursChanged = true;
-				}
-			}
-			if (!found)
-			{
-				WorldRuntime::Colour colour;
-				colour.group = QMudColourGroup::kCustom.toString();
-				colour.attributes.insert(QStringLiteral("seq"), seq);
-				colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
-				colour.attributes.insert(QStringLiteral("text"), text);
-				colour.attributes.insert(QStringLiteral("back"), back);
-				colour.attributes.insert(QStringLiteral("name"), name);
-				colours.push_back(colour);
-				coloursChanged = true;
+				return colour;
 			}
 		}
+		WorldRuntime::Colour colour;
+		colour.group = group;
+		colour.attributes.insert(QStringLiteral("seq"), QString::number(sequence));
+		colours.push_back(std::move(colour));
+		return colours.last();
+	};
+
+	const QMap<QString, QString> customChanges =
+	    suppressedDefaultOptions.contains(QStringLiteral("use_default_colours"))
+	        ? QMap<QString, QString>()
+	        : changedAuxiliaryValues(PageCustomColours);
+	for (auto it = customChanges.cbegin(); it != customChanges.cend(); ++it)
+	{
+		const QStringList parts = it.key().split(QLatin1Char('/'));
+		if (parts.size() != 3 || parts.at(0) != QStringLiteral("custom"))
+			continue;
+		bool      indexOk = false;
+		const int index   = parts.at(1).toInt(&indexOk);
+		if (!indexOk || index < 0 || index >= MAX_CUSTOM)
+			continue;
+		WorldRuntime::Colour &colour = ensureColour(QMudColourGroup::kCustom.toString(), index + 1);
+		colour.attributes.insert(QStringLiteral("seq"), QString::number(index + 1));
+		colour.attributes.insert(QStringLiteral("seq_index"), QString::number(index));
+		colour.attributes.insert(parts.at(2), it.value());
+		coloursChanged = true;
 	}
-	if (!m_ansiNormalSwatches.isEmpty() && !m_ansiBoldSwatches.isEmpty())
+
+	const QMap<QString, QString> ansiChanges =
+	    suppressedDefaultOptions.contains(QStringLiteral("use_default_colours"))
+	        ? QMap<QString, QString>()
+	        : changedAuxiliaryValues(PageAnsiColours);
+	for (auto it = ansiChanges.cbegin(); it != ansiChanges.cend(); ++it)
 	{
-		QVector<QString> normalRgb(8);
-		QVector<QString> boldRgb(8);
-		for (int i = 0; i < 8; ++i)
-		{
-			normalRgb[i] = formatColourValue(swatchButtonColour(m_ansiNormalSwatches.value(i)));
-			boldRgb[i]   = formatColourValue(swatchButtonColour(m_ansiBoldSwatches.value(i)));
-		}
-		for (auto &colour : colours)
-		{
-			if (!colour.group.startsWith(QStringLiteral("ansi/")))
-				continue;
-			bool      ok  = false;
-			const int seq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
-			if (!ok || seq < 1 || seq > 8)
-				continue;
-			const int index = seq - 1;
-			if (colour.group == QStringLiteral("ansi/normal"))
-			{
-				if (colour.attributes.value(QStringLiteral("rgb")) != normalRgb.value(index))
-				{
-					colour.attributes.insert(QStringLiteral("rgb"), normalRgb.value(index));
-					coloursChanged = true;
-				}
-			}
-			else if (colour.group == QStringLiteral("ansi/bold"))
-			{
-				if (colour.attributes.value(QStringLiteral("rgb")) != boldRgb.value(index))
-				{
-					colour.attributes.insert(QStringLiteral("rgb"), boldRgb.value(index));
-					coloursChanged = true;
-				}
-			}
-		}
+		const QStringList parts = it.key().split(QLatin1Char('/'));
+		if (parts.size() != 3 || parts.at(0) != QStringLiteral("ansi"))
+			continue;
+		bool      indexOk = false;
+		const int index   = parts.at(2).toInt(&indexOk);
+		if (!indexOk || index < 0 || index >= 8)
+			continue;
+		WorldRuntime::Colour &colour = ensureColour(QStringLiteral("ansi/") + parts.at(1), index + 1);
+		colour.attributes.insert(QStringLiteral("rgb"), it.value());
+		coloursChanged = true;
 	}
 	if (coloursChanged)
+	{
 		m_runtime->setColours(colours);
+		changedDomains.insert(QStringLiteral("colours"));
+	}
 
-	if (m_macrosTable)
+	const QMap<QString, QString> macroChanges =
+	    suppressedDefaultOptions.contains(QStringLiteral("use_default_macros"))
+	        ? QMap<QString, QString>()
+	        : changedAuxiliaryValues(PageMacros);
+	if (m_workingLists && m_workingLists->macrosStaged &&
+	    !suppressedDefaultOptions.contains(QStringLiteral("use_default_macros")))
+	{
+		changedDomains.insert(QStringLiteral("macros"));
+	}
+	else if (!macroChanges.isEmpty())
 	{
 		QList<WorldRuntime::Macro> macros        = m_runtime->macros();
 		bool                       macrosChanged = false;
-		const int                  rowCount      = m_macrosTable->rowCount();
-		for (int row = 0; row < rowCount; ++row)
+		for (auto it = macroChanges.cbegin(); it != macroChanges.cend(); ++it)
 		{
-			QTableWidgetItem *nameItem = m_macrosTable->item(row, 0);
-			if (!nameItem)
+			const QStringList parts = it.key().split(QLatin1Char('/'));
+			if (parts.size() != 3 || parts.at(0) != QStringLiteral("macro"))
 				continue;
-			bool      ok         = false;
-			const int macroIndex = nameItem->data(Qt::UserRole).toInt(&ok);
-			if (!ok || macroIndex < 0 || macroIndex >= macros.size())
+			bool      indexOk       = false;
+			const int originalIndex = parts.at(1).toInt(&indexOk);
+			if (!indexOk || originalIndex < 0)
 				continue;
-			if (auto *typeCombo = qobject_cast<QComboBox *>(m_macrosTable->cellWidget(row, 1)); typeCombo)
+			int currentIndex = -1;
+			if (m_workingLists && originalIndex < m_workingLists->macros.size())
 			{
-				if (const QString newType = typeCombo->currentData().toString();
-				    macros[macroIndex].attributes.value(QStringLiteral("type")) != newType)
+				const WorldRuntime::Macro &original    = m_workingLists->macros.at(originalIndex);
+				const QString              stableIndex = original.attributes.value(QStringLiteral("index"));
+				const QString              stableName  = original.attributes.value(QStringLiteral("name"));
+				for (int index = 0; index < macros.size(); ++index)
 				{
-					macros[macroIndex].attributes.insert(QStringLiteral("type"), newType);
-					macrosChanged = true;
+					const WorldRuntime::Macro &candidate = macros.at(index);
+					if ((!stableIndex.isEmpty() &&
+					     candidate.attributes.value(QStringLiteral("index")) == stableIndex) ||
+					    (stableIndex.isEmpty() &&
+					     candidate.attributes.value(QStringLiteral("name")) == stableName))
+					{
+						currentIndex = index;
+						break;
+					}
 				}
 			}
-			if (QTableWidgetItem *sendItem = m_macrosTable->item(row, 2); sendItem)
-			{
-				if (const QString newSend = sendItem->text();
-				    macros[macroIndex].children.value(QStringLiteral("send")) != newSend)
-				{
-					macros[macroIndex].children.insert(QStringLiteral("send"), newSend);
-					macrosChanged = true;
-				}
-			}
+			if (currentIndex < 0)
+				continue;
+			if (parts.at(2) == QStringLiteral("type"))
+				macros[currentIndex].attributes.insert(QStringLiteral("type"), it.value());
+			else if (parts.at(2) == QStringLiteral("send"))
+				macros[currentIndex].children.insert(QStringLiteral("send"), it.value());
+			else
+				continue;
+			macrosChanged = true;
 		}
 		if (macrosChanged)
+		{
 			m_runtime->setMacros(macros);
+			changedDomains.insert(QStringLiteral("macros"));
+		}
 	}
 
-	if (!m_keypadFields.isEmpty())
+	const QMap<QString, QString> keypadChanges = changedAuxiliaryValues(PageKeypad);
+	if (!keypadChanges.isEmpty())
 	{
-		if (m_keypadControl)
-			storeKeypadFields(m_keypadControl->isChecked());
+		QMap<QString, QString> merged;
+		for (const WorldRuntime::Keypad &entry : m_runtime->keypadEntries())
+			merged.insert(entry.attributes.value(QStringLiteral("name")), entry.content);
+		for (auto it = keypadChanges.cbegin(); it != keypadChanges.cend(); ++it)
+		{
+			if (it.key().startsWith(QStringLiteral("keypad/")))
+				merged.insert(it.key().sliced(7), it.value());
+		}
 		QList<WorldRuntime::Keypad> entries;
-		entries.reserve(m_keypadValues.size());
-		for (auto it = m_keypadValues.constBegin(); it != m_keypadValues.constEnd(); ++it)
+		entries.reserve(merged.size());
+		for (auto it = merged.cbegin(); it != merged.cend(); ++it)
 		{
 			WorldRuntime::Keypad entry;
 			entry.attributes.insert(QStringLiteral("name"), it.key());
 			entry.content = it.value();
-			entries.push_back(entry);
+			entries.push_back(std::move(entry));
 		}
-		if (!entries.isEmpty())
-			m_runtime->setKeypadEntries(entries);
+		m_runtime->setKeypadEntries(entries);
+		changedDomains.insert(QStringLiteral("keypad"));
 	}
 
-	if (!m_printingNormalBold.isEmpty() || !m_printingBoldBold.isEmpty())
+	const QMap<QString, QString> printingChanges = changedAuxiliaryValues(PagePrinting);
+	if (!printingChanges.isEmpty())
 	{
 		QList<WorldRuntime::PrintingStyle> styles          = m_runtime->printingStyles();
 		bool                               printingChanged = false;
-		for (auto &style : styles)
+		auto ensurePrintingStyle = [&styles](const QString &group,
+		                                     const int      sequence) -> WorldRuntime::PrintingStyle &
 		{
-			const QString group = style.group.toLower();
-			bool          ok    = false;
-			const int     seq   = style.attributes.value(QStringLiteral("seq")).toInt(&ok);
-			if (!ok || seq < 1 || seq > 8)
-				continue;
-			const int  index    = seq - 1;
-			const bool isNormal = group == QStringLiteral("ansi/normal");
-			const bool isBold   = group == QStringLiteral("ansi/bold");
-			if (!isNormal && !isBold)
-				continue;
-			const QVector<QCheckBox *> &boldChecks = isNormal ? m_printingNormalBold : m_printingBoldBold;
-			const QVector<QCheckBox *> &italicChecks =
-			    isNormal ? m_printingNormalItalic : m_printingBoldItalic;
-			const QVector<QCheckBox *> &underlineChecks =
-			    isNormal ? m_printingNormalUnderline : m_printingBoldUnderline;
-			if (index < 0 || index >= boldChecks.size() || index >= italicChecks.size() ||
-			    index >= underlineChecks.size())
-				continue;
-			const QString newBold = boldChecks[index] && boldChecks[index]->isChecked() ? QStringLiteral("1")
-			                                                                            : QStringLiteral("0");
-			const QString newItalic    = italicChecks[index] && italicChecks[index]->isChecked()
-			                                 ? QStringLiteral("1")
-			                                 : QStringLiteral("0");
-			const QString newUnderline = underlineChecks[index] && underlineChecks[index]->isChecked()
-			                                 ? QStringLiteral("1")
-			                                 : QStringLiteral("0");
-			if (style.attributes.value(QStringLiteral("bold")) != newBold ||
-			    style.attributes.value(QStringLiteral("italic")) != newItalic ||
-			    style.attributes.value(QStringLiteral("underline")) != newUnderline)
+			for (WorldRuntime::PrintingStyle &style : styles)
 			{
-				style.attributes.insert(QStringLiteral("bold"), newBold);
-				style.attributes.insert(QStringLiteral("italic"), newItalic);
-				style.attributes.insert(QStringLiteral("underline"), newUnderline);
-				printingChanged = true;
+				bool sequenceOk = false;
+				if (style.group.compare(group, Qt::CaseInsensitive) == 0 &&
+				    style.attributes.value(QStringLiteral("seq")).toInt(&sequenceOk) == sequence &&
+				    sequenceOk)
+				{
+					return style;
+				}
 			}
+			WorldRuntime::PrintingStyle style;
+			style.group = group;
+			style.attributes.insert(QStringLiteral("seq"), QString::number(sequence));
+			style.attributes.insert(QStringLiteral("seq_index"), QString::number(sequence - 1));
+			styles.push_back(std::move(style));
+			return styles.last();
+		};
+		for (auto it = printingChanges.cbegin(); it != printingChanges.cend(); ++it)
+		{
+			const QStringList parts = it.key().split(QLatin1Char('/'));
+			if (parts.size() != 4 || parts.at(0) != QStringLiteral("printing"))
+				continue;
+			bool      indexOk = false;
+			const int index   = parts.at(2).toInt(&indexOk);
+			if (!indexOk || index < 0 || index >= 8)
+				continue;
+			const QString                group = QStringLiteral("ansi/") + parts.at(1);
+			WorldRuntime::PrintingStyle &style = ensurePrintingStyle(group, index + 1);
+			style.attributes.insert(parts.at(3), it.value());
+			printingChanged = true;
 		}
 		if (printingChanged)
+		{
 			m_runtime->setPrintingStyles(styles);
+			changedDomains.insert(QStringLiteral("printing"));
+		}
 	}
+	return changedDomains;
 }
 
 void WorldPreferencesDialog::editColourCell(QTableWidget *table, const int row, const int column)
@@ -3423,7 +4603,7 @@ void WorldPreferencesDialog::editMacroAtRow(const int row)
 {
 	if (!m_macrosTable || row < 0 || row >= m_macrosTable->rowCount())
 		return;
-	if (m_useDefaultMacros && m_useDefaultMacros->isChecked() && hasDefaultMacrosFile())
+	if (m_useDefaultMacros && m_useDefaultMacros->isChecked())
 		return;
 	QTableWidgetItem *nameItem  = m_macrosTable->item(row, 0);
 	auto             *typeCombo = qobject_cast<QComboBox *>(m_macrosTable->cellWidget(row, 1));
@@ -3477,7 +4657,18 @@ void WorldPreferencesDialog::editMacroAtRow(const int row)
 
 	if (const int typeIndex = typeCombo->findData(newType); typeIndex >= 0)
 		typeCombo->setCurrentIndex(typeIndex);
-	sendItem->setText(sendEdit->toPlainText());
+	const QString newSend = sendEdit->toPlainText();
+	sendItem->setText(newSend);
+	if (m_workingLists)
+	{
+		bool      indexOk    = false;
+		const int macroIndex = nameItem->data(Qt::UserRole).toInt(&indexOk);
+		if (indexOk && macroIndex >= 0 && macroIndex < m_workingLists->macros.size())
+		{
+			m_workingLists->macros[macroIndex].attributes.insert(QStringLiteral("type"), newType);
+			m_workingLists->macros[macroIndex].children.insert(QStringLiteral("send"), newSend);
+		}
+	}
 }
 
 void WorldPreferencesDialog::findMacro(const QString &text, const bool continueFromCurrent)
@@ -3731,20 +4922,26 @@ bool WorldPreferencesDialog::loadMacrosFromFile(const QString &fileName)
 		macros.push_back(macro);
 	}
 
-	m_runtime->setMacros(macros);
+	if (!m_workingLists)
+		return false;
+	m_workingLists->macros            = std::move(macros);
+	m_workingLists->macrosInitialized = true;
+	m_workingLists->macrosStaged      = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Triggers))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdt"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save triggers"),
+		QMessageBox::warning(this, QStringLiteral("Save triggers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3771,7 +4968,13 @@ bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName) const
 	out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 	out << "  >" << nl;
 
-	for (const auto &tr : m_runtime->triggers())
+	const QList<WorldRuntime::Trigger> triggers =
+	    m_workingLists->triggersRestoredFromPersistence
+	        ? m_workingLists->triggers
+	        : mergeWorkingRules(m_workingLists->triggers, m_runtime->triggers(),
+	                            m_workingLists->initialTriggerIds, m_workingLists->editedTriggerIds,
+	                            m_workingLists->deletedTriggerIds);
+	for (const auto &tr : triggers)
 	{
 		out << nl << "  <trigger ";
 		for (auto it = tr.attributes.begin(); it != tr.attributes.end(); ++it)
@@ -3790,7 +4993,7 @@ bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save triggers"),
+		QMessageBox::warning(this, QStringLiteral("Save triggers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3814,29 +5017,38 @@ bool WorldPreferencesDialog::loadTriggersFromFile(const QString &fileName, const
 
 	QList<WorldRuntime::Trigger> combined;
 	if (!replace)
-		combined = m_runtime->triggers();
+		combined = m_workingLists->triggers;
+	else
+	{
+		for (const WorldRuntime::Trigger &trigger : std::as_const(m_workingLists->triggers))
+			m_workingLists->deletedTriggerIds.insert(trigger.runtimeId);
+	}
 	for (const auto &t : doc.triggers())
 	{
 		WorldRuntime::Trigger rt;
 		rt.attributes = t.attributes;
 		rt.children   = t.children;
 		rt.included   = t.included;
+		rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
 		combined.push_back(rt);
 	}
-	m_runtime->setTriggers(combined);
+	m_workingLists->triggers       = std::move(combined);
+	m_workingLists->triggersStaged = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Aliases))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qda"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save aliases"),
+		QMessageBox::warning(this, QStringLiteral("Save aliases"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3863,7 +5075,13 @@ bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName) const
 	out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 	out << "  >" << nl;
 
-	for (const auto &al : m_runtime->aliases())
+	const QList<WorldRuntime::Alias> aliases =
+	    m_workingLists->aliasesRestoredFromPersistence
+	        ? m_workingLists->aliases
+	        : mergeWorkingRules(m_workingLists->aliases, m_runtime->aliases(),
+	                            m_workingLists->initialAliasIds, m_workingLists->editedAliasIds,
+	                            m_workingLists->deletedAliasIds);
+	for (const auto &al : aliases)
 	{
 		out << nl << "  <alias ";
 		for (auto it = al.attributes.begin(); it != al.attributes.end(); ++it)
@@ -3882,7 +5100,7 @@ bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save aliases"),
+		QMessageBox::warning(this, QStringLiteral("Save aliases"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3906,29 +5124,38 @@ bool WorldPreferencesDialog::loadAliasesFromFile(const QString &fileName, const 
 
 	QList<WorldRuntime::Alias> combined;
 	if (!replace)
-		combined = m_runtime->aliases();
+		combined = m_workingLists->aliases;
+	else
+	{
+		for (const WorldRuntime::Alias &alias : std::as_const(m_workingLists->aliases))
+			m_workingLists->deletedAliasIds.insert(alias.runtimeId);
+	}
 	for (const auto &a : doc.aliases())
 	{
 		WorldRuntime::Alias ra;
 		ra.attributes = a.attributes;
 		ra.children   = a.children;
 		ra.included   = a.included;
+		ra.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
 		combined.push_back(ra);
 	}
-	m_runtime->setAliases(combined);
+	m_workingLists->aliases       = std::move(combined);
+	m_workingLists->aliasesStaged = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Timers))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdi"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save timers"),
+		QMessageBox::warning(this, QStringLiteral("Save timers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3955,7 +5182,12 @@ bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName) const
 	out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 	out << "  >" << nl;
 
-	for (const auto &tm : m_runtime->timers())
+	const QList<WorldRuntime::Timer> timers =
+	    m_workingLists->timersRestoredFromPersistence
+	        ? m_workingLists->timers
+	        : mergeWorkingRules(m_workingLists->timers, m_runtime->timers(), m_workingLists->initialTimerIds,
+	                            m_workingLists->editedTimerIds, m_workingLists->deletedTimerIds);
+	for (const auto &tm : timers)
 	{
 		out << nl << "  <timer ";
 		for (auto it = tm.attributes.begin(); it != tm.attributes.end(); ++it)
@@ -3974,7 +5206,7 @@ bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save timers"),
+		QMessageBox::warning(this, QStringLiteral("Save timers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3998,29 +5230,38 @@ bool WorldPreferencesDialog::loadTimersFromFile(const QString &fileName, const b
 
 	QList<WorldRuntime::Timer> combined;
 	if (!replace)
-		combined = m_runtime->timers();
+		combined = m_workingLists->timers;
+	else
+	{
+		for (const WorldRuntime::Timer &timer : std::as_const(m_workingLists->timers))
+			m_workingLists->deletedTimerIds.insert(timer.runtimeId);
+	}
 	for (const auto &t : doc.timers())
 	{
 		WorldRuntime::Timer rt;
 		rt.attributes = t.attributes;
 		rt.children   = t.children;
 		rt.included   = t.included;
+		rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
 		combined.push_back(rt);
 	}
-	m_runtime->setTimers(combined);
+	m_workingLists->timers       = std::move(combined);
+	m_workingLists->timersStaged = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Variables))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdv"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save variables"),
+		QMessageBox::warning(this, QStringLiteral("Save variables"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -4042,7 +5283,7 @@ bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName) const
 	out << nl << "<!-- variables -->" << nl;
 	out << "<variables>" << nl;
 
-	for (const auto &var : m_runtime->variables())
+	for (const ResolvedVariable &var : effectiveWorkingVariables())
 	{
 		const QString name = var.attributes.value(QStringLiteral("name"));
 		out << "  <variable name=\"" << fixHtmlString(name) << "\">" << fixHtmlMultilineString(var.content)
@@ -4054,7 +5295,7 @@ bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save variables"),
+		QMessageBox::warning(this, QStringLiteral("Save variables"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -4076,15 +5317,21 @@ bool WorldPreferencesDialog::loadVariablesFromFile(const QString &fileName)
 		return false;
 	}
 
-	QList<WorldRuntime::Variable> vars;
+	QList<WorkingLists::Variable> vars;
+	for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+	{
+		if (working.presentInRuntime)
+			m_workingLists->deletedVariableNames.insert(working.runtimeName.trimmed().toCaseFolded());
+	}
 	for (const auto &v : doc.variables())
 	{
 		WorldRuntime::Variable rv;
 		rv.attributes = v.attributes;
 		rv.content    = v.content;
-		vars.push_back(rv);
+		vars.push_back({rv, {}, false, false, false});
 	}
-	m_runtime->setVariables(vars);
+	m_workingLists->variables       = std::move(vars);
+	m_workingLists->variablesStaged = true;
 	return true;
 }
 
@@ -4104,6 +5351,7 @@ void WorldPreferencesDialog::buildUi()
 	m_pageTree->setMinimumWidth(220);
 	m_pageTree->setRootIsDecorated(true);
 	m_pages = new QStackedWidget(this);
+	m_pages->setObjectName(QStringLiteral("worldPreferencesPages"));
 
 	auto *generalPage       = new QWidget(this);
 	auto *soundPage         = new QWidget(this);
@@ -4214,6 +5462,7 @@ void WorldPreferencesDialog::buildUi()
 			        const int index = data.toInt();
 			        if (index >= 0 && index < m_pages->count())
 			        {
+				        ensurePagePopulated(static_cast<Page>(index));
 				        m_pages->setCurrentIndex(index);
 				        if (m_runtime)
 					        m_runtime->setLastPreferencesPage(index);
@@ -4221,7 +5470,6 @@ void WorldPreferencesDialog::buildUi()
 		        }
 	        });
 	m_pageTree->expandAll();
-	setInitialPage(PageGeneral);
 
 	// General
 	auto *generalLayout     = new QGridLayout(generalPage);
@@ -4375,14 +5623,21 @@ void WorldPreferencesDialog::buildUi()
 	customLeftWidget->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	customMainRow->addWidget(customLeftWidget);
 	customMainRow->addStretch();
-	auto *customButtons     = new QGridLayout();
-	m_customDefaults        = new QPushButton(QStringLiteral("De&faults..."), customColoursPage);
-	m_customLighter         = new QPushButton(QStringLiteral("&Lighter"), customColoursPage);
-	m_customDarker          = new QPushButton(QStringLiteral("&Darker"), customColoursPage);
-	m_customMoreColour      = new QPushButton(QStringLiteral("&More colour"), customColoursPage);
-	m_customLessColour      = new QPushButton(QStringLiteral("L&ess colour"), customColoursPage);
-	m_customInvert          = new QPushButton(QStringLiteral("&Invert"), customColoursPage);
-	m_customRandom          = new QPushButton(QStringLiteral("&Random..."), customColoursPage);
+	auto *customButtons = new QGridLayout();
+	m_customDefaults    = new QPushButton(QStringLiteral("De&faults..."), customColoursPage);
+	m_customLighter     = new QPushButton(QStringLiteral("&Lighter"), customColoursPage);
+	m_customDarker      = new QPushButton(QStringLiteral("&Darker"), customColoursPage);
+	m_customMoreColour  = new QPushButton(QStringLiteral("&More colour"), customColoursPage);
+	m_customLessColour  = new QPushButton(QStringLiteral("L&ess colour"), customColoursPage);
+	m_customInvert      = new QPushButton(QStringLiteral("&Invert"), customColoursPage);
+	m_customRandom      = new QPushButton(QStringLiteral("&Random..."), customColoursPage);
+	m_customDefaults->setObjectName(QStringLiteral("customColourDefaultsButton"));
+	m_customLighter->setObjectName(QStringLiteral("customColourLighterButton"));
+	m_customDarker->setObjectName(QStringLiteral("customColourDarkerButton"));
+	m_customMoreColour->setObjectName(QStringLiteral("customColourMoreButton"));
+	m_customLessColour->setObjectName(QStringLiteral("customColourLessButton"));
+	m_customInvert->setObjectName(QStringLiteral("customColourInvertButton"));
+	m_customRandom->setObjectName(QStringLiteral("customColourRandomButton"));
 	auto shrinkCustomButton = [](QPushButton *button)
 	{
 		if (!button)
@@ -4735,18 +5990,22 @@ void WorldPreferencesDialog::buildUi()
 	legendT->setIndent(0);
 	ansiSwatchGrid->addWidget(legendB, 1, 3, Qt::AlignLeft | Qt::AlignVCenter);
 	ansiSwatchGrid->addWidget(legendT, 8, 3, Qt::AlignLeft | Qt::AlignVCenter);
-	auto *normalLighter = new QPushButton(QStringLiteral("Lighter"), ansiColoursPage);
-	auto *normalDarker  = new QPushButton(QStringLiteral("Darker"), ansiColoursPage);
-	auto *boldLighter   = new QPushButton(QStringLiteral("Lighter"), ansiColoursPage);
-	auto *boldDarker    = new QPushButton(QStringLiteral("Darker"), ansiColoursPage);
-	auto *normalAdjust  = new QVBoxLayout();
+	m_ansiNormalLighter = new QPushButton(QStringLiteral("Lighter"), ansiColoursPage);
+	m_ansiNormalDarker  = new QPushButton(QStringLiteral("Darker"), ansiColoursPage);
+	m_ansiBoldLighter   = new QPushButton(QStringLiteral("Lighter"), ansiColoursPage);
+	m_ansiBoldDarker    = new QPushButton(QStringLiteral("Darker"), ansiColoursPage);
+	m_ansiNormalLighter->setObjectName(QStringLiteral("ansiNormalLighterButton"));
+	m_ansiNormalDarker->setObjectName(QStringLiteral("ansiNormalDarkerButton"));
+	m_ansiBoldLighter->setObjectName(QStringLiteral("ansiBoldLighterButton"));
+	m_ansiBoldDarker->setObjectName(QStringLiteral("ansiBoldDarkerButton"));
+	auto *normalAdjust = new QVBoxLayout();
 	normalAdjust->setContentsMargins(0, 0, 0, 0);
-	normalAdjust->addWidget(normalLighter);
-	normalAdjust->addWidget(normalDarker);
+	normalAdjust->addWidget(m_ansiNormalLighter);
+	normalAdjust->addWidget(m_ansiNormalDarker);
 	auto *boldAdjust = new QVBoxLayout();
 	boldAdjust->setContentsMargins(0, 0, 0, 0);
-	boldAdjust->addWidget(boldLighter);
-	boldAdjust->addWidget(boldDarker);
+	boldAdjust->addWidget(m_ansiBoldLighter);
+	boldAdjust->addWidget(m_ansiBoldDarker);
 	ansiSwatchGrid->addLayout(normalAdjust, 9, 1, Qt::AlignHCenter);
 	ansiSwatchGrid->addLayout(boldAdjust, 9, 2, Qt::AlignHCenter);
 	ansiTop->addLayout(ansiSwatchGrid, 0);
@@ -4932,13 +6191,13 @@ void WorldPreferencesDialog::buildUi()
 		}
 		writeAnsiColours(normal, bold);
 	};
-	connect(normalLighter, &QPushButton::clicked, this,
+	connect(m_ansiNormalLighter, &QPushButton::clicked, this,
 	        [applyAnsiAdjustNormal] { applyAnsiAdjustNormal(ADJUST_COLOUR_LIGHTER); });
-	connect(normalDarker, &QPushButton::clicked, this,
+	connect(m_ansiNormalDarker, &QPushButton::clicked, this,
 	        [applyAnsiAdjustNormal] { applyAnsiAdjustNormal(ADJUST_COLOUR_DARKER); });
-	connect(boldLighter, &QPushButton::clicked, this,
+	connect(m_ansiBoldLighter, &QPushButton::clicked, this,
 	        [applyAnsiAdjustBold] { applyAnsiAdjustBold(ADJUST_COLOUR_LIGHTER); });
-	connect(boldDarker, &QPushButton::clicked, this,
+	connect(m_ansiBoldDarker, &QPushButton::clicked, this,
 	        [applyAnsiAdjustBold] { applyAnsiAdjustBold(ADJUST_COLOUR_DARKER); });
 	auto applyCustomRandom = [readCustomColours, writeCustomColours]
 	{
@@ -5030,6 +6289,17 @@ void WorldPreferencesDialog::buildUi()
 	m_copyAnsiToCustom  = new QPushButton(QStringLiteral("&Copy to custom..."), ansiColoursPage);
 	m_ansiInvert        = new QPushButton(QStringLiteral("Invert"), ansiColoursPage);
 	m_ansiRandom        = new QPushButton(QStringLiteral("&Random..."), ansiColoursPage);
+	m_ansiSwap->setObjectName(QStringLiteral("ansiColourSwapButton"));
+	m_ansiDefaults->setObjectName(QStringLiteral("ansiColourDefaultsButton"));
+	m_ansiLoad->setObjectName(QStringLiteral("ansiColourLoadButton"));
+	m_ansiSave->setObjectName(QStringLiteral("ansiColourSaveButton"));
+	m_ansiLighter->setObjectName(QStringLiteral("ansiColourLighterButton"));
+	m_ansiDarker->setObjectName(QStringLiteral("ansiColourDarkerButton"));
+	m_ansiMoreColour->setObjectName(QStringLiteral("ansiColourMoreButton"));
+	m_ansiLessColour->setObjectName(QStringLiteral("ansiColourLessButton"));
+	m_copyAnsiToCustom->setObjectName(QStringLiteral("ansiCopyToCustomButton"));
+	m_ansiInvert->setObjectName(QStringLiteral("ansiColourInvertButton"));
+	m_ansiRandom->setObjectName(QStringLiteral("ansiColourRandomButton"));
 	if (ansiSwatchGrid)
 		ansiSwatchGrid->addWidget(m_ansiSwap, 10, 1, 1, 2, Qt::AlignHCenter);
 	auto shrinkAnsiButton = [](QPushButton *button)
@@ -5066,7 +6336,13 @@ void WorldPreferencesDialog::buildUi()
 	ansiTop->addLayout(ansiButtonsColumn);
 	auto *ansiOptions = new QVBoxLayout();
 	if (m_useDefaultColours)
-		connect(m_useDefaultColours, &QCheckBox::toggled, this, [this] { updateDefaultColoursState(); });
+		connect(m_useDefaultColours, &QCheckBox::toggled, this,
+		        [this](const bool enabled)
+		        {
+			        handleDefaultOverrideToggle(QStringLiteral("use_default_colours"), m_useDefaultColours,
+			                                    enabled);
+			        updateDefaultColoursState();
+		        });
 	ansiOptions->setContentsMargins(0, 0, 0, 0);
 	ansiOptions->setAlignment(Qt::AlignLeft);
 	ansiOptions->addWidget(m_custom16IsDefaultColour, 0, Qt::AlignLeft);
@@ -5138,6 +6414,7 @@ void WorldPreferencesDialog::buildUi()
 		                                  QStringLiteral("Copy all 16 colours to the custom colours?"),
 		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
 			        return;
+		        ensurePagePopulated(PageCustomColours);
 		        QVector<QColor> normal(8);
 		        QVector<QColor> bold(8);
 		        readAnsiColours(normal, bold);
@@ -5151,6 +6428,7 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_ansiLoad, &QPushButton::clicked, this,
 	        [this]
 	        {
+		        ensurePagePopulated(PageCustomColours);
 		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
 		        const QString fileName = QFileDialog::getOpenFileName(
 		            this, QStringLiteral("Colour file name"), startDir,
@@ -5167,7 +6445,7 @@ void WorldPreferencesDialog::buildUi()
 			        QMessageBox::warning(this, QStringLiteral("Load colours"), doc.errorString());
 			        return;
 		        }
-		        if (m_runtime)
+		        if (m_workingLists)
 		        {
 			        QList<WorldRuntime::Colour> colours;
 			        for (const auto &c : doc.colours())
@@ -5181,7 +6459,8 @@ void WorldPreferencesDialog::buildUi()
 					        rc.attributes.insert(QStringLiteral("seq_index"), QString::number(seq - 1));
 				        colours.push_back(rc);
 			        }
-			        m_runtime->setColours(colours);
+			        m_workingLists->colours       = std::move(colours);
+			        m_workingLists->coloursStaged = true;
 		        }
 		        populateCustomColours();
 		        populateAnsiColours();
@@ -5273,7 +6552,13 @@ void WorldPreferencesDialog::buildUi()
 	macroButtons->addWidget(m_saveMacroButton, 1, 3);
 	macroButtons->setColumnStretch(4, 1);
 	macrosLayout->addLayout(macroButtons);
-	connect(m_useDefaultMacros, &QCheckBox::toggled, this, [this] { updateMacroControls(); });
+	connect(m_useDefaultMacros, &QCheckBox::toggled, this,
+	        [this](const bool enabled)
+	        {
+		        handleDefaultOverrideToggle(QStringLiteral("use_default_macros"), m_useDefaultMacros,
+		                                    enabled);
+		        updateMacroControls();
+	        });
 	connect(m_macrosTable, &QTableWidget::cellDoubleClicked, this,
 	        [this](const int row, int) { editMacroAtRow(row); });
 	connect(m_macrosTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
@@ -5339,247 +6624,6 @@ void WorldPreferencesDialog::buildUi()
 		        }
 	        });
 
-	auto editVariableDialog = [this](QString &name, QString &value, const bool allowRename) -> bool
-	{
-		QDialog dialog(this);
-		dialog.setWindowTitle(QStringLiteral("Variable"));
-		auto *dialogLayout = new QVBoxLayout(&dialog);
-		auto *form         = new QFormLayout();
-		auto *nameEdit     = new QLineEdit(&dialog);
-		nameEdit->setText(name);
-		nameEdit->setReadOnly(!allowRename);
-		auto *valueEdit = new QTextEdit(&dialog);
-		valueEdit->setPlainText(value);
-		form->addRow(QStringLiteral("Name"), nameEdit);
-		form->addRow(QStringLiteral("Contents"), valueEdit);
-		dialogLayout->addLayout(form);
-		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-		connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-		connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-		dialogLayout->addWidget(buttons);
-		if (dialog.exec() != QDialog::Accepted)
-			return false;
-		name  = nameEdit->text().trimmed();
-		value = valueEdit->toPlainText();
-		return !name.isEmpty();
-	};
-	if (m_addVariableButton)
-		connect(m_addVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialog]
-		        {
-			        if (!m_runtime)
-				        return;
-			        QString name;
-			        QString value;
-			        if (!editVariableDialog(name, value, true))
-				        return;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        for (const auto &var : vars)
-			        {
-				        if (var.attributes.value(QStringLiteral("name")) == name)
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Variables"),
-					                             QStringLiteral("That variable name is already in use."));
-					        return;
-				        }
-			        }
-			        WorldRuntime::Variable newVar;
-			        newVar.attributes.insert(QStringLiteral("name"), name);
-			        newVar.content                        = value;
-			        QList<WorldRuntime::Variable> updated = vars;
-			        updated.push_back(newVar);
-			        m_runtime->setVariables(updated);
-			        populateVariables();
-		        });
-	if (m_editVariableButton)
-		connect(m_editVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialog]
-		        {
-			        if (!m_runtime || !m_variablesTable)
-				        return;
-			        const int row   = m_variablesTable->currentRow();
-			        const int index = rowToIndex(m_variablesTable, row);
-			        if (index < 0)
-				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
-				        return;
-			        QString name  = vars.at(index).attributes.value(QStringLiteral("name"));
-			        QString value = vars.at(index).content;
-			        if (!editVariableDialog(name, value, true))
-				        return;
-			        vars[index].attributes.insert(QStringLiteral("name"), name);
-			        vars[index].content = value;
-			        m_runtime->setVariables(vars);
-			        populateVariables();
-			        selectRowByIndex(m_variablesTable, index);
-			        updateVariableControls();
-		        });
-	if (m_deleteVariableButton)
-		connect(m_deleteVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime || !m_variablesTable)
-				        return;
-			        const int row   = m_variablesTable->currentRow();
-			        const int index = rowToIndex(m_variablesTable, row);
-			        if (index < 0)
-				        return;
-			        if (!confirmRemoval(this, QStringLiteral("variable")))
-				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
-				        return;
-			        vars.removeAt(index);
-			        m_runtime->setVariables(vars);
-			        populateVariables();
-			        const int lastIndex = saturatingToInt(vars.size()) - 1;
-			        selectRowByIndex(m_variablesTable, std::min(index, lastIndex));
-			        updateVariableControls();
-		        });
-	if (m_variablesTable)
-		connect(m_variablesTable, &QTableWidget::cellDoubleClicked, this,
-		        [this]
-		        {
-			        if (m_editVariableButton)
-				        m_editVariableButton->click();
-		        });
-	if (m_findVariableButton)
-		connect(m_findVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
-			        {
-				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
-					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
-				        const QString                 name = var.attributes.value(QStringLiteral("name"));
-				        return var.content + QLatin1Char('\t') + name;
-			        };
-			        doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText, m_variableFindRow,
-			                       m_variableFindHistory, m_variableFindMatchCase, m_variableFindRegex,
-			                       m_variableFindForwards, QStringLiteral("Find variable"), false);
-			        updateVariableControls();
-		        });
-	if (m_findNextVariableButton)
-		connect(m_findNextVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
-			        {
-				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
-					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
-				        const QString                 name = var.attributes.value(QStringLiteral("name"));
-				        return var.content + QLatin1Char('\t') + name;
-			        };
-			        doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText, m_variableFindRow,
-			                       m_variableFindHistory, m_variableFindMatchCase, m_variableFindRegex,
-			                       m_variableFindForwards, QStringLiteral("Find variable"), true);
-			        updateVariableControls();
-		        });
-	if (m_loadVariablesButton)
-		connect(m_loadVariablesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Variable file name"), startDir,
-			                                         QStringLiteral("QMud variables (*.qdv *.mcv)"));
-			        if (fileName.isEmpty())
-				        return;
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadVariablesFromFile(fileName))
-				        return;
-			        populateVariables();
-		        });
-	if (m_saveVariablesButton)
-		connect(m_saveVariablesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Variable file name"), startDir,
-			                                         QStringLiteral("QMud variables (*.qdv *.mcv)"));
-			        if (fileName.isEmpty())
-				        return;
-			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdv"));
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveVariablesToFile(outputPath))
-				        return;
-		        });
-	if (m_copyVariableButton)
-		connect(m_copyVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime || !m_variablesTable)
-				        return;
-			        const int row   = m_variablesTable->currentRow();
-			        const int index = rowToIndex(m_variablesTable, row);
-			        if (index < 0)
-				        return;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        if (index >= vars.size())
-				        return;
-			        const WorldRuntime::Variable &var = vars.at(index);
-			        QString                       xml;
-			        QTextStream                   out(&xml);
-			        out << "<variables>\n";
-			        out << "  <variable name=\""
-			            << fixHtmlString(var.attributes.value(QStringLiteral("name"))) << "\">"
-			            << fixHtmlMultilineString(var.content) << "</variable>\n";
-			        out << "</variables>\n";
-			        if (QClipboard *clipboard = QGuiApplication::clipboard())
-				        clipboard->setText(xml);
-		        });
-	if (m_pasteVariableButton)
-		connect(m_pasteVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        const QString text = []() -> QString
-			        {
-				        if (QClipboard *clipboard = QGuiApplication::clipboard())
-					        return clipboard->text();
-				        return {};
-			        }();
-			        if (text.trimmed().isEmpty())
-				        return;
-			        QTemporaryFile temp;
-			        if (!temp.open())
-				        return;
-			        temp.write(text.toUtf8());
-			        temp.flush();
-			        WorldDocument doc;
-			        doc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS |
-			                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-			        if (!doc.loadFromFile(temp.fileName()))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Paste variables"), doc.errorString());
-				        return;
-			        }
-			        QList<WorldRuntime::Variable> combined = m_runtime->variables();
-			        for (const auto &v : doc.variables())
-			        {
-				        WorldRuntime::Variable rv;
-				        rv.attributes = v.attributes;
-				        rv.content    = v.content;
-				        combined.push_back(rv);
-			        }
-			        m_runtime->setVariables(combined);
-			        populateVariables();
-		        });
 	// Output
 	auto *outputLayout = new QGridLayout(outputPage);
 	auto *outputLeft   = new QVBoxLayout();
@@ -5676,7 +6720,13 @@ void WorldPreferencesDialog::buildUi()
 			        m_outputFontWeight = 400;
 	        });
 	if (m_useDefaultOutputFont)
-		connect(m_useDefaultOutputFont, &QCheckBox::toggled, this, [this] { updateOutputFontControls(); });
+		connect(m_useDefaultOutputFont, &QCheckBox::toggled, this,
+		        [this](const bool enabled)
+		        {
+			        handleDefaultOverrideToggle(QStringLiteral("use_default_output_font"),
+			                                    m_useDefaultOutputFont, enabled);
+			        updateOutputFontControls();
+		        });
 
 	auto *activityGroup      = new QGroupBox(QStringLiteral("Sound to play on new activity"), outputPage);
 	auto *activityLayout     = new QGridLayout(activityGroup);
@@ -6308,7 +7358,13 @@ void WorldPreferencesDialog::buildUi()
 			                                                      m_inputFontWeight, m_inputFontItalic));
 	        });
 	if (m_useDefaultInputFont)
-		connect(m_useDefaultInputFont, &QCheckBox::toggled, this, [this] { updateInputFontControls(); });
+		connect(m_useDefaultInputFont, &QCheckBox::toggled, this,
+		        [this](const bool enabled)
+		        {
+			        handleDefaultOverrideToggle(QStringLiteral("use_default_input_font"),
+			                                    m_useDefaultInputFont, enabled);
+			        updateInputFontControls();
+		        });
 	if (m_autoResizeCommandWindow)
 		connect(m_autoResizeCommandWindow, &QCheckBox::toggled, this,
 		        [this] { updateCommandAutoResizeControls(); });
@@ -7490,6 +8546,10 @@ void WorldPreferencesDialog::buildUi()
 	m_infoMxpReferenceCount    = new QLabel(infoPage);
 	m_infoMemoryUsed           = new QLabel(infoPage);
 	m_infoCalculateMemory      = new QPushButton(QStringLiteral("Calculate"), infoPage);
+	m_infoMxpActionsCached->setObjectName(QStringLiteral("infoMxpActionsCached"));
+	m_infoMxpReferenceCount->setObjectName(QStringLiteral("infoMxpReferenceCount"));
+	m_infoMemoryUsed->setObjectName(QStringLiteral("infoMemoryUsed"));
+	m_infoCalculateMemory->setObjectName(QStringLiteral("infoCalculateMemory"));
 	m_infoWorldFile->setVisible(false);
 	m_infoWorldFileVersion->setVisible(false);
 	m_infoQmudVersion->setVisible(false);
@@ -8037,27 +9097,40 @@ void WorldPreferencesDialog::buildUi()
 		selectRuleRowByRuntimeId(m_timersTable, selection);
 		updateTimerControls();
 	};
+	auto pruneMissingRuntimeRules = [](auto &working, const QSet<quint64> &initialIds, const auto &current)
+	{
+		QSet<quint64> currentIds;
+		currentIds.reserve(current.size());
+		for (const auto &item : current)
+			currentIds.insert(item.runtimeId);
+		for (int index = working.size() - 1; index >= 0; --index)
+		{
+			const quint64 runtimeId = working.at(index).runtimeId;
+			if (initialIds.contains(runtimeId) && !currentIds.contains(runtimeId))
+				working.removeAt(index);
+		}
+	};
 
 	auto editAliasItem = [this, refreshAliasView](const int row, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
-		if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+		if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			return false;
-		QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		WorldRuntime::Alias        alias;
-		int                        index = -1;
-		quint64       selectedRuntimeId  = ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		const quint64 runtimeId          = isNew ? 0 : ruleRuntimeIdForRow(m_aliasesTable, row);
+		QList<WorldRuntime::Alias> &workingAliases = m_workingLists->aliases;
+		WorldRuntime::Alias         alias;
+		int                         index = -1;
+		quint64       selectedRuntimeId   = ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
+		const quint64 runtimeId           = isNew ? 0 : ruleRuntimeIdForRow(m_aliasesTable, row);
 		if (!isNew)
 		{
-			index = ruleIndexForRuntimeId(aliases, runtimeId);
-			if (index < 0 || index >= aliases.size())
+			index = ruleIndexForRuntimeId(workingAliases, runtimeId);
+			if (index < 0 || index >= workingAliases.size())
 			{
 				refreshAliasView(selectedRuntimeId);
 				return false;
 			}
-			alias = aliases.at(index);
+			alias = workingAliases.at(index);
 		}
 		else
 		{
@@ -8091,28 +9164,21 @@ void WorldPreferencesDialog::buildUi()
 		WorldAliasDialog dlg(m_runtime, alias, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		const WorldRuntime::Alias editedAlias = dlg.alias();
-		aliases                               = m_runtime->aliases();
-
+		WorldRuntime::Alias committedAlias = dlg.alias();
 		if (isNew)
 		{
-			aliases.push_back(editedAlias);
-			index = saturatingToInt(aliases.size()) - 1;
+			committedAlias.runtimeId = WorldRuntime::allocateRuleRuntimeId();
+			workingAliases.push_back(committedAlias);
 		}
 		else
 		{
-			index = ruleIndexForRuntimeId(aliases, runtimeId);
-			if (index < 0)
-			{
-				refreshAliasView(selectedRuntimeId);
-				return false;
-			}
-			aliases[index].attributes = editedAlias.attributes;
-			aliases[index].children   = editedAlias.children;
+			committedAlias.runtimeId             = runtimeId;
+			committedAlias.runtimeLocationHandle = alias.runtimeLocationHandle;
+			workingAliases[index]                = committedAlias;
+			m_workingLists->editedAliasIds.insert(runtimeId);
 		}
-		m_runtime->setAliases(aliases);
-		m_runtime->ensureWorldAliasRuntimeIds();
-		selectedRuntimeId = m_runtime->aliases().at(index).runtimeId;
+		m_workingLists->aliasesStaged = true;
+		selectedRuntimeId             = committedAlias.runtimeId;
 		refreshAliasView(selectedRuntimeId);
 		return true;
 	};
@@ -8121,22 +9187,22 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return false;
-		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			return false;
-		QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		WorldRuntime::Trigger        trigger;
-		int                          index = -1;
+		QList<WorldRuntime::Trigger> &workingTriggers = m_workingLists->triggers;
+		WorldRuntime::Trigger         trigger;
+		int                           index = -1;
 		quint64       selectedRuntimeId = ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
 		const quint64 runtimeId         = isNew ? 0 : ruleRuntimeIdForRow(m_triggersTable, row);
 		if (!isNew)
 		{
-			index = ruleIndexForRuntimeId(triggers, runtimeId);
-			if (index < 0 || index >= triggers.size())
+			index = ruleIndexForRuntimeId(workingTriggers, runtimeId);
+			if (index < 0 || index >= workingTriggers.size())
 			{
 				refreshTriggerView(selectedRuntimeId);
 				return false;
 			}
-			trigger = triggers.at(index);
+			trigger = workingTriggers.at(index);
 		}
 		else
 		{
@@ -8171,28 +9237,21 @@ void WorldPreferencesDialog::buildUi()
 		WorldTriggerDialog dlg(m_runtime, trigger, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		const WorldRuntime::Trigger editedTrigger = dlg.trigger();
-		triggers                                  = m_runtime->triggers();
-
+		WorldRuntime::Trigger committedTrigger = dlg.trigger();
 		if (isNew)
 		{
-			triggers.push_back(editedTrigger);
-			index = saturatingToInt(triggers.size()) - 1;
+			committedTrigger.runtimeId = WorldRuntime::allocateRuleRuntimeId();
+			workingTriggers.push_back(committedTrigger);
 		}
 		else
 		{
-			index = ruleIndexForRuntimeId(triggers, runtimeId);
-			if (index < 0)
-			{
-				refreshTriggerView(selectedRuntimeId);
-				return false;
-			}
-			triggers[index].attributes = editedTrigger.attributes;
-			triggers[index].children   = editedTrigger.children;
+			committedTrigger.runtimeId             = runtimeId;
+			committedTrigger.runtimeLocationHandle = trigger.runtimeLocationHandle;
+			workingTriggers[index]                 = committedTrigger;
+			m_workingLists->editedTriggerIds.insert(runtimeId);
 		}
-		m_runtime->setTriggers(triggers);
-		m_runtime->ensureWorldTriggerRuntimeIds();
-		selectedRuntimeId = m_runtime->triggers().at(index).runtimeId;
+		m_workingLists->triggersStaged = true;
+		selectedRuntimeId              = committedTrigger.runtimeId;
 		refreshTriggerView(selectedRuntimeId);
 		return true;
 	};
@@ -8201,22 +9260,22 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return false;
-		if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
+		if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 			return false;
-		QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		WorldRuntime::Timer        timer;
-		int                        index = -1;
-		quint64       selectedRuntimeId  = ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
-		const quint64 runtimeId          = isNew ? 0 : ruleRuntimeIdForRow(m_timersTable, row);
+		QList<WorldRuntime::Timer> &workingTimers = m_workingLists->timers;
+		WorldRuntime::Timer         timer;
+		int                         index = -1;
+		quint64       selectedRuntimeId   = ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
+		const quint64 runtimeId           = isNew ? 0 : ruleRuntimeIdForRow(m_timersTable, row);
 		if (!isNew)
 		{
-			index = ruleIndexForRuntimeId(timers, runtimeId);
-			if (index < 0 || index >= timers.size())
+			index = ruleIndexForRuntimeId(workingTimers, runtimeId);
+			if (index < 0 || index >= workingTimers.size())
 			{
 				refreshTimerView(selectedRuntimeId);
 				return false;
 			}
-			timer = timers.at(index);
+			timer = workingTimers.at(index);
 		}
 		else
 		{
@@ -8228,33 +9287,21 @@ void WorldPreferencesDialog::buildUi()
 		WorldTimerDialog dlg(m_runtime, timer, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		const WorldRuntime::Timer editedTimer = dlg.timer();
-		timers                                = m_runtime->timers();
-
+		WorldRuntime::Timer committedTimer = dlg.timer();
 		if (isNew)
 		{
-			timers.push_back(editedTimer);
-			index = saturatingToInt(timers.size()) - 1;
+			committedTimer.runtimeId = WorldRuntime::allocateRuleRuntimeId();
+			workingTimers.push_back(committedTimer);
 		}
 		else
 		{
-			index = ruleIndexForRuntimeId(timers, runtimeId);
-			if (index < 0)
-			{
-				refreshTimerView(selectedRuntimeId);
-				return false;
-			}
-			const WorldRuntime::Timer timerBeforeEdit = timers.at(index);
-			WorldRuntime::Timer      &liveTimer       = timers[index];
-			liveTimer.attributes                      = editedTimer.attributes;
-			liveTimer.children                        = editedTimer.children;
-			const QMudTimerScheduling::TimerResetMutation scheduleReset{QDateTime::currentDateTime()};
-			static_cast<void>(QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(
-			    timerBeforeEdit, liveTimer, scheduleReset));
+			committedTimer.runtimeId             = runtimeId;
+			committedTimer.runtimeLocationHandle = timer.runtimeLocationHandle;
+			workingTimers[index]                 = committedTimer;
+			m_workingLists->editedTimerIds.insert(runtimeId);
 		}
-		m_runtime->setTimers(timers);
-		m_runtime->ensureWorldTimerRuntimeIds();
-		selectedRuntimeId = m_runtime->timers().at(index).runtimeId;
+		m_workingLists->timersStaged = true;
+		selectedRuntimeId            = committedTimer.runtimeId;
 		refreshTimerView(selectedRuntimeId);
 		return true;
 	};
@@ -8263,13 +9310,13 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return;
-		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			return;
 		const QList<int> rows = selectedRows(m_triggersTable);
 		if (rows.isEmpty())
 			return;
-		const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		QList<WorldRuntime::Trigger>       selected;
+		const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		QList<WorldRuntime::Trigger>        selected;
 		for (int row : rows)
 		{
 			const int index = ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
@@ -8325,13 +9372,13 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return;
-		if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+		if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			return;
 		const QList<int> rows = selectedRows(m_aliasesTable);
 		if (rows.isEmpty())
 			return;
-		const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		QList<WorldRuntime::Alias>       selected;
+		const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
+		QList<WorldRuntime::Alias>        selected;
 		for (int row : rows)
 		{
 			const int index = ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
@@ -8387,13 +9434,13 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return;
-		if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
+		if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 			return;
 		const QList<int> rows = selectedRows(m_timersTable);
 		if (rows.isEmpty())
 			return;
-		const QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		QList<WorldRuntime::Timer>       selected;
+		const QList<WorldRuntime::Timer> &timers = m_workingLists->timers;
+		QList<WorldRuntime::Timer>        selected;
 		for (int row : rows)
 		{
 			const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
@@ -8449,7 +9496,7 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return;
-		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			return;
 		QClipboard *clipboard = QGuiApplication::clipboard();
 		if (!clipboard)
@@ -8457,29 +9504,24 @@ void WorldPreferencesDialog::buildUi()
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
 			return;
-		QTemporaryFile temp;
-		if (!temp.open())
-			return;
-		temp.write(text.toUtf8());
-		temp.flush();
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_TRIGGERS | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(temp.fileName()))
+		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
 			QMessageBox::warning(this, QStringLiteral("Paste triggers"), doc.errorString());
 			return;
 		}
-		QList<WorldRuntime::Trigger> combined = m_runtime->triggers();
 		for (const auto &t : doc.triggers())
 		{
 			WorldRuntime::Trigger rt;
 			rt.attributes = t.attributes;
 			rt.children   = t.children;
 			rt.included   = t.included;
-			combined.push_back(rt);
+			rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+			m_workingLists->triggers.push_back(rt);
 		}
-		m_runtime->setTriggers(combined);
+		m_workingLists->triggersStaged = true;
 		populateTriggers();
 		updateTriggerControls();
 	};
@@ -8488,7 +9530,7 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return;
-		if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+		if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			return;
 		QClipboard *clipboard = QGuiApplication::clipboard();
 		if (!clipboard)
@@ -8496,29 +9538,24 @@ void WorldPreferencesDialog::buildUi()
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
 			return;
-		QTemporaryFile temp;
-		if (!temp.open())
-			return;
-		temp.write(text.toUtf8());
-		temp.flush();
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_ALIASES | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(temp.fileName()))
+		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
 			QMessageBox::warning(this, QStringLiteral("Paste aliases"), doc.errorString());
 			return;
 		}
-		QList<WorldRuntime::Alias> combined = m_runtime->aliases();
 		for (const auto &a : doc.aliases())
 		{
 			WorldRuntime::Alias ra;
 			ra.attributes = a.attributes;
 			ra.children   = a.children;
 			ra.included   = a.included;
-			combined.push_back(ra);
+			ra.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+			m_workingLists->aliases.push_back(ra);
 		}
-		m_runtime->setAliases(combined);
+		m_workingLists->aliasesStaged = true;
 		populateAliases();
 		updateAliasControls();
 	};
@@ -8527,7 +9564,7 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!m_runtime)
 			return;
-		if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
+		if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 			return;
 		QClipboard *clipboard = QGuiApplication::clipboard();
 		if (!clipboard)
@@ -8535,29 +9572,24 @@ void WorldPreferencesDialog::buildUi()
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
 			return;
-		QTemporaryFile temp;
-		if (!temp.open())
-			return;
-		temp.write(text.toUtf8());
-		temp.flush();
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_TIMERS | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(temp.fileName()))
+		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
 			QMessageBox::warning(this, QStringLiteral("Paste timers"), doc.errorString());
 			return;
 		}
-		QList<WorldRuntime::Timer> combined = m_runtime->timers();
 		for (const auto &t : doc.timers())
 		{
 			WorldRuntime::Timer rt;
 			rt.attributes = t.attributes;
 			rt.children   = t.children;
 			rt.included   = t.included;
-			combined.push_back(rt);
+			rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+			m_workingLists->timers.push_back(rt);
 		}
-		m_runtime->setTimers(combined);
+		m_workingLists->timersStaged = true;
 		populateTimers();
 		updateTimerControls();
 	};
@@ -8568,10 +9600,10 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+			        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 				        return;
 			        bool replace = true;
-			        if (!m_runtime->triggers().isEmpty())
+			        if (!m_workingLists->triggers.isEmpty())
 			        {
 				        const QString message =
 				            QStringLiteral("Replace existing triggers?\n"
@@ -8615,10 +9647,10 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+			        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 				        return;
 			        bool replace = true;
-			        if (!m_runtime->aliases().isEmpty())
+			        if (!m_workingLists->aliases.isEmpty())
 			        {
 				        const QString message =
 				            QStringLiteral("Replace existing aliases?\n"
@@ -8662,10 +9694,10 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
+			        if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 				        return;
 			        bool replace = true;
-			        if (!m_runtime->timers().isEmpty())
+			        if (!m_workingLists->timers.isEmpty())
 			        {
 				        const QString message =
 				            QStringLiteral("Replace existing timers?\n"
@@ -8712,11 +9744,11 @@ void WorldPreferencesDialog::buildUi()
 		        editAliasItem(row, false);
 	        });
 	connect(m_deleteAliasButton, &QPushButton::clicked, this,
-	        [this, refreshAliasView]
+	        [this, refreshAliasView, pruneMissingRuntimeRules]
 	        {
 		        if (!m_runtime)
 			        return;
-		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
@@ -8724,8 +9756,12 @@ void WorldPreferencesDialog::buildUi()
 		            m_aliasesViewStack && m_aliasesViewStack->currentWidget() == m_aliasesTree;
 		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
 		            m_aliasesTable, m_aliasesTree, treeMode, selectedRuntimeId);
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        int                        index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        if (!m_workingLists->aliasesRestoredFromPersistence)
+		        {
+			        pruneMissingRuntimeRules(m_workingLists->aliases, m_workingLists->initialAliasIds,
+			                                 m_runtime->aliases());
+		        }
+		        int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectionCandidates);
@@ -8733,15 +9769,20 @@ void WorldPreferencesDialog::buildUi()
 		        }
 		        if (!confirmRemoval(this, QStringLiteral("alias")))
 			        return;
-		        aliases = m_runtime->aliases();
-		        index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        if (!m_workingLists->aliasesRestoredFromPersistence)
+		        {
+			        pruneMissingRuntimeRules(m_workingLists->aliases, m_workingLists->initialAliasIds,
+			                                 m_runtime->aliases());
+		        }
+		        index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectionCandidates);
 			        return;
 		        }
-		        aliases.removeAt(index);
-		        m_runtime->setAliases(aliases);
+		        m_workingLists->deletedAliasIds.insert(selectedRuntimeId);
+		        m_workingLists->aliases.removeAt(index);
+		        m_workingLists->aliasesStaged = true;
 		        refreshAliasView(selectionCandidates);
 	        });
 	connect(m_moveAliasUpButton, &QPushButton::clicked, this,
@@ -8749,20 +9790,19 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        const int                  index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index <= 0)
 		        {
 			        if (index < 0)
 				        refreshAliasView(selectedRuntimeId);
 			        return;
 		        }
-		        aliases.swapItemsAt(index, index - 1);
-		        m_runtime->setAliases(aliases);
+		        m_workingLists->aliases.swapItemsAt(index, index - 1);
+		        m_workingLists->aliasesStaged = true;
 		        refreshAliasView(selectedRuntimeId);
 	        });
 	connect(m_moveAliasDownButton, &QPushButton::clicked, this,
@@ -8772,19 +9812,18 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
+		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			        return;
-		        const int index = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectedRuntimeId);
 			        return;
 		        }
-		        if (index + 1 >= aliases.size())
+		        if (index + 1 >= m_workingLists->aliases.size())
 			        return;
-		        aliases.swapItemsAt(index, index + 1);
-		        m_runtime->setAliases(aliases);
+		        m_workingLists->aliases.swapItemsAt(index, index + 1);
+		        m_workingLists->aliasesStaged = true;
 		        refreshAliasView(selectedRuntimeId);
 	        });
 	connect(m_copyAliasButton, &QPushButton::clicked, this,
@@ -8796,8 +9835,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        auto                             rowText = [this, &aliases](const int row) -> QString
+		        const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
+		        auto                              rowText = [this, &aliases](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
@@ -8821,8 +9860,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        auto                             rowText = [this, &aliases](const int row) -> QString
+		        const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
+		        auto                              rowText = [this, &aliases](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
@@ -8851,11 +9890,11 @@ void WorldPreferencesDialog::buildUi()
 		        editTriggerItem(row, false);
 	        });
 	connect(m_deleteTriggerButton, &QPushButton::clicked, this,
-	        [this, refreshTriggerView]
+	        [this, refreshTriggerView, pruneMissingRuntimeRules]
 	        {
 		        if (!m_runtime)
 			        return;
-		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
@@ -8863,8 +9902,12 @@ void WorldPreferencesDialog::buildUi()
 		            m_triggersViewStack && m_triggersViewStack->currentWidget() == m_triggersTree;
 		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
 		            m_triggersTable, m_triggersTree, treeMode, selectedRuntimeId);
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        int                          index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        if (!m_workingLists->triggersRestoredFromPersistence)
+		        {
+			        pruneMissingRuntimeRules(m_workingLists->triggers, m_workingLists->initialTriggerIds,
+			                                 m_runtime->triggers());
+		        }
+		        int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectionCandidates);
@@ -8872,15 +9915,20 @@ void WorldPreferencesDialog::buildUi()
 		        }
 		        if (!confirmRemoval(this, QStringLiteral("trigger")))
 			        return;
-		        triggers = m_runtime->triggers();
-		        index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        if (!m_workingLists->triggersRestoredFromPersistence)
+		        {
+			        pruneMissingRuntimeRules(m_workingLists->triggers, m_workingLists->initialTriggerIds,
+			                                 m_runtime->triggers());
+		        }
+		        index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectionCandidates);
 			        return;
 		        }
-		        triggers.removeAt(index);
-		        m_runtime->setTriggers(triggers);
+		        m_workingLists->deletedTriggerIds.insert(selectedRuntimeId);
+		        m_workingLists->triggers.removeAt(index);
+		        m_workingLists->triggersStaged = true;
 		        refreshTriggerView(selectionCandidates);
 	        });
 	connect(m_moveTriggerUpButton, &QPushButton::clicked, this,
@@ -8888,20 +9936,19 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        const int                    index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index <= 0)
 		        {
 			        if (index < 0)
 				        refreshTriggerView(selectedRuntimeId);
 			        return;
 		        }
-		        triggers.swapItemsAt(index, index - 1);
-		        m_runtime->setTriggers(triggers);
+		        m_workingLists->triggers.swapItemsAt(index, index - 1);
+		        m_workingLists->triggersStaged = true;
 		        refreshTriggerView(selectedRuntimeId);
 	        });
 	connect(m_moveTriggerDownButton, &QPushButton::clicked, this,
@@ -8909,21 +9956,20 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
+		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        const int                    index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectedRuntimeId);
 			        return;
 		        }
-		        if (index + 1 >= triggers.size())
+		        if (index + 1 >= m_workingLists->triggers.size())
 			        return;
-		        triggers.swapItemsAt(index, index + 1);
-		        m_runtime->setTriggers(triggers);
+		        m_workingLists->triggers.swapItemsAt(index, index + 1);
+		        m_workingLists->triggersStaged = true;
 		        refreshTriggerView(selectedRuntimeId);
 	        });
 	connect(m_copyTriggerButton, &QPushButton::clicked, this,
@@ -8935,8 +9981,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        auto                               rowText  = [this, &triggers](const int row) -> QString
+		        const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		        auto                                rowText  = [this, &triggers](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
@@ -8960,8 +10006,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        auto                               rowText  = [this, &triggers](const int row) -> QString
+		        const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		        auto                                rowText  = [this, &triggers](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
@@ -8989,19 +10035,23 @@ void WorldPreferencesDialog::buildUi()
 		        editTimerItem(row, false);
 	        });
 	connect(m_deleteTimerButton, &QPushButton::clicked, this,
-	        [this, refreshTimerView]
+	        [this, refreshTimerView, pruneMissingRuntimeRules]
 	        {
 		        if (!m_runtime)
 			        return;
-		        if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
+		        if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
 		        const bool treeMode = m_timersViewStack && m_timersViewStack->currentWidget() == m_timersTree;
 		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
 		            m_timersTable, m_timersTree, treeMode, selectedRuntimeId);
-		        QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		        int                        index  = ruleIndexForRuntimeId(timers, selectedRuntimeId);
+		        if (!m_workingLists->timersRestoredFromPersistence)
+		        {
+			        pruneMissingRuntimeRules(m_workingLists->timers, m_workingLists->initialTimerIds,
+			                                 m_runtime->timers());
+		        }
+		        int index = ruleIndexForRuntimeId(m_workingLists->timers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTimerView(selectionCandidates);
@@ -9009,15 +10059,20 @@ void WorldPreferencesDialog::buildUi()
 		        }
 		        if (!confirmRemoval(this, QStringLiteral("timer")))
 			        return;
-		        timers = m_runtime->timers();
-		        index  = ruleIndexForRuntimeId(timers, selectedRuntimeId);
+		        if (!m_workingLists->timersRestoredFromPersistence)
+		        {
+			        pruneMissingRuntimeRules(m_workingLists->timers, m_workingLists->initialTimerIds,
+			                                 m_runtime->timers());
+		        }
+		        index = ruleIndexForRuntimeId(m_workingLists->timers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTimerView(selectionCandidates);
 			        return;
 		        }
-		        timers.removeAt(index);
-		        m_runtime->setTimers(timers);
+		        m_workingLists->deletedTimerIds.insert(selectedRuntimeId);
+		        m_workingLists->timers.removeAt(index);
+		        m_workingLists->timersStaged = true;
 		        refreshTimerView(selectionCandidates);
 	        });
 	connect(m_copyTimerButton, &QPushButton::clicked, this,
@@ -9029,8 +10084,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Timer> timers  = m_runtime->timers();
-		        auto                             rowText = [this, &timers](const int row) -> QString
+		        const QList<WorldRuntime::Timer> &timers  = m_workingLists->timers;
+		        auto                              rowText = [this, &timers](const int row) -> QString
 		        {
 			        const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
 			        if (index < 0 || index >= timers.size())
@@ -9052,8 +10107,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Timer> timers  = m_runtime->timers();
-		        auto                             rowText = [this, &timers](const int row) -> QString
+		        const QList<WorldRuntime::Timer> &timers  = m_workingLists->timers;
+		        auto                              rowText = [this, &timers](const int row) -> QString
 		        {
 			        const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
 			        if (index < 0 || index >= timers.size())
@@ -9239,9 +10294,21 @@ void WorldPreferencesDialog::buildUi()
 			        updateAliasControls();
 		        });
 	if (m_useDefaultAliases)
-		connect(m_useDefaultAliases, &QCheckBox::toggled, this, [this] { updateAliasControls(); });
+		connect(m_useDefaultAliases, &QCheckBox::toggled, this,
+		        [this](const bool enabled)
+		        {
+			        handleDefaultOverrideToggle(QStringLiteral("use_default_aliases"), m_useDefaultAliases,
+			                                    enabled);
+			        updateAliasControls();
+		        });
 	if (m_useDefaultTriggers)
-		connect(m_useDefaultTriggers, &QCheckBox::toggled, this, [this] { updateTriggerControls(); });
+		connect(m_useDefaultTriggers, &QCheckBox::toggled, this,
+		        [this](const bool enabled)
+		        {
+			        handleDefaultOverrideToggle(QStringLiteral("use_default_triggers"), m_useDefaultTriggers,
+			                                    enabled);
+			        updateTriggerControls();
+		        });
 	if (m_timersTable)
 		connect(m_timersTable, &QTableWidget::itemSelectionChanged, this,
 		        [this, syncTreeFromTable]
@@ -9257,7 +10324,13 @@ void WorldPreferencesDialog::buildUi()
 			        updateTimerControls();
 		        });
 	if (m_useDefaultTimers)
-		connect(m_useDefaultTimers, &QCheckBox::toggled, this, [this] { updateTimerControls(); });
+		connect(m_useDefaultTimers, &QCheckBox::toggled, this,
+		        [this](const bool enabled)
+		        {
+			        handleDefaultOverrideToggle(QStringLiteral("use_default_timers"), m_useDefaultTimers,
+			                                    enabled);
+			        updateTimerControls();
+		        });
 	if (m_aliasTreeView)
 		connect(m_aliasTreeView, &QCheckBox::toggled, this,
 		        [this]
@@ -9283,7 +10356,7 @@ void WorldPreferencesDialog::buildUi()
 		connect(m_variablesTable, &QTableWidget::itemSelectionChanged, this,
 		        [this] { updateVariableControls(); });
 	auto editVariableDialogNow = [this](QString &name, QString &value, const bool allowRename,
-	                                    const QSet<QString> &disallowedNames) -> bool
+	                                    const std::function<QSet<QString>()> &currentDisallowedNames) -> bool
 	{
 		QDialog dialog(this);
 		dialog.setWindowTitle(QStringLiteral("Variable"));
@@ -9314,7 +10387,7 @@ void WorldPreferencesDialog::buildUi()
 				                     QStringLiteral("Variable name cannot be blank."));
 				continue;
 			}
-			if (disallowedNames.contains(candidateName))
+			if (currentDisallowedNames().contains(candidateName.toCaseFolded()))
 			{
 				QMessageBox::warning(&dialog, QStringLiteral("Variables"),
 				                     QStringLiteral("That variable name is already in use."));
@@ -9327,28 +10400,37 @@ void WorldPreferencesDialog::buildUi()
 		}
 	};
 	if (m_addVariableButton)
-		connect(m_addVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialogNow]
-		        {
-			        if (!m_runtime)
-				        return;
-			        QSet<QString>                        namesInUse;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        for (const auto &var : vars)
-				        namesInUse.insert(var.attributes.value(QStringLiteral("name")));
-			        QString name;
-			        QString value;
-			        if (!editVariableDialogNow(name, value, true, namesInUse))
-				        return;
-			        WorldRuntime::Variable newVar;
-			        newVar.attributes.insert(QStringLiteral("name"), name);
-			        newVar.content                        = value;
-			        QList<WorldRuntime::Variable> updated = vars;
-			        updated.push_back(newVar);
-			        m_runtime->setVariables(updated);
-			        populateVariables();
-			        updateVariableControls();
-		        });
+		connect(
+		    m_addVariableButton, &QPushButton::clicked, this,
+		    [this, editVariableDialogNow]
+		    {
+			    if (!m_runtime)
+				    return;
+			    QString name;
+			    QString value;
+			    auto    currentNamesInUse = [this]
+			    {
+				    QSet<QString> names;
+				    for (const WorldRuntime::Variable &var : m_runtime->variables())
+					    names.insert(var.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded());
+				    for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+					    names.insert(
+					        working.value.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded());
+				    return names;
+			    };
+			    if (!editVariableDialogNow(name, value, true, currentNamesInUse))
+				    return;
+			    WorldRuntime::Variable newVar;
+			    newVar.attributes.insert(QStringLiteral("name"), name);
+			    newVar.content                        = value;
+			    QList<WorldRuntime::Variable> updated = m_runtime->variables();
+			    updated.push_back(newVar);
+			    m_runtime->setVariables(updated);
+			    m_workingLists->variables.push_back({newVar, name, true, false, false});
+			    populateVariables();
+			    selectRowByIndex(m_variablesTable, saturatingToInt(m_workingLists->variables.size()) - 1);
+			    updateVariableControls();
+		    });
 	if (m_editVariableButton)
 		connect(m_editVariableButton, &QPushButton::clicked, this,
 		        [this, editVariableDialogNow]
@@ -9359,24 +10441,63 @@ void WorldPreferencesDialog::buildUi()
 			        const int index = rowToIndex(m_variablesTable, row);
 			        if (index < 0)
 				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
+			        if (index >= m_workingLists->variables.size())
 				        return;
-			        const QString oldName = vars.at(index).attributes.value(QStringLiteral("name"));
-			        QString       name    = oldName;
-			        QString       value   = vars.at(index).content;
-			        QSet<QString> namesInUse;
-			        for (int i = 0; i < vars.size(); ++i)
+			        WorkingLists::Variable &working = m_workingLists->variables[index];
+			        const QString           oldName = working.value.attributes.value(QStringLiteral("name"));
+			        QString                 name    = oldName;
+			        QString                 value   = working.value.content;
+			        auto                    currentNamesInUse = [this, index]
 			        {
-				        if (i == index)
-					        continue;
-				        namesInUse.insert(vars.at(i).attributes.value(QStringLiteral("name")));
-			        }
-			        if (!editVariableDialogNow(name, value, true, namesInUse))
+				        QSet<QString>                 names;
+				        const WorkingLists::Variable &selected = m_workingLists->variables.at(index);
+				        for (int i = 0; i < m_workingLists->variables.size(); ++i)
+				        {
+					        if (i == index)
+						        continue;
+					        names.insert(m_workingLists->variables.at(i)
+					                         .value.attributes.value(QStringLiteral("name"))
+					                         .trimmed()
+					                         .toCaseFolded());
+				        }
+				        for (const WorldRuntime::Variable &runtimeVariable : m_runtime->variables())
+				        {
+					        const QString runtimeName =
+					            runtimeVariable.attributes.value(QStringLiteral("name")).trimmed();
+					        if (selected.presentInRuntime &&
+					            runtimeName.compare(selected.runtimeName, Qt::CaseInsensitive) == 0)
+						        continue;
+					        names.insert(runtimeName.toCaseFolded());
+				        }
+				        return names;
+			        };
+			        if (!editVariableDialogNow(name, value, true, currentNamesInUse))
 				        return;
-			        vars[index].attributes.insert(QStringLiteral("name"), name);
-			        vars[index].content = value;
-			        m_runtime->setVariables(vars);
+
+			        WorldRuntime::Variable committed = working.value;
+			        committed.attributes.insert(QStringLiteral("name"), name);
+			        committed.content                              = value;
+			        QList<WorldRuntime::Variable> runtimeVariables = m_runtime->variables();
+			        int                           runtimeIndex     = -1;
+			        if (working.presentInRuntime)
+			        {
+				        for (int i = 0; i < runtimeVariables.size(); ++i)
+				        {
+					        if (runtimeVariables.at(i)
+					                .attributes.value(QStringLiteral("name"))
+					                .compare(working.runtimeName, Qt::CaseInsensitive) == 0)
+					        {
+						        runtimeIndex = i;
+						        break;
+					        }
+				        }
+			        }
+			        if (runtimeIndex >= 0)
+				        runtimeVariables[runtimeIndex] = committed;
+			        else
+				        runtimeVariables.push_back(committed);
+			        m_runtime->setVariables(runtimeVariables);
+			        working = {committed, name, true, false, false};
 			        populateVariables();
 			        selectRowByIndex(m_variablesTable, index);
 			        updateVariableControls();
@@ -9393,15 +10514,42 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 			        if (!confirmRemoval(this, QStringLiteral("variable")))
 				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
+			        if (index >= m_workingLists->variables.size())
 				        return;
-			        vars.removeAt(index);
-			        m_runtime->setVariables(vars);
+			        const WorkingLists::Variable &working = m_workingLists->variables.at(index);
+			        if (working.presentInRuntime)
+				        m_workingLists->deletedVariableNames.insert(
+				            working.runtimeName.trimmed().toCaseFolded());
+			        m_workingLists->variables.removeAt(index);
+			        m_workingLists->variablesStaged = true;
 			        populateVariables();
-			        const int lastIndex = saturatingToInt(vars.size()) - 1;
+			        const int lastIndex = saturatingToInt(m_workingLists->variables.size()) - 1;
 			        selectRowByIndex(m_variablesTable, std::min(index, lastIndex));
 			        updateVariableControls();
+		        });
+	if (m_variablesTable)
+		connect(m_variablesTable, &QTableWidget::itemChanged, this,
+		        [this](const QTableWidgetItem *item)
+		        {
+			        if (!item)
+				        return;
+			        const int index = rowToIndex(m_variablesTable, item->row());
+			        if (index < 0 || index >= m_workingLists->variables.size())
+				        return;
+			        WorkingLists::Variable &working = m_workingLists->variables[index];
+			        if (item->column() == 0)
+			        {
+				        working.value.attributes.insert(QStringLiteral("name"), item->text().trimmed());
+				        working.nameEdited = true;
+			        }
+			        else if (item->column() == 1)
+			        {
+				        working.value.content = item->text();
+				        working.valueEdited   = true;
+			        }
+			        else
+				        return;
+			        m_workingLists->variablesStaged = true;
 		        });
 	if (m_variablesTable)
 		connect(m_variablesTable, &QTableWidget::cellDoubleClicked, this,
@@ -9416,13 +10564,12 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
+			        auto rowText = [this](const int row) -> QString
 			        {
 				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
+				        if (index < 0 || index >= m_workingLists->variables.size())
 					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
+				        const WorldRuntime::Variable &var  = m_workingLists->variables.at(index).value;
 				        const QString                 name = var.attributes.value(QStringLiteral("name"));
 				        return var.content + QLatin1Char('\t') + name;
 			        };
@@ -9437,13 +10584,12 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
+			        auto rowText = [this](const int row) -> QString
 			        {
 				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
+				        if (index < 0 || index >= m_workingLists->variables.size())
 					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
+				        const WorldRuntime::Variable &var  = m_workingLists->variables.at(index).value;
 				        const QString                 name = var.attributes.value(QStringLiteral("name"));
 				        return var.content + QLatin1Char('\t') + name;
 			        };
@@ -9496,10 +10642,9 @@ void WorldPreferencesDialog::buildUi()
 			        const int index = rowToIndex(m_variablesTable, row);
 			        if (index < 0)
 				        return;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        if (index >= vars.size())
+			        if (index >= m_workingLists->variables.size())
 				        return;
-			        const WorldRuntime::Variable &var = vars.at(index);
+			        const WorldRuntime::Variable &var = m_workingLists->variables.at(index).value;
 			        QString                       xml;
 			        QTextStream                   out(&xml);
 			        out << "<variables>\n";
@@ -9513,7 +10658,7 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_pasteVariableButton)
 		connect(m_pasteVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialogNow]
+		        [this]
 		        {
 			        if (!m_runtime)
 				        return;
@@ -9525,44 +10670,24 @@ void WorldPreferencesDialog::buildUi()
 			        }();
 			        if (text.trimmed().isEmpty())
 				        return;
-			        QTemporaryFile temp;
-			        if (!temp.open())
-				        return;
-			        temp.write(text.toUtf8());
-			        temp.flush();
 			        WorldDocument doc;
 			        doc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS |
 			                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-			        if (!doc.loadFromFile(temp.fileName()))
+			        if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 			        {
 				        QMessageBox::warning(this, QStringLiteral("Paste variables"), doc.errorString());
 				        return;
 			        }
-			        QList<WorldRuntime::Variable> combined = m_runtime->variables();
-			        QSet<QString>                 namesInUse;
-			        for (const auto &var : combined)
-				        namesInUse.insert(var.attributes.value(QStringLiteral("name")));
-			        bool changed = false;
 			        for (const auto &v : doc.variables())
 			        {
-				        QString name  = v.attributes.value(QStringLiteral("name"));
-				        QString value = v.content;
-				        if (namesInUse.contains(name))
-				        {
-					        if (!editVariableDialogNow(name, value, true, namesInUse))
-						        continue;
-				        }
 				        WorldRuntime::Variable rv;
 				        rv.attributes = v.attributes;
-				        rv.attributes.insert(QStringLiteral("name"), name);
-				        rv.content = value;
-				        combined.push_back(rv);
-				        namesInUse.insert(name);
-				        changed = true;
+				        rv.content    = v.content;
+				        m_workingLists->variables.push_back({rv, {}, false, false, false});
 			        }
-			        if (changed)
+			        if (!doc.variables().isEmpty())
 			        {
-				        m_runtime->setVariables(combined);
+				        m_workingLists->variablesStaged = true;
 				        populateVariables();
 			        }
 			        updateVariableControls();
@@ -9607,30 +10732,12 @@ void WorldPreferencesDialog::buildUi()
 	connect(buttons, &QDialogButtonBox::rejected, this, &WorldPreferencesDialog::reject);
 	layout->addWidget(buttons);
 
-	populateGeneral();
-	populateSound();
-	populateCustomColours();
-	populateLogging();
-	populateAnsiColours();
-	populateMacros();
-	populateOutput();
-	populateCommands();
-	populateScripting();
-	populateSendToWorld();
-	populateNotes();
-	populateKeypad();
-	populatePaste();
-	populateInfo();
-	populateTriggers();
-	populateAliases();
-	populateTimers();
-	populateVariables();
-	populateAutoSay();
-	populatePrinting();
-	populateConnecting();
-	populateMxp();
-	populateChat();
-	updateRuleViewModes();
+	if (QTreeWidgetItem *const generalItem = m_pageItems.value(PageGeneral))
+	{
+		const QSignalBlocker blocker(m_pageTree);
+		m_pageTree->setCurrentItem(generalItem);
+	}
+	m_pages->setCurrentIndex(PageGeneral);
 }
 
 void WorldPreferencesDialog::populateGeneral()
@@ -9718,13 +10825,20 @@ void WorldPreferencesDialog::populateCustomColours()
 	if (!m_runtime || m_customColourNames.size() < MAX_CUSTOM || m_customTextSwatches.size() < MAX_CUSTOM ||
 	    m_customBackSwatches.size() < MAX_CUSTOM)
 		return;
+	if (m_useDefaultColours && !m_useDefaultColoursLoaded)
+	{
+		m_useDefaultColours->setChecked(
+		    qmudIsEnabledFlag(m_runtime->worldAttributes().value(QStringLiteral("use_default_colours"))));
+		m_useDefaultColoursLoaded = true;
+	}
 	unsigned long defaultText[MAX_CUSTOM];
 	unsigned long defaultBack[MAX_CUSTOM];
 	setDefaultCustomColours(defaultText, defaultBack);
 	QVector<QColor>                    textColours(MAX_CUSTOM);
 	QVector<QColor>                    backColours(MAX_CUSTOM);
 	QVector<QString>                   names(MAX_CUSTOM);
-	const QList<WorldRuntime::Colour> &colours = m_runtime->colours();
+	const QList<WorldRuntime::Colour> &colours =
+	    m_workingLists && m_workingLists->coloursStaged ? m_workingLists->colours : m_runtime->colours();
 	for (const WorldRuntime::Colour &colour : colours)
 	{
 		if (colour.group != QMudColourGroup::kCustom)
@@ -9758,6 +10872,7 @@ void WorldPreferencesDialog::populateCustomColours()
 		setSwatchButtonColour(m_customBackSwatches.value(i), backColours[i]);
 	}
 	updateScriptNoteColourItems();
+	updateDefaultColoursState();
 }
 
 void WorldPreferencesDialog::populateLogging() const
@@ -9826,15 +10941,19 @@ void WorldPreferencesDialog::populateAnsiColours()
 	if (!m_runtime || m_ansiNormalSwatches.size() < 8 || m_ansiBoldSwatches.size() < 8)
 		return;
 	const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-	if (m_useDefaultColours)
+	if (m_useDefaultColours && !m_useDefaultColoursLoaded)
+	{
 		m_useDefaultColours->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_colours"))));
+		m_useDefaultColoursLoaded = true;
+	}
 	if (m_custom16IsDefaultColour)
 		m_custom16IsDefaultColour->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("custom_16_is_default_colour"))));
 	QVector<QColor>                    normal(8);
 	QVector<QColor>                    bold(8);
-	const QList<WorldRuntime::Colour> &colours = m_runtime->colours();
+	const QList<WorldRuntime::Colour> &colours =
+	    m_workingLists && m_workingLists->coloursStaged ? m_workingLists->colours : m_runtime->colours();
 	for (const WorldRuntime::Colour &colour : colours)
 	{
 		if (!colour.group.startsWith(QStringLiteral("ansi/")))
@@ -9880,8 +10999,6 @@ void WorldPreferencesDialog::populateAnsiColours()
 			m_customAnsiBold[i]->setPalette(pal);
 		}
 	}
-	if (m_useDefaultColours)
-		m_initialUseDefaultColours = m_useDefaultColours->isChecked();
 	updateDefaultColoursState();
 }
 
@@ -9891,7 +11008,8 @@ void WorldPreferencesDialog::populateMacros()
 		return;
 	m_macrosTable->setShowGrid(gridLinesEnabled());
 	m_macrosTable->setRowCount(0);
-	const QList<WorldRuntime::Macro> &macros = m_runtime->macros();
+	const QList<WorldRuntime::Macro> &macros =
+	    m_workingLists && m_workingLists->macrosInitialized ? m_workingLists->macros : m_runtime->macros();
 	struct MacroRow
 	{
 			int     index{0};
@@ -9971,13 +11089,12 @@ void WorldPreferencesDialog::populateMacros()
 	if (QHeaderView *header = m_macrosTable->horizontalHeader())
 		header->setSortIndicator(m_macroSortColumn,
 		                         m_macroSortAscending ? Qt::AscendingOrder : Qt::DescendingOrder);
-	if (m_useDefaultMacros)
+	if (m_useDefaultMacros && !m_useDefaultMacrosLoaded)
 	{
 		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
 		m_useDefaultMacros->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_macros"))));
+		m_useDefaultMacrosLoaded = true;
 	}
-	if (m_useDefaultMacros)
-		m_initialUseDefaultMacros = m_useDefaultMacros->isChecked();
 	updateMacroControls();
 }
 
@@ -10448,10 +11565,8 @@ void WorldPreferencesDialog::calculateMemoryUsage(const bool allowProgress)
 		progress->setValue(0);
 	}
 
-	long long     totalBytes     = 0;
-	int           styleCount     = 0;
-	int           actionRefCount = 0;
-	QSet<QString> actionKeys;
+	long long totalBytes = 0;
+	int       styleCount = 0;
 
 	for (int i = 0; i < lineCount; ++i)
 	{
@@ -10460,13 +11575,6 @@ void WorldPreferencesDialog::calculateMemoryUsage(const bool allowProgress)
 		totalBytes += entry.text.capacity() * static_cast<long long>(sizeof(QChar));
 		totalBytes += entry.spans.capacity() * static_cast<long long>(sizeof(WorldRuntime::StyleSpan));
 		styleCount += saturatingToInt(entry.spans.size());
-		for (const auto &span : entry.spans)
-		{
-			if (span.actionType == WorldRuntime::ActionNone)
-				continue;
-			actionRefCount++;
-			actionKeys.insert(QStringLiteral("%1:%2").arg(span.actionType).arg(span.action));
-		}
 
 		if (progress && (i & 63) == 0)
 		{
@@ -10504,10 +11612,6 @@ void WorldPreferencesDialog::calculateMemoryUsage(const bool allowProgress)
 		memoryText = QStringLiteral("%1 (%2 bytes/line)").arg(memoryText).arg(totalBytes / lineCount);
 	m_infoMemoryUsed->setText(memoryText);
 
-	if (m_infoMxpActionsCached)
-		m_infoMxpActionsCached->setText(QString::number(actionKeys.size()));
-	if (m_infoMxpReferenceCount)
-		m_infoMxpReferenceCount->setText(QString::number(actionRefCount));
 	if (m_infoCalculateMemory)
 		m_infoCalculateMemory->setEnabled(false);
 }
@@ -10761,7 +11865,7 @@ void WorldPreferencesDialog::populateInfo()
 		{
 			if (span.actionType == WorldRuntime::ActionNone)
 				continue;
-			actionRefCount++;
+			++actionRefCount;
 			actionKeys.insert(QStringLiteral("%1:%2").arg(span.actionType).arg(span.action));
 		}
 	}
@@ -10815,9 +11919,8 @@ void WorldPreferencesDialog::populateTriggers()
 {
 	if (!m_runtime || !m_triggersTable)
 		return;
-	m_runtime->ensureWorldTriggerRuntimeIds();
 	m_triggersTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Trigger> &triggers = m_runtime->triggers();
+	const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
 	QSet<QString>                       pluginOwnedSignatures;
 	for (const auto &plugin : m_runtime->plugins())
 	{
@@ -11012,33 +12115,39 @@ void WorldPreferencesDialog::populateTriggers()
 	}
 	if (m_triggersCount)
 		m_triggersCount->setText(QStringLiteral("%1 triggers.").arg(m_triggersTable->rowCount()));
-	const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-	if (m_enableTriggers)
-		m_enableTriggers->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_triggers"))));
-	if (m_enableTriggerSounds)
-		m_enableTriggerSounds->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_trigger_sounds"))));
-	if (m_useDefaultTriggers)
-		m_useDefaultTriggers->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_triggers"))));
-	if (m_triggerTreeView)
-		m_triggerTreeView->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("treeview_triggers"))));
-	if (m_defaultTriggerExpandVariables)
-		m_defaultTriggerExpandVariables->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_expand_variables"))));
-	if (m_defaultTriggerIgnoreCase)
-		m_defaultTriggerIgnoreCase->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_ignore_case"))));
-	if (m_defaultTriggerKeepEvaluating)
-		m_defaultTriggerKeepEvaluating->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_keep_evaluating"))));
-	if (m_defaultTriggerRegexp)
-		m_defaultTriggerRegexp->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_regexp"))));
-	if (m_defaultTriggerSendTo)
-		m_defaultTriggerSendTo->setValue(attrs.value(QStringLiteral("default_trigger_send_to")).toInt());
-	if (m_defaultTriggerSequence)
-		m_defaultTriggerSequence->setValue(attrs.value(QStringLiteral("default_trigger_sequence")).toInt());
+	if (!m_useDefaultTriggersLoaded)
+	{
+		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+		if (m_enableTriggers)
+			m_enableTriggers->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_triggers"))));
+		if (m_enableTriggerSounds)
+			m_enableTriggerSounds->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_trigger_sounds"))));
+		if (m_useDefaultTriggers)
+			m_useDefaultTriggers->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_triggers"))));
+		if (m_triggerTreeView)
+			m_triggerTreeView->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("treeview_triggers"))));
+		if (m_defaultTriggerExpandVariables)
+			m_defaultTriggerExpandVariables->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_expand_variables"))));
+		if (m_defaultTriggerIgnoreCase)
+			m_defaultTriggerIgnoreCase->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_ignore_case"))));
+		if (m_defaultTriggerKeepEvaluating)
+			m_defaultTriggerKeepEvaluating->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_keep_evaluating"))));
+		if (m_defaultTriggerRegexp)
+			m_defaultTriggerRegexp->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_trigger_regexp"))));
+		if (m_defaultTriggerSendTo)
+			m_defaultTriggerSendTo->setValue(attrs.value(QStringLiteral("default_trigger_send_to")).toInt());
+		if (m_defaultTriggerSequence)
+			m_defaultTriggerSequence->setValue(
+			    attrs.value(QStringLiteral("default_trigger_sequence")).toInt());
+		m_useDefaultTriggersLoaded = true;
+	}
 	if (m_triggersTree)
 	{
 		rebuildGroupedTree(
@@ -11052,11 +12161,6 @@ void WorldPreferencesDialog::populateTriggers()
 		    m_runtime ? m_runtime->lastTriggerTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
-	if (m_useDefaultTriggers && !m_useDefaultTriggersLoaded)
-	{
-		m_initialUseDefaultTriggers = m_useDefaultTriggers->isChecked();
-		m_useDefaultTriggersLoaded  = true;
-	}
 	updateTriggerControls();
 }
 
@@ -11064,9 +12168,8 @@ void WorldPreferencesDialog::populateAliases()
 {
 	if (!m_runtime || !m_aliasesTable)
 		return;
-	m_runtime->ensureWorldAliasRuntimeIds();
 	m_aliasesTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Alias> &aliases = m_runtime->aliases();
+	const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
 	QSet<QString>                     pluginOwnedSignatures;
 	for (const auto &plugin : m_runtime->plugins())
 	{
@@ -11237,30 +12340,34 @@ void WorldPreferencesDialog::populateAliases()
 	}
 	if (m_aliasesCount)
 		m_aliasesCount->setText(QStringLiteral("%1 aliases.").arg(m_aliasesTable->rowCount()));
-	const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-	if (m_enableAliases)
-		m_enableAliases->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_aliases"))));
-	if (m_useDefaultAliases)
-		m_useDefaultAliases->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_aliases"))));
-	if (m_aliasTreeView)
-		m_aliasTreeView->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("treeview_aliases"))));
-	if (m_defaultAliasExpandVariables)
-		m_defaultAliasExpandVariables->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_expand_variables"))));
-	if (m_defaultAliasIgnoreCase)
-		m_defaultAliasIgnoreCase->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_ignore_case"))));
-	if (m_defaultAliasKeepEvaluating)
-		m_defaultAliasKeepEvaluating->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_keep_evaluating"))));
-	if (m_defaultAliasRegexp)
-		m_defaultAliasRegexp->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_regexp"))));
-	if (m_defaultAliasSendTo)
-		m_defaultAliasSendTo->setValue(attrs.value(QStringLiteral("default_alias_send_to")).toInt());
-	if (m_defaultAliasSequence)
-		m_defaultAliasSequence->setValue(attrs.value(QStringLiteral("default_alias_sequence")).toInt());
+	if (!m_useDefaultAliasesLoaded)
+	{
+		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+		if (m_enableAliases)
+			m_enableAliases->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_aliases"))));
+		if (m_useDefaultAliases)
+			m_useDefaultAliases->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_aliases"))));
+		if (m_aliasTreeView)
+			m_aliasTreeView->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("treeview_aliases"))));
+		if (m_defaultAliasExpandVariables)
+			m_defaultAliasExpandVariables->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_expand_variables"))));
+		if (m_defaultAliasIgnoreCase)
+			m_defaultAliasIgnoreCase->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_ignore_case"))));
+		if (m_defaultAliasKeepEvaluating)
+			m_defaultAliasKeepEvaluating->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_keep_evaluating"))));
+		if (m_defaultAliasRegexp)
+			m_defaultAliasRegexp->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("default_alias_regexp"))));
+		if (m_defaultAliasSendTo)
+			m_defaultAliasSendTo->setValue(attrs.value(QStringLiteral("default_alias_send_to")).toInt());
+		if (m_defaultAliasSequence)
+			m_defaultAliasSequence->setValue(attrs.value(QStringLiteral("default_alias_sequence")).toInt());
+		m_useDefaultAliasesLoaded = true;
+	}
 	if (m_aliasesTree)
 	{
 		rebuildGroupedTree(
@@ -11274,11 +12381,6 @@ void WorldPreferencesDialog::populateAliases()
 		    m_runtime ? m_runtime->lastAliasTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
-	if (m_useDefaultAliases && !m_useDefaultAliasesLoaded)
-	{
-		m_initialUseDefaultAliases = m_useDefaultAliases->isChecked();
-		m_useDefaultAliasesLoaded  = true;
-	}
 	updateAliasControls();
 }
 
@@ -11286,9 +12388,8 @@ void WorldPreferencesDialog::populateTimers()
 {
 	if (!m_runtime || !m_timersTable)
 		return;
-	m_runtime->ensureWorldTimerRuntimeIds();
 	m_timersTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Timer> &timers = m_runtime->timers();
+	const QList<WorldRuntime::Timer> &timers = m_workingLists->timers;
 	QSet<QString>                     pluginOwnedSignatures;
 	for (const auto &plugin : m_runtime->plugins())
 	{
@@ -11477,15 +12578,20 @@ void WorldPreferencesDialog::populateTimers()
 	}
 	if (m_timersCount)
 		m_timersCount->setText(QStringLiteral("%1 timers.").arg(m_timersTable->rowCount()));
-	const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-	if (m_enableTimers)
-		m_enableTimers->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_timers"))));
-	if (m_useDefaultTimers)
-		m_useDefaultTimers->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_timers"))));
-	if (m_timerTreeView)
-		m_timerTreeView->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("treeview_timers"))));
-	if (m_defaultTimerSendTo)
-		m_defaultTimerSendTo->setValue(attrs.value(QStringLiteral("default_timer_send_to")).toInt());
+	if (!m_useDefaultTimersLoaded)
+	{
+		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+		if (m_enableTimers)
+			m_enableTimers->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_timers"))));
+		if (m_useDefaultTimers)
+			m_useDefaultTimers->setChecked(
+			    qmudIsEnabledFlag(attrs.value(QStringLiteral("use_default_timers"))));
+		if (m_timerTreeView)
+			m_timerTreeView->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("treeview_timers"))));
+		if (m_defaultTimerSendTo)
+			m_defaultTimerSendTo->setValue(attrs.value(QStringLiteral("default_timer_send_to")).toInt());
+		m_useDefaultTimersLoaded = true;
+	}
 	if (m_timersTree)
 	{
 		rebuildGroupedTree(
@@ -11503,11 +12609,6 @@ void WorldPreferencesDialog::populateTimers()
 		    m_runtime ? m_runtime->lastTimerTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
-	if (m_useDefaultTimers && !m_useDefaultTimersLoaded)
-	{
-		m_initialUseDefaultTimers = m_useDefaultTimers->isChecked();
-		m_useDefaultTimersLoaded  = true;
-	}
 	updateTimerControls();
 }
 
@@ -11516,8 +12617,7 @@ void WorldPreferencesDialog::populateVariables()
 	if (!m_runtime || !m_variablesTable)
 		return;
 	m_variablesTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-	QSet<QString>                        pluginOwnedVariables;
+	QSet<QString> pluginOwnedVariables;
 	for (const auto &plugin : m_runtime->plugins())
 	{
 		for (auto it = plugin.variables.constBegin(); it != plugin.variables.constEnd(); ++it)
@@ -11535,9 +12635,10 @@ void WorldPreferencesDialog::populateVariables()
 	LuaFilterRunner filter(filterEnabled ? m_variableFilterText : QString(), this);
 	const bool      useLuaFilter = filterEnabled && filter.isValid();
 #endif
-	for (int i = 0; i < vars.size(); ++i)
+	const QSignalBlocker tableBlocker(m_variablesTable);
+	for (int i = 0; i < m_workingLists->variables.size(); ++i)
 	{
-		const WorldRuntime::Variable &var     = vars.at(i);
+		const WorldRuntime::Variable &var     = m_workingLists->variables.at(i).value;
 		const QString                 varName = var.attributes.value(QStringLiteral("name"));
 		const QString variableKey = normalizeObjectName(varName) + QLatin1Char('\x1d') + var.content;
 		if (pluginOwnedVariables.contains(variableKey))

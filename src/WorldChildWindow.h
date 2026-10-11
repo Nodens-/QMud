@@ -67,6 +67,11 @@ class WorldChildWindow : public QMdiSubWindow
 		 */
 		[[nodiscard]] bool             isPrimaryRuntimeBinding() const;
 		/**
+		 * @brief Reports whether this world's periodic autosave is currently writing a snapshot.
+		 * @return `true` while an autosave request is in flight.
+		 */
+		[[nodiscard]] bool             autosaveInFlight() const;
+		/**
 		 * @brief Returns world view widget hosted by this child window.
 		 * @return Hosted world view pointer, or `nullptr`.
 		 */
@@ -81,6 +86,16 @@ class WorldChildWindow : public QMdiSubWindow
 		 * @param command ShowWindow command value.
 		 */
 		void                           setInfoWindowShowCommand(int command);
+
+	signals:
+		/**
+		 * @brief Emitted after the runtime pointer or primary/observer role changes.
+		 */
+		void runtimeBindingChanged();
+		/**
+		 * @brief Emitted after the callback-visible ShowWindow command changes.
+		 */
+		void infoWindowShowCommandChanged();
 
 	protected:
 		/**

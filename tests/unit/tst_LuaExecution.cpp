@@ -2038,6 +2038,4 @@ namespace
 
 QTEST_MAIN(tst_LuaExecution)
 
-#if __has_include("tst_LuaExecution.moc")
 #include "tst_LuaExecution.moc"
-#endif

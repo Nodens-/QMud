@@ -157,10 +157,11 @@ namespace MiniWindowUtils
 	                           const QString &releaseCallback, int flags, const QString &pluginId);
 	int  setHotspotScrollwheelHandler(MiniWindow &window, const QString &hotspotId,
 	                                  const QString &moveCallback, const QString &pluginId);
-	void clearGeneratedOutputHotspots(MiniWindow &window, const QString &hotspotPrefix);
+	void clearGeneratedOutputHotspots(MiniWindow &window, const QString &hotspotPrefix,
+	                                  QStringList *removedHotspotIdsOut = nullptr);
 	int  addGeneratedOutputHotspot(MiniWindow &window, const QString &hotspotPrefix, int left, int top,
 	                               int right, int bottom, const QString &mouseUp, const QString &pluginId,
-	                               int actionType, const QString &action);
+	                               int actionType, const QString &action, QString *hotspotIdOut = nullptr);
 	[[nodiscard]] bool lineFitsVertically(int y, int lineHeight, int rectBottom);
 	[[nodiscard]] bool runNeedsWrap(int x, int candidateWidth, int currentLineWidth, int rectLeft,
 	                                int rightLimitExclusive);

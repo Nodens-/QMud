@@ -97,8 +97,17 @@ class TelnetProcessor
 				std::function<bool(int level)>              onMxpDiagnosticNeeded;
 				/** @brief NO-ECHO state changed callback. */
 				std::function<void(bool enabled)>           onNoEchoChanged;
+				/** @brief Effective NAWS negotiation state changed callback. */
+				std::function<void(bool negotiated)>        onNawsNegotiatedChanged;
 				/** @brief Fatal protocol error callback. */
 				std::function<void(const QString &message)> onFatalProtocolError;
+				/** @brief Custom MXP entity value changed. */
+				std::function<void(const QByteArray &name, const QByteArray &value, bool present)>
+				                                            onCustomEntityChanged;
+				/** @brief Every custom MXP entity was cleared. */
+				std::function<void()>                       onCustomEntitiesCleared;
+				/** @brief One custom MXP element changed, or the complete set was replaced. */
+				std::function<void(const QByteArray &name)> onCustomElementsChanged;
 		};
 
 		/**
@@ -136,6 +145,15 @@ class TelnetProcessor
 		 * @param enabled Enable NAWS negotiation when `true`.
 		 */
 		void       setNawsEnabled(bool enabled);
+		/**
+		 * @brief Restores the peer NAWS request state for an adopted live connection.
+		 * @param negotiated Restore an active peer NAWS request when `true`.
+		 *
+		 * This does not emit a fresh WILL negotiation because descriptor adoption
+		 * preserves the existing TCP session. An active restoration sends the
+		 * current cached dimensions once.
+		 */
+		void       restoreNawsNegotiatedState(bool negotiated);
 		/**
 		 * @brief Enables/disables one-time telnet option negotiation mode.
 		 * @param enabled When `true`, repeated WILL/WONT and DO/DONT for an already
@@ -247,26 +265,28 @@ class TelnetProcessor
 		 */
 		QByteArray processBytes(const QByteArray &data, const PacketTransformCallback &packetTransform);
 		/**
-		 * @brief Plugin-visible telnet event emitted at a position in processed output.
+		 * @brief Telnet state or plugin callback event at a position in processed output.
 		 */
-		struct TelnetPluginEvent
+		struct TelnetStreamEvent
 		{
 				enum Type
 				{
 					IacGa,
 					Option,
-					Subnegotiation
+					Subnegotiation,
+					NawsNegotiatedChanged
 				} type{Subnegotiation};
 				int        offset{0};
 				int        sequence{0};
 				int        option{0};
 				QByteArray data;
+				bool       negotiated{false};
 		};
 		/**
-		 * @brief Returns and clears plugin-visible telnet events since the previous call.
-		 * @return Ordered telnet plugin events.
+		 * @brief Returns and clears ordered telnet stream events since the previous call.
+		 * @return Ordered telnet stream events.
 		 */
-		QList<TelnetPluginEvent> takeTelnetPluginEvents();
+		QList<TelnetStreamEvent> takeTelnetStreamEvents();
 		/**
 		 * @brief Returns and clears bytes queued for outbound socket write.
 		 * @return Queued outbound bytes.
@@ -311,124 +331,133 @@ class TelnetProcessor
 		 * @return Parsed MXP mode-change markers.
 		 */
 		QList<MxpModeChange> takeMxpModeChanges();
+		/** Custom MXP entities keyed by normalized entity name. */
+		using CustomEntityMap = QMap<QByteArray, QByteArray>;
 		/**
 		 * @brief Retrieves a custom MXP entity value by name.
 		 * @param name Entity name.
 		 * @param value Output entity value.
 		 * @return `true` when entity exists.
 		 */
-		bool                 getCustomEntityValue(const QByteArray &name, QByteArray &value) const;
+		bool                          getCustomEntityValue(const QByteArray &name, QByteArray &value) const;
 		/**
 		 * @brief Returns a snapshot of custom MXP entity definitions.
 		 * @return Custom entity values keyed by normalized entity name.
 		 */
-		[[nodiscard]] QMap<QByteArray, QByteArray> customEntitySnapshot() const;
+		[[nodiscard]] CustomEntityMap customEntitySnapshot() const;
 		/**
 		 * @brief Resolves an entity using custom and built-in MXP entity tables.
 		 * @param name Entity name.
 		 * @param value Output resolved value.
 		 * @return `true` when entity resolves successfully.
 		 */
-		bool                 resolveEntityValue(const QByteArray &name, QByteArray &value) const;
+		bool                          resolveEntityValue(const QByteArray &name, QByteArray &value) const;
+		/**
+		 * @brief Resolves one built-in MXP entity to internal UTF-8 bytes.
+		 * @param name Entity name.
+		 * @param value Output resolved value.
+		 * @return `true` when the built-in entity exists and resolves to a non-empty value.
+		 */
+		static bool                   resolveBuiltinEntityValue(const QByteArray &name, QByteArray &value);
 		/**
 		 * @brief Registers or replaces a custom MXP entity value.
 		 * @param name Entity name.
 		 * @param value Entity value.
 		 */
-		void                 setCustomEntity(const QByteArray &name, const QByteArray &value);
+		void                          setCustomEntity(const QByteArray &name, const QByteArray &value);
 		/**
 		 * @brief Reports whether current MXP mode is secure.
 		 * @return `true` when MXP mode is secure.
 		 */
-		[[nodiscard]] bool   isMxpSecure() const;
+		[[nodiscard]] bool            isMxpSecure() const;
 		/**
 		 * @brief Reports whether current MXP mode is open.
 		 * @return `true` when MXP mode is open.
 		 */
-		[[nodiscard]] bool   isMxpOpen() const;
+		[[nodiscard]] bool            isMxpOpen() const;
 		/**
 		 * @brief Reports whether MXP processing is active.
 		 * @return `true` when MXP processing is enabled.
 		 */
-		[[nodiscard]] bool   isMxpEnabled() const;
+		[[nodiscard]] bool            isMxpEnabled() const;
 		/**
 		 * @brief Reports whether pueblo mode is currently active.
 		 * @return `true` when pueblo mode is active.
 		 */
-		[[nodiscard]] bool   isPuebloActive() const;
+		[[nodiscard]] bool            isPuebloActive() const;
 		/**
 		 * @brief Forces pueblo mode activation.
 		 */
-		void                 activatePuebloMode();
+		void                          activatePuebloMode();
 		/**
 		 * @brief Returns current NAWS window width in columns.
 		 * @return Current NAWS width in columns.
 		 */
-		[[nodiscard]] int    windowColumns() const;
+		[[nodiscard]] int             windowColumns() const;
 		/**
 		 * @brief Returns whether NAWS was successfully negotiated with the server.
 		 * @return `true` when NAWS negotiation is active.
 		 */
-		[[nodiscard]] bool   isNawsNegotiated() const;
+		[[nodiscard]] bool            isNawsNegotiated() const;
 		/**
 		 * @brief Returns current NAWS window height in rows.
 		 * @return Current NAWS height in rows.
 		 */
-		[[nodiscard]] int    windowRows() const;
+		[[nodiscard]] int             windowRows() const;
 		/**
 		 * @brief Returns the negotiated MCCP compression type.
 		 * @return Active MCCP type code.
 		 */
-		[[nodiscard]] int    mccpType() const;
+		[[nodiscard]] int             mccpType() const;
 		/**
 		 * @brief Returns the number of compressed bytes received.
 		 * @return Compressed byte count.
 		 */
-		[[nodiscard]] qint64 totalCompressedBytes() const;
+		[[nodiscard]] qint64          totalCompressedBytes() const;
 		/**
 		 * @brief Returns the number of decompressed output bytes produced.
 		 * @return Uncompressed byte count.
 		 */
-		[[nodiscard]] qint64 totalUncompressedBytes() const;
+		[[nodiscard]] qint64          totalUncompressedBytes() const;
 		/**
 		 * @brief Returns total parsed MXP tag count.
 		 * @return Parsed MXP tag count.
 		 */
-		[[nodiscard]] qint64 mxpTagCount() const;
+		[[nodiscard]] qint64          mxpTagCount() const;
 		/**
 		 * @brief Returns total parsed MXP entity count.
 		 * @return Parsed MXP entity count.
 		 */
-		[[nodiscard]] qint64 mxpEntityCount() const;
+		[[nodiscard]] qint64          mxpEntityCount() const;
 		/**
 		 * @brief Returns number of currently registered custom MXP elements.
 		 * @return Custom MXP element count.
 		 */
-		[[nodiscard]] int    customElementCount() const;
+		[[nodiscard]] int             customElementCount() const;
 		/**
 		 * @brief Returns number of currently registered custom MXP entities.
 		 * @return Custom MXP entity count.
 		 */
-		[[nodiscard]] int    customEntityCount() const;
+		[[nodiscard]] int             customEntityCount() const;
 		/**
 		 * @brief Returns number of built-in MXP entities.
 		 * @return Built-in MXP entity count.
 		 */
-		static int           builtinEntityCount();
+		static int                    builtinEntityCount();
 		/**
 		 * @brief Reports whether input is currently being decompressed.
 		 * @return `true` when MCCP decompression is active.
 		 */
-		[[nodiscard]] bool   isCompressing() const;
+		[[nodiscard]] bool            isCompressing() const;
 		/**
 		 * @brief Disables MXP processing for the current connection state.
 		 */
-		void                 disableMxp();
+		void                          disableMxp();
 		/**
 		 * @brief Sets default MXP mode applied when MXP is reset.
 		 * @param mode Default MXP mode.
 		 */
-		void                 setMxpDefaultMode(MxpDefaultMode mode);
+		void                          setMxpDefaultMode(MxpDefaultMode mode);
 		/**
 		 * @brief Snapshot of MXP session state used for reload restoration.
 		 */
@@ -453,7 +482,10 @@ class TelnetProcessor
 				QByteArray flag;
 				QByteArray definition;
 				QByteArray attributes;
+				bool       operator==(const CustomElementInfo &) const = default;
 		};
+		/** Custom MXP elements keyed by normalized element name. */
+		using CustomElementMap = QMap<QByteArray, CustomElementInfo>;
 		/**
 		 * @brief Fetches custom element metadata by name.
 		 * @param name Element name.
@@ -466,6 +498,11 @@ class TelnetProcessor
 		 * @return Snapshot list of custom element metadata.
 		 */
 		[[nodiscard]] QList<CustomElementInfo> customElementInfos() const;
+		/**
+		 * @brief Returns an implicitly shared snapshot of custom MXP element definitions.
+		 * @return Custom elements keyed by normalized element name.
+		 */
+		[[nodiscard]] CustomElementMap         customElementSnapshot() const;
 		/**
 		 * @brief Replaces all custom MXP element definitions from snapshot metadata.
 		 * @param elements Custom element metadata to apply.
@@ -681,6 +718,12 @@ class TelnetProcessor
 		 */
 		void                   sendWindowSize();
 		/**
+		 * @brief Updates NAWS preference and peer state and reports an effective negotiation transition.
+		 * @param enabled Whether local NAWS support is enabled.
+		 * @param wanted Whether the peer currently requests NAWS.
+		 */
+		void                   setNawsState(bool enabled, bool wanted);
+		/**
 		 * @brief Applies the configured response and state changes for IAC WILL.
 		 * @param option Telnet option code.
 		 */
@@ -712,12 +755,14 @@ class TelnetProcessor
 		/** @brief Clears rolling negotiation histories and active suppression intervals. */
 		void                   resetRenegotiationLoopProtection();
 		/**
-		 * @brief Records a plugin-visible telnet event at the current output position.
-		 * @param type Plugin event type.
+		 * @brief Records a telnet stream event at the current output position.
+		 * @param type Stream event type.
 		 * @param option Telnet option number.
 		 * @param data Telnet event payload bytes.
+		 * @param negotiated Effective NAWS state for a NAWS transition event.
 		 */
-		void appendTelnetPluginEvent(TelnetPluginEvent::Type type, int option, const QByteArray &data);
+		void appendTelnetStreamEvent(TelnetStreamEvent::Type type, int option, const QByteArray &data,
+		                             bool negotiated = false);
 		/**
 		 * @brief Returns the active CHARSET negotiation preference list.
 		 * @return Charset names in priority order.
@@ -753,7 +798,23 @@ class TelnetProcessor
 		 * @param value Output internal UTF-8 value.
 		 * @return `true` when a custom entity exists.
 		 */
-		[[nodiscard]] bool       resolveCustomEntityValue(const QByteArray &name, QByteArray &value) const;
+		[[nodiscard]] bool resolveCustomEntityValue(const QByteArray &name, QByteArray &value) const;
+		/**
+		 * @brief Applies one normalized custom-entity assignment and reports an actual state change.
+		 * @param name Canonical lowercase entity name.
+		 * @param value Internal UTF-8 value.
+		 * @param present Whether the entity should exist.
+		 */
+		void               updateCustomEntity(const QByteArray &name, const QByteArray &value, bool present);
+		/** @brief Clears custom entities and reports the reset boundary. */
+		void               clearCustomEntities();
+		/** @brief Clears custom elements and reports an actual definition change. */
+		void               clearCustomElements();
+		/**
+		 * @brief Reports an actual custom-element definition change.
+		 * @param name Changed normalized name, or empty when the complete set was replaced.
+		 */
+		void               notifyCustomElementsChanged(const QByteArray &name = {}) const;
 		/**
 		 * @brief Resolves an entity for insertion into the raw processed output stream.
 		 * @param name Entity name.
@@ -798,60 +859,51 @@ class TelnetProcessor
 			HAVE_MXP_ENTITY
 		};
 
-		int                          m_mxpMode{mxpModeCode(MxpMode::Locked)};
-		int                          m_mxpDefaultMode{mxpModeCode(MxpMode::Open)};
-		int                          m_mxpPreviousMode{mxpModeCode(MxpMode::Open)};
-		bool                         m_mxpEnabled{false};
-		bool                         m_puebloActive{false};
-		MxpPhase                     m_mxpPhase{MXP_NONE};
-		QByteArray                   m_mxpString;
-		unsigned char                m_mxpQuoteTerminator{0};
-		QMap<QByteArray, QByteArray> m_customEntities;
-		struct CustomElement
-		{
-				QByteArray name;
-				bool       open{false};
-				bool       command{false};
-				int        tag{0};
-				QByteArray flag;
-				QByteArray definition;
-				QByteArray attributes;
-		};
-		QMap<QByteArray, CustomElement> m_customElements;
-		QList<MxpEvent>                 m_mxpEvents;
-		QList<MxpModeChange>            m_mxpModeChanges;
-		QList<TelnetPluginEvent>        m_telnetPluginEvents;
-		int                             m_mxpEventSequence{0};
-		Callbacks                       m_callbacks;
+		int                            m_mxpMode{mxpModeCode(MxpMode::Locked)};
+		int                            m_mxpDefaultMode{mxpModeCode(MxpMode::Open)};
+		int                            m_mxpPreviousMode{mxpModeCode(MxpMode::Open)};
+		bool                           m_mxpEnabled{false};
+		bool                           m_puebloActive{false};
+		MxpPhase                       m_mxpPhase{MXP_NONE};
+		QByteArray                     m_mxpString;
+		unsigned char                  m_mxpQuoteTerminator{0};
+		CustomEntityMap                m_customEntities;
+		CustomElementMap               m_customElements;
+		QList<MxpEvent>                m_mxpEvents;
+		QList<MxpModeChange>           m_mxpModeChanges;
+		QList<TelnetStreamEvent>       m_telnetStreamEvents;
+		bool                           m_recordTelnetStreamEvents{false};
+		int                            m_mxpEventSequence{0};
+		Callbacks                      m_callbacks;
 
-		bool                            m_compress{false};
-		int                             m_mccpType{0};
-		bool                            m_compressInitOk{false};
-		bool                            m_supportsMccp2{false};
-		bool                            m_disableCompression{false};
-		bool                            m_startTlsEnabled{false};
-		bool                            m_startTlsActive{false};
-		bool                            m_startTlsDoSent{false};
-		bool                            m_startTlsFollowsSent{false};
-		bool                            m_startTlsUpgradeRequested{false};
-		bool                            m_startTlsUpgradeInProgress{false};
-		bool                            m_startTlsNegotiationRejected{false};
-		qint64                          m_totalCompressedBytes{0};
-		qint64                          m_totalUncompressedBytes{0};
-		qint64                          m_mxpTagCount{0};
-		qint64                          m_mxpEntityCount{0};
+		bool                           m_compress{false};
+		int                            m_mccpType{0};
+		bool                           m_compressInitOk{false};
+		bool                           m_supportsMccp2{false};
+		bool                           m_disableCompression{false};
+		bool                           m_startTlsEnabled{false};
+		bool                           m_startTlsActive{false};
+		bool                           m_startTlsDoSent{false};
+		bool                           m_startTlsFollowsSent{false};
+		bool                           m_startTlsUpgradeRequested{false};
+		bool                           m_startTlsUpgradeInProgress{false};
+		bool                           m_startTlsNegotiationRejected{false};
+		qint64                         m_totalCompressedBytes{0};
+		qint64                         m_totalUncompressedBytes{0};
+		qint64                         m_mxpTagCount{0};
+		qint64                         m_mxpEntityCount{0};
 
-		bool                            m_seenCompressWillIac{false};
-		bool                            m_requestedSga{false};
-		bool                            m_requestedEor{false};
-		bool                            m_negotiateOptionsOnce{false};
-		std::array<bool, 256>           m_seenWillWontOption{};
-		std::array<bool, 256>           m_seenDoDontOption{};
-		bool                            m_automaticRenegotiationLoopProtection{false};
-		std::array<QList<qint64>, 512>  m_negotiationAttemptTimes;
-		std::array<qint64, 512>         m_negotiationSuppressionUntil{};
-		qint64                          m_lastNegotiationAttemptTime{-1};
-		QElapsedTimer                   m_negotiationClock;
+		bool                           m_seenCompressWillIac{false};
+		bool                           m_requestedSga{false};
+		bool                           m_requestedEor{false};
+		bool                           m_negotiateOptionsOnce{false};
+		std::array<bool, 256>          m_seenWillWontOption{};
+		std::array<bool, 256>          m_seenDoDontOption{};
+		bool                           m_automaticRenegotiationLoopProtection{false};
+		std::array<QList<qint64>, 512> m_negotiationAttemptTimes;
+		std::array<qint64, 512>        m_negotiationSuppressionUntil{};
+		qint64                         m_lastNegotiationAttemptTime{-1};
+		QElapsedTimer                  m_negotiationClock;
 
 		struct ZStreamWrapper;
 		ZStreamWrapper *m_zlib{nullptr};

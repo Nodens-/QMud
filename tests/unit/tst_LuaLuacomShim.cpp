@@ -1038,6 +1038,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_LuaLuacomShim)
 
-#if __has_include("tst_LuaLuacomShim.moc")
 #include "tst_LuaLuacomShim.moc"
-#endif

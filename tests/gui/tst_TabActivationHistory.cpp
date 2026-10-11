@@ -104,6 +104,4 @@ namespace
 
 QTEST_MAIN(tst_TabActivationHistory)
 
-#if __has_include("tst_TabActivationHistory.moc")
 #include "tst_TabActivationHistory.moc"
-#endif

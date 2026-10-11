@@ -305,6 +305,14 @@ qmud_add_qtest(tst_WorldRuntime_OutputBufferSeal
         LABELS
         unit)
 
+qmud_add_qtest(tst_WorldRuntime_BlendPixel
+        SOURCES
+        unit/tst_WorldRuntime_BlendPixel.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_WorldSessionRestoreFlowUtils
         SOURCES
         unit/tst_WorldSessionRestoreFlowUtils.cpp

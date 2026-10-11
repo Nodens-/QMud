@@ -185,14 +185,14 @@ namespace
 				const qint64 anchorLineNumber = runtime.lines().at(0).lineNumber;
 
 				runtime.setSessionStateOutputBufferSealed(true);
-				QVERIFY(!runtime.writeLuaCallbackOutputAtLineAnchor(anchorLineNumber, 1, false,
+				QVERIFY(!runtime.writeLuaCallbackOutputAtLineAnchor(anchorLineNumber, 1, 1, false,
 				                                                    QStringLiteral("blocked-anchor"),
 				                                                    WorldRuntime::LineOutput, {}, true));
 				QCOMPARE(runtime.lines().size(), 1);
 				QCOMPARE(runtime.lines().at(0).text, QStringLiteral("anchor"));
 
 				runtime.setSessionStateOutputBufferSealed(false);
-				QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(anchorLineNumber, 1, false,
+				QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(anchorLineNumber, 1, 1, false,
 				                                                   QStringLiteral("inserted"),
 				                                                   WorldRuntime::LineOutput, {}, true));
 				QCOMPARE(runtime.lines().size(), 2);
@@ -207,7 +207,7 @@ namespace
 				QVERIFY(runtime.reserveIncomingLineLuaContextInBuffer());
 				QVERIFY(runtime.hideBufferedIncomingLineLuaContextForReplacement());
 				const qint64 hiddenLineNumber = runtime.incomingLineLuaContextAbsoluteNumber();
-				QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(hiddenLineNumber, 1, false,
+				QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(hiddenLineNumber, 2, 1, false,
 				                                                   QStringLiteral("following"),
 				                                                   WorldRuntime::LineNote, {}, true));
 
@@ -247,6 +247,4 @@ namespace
 
 QTEST_MAIN(tst_WorldRuntime_OutputBufferSeal)
 
-#if __has_include("tst_WorldRuntime_OutputBufferSeal.moc")
 #include "tst_WorldRuntime_OutputBufferSeal.moc"
-#endif

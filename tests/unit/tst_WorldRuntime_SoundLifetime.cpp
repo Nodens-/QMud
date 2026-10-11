@@ -110,6 +110,4 @@ class tst_WorldRuntime_SoundLifetime : public QObject
 
 QTEST_MAIN(tst_WorldRuntime_SoundLifetime)
 
-#if __has_include("tst_WorldRuntime_SoundLifetime.moc")
 #include "tst_WorldRuntime_SoundLifetime.moc"
-#endif

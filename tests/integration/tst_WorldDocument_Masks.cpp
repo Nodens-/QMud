@@ -108,6 +108,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldDocument_Masks)
 
-#if __has_include("tst_WorldDocument_Masks.moc")
 #include "tst_WorldDocument_Masks.moc"
-#endif

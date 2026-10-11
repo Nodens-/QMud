@@ -143,6 +143,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_TimerAccounting)
 
-#if __has_include("tst_WorldCommandProcessor_TimerAccounting.moc")
 #include "tst_WorldCommandProcessor_TimerAccounting.moc"
-#endif
