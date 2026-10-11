@@ -15,6 +15,11 @@
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
+#include <QFile>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
 #include <QScopeGuard>
 #include <QScopedPointer>
@@ -94,6 +99,158 @@ namespace
 			Q_OBJECT
 
 		private slots:
+			/**
+			 * @brief Verifies trigger output notes and matched world output use their own log options.
+			 */
+			static void sendToOutputLoggingUsesIndependentWorldAndNoteOptions()
+			{
+				const QString rootPath =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("test-artifacts/tst_WorldCommandProcessor_Trigger/"
+				                                 "send-to-output-log-options"));
+				if (QDir(rootPath).exists())
+					QVERIFY(QDir(rootPath).removeRecursively());
+				QVERIFY(QDir().mkpath(QDir(rootPath).filePath(QStringLiteral("logs"))));
+				[[maybe_unused]] const auto cleanup =
+				    qScopeGuard([rootPath] { static_cast<void>(QDir(rootPath).removeRecursively()); });
+
+				auto runCase = [&rootPath](const QString &name, const bool logOutput, const bool logNotes)
+				{
+					WorldRuntime runtime;
+					runtime.setStartupDirectory(rootPath);
+					runtime.setDefaultLogDirectory(QDir(rootPath).filePath(QStringLiteral("logs")));
+					runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("1"));
+					runtime.setWorldAttribute(QStringLiteral("log_output"),
+					                          logOutput ? QStringLiteral("1") : QStringLiteral("0"));
+					runtime.setWorldAttribute(QStringLiteral("log_notes"),
+					                          logNotes ? QStringLiteral("1") : QStringLiteral("0"));
+					runtime.setWorldAttribute(QStringLiteral("log_html"), QStringLiteral("0"));
+					runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+					runtime.setWorldAttribute(QStringLiteral("log_rotate_gzip"), QStringLiteral("0"));
+
+					WorldRuntime::Trigger trigger;
+					trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+					trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("source-line"));
+					trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+					trigger.children.insert(QStringLiteral("send"), QStringLiteral("generated-note"));
+					WorldRuntimeTestAccess::triggers(runtime).push_back(std::move(trigger));
+					runtime.markTriggersChanged();
+
+					WorldView             view;
+					WorldCommandProcessor processor;
+					processor.setView(&view);
+					processor.setRuntime(&runtime);
+					runtime.setCommandProcessor(&processor);
+					view.setRuntime(&runtime);
+
+					const QString path = QDir(rootPath).filePath(QStringLiteral("logs/%1.txt").arg(name));
+					QCOMPARE(runtime.openLog(path, false), eOK);
+					const QString           openedPath = runtime.logFileName();
+					WorldRuntime::StyleSpan span;
+					span.length = 11;
+					processor.onIncomingStyledLineReceived(QStringLiteral("source-line"), {span});
+					QCOMPARE(runtime.closeLog(), eOK);
+
+					QFile logFile(openedPath);
+					QVERIFY(logFile.open(QIODevice::ReadOnly));
+					const QString contents = QString::fromLocal8Bit(logFile.readAll());
+					QCOMPARE(contents.contains(QStringLiteral("source-line")), logOutput);
+					QCOMPARE(contents.contains(QStringLiteral("generated-note")), logNotes);
+
+					view.setRuntime(nullptr);
+					runtime.setCommandProcessor(nullptr);
+					processor.setRuntime(nullptr);
+				};
+
+				runCase(QStringLiteral("world-only"), true, false);
+				runCase(QStringLiteral("notes-only"), false, true);
+			}
+
+			/**
+			 * @brief Verifies live styled output uses HTML colours without changing the disabled-colour path.
+			 */
+			static void liveHtmlColourLoggingUsesOutputSpansAndPreservesDisabledBehaviour()
+			{
+				const QString rootPath = QDir(QCoreApplication::applicationDirPath())
+				                             .filePath(QStringLiteral("test-artifacts/"
+				                                                      "tst_WorldCommandProcessor_Trigger/"
+				                                                      "html-colour-logging"));
+				if (QDir(rootPath).exists())
+					QVERIFY(QDir(rootPath).removeRecursively());
+				QVERIFY(QDir().mkpath(QDir(rootPath).filePath(QStringLiteral("logs"))));
+				[[maybe_unused]] const auto cleanup =
+				    qScopeGuard([rootPath] { static_cast<void>(QDir(rootPath).removeRecursively()); });
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(rootPath);
+				runtime.setDefaultLogDirectory(QDir(rootPath).filePath(QStringLiteral("logs")));
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("log_html"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("log_in_colour"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("log_rotate_gzip"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("alternative_inverse"), QStringLiteral("0"));
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+
+				WorldRuntime::StyleSpan first;
+				first.length    = 5;
+				first.fore      = QColor(QStringLiteral("#ff0000"));
+				first.back      = QColor(QStringLiteral("#0000ff"));
+				first.underline = true;
+				WorldRuntime::StyleSpan second;
+				second.length      = 6;
+				second.fore        = QColor(QStringLiteral("#00ff00"));
+				second.back        = QColor(QStringLiteral("#000000"));
+				second.inverse     = true;
+				const QString line = QStringLiteral("red<&invert");
+
+				const QString colouredPath = QDir(rootPath).filePath(QStringLiteral("logs/coloured.html"));
+				QCOMPARE(runtime.openLog(colouredPath, false), eOK);
+				const QString openedColouredPath = runtime.logFileName();
+				processor.onIncomingStyledLineReceived(line, {first, second});
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("*"));
+				trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+				trigger.attributes.insert(QStringLiteral("custom_colour"), QString::number(OTHER_CUSTOM + 1));
+				trigger.attributes.insert(QStringLiteral("colour_change_type"),
+				                          QString::number(TRIGGER_COLOUR_CHANGE_BOTH));
+				trigger.attributes.insert(QStringLiteral("other_text_colour"), QStringLiteral("#112233"));
+				trigger.attributes.insert(QStringLiteral("other_back_colour"), QStringLiteral("#445566"));
+				WorldRuntimeTestAccess::triggers(runtime).push_back(trigger);
+				runtime.markTriggersChanged();
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("1"));
+				WorldRuntime::StyleSpan triggerInput;
+				triggerInput.length = 9;
+				triggerInput.fore   = QColor(QStringLiteral("#ffffff"));
+				triggerInput.back   = QColor(QStringLiteral("#000000"));
+				processor.onIncomingStyledLineReceived(QStringLiteral("triggered"), {triggerInput});
+				QCOMPARE(runtime.closeLog(), eOK);
+				QFile colouredFile(openedColouredPath);
+				QVERIFY(colouredFile.open(QIODevice::ReadOnly));
+				QCOMPARE(QString::fromLocal8Bit(colouredFile.readAll()),
+				         QStringLiteral("<font color=\"#ff0000\"><span style=\"color: #ff0000; "
+				                        "background: #0000ff\"><u>red&lt;&amp;</u></span></font>"
+				                        "<font color=\"#000000\"><span style=\"color: #000000; "
+				                        "background: #00ff00\">invert</span></font>\n"
+				                        "<font color=\"#112233\"><span style=\"color: #112233; "
+				                        "background: #445566\">triggered</span></font>\n"));
+
+				runtime.setWorldAttribute(QStringLiteral("log_in_colour"), QStringLiteral("0"));
+				const QString plainPath = QDir(rootPath).filePath(QStringLiteral("logs/plain.html"));
+				QCOMPARE(runtime.openLog(plainPath, false), eOK);
+				const QString openedPlainPath = runtime.logFileName();
+				processor.onIncomingStyledLineReceived(line, {first, second});
+				QCOMPARE(runtime.closeLog(), eOK);
+				QFile plainFile(openedPlainPath);
+				QVERIFY(plainFile.open(QIODevice::ReadOnly));
+				QCOMPARE(QString::fromLocal8Bit(plainFile.readAll()), QStringLiteral("red&lt;&amp;invert\n"));
+			}
+
 			static void triggerMatchTargetPreservesTrailingWhitespaceForRegexp()
 			{
 				const QString line = QStringLiteral("<274hp 930sp 448st> ");

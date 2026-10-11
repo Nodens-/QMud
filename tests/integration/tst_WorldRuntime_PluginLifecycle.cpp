@@ -1396,6 +1396,275 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		}
 
 	private slots:
+		/**
+		 * @brief Verifies trigger output screen-draw callbacks report the note's actual logging state.
+		 */
+		static void triggerOutputScreenDrawLogFlagUsesNoteLoggingOption()
+		{
+			const QString artifactDirectory =
+			    QDir(QCoreApplication::applicationDirPath())
+			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
+			                                 "trigger-output-screen-draw-log"));
+			if (QDir(artifactDirectory).exists())
+				QVERIFY(QDir(artifactDirectory).removeRecursively());
+			QVERIFY(QDir().mkpath(QDir(artifactDirectory).filePath(QStringLiteral("logs"))));
+			[[maybe_unused]] const auto cleanup = qScopeGuard(
+			    [artifactDirectory] { static_cast<void>(QDir(artifactDirectory).removeRecursively()); });
+
+			auto runCase =
+			    [&artifactDirectory](const QString &name, const bool logOutput, const bool logNotes)
+			{
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(artifactDirectory);
+				runtime.setDefaultLogDirectory(QDir(artifactDirectory).filePath(QStringLiteral("logs")));
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+				runtime.setWorldAttribute(QStringLiteral("log_output"),
+				                          logOutput ? QStringLiteral("1") : QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("log_notes"),
+				                          logNotes ? QStringLiteral("1") : QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("log_html"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("log_rotate_gzip"), QStringLiteral("0"));
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("callback-source"));
+				trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+				trigger.attributes.insert(QStringLiteral("omit_from_log"), QStringLiteral("1"));
+				trigger.children.insert(QStringLiteral("send"), QStringLiteral("generated-note"));
+				WorldRuntimeTestAccess::triggers(runtime).push_back(std::move(trigger));
+				runtime.markTriggersChanged();
+
+				const QString pluginId = QStringLiteral("919191919191919191919191");
+				[[maybe_unused]] const QSharedPointer<LuaCallbackEngine> recorder = addRuntimeCallbackPlugin(
+				    runtime, pluginId, QStringLiteral("Trigger output screen-draw recorder"),
+				    QStringLiteral(R"lua(
+function OnPluginScreendraw(draw_type, log, line)
+  if draw_type ~= 1 or line ~= "generated-note" then
+    return
+  end
+  SetVariable("note_seen", "1")
+  SetVariable("note_type", string.format("%.0f", draw_type))
+  SetVariable("note_log", string.format("%.0f", log))
+  SetVariable("note_text", line)
+end
+)lua"));
+
+				RuntimeCommandHarness harness(runtime);
+				QVERIFY(harness.showAndWait());
+				const QString logPath =
+				    QDir(artifactDirectory).filePath(QStringLiteral("logs/%1.txt").arg(name));
+				QCOMPARE(runtime.openLog(logPath, false), eOK);
+				const QString openedLogPath = runtime.logFileName();
+
+				runtime.receiveRawData(QByteArrayLiteral("callback-source\r\n"));
+				QTRY_COMPARE_WITH_TIMEOUT(pluginVariable(runtime, pluginId, QStringLiteral("note_seen")),
+				                          QStringLiteral("1"), 3000);
+				QCOMPARE(pluginVariable(runtime, pluginId, QStringLiteral("note_type")), QStringLiteral("1"));
+				QCOMPARE(pluginVariable(runtime, pluginId, QStringLiteral("note_log")),
+				         logNotes ? QStringLiteral("1") : QStringLiteral("0"));
+				QCOMPARE(pluginVariable(runtime, pluginId, QStringLiteral("note_text")),
+				         QStringLiteral("generated-note"));
+
+				QCOMPARE(runtime.closeLog(), eOK);
+				QFile logFile(openedLogPath);
+				QVERIFY(logFile.open(QIODevice::ReadOnly));
+				const QString contents = QString::fromLocal8Bit(logFile.readAll());
+				QCOMPARE(contents.contains(QStringLiteral("generated-note")), logNotes);
+				QVERIFY(!contents.contains(QStringLiteral("callback-source")));
+			};
+
+			runCase(QStringLiteral("world-only"), true, false);
+			runCase(QStringLiteral("notes-only"), false, true);
+		}
+
+		/**
+		 * @brief Verifies full-buffer callback output logs one complete unwrapped styled line.
+		 */
+		static void fullBufferCallbackOutputKeepsCompleteLogicalLogLine()
+		{
+			const QString artifactDirectory =
+			    QDir(QCoreApplication::applicationDirPath())
+			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
+			                                 "full-buffer-script-note-log"));
+			if (QDir(artifactDirectory).exists())
+				QVERIFY(QDir(artifactDirectory).removeRecursively());
+			QVERIFY(QDir().mkpath(QDir(artifactDirectory).filePath(QStringLiteral("logs"))));
+			[[maybe_unused]] const auto cleanup = qScopeGuard(
+			    [artifactDirectory] { static_cast<void>(QDir(artifactDirectory).removeRecursively()); });
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(artifactDirectory);
+			runtime.setDefaultLogDirectory(QDir(artifactDirectory).filePath(QStringLiteral("logs")));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("log_notes"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_html"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_in_colour"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("log_rotate_gzip"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("3"));
+			runtime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("3"));
+			runtime.setWorldMultilineAttribute(QStringLiteral("log_line_preamble_notes"),
+			                                   QStringLiteral("[N]"));
+			runtime.setWorldMultilineAttribute(QStringLiteral("log_line_postamble_notes"),
+			                                   QStringLiteral("[/N]"));
+
+			WorldRuntime::Trigger trigger;
+			trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("full-buffer-log"));
+			trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+			trigger.children.insert(QStringLiteral("send"), QStringLiteral(R"lua(
+ColourTell("#ff0000", "#000000", "abcdef")
+ColourTell("#00ff00", "#000000", "ghijkl")
+ColourNote("#0000ff", "#000000", "mnop")
+)lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(std::move(trigger));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			for (int index = 0; index < 3; ++index)
+				runtime.outputText(QStringLiteral("filler-%1").arg(index), false, true);
+			QCOMPARE(runtime.lines().size(), 3);
+
+			const QString logPath =
+			    QDir(artifactDirectory).filePath(QStringLiteral("logs/full-buffer-script-note.html"));
+			QCOMPARE(runtime.openLog(logPath, false), eOK);
+			const QString openedLogPath = runtime.logFileName();
+			runtime.receiveRawData(QByteArrayLiteral("full-buffer-log\r\n"));
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    harness.view.outputLines().join(QString()).contains(QStringLiteral("mnop")), 3000);
+			QCOMPARE(runtime.lines().size(), 3);
+			QCOMPARE(runtime.closeLog(), eOK);
+
+			QFile logFile(openedLogPath);
+			QVERIFY(logFile.open(QIODevice::ReadOnly));
+			const QString contents = QString::fromLocal8Bit(logFile.readAll());
+			QCOMPARE(contents.count(QStringLiteral("[N]")), 1);
+			QCOMPARE(contents.count(QStringLiteral("[/N]")), 1);
+			QVERIFY(contents.contains(QStringLiteral("abcdef")));
+			QVERIFY(contents.contains(QStringLiteral("ghijkl")));
+			QVERIFY(contents.contains(QStringLiteral("mnop")));
+			QVERIFY(contents.indexOf(QStringLiteral("abcdef")) < contents.indexOf(QStringLiteral("ghijkl")));
+			QVERIFY(contents.indexOf(QStringLiteral("ghijkl")) < contents.indexOf(QStringLiteral("mnop")));
+		}
+
+		/**
+		 * @brief Verifies committed script-note lines use the normal styled session-log writer exactly once.
+		 */
+		static void scriptNotesUseStyledLineLoggingAfterSuccessfulPresentation()
+		{
+			const QString artifactDirectory =
+			    QDir(QCoreApplication::applicationDirPath())
+			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
+			                                 "script-note-html-log"));
+			if (QDir(artifactDirectory).exists())
+				QVERIFY(QDir(artifactDirectory).removeRecursively());
+			QVERIFY(QDir().mkpath(QDir(artifactDirectory).filePath(QStringLiteral("logs"))));
+			[[maybe_unused]] const auto cleanup = qScopeGuard(
+			    [artifactDirectory] { static_cast<void>(QDir(artifactDirectory).removeRecursively()); });
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(artifactDirectory);
+			runtime.setDefaultLogDirectory(QDir(artifactDirectory).filePath(QStringLiteral("logs")));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("log_notes"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_html"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_in_colour"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("log_rotate_gzip"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("5"));
+			runtime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			runtime.setWorldMultilineAttribute(QStringLiteral("log_line_preamble_notes"),
+			                                   QStringLiteral("[N]"));
+			runtime.setWorldMultilineAttribute(QStringLiteral("log_line_postamble_notes"),
+			                                   QStringLiteral("[/N]"));
+
+			WorldRuntime::Trigger trigger;
+			trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("script-log-origin"));
+			trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+			trigger.children.insert(QStringLiteral("send"), QStringLiteral(R"lua(
+ColourTell("#ff0000", "#000000", "red<&")
+ColourTell("#00ff00", "#000000", "green")
+AnsiNote(ANSI(34) .. "blue" .. string.char(10) .. ANSI(31) .. "ansi-red")
+ColourTell("#ffff00", "#000000", "rule")
+NoteHr()
+Tell("plain ")
+Note("note")
+ColourTell("#00ffff", "#000000", "multi-one" .. string.char(10) .. "multi-")
+ColourNote("#ff00ff", "#000000", "two")
+ColourTell("#ffffff", "#000000", "unfinished")
+)lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(std::move(trigger));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			const QString logPath =
+			    QDir(artifactDirectory).filePath(QStringLiteral("logs/script-notes.html"));
+			QCOMPARE(runtime.openLog(logPath, false), eOK);
+			const QString openedLogPath = runtime.logFileName();
+
+			runtime.receiveRawData(QByteArrayLiteral("script-log-origin\r\n"));
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    harness.view.outputLines().join(QString()).contains(QStringLiteral("red<&greenblue")), 3000);
+			QTRY_VERIFY_WITH_TIMEOUT(harness.view.outputLines().contains(QStringLiteral("rule")), 3000);
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    harness.view.outputLines().join(QString()).contains(QStringLiteral("plain note")), 3000);
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    harness.view.outputLines().join(QString()).contains(QStringLiteral("multi-two")), 3000);
+
+			WorldRuntime::StyleSpan sealedSpan;
+			sealedSpan.length = 6;
+			sealedSpan.fore   = QColor(QStringLiteral("#123456"));
+			sealedSpan.back   = QColor(QStringLiteral("#654321"));
+			runtime.setSessionStateOutputBufferSealed(true);
+			runtime.outputStyledText(QStringLiteral("sealed"), {sealedSpan}, true, true);
+			runtime.setSessionStateOutputBufferSealed(false);
+
+			QCOMPARE(runtime.closeLog(), eOK);
+			QFile logFile(openedLogPath);
+			QVERIFY(logFile.open(QIODevice::ReadOnly));
+			const QString contents = QString::fromLocal8Bit(logFile.readAll());
+			QCOMPARE(contents.count(QStringLiteral("[N]")), 6);
+			QCOMPARE(contents.count(QStringLiteral("[/N]")), 6);
+			QVERIFY(contents.contains(
+			    QStringLiteral("<font color=\"#ff0000\"><span style=\"color: #ff0000; background: #000000\">"
+			                   "red&lt;&amp;</span></font>")));
+			QVERIFY(contents.contains(
+			    QStringLiteral("<font color=\"#00ff00\"><span style=\"color: #00ff00; background: #000000\">"
+			                   "green</span></font>")));
+			QVERIFY(contents.contains(
+			    QStringLiteral("<font color=\"#000080\"><span style=\"color: #000080; background: #000000\">"
+			                   "blue</span></font>")));
+			QVERIFY(contents.contains(
+			    QStringLiteral("<font color=\"#800000\"><span style=\"color: #800000; background: #000000\">"
+			                   "ansi-red</span></font>")));
+			QVERIFY(contents.contains(
+			    QStringLiteral("<font color=\"#ffff00\"><span style=\"color: #ffff00; background: #000000\">"
+			                   "rule</span></font>")));
+			QVERIFY(contents.contains(QStringLiteral("plain note")));
+			QVERIFY(contents.contains(QStringLiteral("multi-one")));
+			QVERIFY(contents.contains(QStringLiteral("multi-")));
+			QVERIFY(contents.contains(QStringLiteral("two")));
+			QVERIFY(!contents.contains(QLatin1Char('\x1b')));
+			QVERIFY(!contents.contains(QStringLiteral("unfinished")));
+			QVERIFY(!contents.contains(QStringLiteral("sealed")));
+		}
+
 		static void dofileImportRemainsPluginOwnedAfterTriggerExecutionAndWorldSave()
 		{
 			const QString artifactDirectory =

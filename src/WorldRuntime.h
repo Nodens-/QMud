@@ -2200,6 +2200,15 @@ class WorldRuntime : public QObject
 		    int *resolvedAnchorBufferIndex = nullptr);
 		/**
 		 * @brief Parses ANSI callback output and writes it relative to a stable output anchor.
+		 * @param anchorLineNumber Absolute line number of the callback output anchor.
+		 * @param anchorBufferIndex One-based buffer position captured for the anchor.
+		 * @param anchorRelativeOffset Zero-based output offset from the anchor.
+		 * @param replaceAnchor Replace the hidden anchor entry when `true`.
+		 * @param text ANSI output text.
+		 * @param flags Line flags captured for the callback output.
+		 * @param outputStreamId Callback output stream that owns the anchored insertion cursor.
+		 * @param anchorState Shared presentation state maintained with the insertion cursor.
+		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after the write.
 		 * @return `true` when the anchored output was written.
 		 */
 		bool writeLuaCallbackAnsiOutputAtLineAnchor(
@@ -5330,6 +5339,13 @@ class WorldRuntime : public QObject
 		 */
 		int                   writeLog(const QString &text);
 		/**
+		 * @brief Writes HTML-escaped text with the supplied output style spans to the active log.
+		 * @param text Text covered sequentially by @p spans.
+		 * @param spans Output style spans to serialize as HTML colours and underlining.
+		 * @return API status code.
+		 */
+		int                   writeStyledHtmlLogText(const QString &text, const QVector<StyleSpan> &spans);
+		/**
 		 * @brief Flushes log file buffers.
 		 * @return API status code.
 		 */
@@ -5770,16 +5786,90 @@ class WorldRuntime : public QObject
 				int anchorIndex{-1};
 				int insertionIndex{-1};
 		};
+		struct OutputLogCommitContext
+		{
+				qint64                   pendingLineNumber{0};
+				std::optional<LineEntry> pendingLine;
+		};
+		/**
+		 * @brief Returns the visible unfinished logical output line before an insertion point.
+		 * @param insertionIndex Zero-based output-buffer insertion index.
+		 * @return Accumulated text, spans, and flags for the unfinished line.
+		 */
+		[[nodiscard]] LineEntry openOutputLogLineBeforeIndex(int insertionIndex) const;
+		/**
+		 * @brief Appends text and complete style coverage to a logical line prepared for logging.
+		 * @param line Logical line receiving the text.
+		 * @param text Text to append.
+		 * @param spans Sequential style spans for @p text.
+		 * @param flags Line flags used to resolve styling for uncovered text.
+		 */
+		void appendOutputLogText(LineEntry &line, const QString &text, const QVector<StyleSpan> &spans,
+		                         int flags) const;
+		/**
+		 * @brief Captures the unfinished logical log line preceding an output insertion.
+		 * @param insertionIndex Zero-based output-buffer insertion point.
+		 * @return Commit context that remains valid if presentation trims its physical predecessor.
+		 */
+		[[nodiscard]] OutputLogCommitContext prepareOutputLogCommit(int insertionIndex) const;
+		/**
+		 * @brief Applies committed unwrapped logical segments to sparse runtime log-line state.
+		 * @param context Pre-commit unfinished-line context.
+		 * @param logicalSegments Unwrapped segments committed by the presentation mutation.
+		 * @param flags Flags assigned to the committed output.
+		 * @param finalPhysicalLineNumber Physical line retaining the final unfinished segment, or zero.
+		 * @return Completed logical lines in presentation order.
+		 */
+		[[nodiscard]] QVector<LineEntry> commitOutputLogSegments(OutputLogCommitContext    context,
+		                                                         const QVector<LineEntry> &logicalSegments,
+		                                                         int flags, qint64 finalPhysicalLineNumber);
+		/**
+		 * @brief Writes committed completed output lines through the session line logger.
+		 * @param lines Completed logical output lines.
+		 */
+		void                             logCompletedOutputLines(const QVector<LineEntry> &lines) const;
+		/**
+		 * @brief Parses ANSI text and commits it to ordinary or anchored output.
+		 * @param text ANSI output text.
+		 * @param note Emit as note output when `true`.
+		 * @param finishLine Complete the final logical line when `true`.
+		 * @param anchorLineNumber Absolute anchored line number, or zero for ordinary output.
+		 * @param anchorBufferIndex One-based anchored buffer position.
+		 * @param anchorRelativeOffset Zero-based output offset from the anchor.
+		 * @param replaceAnchor Replace the hidden anchor entry when `true`.
+		 * @param flags Captured anchored-output flags.
+		 * @param outputStreamId Callback output stream identity.
+		 * @param anchorState Shared anchor presentation state.
+		 * @param resolvedAnchorBufferIndex Receives the current one-based anchor position.
+		 * @return `true` when output was committed.
+		 */
 		bool outputAnsiTextInternal(const QString &text, bool note, bool finishLine, qint64 anchorLineNumber,
 		                            int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
 		                            int flags, quint64 outputStreamId = 0,
 		                            const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState = {},
 		                            int *resolvedAnchorBufferIndex = nullptr);
 		[[nodiscard]] QVector<StyleSpan> inputEchoStyleSpans(const QString &text) const;
+		/**
+		 * @brief Commits prepared callback-output segments at a resolved line anchor.
+		 * @param anchorLineNumber Absolute identity of the anchor line.
+		 * @param anchorRelativeOffset Relative callback-output position after the anchor.
+		 * @param replaceAnchor Replace the hidden anchor when it is still eligible.
+		 * @param position Resolved current anchor and insertion indexes.
+		 * @param segments Wrapped physical output-buffer segments to commit.
+		 * @param flags Flags assigned to every committed segment.
+		 * @param outputStreamId Callback-output stream identity.
+		 * @param screenDrawLines Completed logical lines delivered to screen-draw callbacks.
+		 * @param logContext Pre-commit unfinished logical log-line context.
+		 * @param logicalLogSegments Unwrapped logical segments committed with @p segments.
+		 * @param anchorState Shared anchor presentation state, when one is tracked.
+		 * @param resolvedAnchorBufferIndex Receives the current one-based anchor position.
+		 * @return `true` when the complete mutation was committed.
+		 */
 		bool                             writeLuaCallbackOutputSegmentsAtLineAnchor(
 		    qint64 anchorLineNumber, int anchorRelativeOffset, bool replaceAnchor,
 		    const LuaCallbackOutputPosition &position, const QVector<LineEntry> &segments, int flags,
-		    quint64 outputStreamId, const QStringList &screenDrawLines,
+		    quint64 outputStreamId, const QStringList &screenDrawLines, OutputLogCommitContext logContext,
+		    const QVector<LineEntry>                            &logicalLogSegments,
 		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *resolvedAnchorBufferIndex);
 		/**
 		 * @brief Resolves an anchored-output cursor's current one-based Lua buffer position.
@@ -8710,6 +8800,7 @@ class WorldRuntime : public QObject
 		QList<Include>                              m_includes;
 		QString                                     m_comments;
 		IndexedRingBuffer<LineEntry>                m_lines;
+		QHash<qint64, LineEntry>                    m_pendingOutputLogLines;
 		bool                                        m_sessionStateOutputBufferSealed{false};
 		QMap<qint64, int>                           m_acceleratorKeyToCommand;
 		QMap<int, AcceleratorEntry>                 m_commandToAcceleratorEntry;

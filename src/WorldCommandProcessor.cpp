@@ -3546,11 +3546,11 @@ void WorldCommandProcessor::continueIncomingLineAfterPluginDecision(
 			if (outputLine.isEmpty())
 				continue;
 			if (m_runtime)
-				m_runtime->firePluginScreendraw(0, logOutput && !triggerResult.omitFromLog ? 1 : 0,
-				                                outputLine);
+				m_runtime->outputText(outputLine, true, true);
 			// Legacy behavior: trigger "send to output" text is comment/note output,
 			// not normal world-output text.
-			m_view->appendNoteText(outputLine, true);
+			else
+				m_view->appendNoteText(outputLine, true);
 		}
 	}
 
@@ -3797,7 +3797,7 @@ void WorldCommandProcessor::finishIncomingLine(const QSharedPointer<PendingIncom
 		    isEnabledValue(m_runtime->worldAttributes().value(QStringLiteral("log_output")));
 		if (logOutput && !triggerResult.omitFromLog)
 			logLine(line, QStringLiteral("log_line_preamble_output"),
-			        QStringLiteral("log_line_postamble_output"));
+			        QStringLiteral("log_line_postamble_output"), triggerResult.spans);
 		m_runtime->endIncomingLineLuaContext();
 	}
 	const QSharedPointer<PendingIncomingLineOperation>        parent          = operation->parent;
@@ -4359,16 +4359,9 @@ void WorldCommandProcessor::onMiniWindowOutputActionActivated(const int actionTy
 void WorldCommandProcessor::note(const QString &text, const bool newLine) const
 {
 	if (m_runtime)
-	{
-		const QString value    = m_runtime->worldAttributes().value(QStringLiteral("log_notes"));
-		const bool    logNotes = value == QStringLiteral("1") ||
-		                         value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                         value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		m_runtime->firePluginScreendraw(1, logNotes ? 1 : 0, text);
-	}
-	if (m_view)
+		m_runtime->outputText(text, true, newLine);
+	else if (m_view)
 		m_view->appendNoteText(text, newLine);
-	logLine(text, QStringLiteral("log_line_preamble_notes"), QStringLiteral("log_line_postamble_notes"));
 }
 
 void WorldCommandProcessor::sendRawText(const QString &text, const bool echo, const bool queue,
@@ -6257,7 +6250,9 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 			m_view->setInputText(text);
 		break;
 	case eSendToOutput:
-		if (m_view)
+		if (m_runtime)
+			m_runtime->outputText(text, true, true);
+		else if (m_view)
 			m_view->appendNoteText(text, true);
 		break;
 	case eSendToStatus:
@@ -7353,7 +7348,8 @@ void WorldCommandProcessor::updateQueuedCommandsStatusLine()
 }
 
 void WorldCommandProcessor::logLine(const QString &text, const QString &preambleKey,
-                                    const QString &postambleKey) const
+                                    const QString                          &postambleKey,
+                                    const QVector<WorldRuntime::StyleSpan> &spans) const
 {
 	if (!m_runtime)
 		return;
@@ -7400,28 +7396,35 @@ void WorldCommandProcessor::logLine(const QString &text, const QString &preamble
 	{
 		const bool inputLine   = preambleKey == QStringLiteral("log_line_preamble_input");
 		const bool logInColour = isEnabled(attrs.value(QStringLiteral("log_in_colour")));
-		bool       wrapped     = false;
-		if (inputLine && logInColour)
+		if (logInColour && !spans.isEmpty())
 		{
-			bool ok = false;
-			if (const int echoColour = attrs.value(QStringLiteral("echo_colour")).toInt(&ok);
-			    ok && echoColour >= 1 && echoColour <= MAX_CUSTOM)
-			{
-				const long colour = m_runtime->customColourText(echoColour);
-				const int  r      = static_cast<int>(colour & 0xFF);
-				const int  g      = static_cast<int>(colour >> 8 & 0xFF);
-				const int  b      = static_cast<int>(colour >> 16 & 0xFF);
-				m_runtime->writeLog(QStringLiteral("<font color=\"#%1%2%3\">")
-				                        .arg(r, 2, 16, QLatin1Char('0'))
-				                        .arg(g, 2, 16, QLatin1Char('0'))
-				                        .arg(b, 2, 16, QLatin1Char('0'))
-				                        .toUpper());
-				wrapped = true;
-			}
+			m_runtime->writeStyledHtmlLogText(text, spans);
 		}
-		m_runtime->writeLog(fixHtmlString(text));
-		if (wrapped)
-			m_runtime->writeLog(QStringLiteral("</font>"));
+		else
+		{
+			bool wrapped = false;
+			if (inputLine && logInColour)
+			{
+				bool ok = false;
+				if (const int echoColour = attrs.value(QStringLiteral("echo_colour")).toInt(&ok);
+				    ok && echoColour >= 1 && echoColour <= MAX_CUSTOM)
+				{
+					const long colour = m_runtime->customColourText(echoColour);
+					const int  r      = static_cast<int>(colour & 0xFF);
+					const int  g      = static_cast<int>(colour >> 8 & 0xFF);
+					const int  b      = static_cast<int>(colour >> 16 & 0xFF);
+					m_runtime->writeLog(QStringLiteral("<font color=\"#%1%2%3\">")
+					                        .arg(r, 2, 16, QLatin1Char('0'))
+					                        .arg(g, 2, 16, QLatin1Char('0'))
+					                        .arg(b, 2, 16, QLatin1Char('0'))
+					                        .toUpper());
+					wrapped = true;
+				}
+			}
+			m_runtime->writeLog(fixHtmlString(text));
+			if (wrapped)
+				m_runtime->writeLog(QStringLiteral("</font>"));
+		}
 	}
 	else
 		m_runtime->writeLog(text);

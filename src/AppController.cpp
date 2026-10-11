@@ -14439,30 +14439,7 @@ void AppController::handleLogSession() const
 			bool wroteColourLine = false;
 			if (logHtml && logInColour && !entry.spans.isEmpty())
 			{
-				int       iCol    = 0;
-				const int textLen = static_cast<int>(entry.text.size());
-				for (const auto &span : entry.spans)
-				{
-					if (span.length <= 0 || iCol >= textLen)
-						continue;
-					const int     spanLen  = qMin(span.length, textLen - iCol);
-					const QString fragment = entry.text.mid(iCol, spanLen);
-					if (span.fore.isValid())
-					{
-						runtime->writeLog(QStringLiteral("<font color=\"#%1%2%3\">")
-						                      .arg(span.fore.red(), 2, 16, QLatin1Char('0'))
-						                      .arg(span.fore.green(), 2, 16, QLatin1Char('0'))
-						                      .arg(span.fore.blue(), 2, 16, QLatin1Char('0')));
-					}
-					if (span.underline)
-						runtime->writeLog(QStringLiteral("<u>"));
-					runtime->writeLog(fragment.toHtmlEscaped());
-					if (span.underline)
-						runtime->writeLog(QStringLiteral("</u>"));
-					if (span.fore.isValid())
-						runtime->writeLog(QStringLiteral("</font>"));
-					iCol += spanLen;
-				}
+				runtime->writeStyledHtmlLogText(entry.text, entry.spans);
 				runtime->writeLog(QStringLiteral("\n"));
 				wroteColourLine = true;
 			}

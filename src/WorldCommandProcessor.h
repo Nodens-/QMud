@@ -1107,8 +1107,10 @@ class WorldCommandProcessor : public QObject
 		 * @param text Line text.
 		 * @param preambleKey Preamble option key.
 		 * @param postambleKey Postamble option key.
+		 * @param spans Optional output style spans for coloured HTML logging.
 		 */
-		void logLine(const QString &text, const QString &preambleKey, const QString &postambleKey) const;
+		void logLine(const QString &text, const QString &preambleKey, const QString &postambleKey,
+		             const QVector<WorldRuntime::StyleSpan> &spans = {}) const;
 		/**
 		 * @brief Checks whether a world Lua callback can be executed.
 		 * @param functionType Callback type label.
