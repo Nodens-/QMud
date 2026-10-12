@@ -1408,6 +1408,66 @@ jobs:
               });
             }
 
+      - name: Announce CI prerelease on Discord
+        env:
+          # Discord pre-release-notes channel: 1559000770987294840
+          DISCORD_PRERELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_PRERELEASE_WEBHOOK_URL }}
+          RELEASE_NAME: QMud v${{ steps.version.outputs.base }}-ci
+          RELEASE_NOTES_PATH: ${{ steps.changelog.outputs.body_path }}
+        run: |
+          if [ -z "${DISCORD_PRERELEASE_WEBHOOK_URL}" ]; then
+            echo "DISCORD_PRERELEASE_WEBHOOK_URL is not set." >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          webhook = os.environ["DISCORD_PRERELEASE_WEBHOOK_URL"].strip()
+          notes_path = os.environ["RELEASE_NOTES_PATH"].strip()
+          release_name = os.environ["RELEASE_NAME"].strip()
+          repo = os.environ["GITHUB_REPOSITORY"]
+          release_url = f"https://github.com/{repo}/releases/tag/ci-main"
+
+          def post_message(content: str) -> None:
+              payload = json.dumps({"content": content}).encode("utf-8")
+              request = urllib.request.Request(
+                  webhook,
+                  data=payload,
+                  headers={
+                      "Content-Type": "application/json",
+                      "User-Agent": "qmud-prerelease-discord",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=20):
+                  pass
+
+          with open(notes_path, "r", encoding="utf-8") as fh:
+              notes = fh.read()
+          notes = notes.strip()
+          if not notes:
+              notes = "(No release notes.)"
+
+          combined_message = f"{release_name} released: <{release_url}>\n\n{notes}"
+
+          max_len = 2000
+          chunks = []
+          remaining = combined_message
+          while remaining:
+              if len(remaining) <= max_len:
+                  chunks.append(remaining)
+                  break
+              split_index = remaining.rfind("\n", 0, max_len)
+              if split_index <= 0:
+                  split_index = max_len
+              chunks.append(remaining[:split_index])
+              remaining = remaining[split_index:]
+
+          for chunk in chunks:
+              post_message(chunk)
+          PY
+
       - name: Cleanup workspace build directories
         if: always()
         run: |
