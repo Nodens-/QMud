@@ -334,6 +334,7 @@ set(QMUD_SOURCES
         helpers/NoteColourUtils.cpp
         helpers/WorldCommandProcessorUtils.cpp
         helpers/SoundFileRoutingUtils.cpp
+        SoundEngine.cpp
         helpers/ShortcutPreferenceUtils.cpp
         helpers/LuaExecutionUtils.cpp
         helpers/LuaModalDialogUtils.cpp
@@ -405,6 +406,7 @@ set(QMUD_SOURCES
 # Optionally collect headers (helps IDEs) — not required for build
 set(QMUD_HEADERS
         MainWindowHost.h
+        AtomicSharedPtrCompat.h
         helpers/MainWindowHostResolver.h
         Version.h
         MainFrame.h
@@ -435,6 +437,7 @@ set(QMUD_HEADERS
         CommandMappingTypes.h
         helpers/WorldCommandProcessorUtils.h
         helpers/SoundFileRoutingUtils.h
+        SoundEngine.h
         helpers/ShortcutPreferenceUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h

@@ -66,9 +66,13 @@ namespace
 		const QString path = pathValue.toString();
 		if (path.isEmpty() || path.contains(QChar::Null))
 			return false;
+		const QJsonValue suppressAutoConnectValue = object.value(QStringLiteral("suppressAutoConnect"));
+		if (!suppressAutoConnectValue.isUndefined() && !suppressAutoConnectValue.isBool())
+			return false;
 
 		request.action              = QMudSingleInstanceIpc::Action::OpenFileAssociation;
 		request.fileAssociationPath = path;
+		request.suppressAutoConnect = suppressAutoConnectValue.toBool(false);
 		return true;
 	}
 
@@ -168,6 +172,7 @@ QByteArray QMudSingleInstanceIpc::encodeRequestFrame(const Request &request)
 	{
 		object.insert(QStringLiteral("action"), QStringLiteral("open"));
 		object.insert(QStringLiteral("path"), request.fileAssociationPath);
+		object.insert(QStringLiteral("suppressAutoConnect"), request.suppressAutoConnect);
 	}
 	else
 	{

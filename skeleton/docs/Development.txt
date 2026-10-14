@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: Development.txt
- * Role: Development design contract invariants for QMud's Lua engine, snapshots, paths, and colors.
+ * Role: Development design contract invariants for QMud's Lua engine, snapshots, paths, colors, and sound.
  */
 
 QMud Development Design Contract Invariants
@@ -226,3 +226,61 @@ and potential contributors need to fully understand them.
   whether it is QMudColorRef, QRgb/RGBA, or canonical RGB text. A plain integer named only color is not sufficient.
 - Color tests must use asymmetric channel values (for example red != blue) and verify both conversion directions.
   Black, white, and grays cannot detect a COLORREF/QRgb byte-order error.
+
+5. Sound engine
+---------------
+
+- AppController owns one process-wide sound engine. Its worker thread owns every QSoundEffect, QMediaPlayer,
+  QAudioOutput, retained memory-playback temporary file, prepared request, channel assignment, and cached backend.
+  One ordered preparation task hashes and materializes new memory payloads without blocking worker control commands.
+  It returns the closed temporary-file resource to the worker before playback. Runtime and Lua threads submit value
+  commands and never access multimedia objects.
+- Each world has an opaque sound session with ten logical channels. One mutex-protected ingress establishes FIFO order
+  for commands from all submitting threads. Commands and worker signals identify sessions and channel assignments by
+  numeric identity and generation. The worker invokes a bounded, thread-safe ownership-release callback using the
+  WorldRuntime address only as an opaque registry key. It never dereferences the runtime or accesses Lua or QObject
+  state. Session close is the callback barrier before runtime registry state is discarded.
+- PlaySound, PlaySoundMemory, scripted StopSound, native LuaAudio operations, and other explicitly direct operations
+  submit to the sound session immediately. They do not enter the deferred runtime-mutation journal and do not fire
+  OnPluginPlaySound.
+- Sound() and configured world sounds submit preparation before OnPluginPlaySound is dispatched. As in MUSHclient,
+  the first eligible OnPluginPlaySound function handles the occurrence by existing. Its Lua return value does not
+  decide suppression. A handled or canceled occurrence returns its prepared backend to the idle cache, while an
+  occurrence with no handler commits. Sound() called from inside OnPluginPlaySound is direct so a callback can play
+  one replacement without recursively intercepting itself.
+- Intentionally delayed LuaAudio operations retain their existing runtime-owned timers and cancellation generations.
+  Every operation for one buffer generation shares one cancellation signal. Ownership release flips that signal once
+  instead of retaining or walking per-operation tokens. When a timer expires, it validates the signal and generation
+  before submitting its sound operation directly. Registry mutations, channel updates, and channel stops validate the
+  same captured generation, so stale work cannot recreate state or affect a reused channel. LuaAudio uses a dedicated
+  bounded state lock, and delayed operations must not enter callback mutation playback.
+- Logical channel state is independent of cached multimedia objects. Explicit stop frees the channel. Natural
+  completion leaves it allocated with status zero and retains its backend for at least 300 seconds. The minute-based,
+  low-priority maintenance pass may then detach that backend without changing channel status or reusability. A replay
+  may reuse an unchanged assigned or idle backend, while a changed file size, modification time, backend route, or
+  output device produces a different cache key.
+- Memory playback reserves its logical channel before asynchronous hashing. Stop, replacement, session close, device
+  change, and shutdown invalidate the assignment generation, wake any waiting caller, and prevent a late preparation
+  result from starting. Identical concurrent payloads share one materialization operation and retained resource.
+- QSoundEffect instances for the same source rely on Qt's process-wide de`coded-sample cache. Separate instances provide
+  simultaneous channel state without a second QMud PCM cache. QMediaPlayer instances are reused sequentially, but Qt
+  does not guarantee shared decoded data for simultaneous compressed playback.
+- One process-wide cache policy applies uniformly to effect and media-player sources. The budget counts each loaded
+  file or memory payload once by source size across thin playback instances. The minute timer requests
+  completed-channel, idle-age, and size maintenance. Size pressure evicts fully idle sources from least to most recently
+  used. Each event removes at most one fully idle source and reposts itself while more eviction is required, so a large
+  cache cleanup cannot monopolize the sound worker. Cache growth, backend release, and policy changes wait for that
+  periodic boundary rather than starting additional maintenance cycles. Active, prepared, and completed-grace sources
+  are protected, so protected sources may temporarily exceed the configured budget. Policy defaults, limits, UI
+  ranges, and worker normalization come from SoundEngine::CachePolicy.
+- Sound status is published as an immutable revisioned per-session snapshot only when callback-visible status changes.
+  Callback capture performs one atomic snapshot load for all ten channels and keys its cached presentation by session
+  identity and revision. Callback-local status overlays preserve read-your-writes for direct play, update, stop, and
+  LuaAudio allocation. Channel selection and reservation use live worker-owned state and are never inferred from a
+  callback snapshot.
+- Multimedia device discovery and both playback backend types are initialized during application startup before
+  worlds open. Device changes invalidate prepared, active, and idle objects bound to the previous output and publish
+  the resulting channel state.
+- Session close rejects later submissions, cancels prepared requests, stops its channels, and removes runtime callback
+  routing before teardown. Engine shutdown drains accepted commands, destroys multimedia objects on their owning
+  thread, quits that thread, and cannot leave a waiting caller or late worker notification attached to a dead runtime.

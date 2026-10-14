@@ -33,6 +33,8 @@ use the issue tracker, with the appropriate template to report issues, request f
   Upgrade).
 - Lua scripting. The FIRST and ONLY, currently, MUD client with a multithreaded Lua engine that allows ridiculously
   heavy Lua plugin workloads without lagging the client.
+- High performance sound engine offloaded from the main thread, reducing playback latency as much as possible for VI
+  users.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
 - MushReader and LuaAudio implemented natively for VI workflows and are activated by the presence of those plugins in
   existing world files or by loading the included stub plugins.
@@ -160,12 +162,16 @@ entries, used as fallback when not set in the process environment).
   with same datadir). In this mode, `QMUD_HOME` must be explicitly set in process environment.
 - `QMUD_DISABLE_UPDATE`:  When set to `1`, `y`, `yes`, or `true`, disables the automatic updates functionality (for
   distro packaging).
+- `QMUD_NO_AUTOCONNECT`: When set to `1`, `y`, `yes`, or `true`, suppresses preference-driven automatic world
+  connections for that execution without changing the persisted `AutoConnectWorlds` preference.
 - `QMUD_RELOAD_VERBOSE`: When set to `1`, `y`, `yes`, or `true`, enables verbose per-world reload diagnostics in logs.
 
 ### CLI switches
 
 - `--multi-instance` (alias: `--allow-multi-instance`): Bypass single-instance enforcement for that process. (Not safe
   with same datadir). In this mode, `QMUD_HOME` must be explicitly set in process environment.
+- `--no-autoconnect`: Suppress preference-driven automatic world connections for that execution without changing the
+  persisted `AutoConnectWorlds` preference.
 - `--dump-lua-api <output-dir>`: Export Lua API inventory to the given directory and exit.
 
 ## Reload QMud (Copyover-style)

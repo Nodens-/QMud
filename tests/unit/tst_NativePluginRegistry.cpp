@@ -34,12 +34,11 @@ namespace
 	{
 			QHash<int, int>  statusByBuffer;
 			QHash<int, bool> reusableByBuffer;
+			QSet<int>        reservedBuffers;
+			QStringList      reservedFiles;
 			QStringList      failingPlayFiles;
 			int              playCalls{0};
 			int              stopCalls{0};
-			bool             playRequiresLuaAudioState{false};
-			bool             playReleasesLuaAudioState{false};
-			bool             sawLuaAudioStateDuringPlay{false};
 	};
 
 	/**
@@ -50,8 +49,7 @@ namespace
 	void installSoundBackend(WorldRuntime &runtime, SoundBackendState &state)
 	{
 		WorldRuntime::TestSoundBackend backend;
-		backend.play =
-		    [&runtime, &state](const int buffer, const QString &fileName, const bool loop, double, double)
+		backend.play = [&state](const int buffer, const QString &fileName, const bool loop, double, double)
 		{
 			++state.playCalls;
 			if (fileName.isEmpty())
@@ -63,15 +61,8 @@ namespace
 			}
 			if (state.failingPlayFiles.contains(fileName))
 				return eCannotPlaySound;
-			const int                                            targetBuffer = buffer > 0 ? buffer : 1;
-			QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			const bool                                           hasLuaAudioState =
-			    QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, targetBuffer, bufferState);
-			if (state.playRequiresLuaAudioState)
-				state.sawLuaAudioStateDuringPlay = hasLuaAudioState;
-			if (hasLuaAudioState && state.playReleasesLuaAudioState)
-				QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(&runtime, targetBuffer,
-				                                                                   bufferState.generation);
+			const int targetBuffer = buffer > 0 ? buffer : 1;
+			state.reservedBuffers.remove(targetBuffer);
 			state.statusByBuffer.insert(targetBuffer, loop ? 2 : 1);
 			return eOK;
 		};
@@ -79,9 +70,15 @@ namespace
 		{
 			++state.stopCalls;
 			if (buffer == 0)
+			{
 				state.statusByBuffer.clear();
+				state.reservedBuffers.clear();
+			}
 			else
+			{
 				state.statusByBuffer.remove(buffer);
+				state.reservedBuffers.remove(buffer);
+			}
 			return eOK;
 		};
 		backend.status = [&state](const int buffer)
@@ -94,10 +91,29 @@ namespace
 		{
 			if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 				return false;
+			if (state.reservedBuffers.contains(buffer))
+				return false;
 			if (state.reusableByBuffer.contains(buffer))
 				return state.reusableByBuffer.value(buffer);
 			const int status = state.statusByBuffer.value(buffer, -2);
 			return status == -2 || status == 0;
+		};
+		backend.reserve = [&state](const QString &fileName, const quint64)
+		{
+			state.reservedFiles.push_back(fileName);
+			for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
+			{
+				const int  status   = state.statusByBuffer.value(buffer, -2);
+				const bool reusable = state.reusableByBuffer.contains(buffer)
+				                          ? state.reusableByBuffer.value(buffer)
+				                          : status == -2 || status == 0;
+				if (!state.reservedBuffers.contains(buffer) && reusable)
+				{
+					state.reservedBuffers.insert(buffer);
+					return buffer;
+				}
+			}
+			return 0;
 		};
 		runtime.setSoundBackendForTest(std::move(backend));
 	}
@@ -388,6 +404,7 @@ namespace
 				QCOMPARE(delayedPlay.errorCode, eOK);
 				QCOMPARE(delayedPlay.returnValues.size(), 1);
 				QCOMPARE(delayedPlay.returnValues.constFirst().toInt(), 1);
+				QCOMPARE(soundState.reservedFiles, QStringList{QStringLiteral("coin.wav")});
 				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
 
 				QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("setVol"),
@@ -415,11 +432,6 @@ namespace
 				QCOMPARE(volume.errorCode, eOK);
 				QCOMPARE(volume.returnValues.size(), 1);
 				QCOMPARE(volume.returnValues.constFirst().toDouble(), 25.0);
-
-				const int reserved = QMudNativePluginRegistry::luaAudioReserveRuntimeBuffer(
-				    &runtime, [](const int) { return true; });
-				QCOMPARE(reserved, 2);
-				QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(&runtime, reserved);
 
 				QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("stop"), {1},
 				                                               audioContext)
@@ -472,7 +484,7 @@ namespace
 				QCOMPARE(transientStoppedPlay.returnValues.constFirst().toInt(), 2);
 				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 2);
 				QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(&runtime, 2);
-				static_cast<void>(runtime.stopSoundBypassingPluginCallbacks(2));
+				static_cast<void>(runtime.stopSoundDirect(2));
 				soundState.reusableByBuffer.remove(1);
 
 				QVERIFY(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
@@ -490,17 +502,90 @@ namespace
 				QCOMPARE(soundState.statusByBuffer.value(1), 1);
 
 				QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(&runtime, 1);
-				static_cast<void>(runtime.stopSoundBypassingPluginCallbacks(1));
-				soundState.playRequiresLuaAudioState = true;
-				soundState.playReleasesLuaAudioState = true;
+				static_cast<void>(runtime.stopSoundDirect(1));
 				const QMudNativePluginRegistry::NativeCallResult immediateReleasePlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("play"),
 				                                          {QStringLiteral("coin.wav"), false, 0.0, 65.0},
 				                                          audioContext);
 				QCOMPARE(immediateReleasePlay.errorCode, eOK);
 				QCOMPARE(immediateReleasePlay.returnValues.constFirst().toInt(), 1);
-				QVERIFY(soundState.sawLuaAudioStateDuringPlay);
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState immediateReleaseState;
+				QVERIFY(
+				    QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, immediateReleaseState));
+				QVERIFY(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+				    &runtime, 1, immediateReleaseState.generation));
 				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+			}
+
+			/**
+			 * @brief Verifies a new generation atomically removes every buffer-scoped artifact of its predecessor.
+			 */
+			void luaAudioGenerationReplacementClearsPriorBufferState() const
+			{
+				WorldRuntime      runtime;
+				SoundBackendState soundState;
+				installSoundBackend(runtime, soundState);
+				WorldRuntime::Plugin audioPlugin;
+				audioPlugin.enabled    = true;
+				audioPlugin.nativeShim = true;
+				audioPlugin.attributes.insert(QStringLiteral("id"),
+				                              QMudNativePluginRegistry::luaAudioPluginId());
+				WorldRuntimeTestAccess::plugins(runtime).push_back(audioPlugin);
+				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(
+				    &runtime, QStringLiteral("loop=prior-generation.wav")));
+
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState priorState;
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, priorState));
+				auto pendingPlayCancel   = std::make_shared<std::atomic_bool>(false);
+				priorState.pendingCancel = pendingPlayCancel;
+				QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, priorState);
+				QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard firstGuard;
+				QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard secondGuard;
+				QVERIFY(QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(&runtime, 1,
+				                                                                             firstGuard));
+				QVERIFY(QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(&runtime, 1,
+				                                                                             secondGuard));
+				QCOMPARE(firstGuard.generation, priorState.generation);
+				QVERIFY(firstGuard.cancelled == secondGuard.cancelled);
+				QVERIFY(!firstGuard.cancelled->load(std::memory_order_acquire));
+
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState replacementState;
+				replacementState.generation        = priorState.generation + 1;
+				replacementState.playbackSubmitted = true;
+				QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, replacementState);
+
+				QVERIFY(pendingPlayCancel->load(std::memory_order_acquire));
+				QVERIFY(firstGuard.cancelled->load(std::memory_order_acquire));
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState guardedState;
+				QVERIFY(!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
+				    &runtime, 1, firstGuard, guardedState));
+				QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard replacementGuard;
+				QVERIFY(QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(
+				    &runtime, 1, replacementGuard));
+				QCOMPARE(replacementGuard.generation, replacementState.generation);
+				QVERIFY(replacementGuard.cancelled != firstGuard.cancelled);
+				const int stopsBeforeOldLoopCommand = soundState.stopCalls;
+				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(
+				    &runtime, QStringLiteral("stop=prior-generation.wav")));
+				QCOMPARE(soundState.stopCalls, stopsBeforeOldLoopCommand);
+				QVERIFY(!QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+				    &runtime, 1, priorState.generation));
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState currentState;
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, currentState));
+				QCOMPARE(currentState.generation, replacementState.generation);
+				priorState.volume = 12.0;
+				QVERIFY(!QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(&runtime, 1,
+				                                                                           priorState));
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, currentState));
+				QCOMPARE(currentState.generation, replacementState.generation);
+				QCOMPARE(currentState.volume, replacementState.volume);
+				QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(&runtime, 1);
+				QVERIFY(replacementGuard.cancelled->load(std::memory_order_acquire));
+				QVERIFY(!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
+				    &runtime, 1, replacementGuard, guardedState));
+				QVERIFY(!QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(&runtime, 1,
+				                                                                           replacementState));
+				QVERIFY(!QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, currentState));
 			}
 
 			void luaAudioCommandsAndPlaySoundCallbackMirrorLegacyPlugin() const
@@ -574,18 +659,16 @@ namespace
 				QCOMPARE(runtime.soundStatus(1), -2);
 				QCOMPARE(soundState.stopCalls, 1);
 
-				soundState.playRequiresLuaAudioState  = true;
-				soundState.playReleasesLuaAudioState  = true;
-				soundState.sawLuaAudioStateDuringPlay = false;
 				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime,
 				                                                          QStringLiteral("loop=coin.wav")));
-				QVERIFY(soundState.sawLuaAudioStateDuringPlay);
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState loopState;
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, loopState));
+				QVERIFY(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+				    &runtime, 1, loopState.generation));
 				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime,
 				                                                          QStringLiteral("stop=coin.wav")));
 				QCOMPARE(soundState.stopCalls, 1);
-				soundState.playRequiresLuaAudioState = false;
-				soundState.playReleasesLuaAudioState = false;
 				soundState.statusByBuffer.remove(1);
 
 				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime,

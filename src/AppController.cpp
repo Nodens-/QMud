@@ -27,6 +27,7 @@
 #include "MushclientImportUtils.h"
 #include "NameGeneration.h"
 #include "ReloadUtils.h"
+#include "SoundEngine.h"
 #include "SqliteCompat.h"
 #include "UpdateCheckUtils.h"
 #include "Version.h"
@@ -1952,69 +1953,71 @@ static const struct
 } kGlobalOptionsTable[] = {
 
     // option name                          default
-    {"AllTypingToCommandWindow",        1                       },
-    {"AlwaysOnTop",                     0                       },
-    {"AppendToLogFiles",                0                       },
-    {"AutoConnectWorlds",               1                       },
-    {"AutoExpandConfig",                1                       },
-    {"AutoCheckForUpdates",             1                       },
-    {"BackupOnUpgrades",                1                       },
-    {"FlatToolbars",                    1                       },
-    {"AutoLogWorld",                    0                       },
-    {"BleedBackground",                 0                       },
-    {"ColourGradientConfig",            1                       },
-    {"ConfirmBeforeClosingMXPdebug",    0                       },
-    {"ConfirmBeforeClosingQmud",        0                       },
-    {"ConfirmBeforeClosingWorld",       1                       },
-    {"ConfirmBeforeSavingVariables",    1                       },
-    {"ConfirmLogFileClose",             1                       },
-    {"EnableSpellCheck",                1                       },
-    {"AllowLoadingDlls",                1                       },
-    {"F1macro",                         0                       },
-    {"DisableWindowScaler",             1                       },
-    {"FixedFontForEditing",             1                       },
-    {"NotepadWordWrap",                 1                       },
-    {"NotifyIfCannotConnect",           1                       },
-    {"ErrorNotificationToOutputWindow", 1                       },
-    {"NotifyOnDisconnect",              1                       },
-    {"OpenActivityWindow",              0                       },
-    {"OpenWorldsMaximised",             0                       },
-    {"WindowTabsStyle",                 0                       },
-    {"SplitViewDividerWidth",           kSplitDividerDefault    },
-    {"ReconnectOnLinkFailure",          0                       },
-    {"EnableReloadFeature",             1                       },
-    {"RegexpMatchEmpty",                1                       },
-    {"ShowGridLinesInListViews",        1                       },
-    {"SmoothScrolling",                 0                       },
-    {"SmootherScrolling",               0                       },
-    {"DisableKeyboardMenuActivation",   0                       },
-    {"TriggerRemoveCheck",              1                       },
-    {"NotepadBackColour",               0                       },
-    {"NotepadTextColour",               0                       },
-    {"ActivityButtonBarStyle",          0                       },
-    {"AsciiArtLayout",                  0                       },
-    {"DefaultInputFontHeight",          9                       },
-    {"DefaultInputFontItalic",          0                       },
-    {"DefaultInputFontWeight",          400                     },
-    {"DefaultOutputFontHeight",         9                       },
-    {"Icon Placement",                  0                       },
-    {"Tray Icon",                       0                       }, // normal icon
-    {"ActivityWindowRefreshInterval",   15                      },
-    {"ActivityWindowRefreshType",       2                       },
-    {"ParenMatchFlags",                 0x0001 | 0x0020 | 0x0040},
-    {"PrinterFontSize",                 10                      },
-    {"PrinterFontItalic",               0                       },
-    {"PrinterFontWeight",               400                     },
-    {"PrinterLeftMargin",               15                      },
-    {"PrinterLinesPerPage",             60                      },
-    {"PrinterTopMargin",                15                      },
-    {"ReloadMccpDisableTimeoutMs",      1000                    },
-    {"TimerInterval",                   0                       },
-    {"UpdateCheckIntervalHours",        1                       },
-    {"FixedPitchFontSize",              9                       },
-    {"TabInsertsTabInMultiLineDialogs", 0                       },
+    {"AllTypingToCommandWindow",            1                                                    },
+    {"AlwaysOnTop",                         0                                                    },
+    {"AppendToLogFiles",                    0                                                    },
+    {"AutoConnectWorlds",                   1                                                    },
+    {"AutoExpandConfig",                    1                                                    },
+    {"AutoCheckForUpdates",                 1                                                    },
+    {"BackupOnUpgrades",                    1                                                    },
+    {"FlatToolbars",                        1                                                    },
+    {"AutoLogWorld",                        0                                                    },
+    {"BleedBackground",                     0                                                    },
+    {"ColourGradientConfig",                1                                                    },
+    {"ConfirmBeforeClosingMXPdebug",        0                                                    },
+    {"ConfirmBeforeClosingQmud",            0                                                    },
+    {"ConfirmBeforeClosingWorld",           1                                                    },
+    {"ConfirmBeforeSavingVariables",        1                                                    },
+    {"ConfirmLogFileClose",                 1                                                    },
+    {"EnableSpellCheck",                    1                                                    },
+    {"AllowLoadingDlls",                    1                                                    },
+    {"F1macro",                             0                                                    },
+    {"DisableWindowScaler",                 1                                                    },
+    {"FixedFontForEditing",                 1                                                    },
+    {"NotepadWordWrap",                     1                                                    },
+    {"NotifyIfCannotConnect",               1                                                    },
+    {"ErrorNotificationToOutputWindow",     1                                                    },
+    {"NotifyOnDisconnect",                  1                                                    },
+    {"OpenActivityWindow",                  0                                                    },
+    {"OpenWorldsMaximised",                 0                                                    },
+    {"WindowTabsStyle",                     0                                                    },
+    {"SplitViewDividerWidth",               kSplitDividerDefault                                 },
+    {"SoundEngineRamCacheSizeMB",           SoundEngine::CachePolicy::kDefaultRamCacheSizeMiB    },
+    {"SoundEngineIdleCacheEvictionSeconds", SoundEngine::CachePolicy::kDefaultIdleEvictionSeconds},
+    {"ReconnectOnLinkFailure",              0                                                    },
+    {"EnableReloadFeature",                 1                                                    },
+    {"RegexpMatchEmpty",                    1                                                    },
+    {"ShowGridLinesInListViews",            1                                                    },
+    {"SmoothScrolling",                     0                                                    },
+    {"SmootherScrolling",                   0                                                    },
+    {"DisableKeyboardMenuActivation",       0                                                    },
+    {"TriggerRemoveCheck",                  1                                                    },
+    {"NotepadBackColour",                   0                                                    },
+    {"NotepadTextColour",                   0                                                    },
+    {"ActivityButtonBarStyle",              0                                                    },
+    {"AsciiArtLayout",                      0                                                    },
+    {"DefaultInputFontHeight",              9                                                    },
+    {"DefaultInputFontItalic",              0                                                    },
+    {"DefaultInputFontWeight",              400                                                  },
+    {"DefaultOutputFontHeight",             9                                                    },
+    {"Icon Placement",                      0                                                    },
+    {"Tray Icon",                           0                                                    }, // normal icon
+    {"ActivityWindowRefreshInterval",       15                                                   },
+    {"ActivityWindowRefreshType",           2                                                    },
+    {"ParenMatchFlags",                     0x0001 | 0x0020 | 0x0040                             },
+    {"PrinterFontSize",                     10                                                   },
+    {"PrinterFontItalic",                   0                                                    },
+    {"PrinterFontWeight",                   400                                                  },
+    {"PrinterLeftMargin",                   15                                                   },
+    {"PrinterLinesPerPage",                 60                                                   },
+    {"PrinterTopMargin",                    15                                                   },
+    {"ReloadMccpDisableTimeoutMs",          1000                                                 },
+    {"TimerInterval",                       0                                                    },
+    {"UpdateCheckIntervalHours",            1                                                    },
+    {"FixedPitchFontSize",                  9                                                    },
+    {"TabInsertsTabInMultiLineDialogs",     0                                                    },
 
-    {nullptr,                           0                       }  // end of table marker
+    {nullptr,                               0                                                    }  // end of table marker
 }; // end of table
 
 // strings
@@ -2365,10 +2368,20 @@ namespace
 
 AppController *AppController::s_instance = nullptr;
 
-AppController::AppController(QObject *parent) : QObject(parent)
+AppController::AppController(const bool disableAutoConnectForExecution, QObject *parent)
+    : QObject(parent), m_disableAutoConnectForExecution(disableAutoConnectForExecution)
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
+	m_soundEngine = std::make_unique<SoundEngine>(this);
+	connect(m_soundEngine.get(), &SoundEngine::playbackInitializationFinished, this,
+	        [this](const bool available)
+	        {
+		        if (!available)
+			        qWarning() << "Sound engine initialization timed out; sound is disabled.";
+		        m_soundInitializationResolved = true;
+		        finalizeStartupIfReady();
+	        });
 	refreshWorldViewGlobalSettings();
 	if (QCoreApplication *application = QCoreApplication::instance())
 		application->installEventFilter(this);
@@ -2435,13 +2448,13 @@ bool AppController::eventFilter(QObject *watched, QEvent *event)
 	return true;
 }
 
-bool AppController::handleFileAssociationRequest(const QString &path)
+bool AppController::handleFileAssociationRequest(const QString &path, const bool suppressAutoConnect)
 {
 	if (path.isEmpty())
 		return false;
 	if (m_fileAssociationDispatchReady)
-		return dispatchFileAssociationRequest(path);
-	m_pendingFileAssociationRequests.push_back(path);
+		return dispatchFileAssociationRequest(path, suppressAutoConnect);
+	m_pendingFileAssociationRequests.push_back({path, suppressAutoConnect});
 	return true;
 }
 
@@ -2503,7 +2516,7 @@ void AppController::setMainWindow(MainWindow *window)
 		connect(m_mainWindow, &MainWindow::viewPreferenceChanged, this,
 		        [this](const QString &, int) { saveViewPreferences(); });
 		connect(m_mainWindow, &MainWindow::recentFileTriggered, this,
-		        [this](const QString &path) { openDocumentFile(path); });
+		        [this](const QString &path) { openDocumentFileFromUserAction(path); });
 	}
 }
 
@@ -2533,6 +2546,11 @@ void AppController::startWithSplash()
 {
 	if (m_startupFinalized)
 		return;
+	m_soundInitializationResolved = false;
+	if (m_soundEngine)
+		m_soundEngine->initializePlayback();
+	else
+		m_soundInitializationResolved = true;
 
 	static constexpr int kMinSplashVisibleMs = 500;
 	m_splashMinDelayElapsed                  = false;
@@ -3227,9 +3245,20 @@ void AppController::cleanupReloadStateOnNormalStartup() const
 
 bool AppController::openDocumentFile(const QString &path)
 {
+	return openDocumentFile(path, RecentFileUpdate::Preserve, InitialAutoConnectPolicy::AllowIfEnabled);
+}
+
+bool AppController::openDocumentFileFromUserAction(const QString &path)
+{
+	return openDocumentFile(path, RecentFileUpdate::Record, InitialAutoConnectPolicy::AllowIfEnabled);
+}
+
+bool AppController::openDocumentFile(const QString &path, const RecentFileUpdate recentFileUpdate,
+                                     const InitialAutoConnectPolicy autoConnectPolicy)
+{
 	// Open-document flow with world/template routing.
 	if (path.isEmpty())
-		return openWorldDocument(QString());
+		return openWorldDocument(QString(), autoConnectPolicy);
 
 	QString normalized = path;
 #ifdef Q_OS_WIN
@@ -3240,21 +3269,30 @@ bool AppController::openDocumentFile(const QString &path)
 	auto resolvedPath = normalized;
 	if (const QFileInfo info(normalized); !info.isAbsolute())
 		resolvedPath = makeAbsolutePath(normalized);
-	return openResolvedDocumentFile(resolvedPath);
+	return openResolvedDocumentFile(resolvedPath, recentFileUpdate, autoConnectPolicy);
 }
 
-bool AppController::openResolvedDocumentFile(const QString &resolvedPath)
+bool AppController::openResolvedDocumentFile(const QString                 &resolvedPath,
+                                             const RecentFileUpdate         recentFileUpdate,
+                                             const InitialAutoConnectPolicy autoConnectPolicy)
 {
 	const auto suffix = QFileInfo(resolvedPath).suffix().toLower();
-	const auto opened = QMudFileExtensions::isWorldSuffix(suffix) ? openWorldDocument(resolvedPath)
-	                                                              : openTextDocument(resolvedPath);
+	const auto opened = QMudFileExtensions::isWorldSuffix(suffix)
+	                        ? openWorldDocument(resolvedPath, autoConnectPolicy)
+	                        : openTextDocument(resolvedPath);
 	if (!opened)
 	{
 		return false;
 	}
+	if (recentFileUpdate == RecentFileUpdate::Record)
+		recordRecentFile(resolvedPath);
+	return true;
+}
 
-	// update MRU list
-	QSettings settings(iniFilePath(), QSettings::IniFormat);
+void AppController::recordRecentFile(const QString &resolvedPath) const
+{
+	const auto suffix = QFileInfo(resolvedPath).suffix().toLower();
+	QSettings  settings(iniFilePath(), QSettings::IniFormat);
 	settings.beginGroup(QStringLiteral("Recent File List"));
 	QStringList files;
 	QStringList fileKeys;
@@ -3307,10 +3345,15 @@ bool AppController::openResolvedDocumentFile(const QString &resolvedPath)
 	settings.endGroup();
 	if (m_mainWindow)
 		m_mainWindow->setRecentFiles(files);
-	return true;
 }
 
 void AppController::openWorldsFromList(const QStringList &items, const bool activateFirstOnly)
+{
+	openWorldsFromList(items, activateFirstOnly, RecentFileUpdate::Preserve);
+}
+
+void AppController::openWorldsFromList(const QStringList &items, const bool activateFirstOnly,
+                                       const RecentFileUpdate recentFileUpdate)
 {
 	if (items.isEmpty())
 		return;
@@ -3326,7 +3369,8 @@ void AppController::openWorldsFromList(const QStringList &items, const bool acti
 
 	for (const QString &item : items)
 	{
-		const bool opened = openDocumentFile(item);
+		const bool opened =
+		    openDocumentFile(item, recentFileUpdate, InitialAutoConnectPolicy::AllowIfEnabled);
 		if (!activateFirstOnly || !opened || firstOpenedRuntime != nullptr || !m_mainWindow)
 			continue;
 		if (WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
@@ -4791,7 +4835,8 @@ void AppController::setupStartupBehavior()
 	for (qsizetype index = args.size() - 1; index >= 1; --index)
 	{
 		const QString &argument = args.at(index);
-		if (argument.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
+		if (argument.compare(QStringLiteral("--no-autoconnect"), Qt::CaseInsensitive) == 0 ||
+		    argument.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
 		    argument.compare(QStringLiteral("--allow-multi-instance"), Qt::CaseInsensitive) == 0)
 		{
 			args.removeAt(index);
@@ -4856,14 +4901,14 @@ void AppController::setupStartupBehavior()
 		if (!worldList.isEmpty())
 		{
 			const auto items = splitSerializedWorldList(worldList);
-			openWorldsFromList(items, false);
+			openWorldsFromList(items, false, RecentFileUpdate::Preserve);
 		}
 	}
 
 	showTipAtStartup();
 }
 
-bool AppController::openWorldDocument(const QString &path)
+bool AppController::openWorldDocument(const QString &path, const InitialAutoConnectPolicy autoConnectPolicy)
 {
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
@@ -4973,6 +5018,7 @@ bool AppController::openWorldDocument(const QString &path)
 		auto *runtime = new WorldRuntime(m_mainWindow);
 		runtime->setClientStartTime(m_whenClientStarted);
 		runtime->setStartupDirectory(m_workingDir);
+		runtime->attachSoundEngine(m_soundEngine.get());
 		runtime->setDefaultWorldDirectory(
 		    makeAbsolutePath(getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString()));
 		runtime->setDefaultLogDirectory(
@@ -5039,21 +5085,24 @@ bool AppController::openWorldDocument(const QString &path)
 		const QPointer<WorldRuntime> runtimeGuard(runtime);
 		restoreWorldSessionStateAsync(
 		    runtime, window->view(), false,
-		    [this, runtimeGuard](const bool ok, const QString &error)
+		    [this, runtimeGuard, autoConnectPolicy](const bool ok, const QString &error)
 		    {
 			    if (!runtimeGuard)
 				    return;
 			    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
 			        ok, error,
 			        {
-			            [this, runtimeGuard]
+			            [this, runtimeGuard, autoConnectPolicy]
 			            {
 				            runWorldStartupPostRestore(runtimeGuard,
-				                                       [this, runtimeGuard]
+				                                       [this, runtimeGuard, autoConnectPolicy]
 				                                       {
 					                                       if (!runtimeGuard)
 						                                       return;
-					                                       maybeAutoConnectWorld(runtimeGuard);
+					                                       maybeAutoConnectWorld(
+					                                           runtimeGuard,
+					                                           autoConnectPolicy ==
+					                                               InitialAutoConnectPolicy::Suppress);
 				                                       });
 			            },
 			            {},
@@ -5096,22 +5145,24 @@ bool AppController::openWorldDocument(const QString &path)
 	const QPointer<WorldRuntime> runtimeGuard(runtime);
 	restoreWorldSessionStateAsync(
 	    runtime, window->view(), false,
-	    [this, runtimeGuard](const bool ok, const QString &error)
+	    [this, runtimeGuard, autoConnectPolicy](const bool ok, const QString &error)
 	    {
 		    if (!runtimeGuard)
 			    return;
 		    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
 		        ok, error,
 		        {
-		            [this, runtimeGuard]
+		            [this, runtimeGuard, autoConnectPolicy]
 		            {
-			            runWorldStartupPostRestore(runtimeGuard,
-			                                       [this, runtimeGuard]
-			                                       {
-				                                       if (!runtimeGuard)
-					                                       return;
-				                                       maybeAutoConnectWorld(runtimeGuard);
-			                                       });
+			            runWorldStartupPostRestore(
+			                runtimeGuard,
+			                [this, runtimeGuard, autoConnectPolicy]
+			                {
+				                if (!runtimeGuard)
+					                return;
+				                maybeAutoConnectWorld(runtimeGuard, autoConnectPolicy ==
+				                                                        InitialAutoConnectPolicy::Suppress);
+			                });
 		            },
 		            {},
 		            [runtimeGuard](const QString &restoreError)
@@ -5125,11 +5176,13 @@ bool AppController::openWorldDocument(const QString &path)
 	return true;
 }
 
-void AppController::maybeAutoConnectWorld(WorldRuntime *runtime) const
+void AppController::maybeAutoConnectWorld(WorldRuntime *runtime, const bool suppressForOpen) const
 {
 	if (!runtime)
 		return;
 	if (m_suppressAutoConnect)
+		return;
+	if (m_disableAutoConnectForExecution || suppressForOpen)
 		return;
 	if (getGlobalOption(QStringLiteral("AutoConnectWorlds")).toInt() == 0)
 		return;
@@ -5178,6 +5231,7 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 	runtime->applyDefaultWorldOptions();
 	runtime->setClientStartTime(m_whenClientStarted);
 	runtime->setStartupDirectory(m_workingDir);
+	runtime->attachSoundEngine(m_soundEngine.get());
 	runtime->setDefaultWorldDirectory(
 	    makeAbsolutePath(getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString()));
 	runtime->setDefaultLogDirectory(
@@ -5781,6 +5835,14 @@ void AppController::loadToolbarLayout() const
 
 void AppController::applyGlobalPreferences()
 {
+	if (m_soundEngine)
+	{
+		SoundEngine::CachePolicy cachePolicy;
+		cachePolicy.ramCacheSizeMiB = getGlobalOption(QStringLiteral("SoundEngineRamCacheSizeMB")).toInt();
+		cachePolicy.idleEvictionSeconds =
+		    getGlobalOption(QStringLiteral("SoundEngineIdleCacheEvictionSeconds")).toInt();
+		m_soundEngine->configureCache(cachePolicy);
+	}
 	applyWindowPreferences();
 	applyUpdatePreferences();
 	applyViewPreferences();
@@ -8210,6 +8272,8 @@ void AppController::finalizeStartupIfReady()
 {
 	if (m_startupFinalized || !m_splashMinDelayElapsed || !m_initializeFinished)
 		return;
+	if (m_initializeSucceeded && !m_soundInitializationResolved)
+		return;
 
 	m_startupFinalized = true;
 	hideSplashScreen();
@@ -8250,19 +8314,22 @@ void AppController::enableFileAssociationDispatch()
 {
 	while (!m_pendingFileAssociationRequests.isEmpty())
 	{
-		const QStringList pendingRequests = std::exchange(m_pendingFileAssociationRequests, {});
-		for (const QString &path : pendingRequests)
-			dispatchFileAssociationRequest(path);
+		const QList<PendingFileAssociationRequest> pendingRequests =
+		    std::exchange(m_pendingFileAssociationRequests, {});
+		for (const PendingFileAssociationRequest &request : pendingRequests)
+			dispatchFileAssociationRequest(request.path, request.suppressAutoConnect);
 	}
 	m_fileAssociationDispatchReady = true;
 }
 
-bool AppController::dispatchFileAssociationRequest(const QString &path)
+bool AppController::dispatchFileAssociationRequest(const QString &path, const bool suppressAutoConnect)
 {
 	QString resolvedPath;
 	if (!resolveFileAssociationFile(m_workingDir, path, &resolvedPath))
 		return false;
-	return openResolvedDocumentFile(resolvedPath);
+	return openResolvedDocumentFile(resolvedPath, RecentFileUpdate::Record,
+	                                suppressAutoConnect ? InitialAutoConnectPolicy::Suppress
+	                                                    : InitialAutoConnectPolicy::AllowIfEnabled);
 }
 
 bool AppController::resolveFileAssociationFile(const QString &qmudHome, const QString &path,
@@ -9860,7 +9927,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		auto *runtime = world->runtime();
 		if (!runtime)
 			return;
-		runtime->stopSound(0);
+		runtime->cancelSoundIntercepted();
 	}
 	else if (cmdName == QStringLiteral("MultiLineTrigger"))
 	{
@@ -11677,7 +11744,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		const int previousActivationOverride = m_nextNewWorldActivationOverride;
 		if (QMudFileExtensions::isWorldSuffix(info.suffix().toLower()))
 			m_nextNewWorldActivationOverride = 1;
-		const bool opened = openDocumentFile(fileName);
+		const bool opened = openDocumentFileFromUserAction(fileName);
 		Q_UNUSED(opened);
 		m_nextNewWorldActivationOverride = previousActivationOverride;
 	}
@@ -11696,7 +11763,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (worldList.isEmpty())
 			return;
 		const auto items = splitSerializedWorldList(worldList);
-		openWorldsFromList(items, false);
+		openWorldsFromList(items, false, RecentFileUpdate::Record);
 		changeToStartupDirectory();
 	}
 	else if (cmdName == QStringLiteral("CloseWorld"))
@@ -12991,7 +13058,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (worldList.isEmpty())
 			return;
 		const QStringList items = splitSerializedWorldList(worldList);
-		openWorldsFromList(items, false);
+		openWorldsFromList(items, false, RecentFileUpdate::Record);
 
 		for (WorldRuntime *runtime : activeWorldRuntimes())
 			connectRuntime(runtime);

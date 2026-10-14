@@ -90,9 +90,19 @@ namespace QMudNativePluginRegistry
 			double                            pan{0.0};
 			double                            pitch{0.0};
 			bool                              loop{false};
+			bool                              playbackSubmitted{false};
 			const void                       *ownerKey{nullptr};
 			std::shared_ptr<std::atomic_bool> pendingCancel;
 			quint64                           generation{0};
+	};
+
+	/**
+	 * @brief Shared cancellation identity for delayed operations belonging to one buffer generation.
+	 */
+	struct LuaAudioRuntimeOperationGuard
+	{
+			quint64                           generation{0};
+			std::shared_ptr<std::atomic_bool> cancelled;
 	};
 
 	/**
@@ -188,55 +198,62 @@ namespace QMudNativePluginRegistry
 	 * @param runtime Owning runtime.
 	 * @param volume Legacy LuaAudio volume value.
 	 */
-	void              luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, double volume);
+	void                  luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, double volume);
 	/**
 	 * @brief Updates LuaAudio master pan for a runtime.
 	 * @param runtime Owning runtime.
 	 * @param pan Legacy LuaAudio pan value.
 	 */
-	void              luaAudioSetRuntimeMasterPan(const WorldRuntime *runtime, double pan);
+	void                  luaAudioSetRuntimeMasterPan(const WorldRuntime *runtime, double pan);
 	/**
 	 * @brief Updates LuaAudio master pitch for a runtime.
 	 * @param runtime Owning runtime.
 	 * @param pitch Legacy LuaAudio pitch value.
 	 */
-	void              luaAudioSetRuntimeMasterPitch(const WorldRuntime *runtime, double pitch);
+	void                  luaAudioSetRuntimeMasterPitch(const WorldRuntime *runtime, double pitch);
 	/**
-	 * @brief Reserves the first available LuaAudio buffer using shared runtime ownership.
+	 * @brief Allocates a new runtime-wide LuaAudio ownership generation.
 	 * @param runtime Owning runtime.
-	 * @param bufferReusableResolver Callback returning whether a buffer may be reused.
-	 * @return Reserved buffer id, or zero when none is available.
+	 * @return Nonzero monotonic generation, or zero without a runtime.
 	 */
-	[[nodiscard]] int luaAudioReserveRuntimeBuffer(const WorldRuntime             *runtime,
-	                                               const std::function<bool(int)> &bufferReusableResolver);
+	[[nodiscard]] quint64 luaAudioNextRuntimeBufferGeneration(const WorldRuntime *runtime);
 	/**
 	 * @brief Marks a runtime LuaAudio buffer as owned and stores current playback settings.
 	 * @param runtime Owning runtime.
 	 * @param buffer Buffer id.
 	 * @param state Playback settings.
 	 */
-	void              luaAudioMarkRuntimeBuffer(const WorldRuntime *runtime, int buffer,
-	                                            const LuaAudioRuntimeBufferState &state);
+	void                  luaAudioMarkRuntimeBuffer(const WorldRuntime *runtime, int buffer,
+	                                                const LuaAudioRuntimeBufferState &state);
 	/**
-	 * @brief Tracks a cancellable delayed operation against a LuaAudio-owned buffer.
+	 * @brief Updates an existing LuaAudio buffer only while its ownership generation remains current.
 	 * @param runtime Owning runtime.
 	 * @param buffer Buffer id.
-	 * @param cancelToken Shared cancellation flag checked by delayed work.
-	 * @param generation Optional output for the current buffer ownership generation.
-	 * @return `true` when the operation was attached to an owned buffer.
+	 * @param state Replacement settings carrying the expected ownership generation.
+	 * @return `true` when the current generation was updated.
 	 */
-	[[nodiscard]] bool
-	     luaAudioTrackRuntimeBufferPendingOperation(const WorldRuntime *runtime, int buffer,
-	                                                const std::shared_ptr<std::atomic_bool> &cancelToken,
-	                                                quint64                                 *generation = nullptr);
+	[[nodiscard]] bool    luaAudioUpdateRuntimeBufferIfGeneration(const WorldRuntime *runtime, int buffer,
+	                                                              const LuaAudioRuntimeBufferState &state);
 	/**
-	 * @brief Removes a completed delayed operation token from a LuaAudio-owned buffer.
+	 * @brief Captures the shared cancellation identity for the current LuaAudio buffer generation.
 	 * @param runtime Owning runtime.
 	 * @param buffer Buffer id.
-	 * @param cancelToken Shared cancellation flag for the completed work.
+	 * @param guard Output generation and shared cancellation identity.
+	 * @return `true` when the buffer is currently owned by LuaAudio.
 	 */
-	void luaAudioForgetRuntimeBufferPendingOperation(const WorldRuntime *runtime, int buffer,
-	                                                 const std::shared_ptr<std::atomic_bool> &cancelToken);
+	[[nodiscard]] bool    luaAudioCaptureRuntimeBufferOperationGuard(const WorldRuntime *runtime, int buffer,
+	                                                                 LuaAudioRuntimeOperationGuard &guard);
+	/**
+	 * @brief Resolves current buffer state only while a captured operation guard remains current.
+	 * @param runtime Owning runtime.
+	 * @param buffer Buffer id.
+	 * @param guard Previously captured generation and cancellation identity.
+	 * @param state Output current buffer state.
+	 * @return `true` when the guarded delayed operation may proceed.
+	 */
+	[[nodiscard]] bool    luaAudioResolveRuntimeBufferOperation(const WorldRuntime *runtime, int buffer,
+	                                                            const LuaAudioRuntimeOperationGuard &guard,
+	                                                            LuaAudioRuntimeBufferState          &state);
 	/**
 	 * @brief Atomically consumes a delayed play token for a still-current LuaAudio buffer generation.
 	 * @param runtime Owning runtime.
@@ -250,19 +267,6 @@ namespace QMudNativePluginRegistry
 	luaAudioConsumeRuntimeBufferPendingPlay(const WorldRuntime *runtime, int buffer, quint64 generation,
 	                                        const std::shared_ptr<std::atomic_bool> &cancelToken,
 	                                        LuaAudioRuntimeBufferState              &state);
-	/**
-	 * @brief Atomically consumes a delayed operation token for a still-current LuaAudio buffer generation.
-	 * @param runtime Owning runtime.
-	 * @param buffer Buffer id.
-	 * @param generation Expected buffer ownership generation.
-	 * @param cancelToken Shared cancellation flag for the delayed operation.
-	 * @param state Output current buffer state.
-	 * @return `true` when the delayed operation may proceed.
-	 */
-	[[nodiscard]] bool
-	luaAudioConsumeRuntimeBufferPendingOperation(const WorldRuntime *runtime, int buffer, quint64 generation,
-	                                             const std::shared_ptr<std::atomic_bool> &cancelToken,
-	                                             LuaAudioRuntimeBufferState              &state);
 	/**
 	 * @brief Returns stored runtime LuaAudio buffer settings.
 	 * @param runtime Owning runtime.

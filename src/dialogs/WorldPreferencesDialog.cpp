@@ -121,13 +121,24 @@ static QColor parseColourValue(const QString &value)
 	return {};
 }
 
-static bool confirmRemoval(QWidget *parent, const QString &singular)
+/**
+ * @brief Requests confirmation before removing one or more world rules.
+ * @param parent Parent widget for the confirmation dialog.
+ * @param singular Singular rule-kind name used in the message.
+ * @param count Number of selected rules that would be removed.
+ * @param plural Plural rule-kind name used when removing multiple rules.
+ * @return `true` when confirmation is disabled or the user accepts removal.
+ */
+static bool confirmRemoval(QWidget *parent, const QString &singular, const qsizetype count = 1,
+                           const QString &plural = {})
 {
 	if (AppController *app = AppController::instance();
 	    !app || app->getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt() == 0)
 		return true;
 
-	const QString message                    = QStringLiteral("Delete this %1 - are you sure?").arg(singular);
+	const QString message = count == 1
+	                            ? QStringLiteral("Delete this %1 - are you sure?").arg(singular)
+	                            : QStringLiteral("Delete these %1 %2 - are you sure?").arg(count).arg(plural);
 	const QMessageBox::StandardButton result = QMessageBox::question(
 	    parent, QStringLiteral("Confirm"), message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 	return result == QMessageBox::Yes;
@@ -449,6 +460,34 @@ template <typename Rule> static int ruleIndexForRuntimeId(const QList<Rule> &rul
 	return -1;
 }
 
+/**
+ * @brief Resolves selected runtime identities without repeatedly searching the rule collection.
+ * @tparam Rule Rule value type.
+ * @param rules Rule collection to index.
+ * @param runtimeIds Runtime identities to resolve in result order.
+ * @return Selected rules, or no value if any identity is absent.
+ */
+template <typename Rule>
+static std::optional<QList<Rule>> rulesForRuntimeIds(const QList<Rule>    &rules,
+                                                     const QList<quint64> &runtimeIds)
+{
+	QHash<quint64, qsizetype> indexes;
+	indexes.reserve(rules.size());
+	for (qsizetype index = 0; index < rules.size(); ++index)
+		indexes.insert(rules.at(index).runtimeId, index);
+
+	QList<Rule> selected;
+	selected.reserve(runtimeIds.size());
+	for (const quint64 runtimeId : runtimeIds)
+	{
+		const auto index = indexes.constFind(runtimeId);
+		if (index == indexes.cend())
+			return std::nullopt;
+		selected.push_back(rules.at(index.value()));
+	}
+	return selected;
+}
+
 template <typename Rule>
 static QList<Rule> mergeWorkingRules(const QList<Rule> &working, const QList<Rule> &current,
                                      const QSet<quint64> &initialIds, const QSet<quint64> &editedIds,
@@ -658,17 +697,20 @@ static int selectedRow(const QTableWidget *table)
 	return -1;
 }
 
-static QList<int> selectedRows(const QTableWidget *table)
+/**
+ * @brief Returns selected rule-table rows without enumerating every selected cell.
+ * @param table Rule table to inspect.
+ * @return Selected row numbers in display order.
+ */
+static QList<int> selectedRuleRows(const QTableWidget *table)
 {
 	QList<int> rows;
-	if (!table)
+	if (!table || !table->selectionModel())
 		return rows;
-	const QList<QTableWidgetItem *> items = table->selectedItems();
-	for (const QTableWidgetItem *item : items)
-	{
-		if (item && !rows.contains(item->row()))
-			rows.append(item->row());
-	}
+	const QModelIndexList selected = table->selectionModel()->selectedRows(0);
+	rows.reserve(selected.size());
+	for (const QModelIndex &index : selected)
+		rows.push_back(index.row());
 	std::ranges::sort(rows);
 	return rows;
 }
@@ -727,34 +769,94 @@ static quint64 ruleRuntimeIdForRow(const QTableWidget *table, const int row)
 	return ok ? runtimeId : 0;
 }
 
-static int findRuleRowForRuntimeId(const QTableWidget *table, const quint64 runtimeId)
+/**
+ * @brief Returns selected rule identities in table display order.
+ * @param table Rule table carrying runtime identities in `Qt::UserRole`.
+ * @return Selected nonzero runtime identities.
+ */
+static QList<quint64> selectedRuleRuntimeIds(const QTableWidget *table)
 {
-	if (!table || runtimeId == 0)
-		return -1;
-	for (int row = 0; row < table->rowCount(); ++row)
+	QList<quint64> runtimeIds;
+	for (const int row : selectedRuleRows(table))
 	{
-		if (ruleRuntimeIdForRow(table, row) == runtimeId)
-			return row;
+		if (const quint64 runtimeId = ruleRuntimeIdForRow(table, row); runtimeId != 0)
+			runtimeIds.push_back(runtimeId);
 	}
-	return -1;
+	return runtimeIds;
 }
 
-static void selectRuleRowByRuntimeId(QTableWidget *table, const quint64 runtimeId)
+/**
+ * @brief Returns selected rule identities in grouped-tree display order.
+ * @param tree Grouped rule tree carrying runtime identities in `Qt::UserRole`.
+ * @return Selected nonzero runtime identities.
+ */
+static QList<quint64> selectedRuleRuntimeIds(const QTreeWidget *tree)
 {
-	if (const int row = findRuleRowForRuntimeId(table, runtimeId); row >= 0)
-		selectRow(table, row);
+	QList<quint64> runtimeIds;
+	if (!tree || !tree->selectionModel())
+		return runtimeIds;
+	QModelIndexList selected = tree->selectionModel()->selectedRows(0);
+	selected.removeIf([](const QModelIndex &index) { return !index.parent().isValid(); });
+	std::ranges::sort(selected,
+	                  [](const QModelIndex &lhs, const QModelIndex &rhs)
+	                  {
+		                  if (lhs.parent().row() != rhs.parent().row())
+			                  return lhs.parent().row() < rhs.parent().row();
+		                  return lhs.row() < rhs.row();
+	                  });
+	runtimeIds.reserve(selected.size());
+	for (const QModelIndex &index : std::as_const(selected))
+	{
+		bool          ok        = false;
+		const quint64 runtimeId = index.data(Qt::UserRole).toULongLong(&ok);
+		if (ok && runtimeId != 0)
+			runtimeIds.push_back(runtimeId);
+	}
+	return runtimeIds;
 }
 
-static void selectRuleRowByRuntimeId(QTableWidget *table, const QList<quint64> &runtimeIds)
+/**
+ * @brief Returns the runtime identity at the table's current row.
+ * @param table Rule table carrying runtime identities in `Qt::UserRole`.
+ * @return Current runtime identity, or zero when no valid rule is current.
+ */
+static quint64 currentTableRuleRuntimeId(const QTableWidget *table)
 {
+	return table ? ruleRuntimeIdForRow(table, table->currentRow()) : 0;
+}
+
+/**
+ * @brief Replaces a rule table's selected rows by stable runtime identity.
+ * @param table Rule table to update.
+ * @param itemsByRuntimeId Direct lookup for the table's rule items.
+ * @param runtimeIds Runtime identities to select.
+ * @param currentRuntimeId Preferred current identity within the selection.
+ */
+static void setSelectedRuleRuntimeIds(QTableWidget                             *table,
+                                      const QHash<quint64, QTableWidgetItem *> &itemsByRuntimeId,
+                                      const QList<quint64> &runtimeIds, const quint64 currentRuntimeId)
+{
+	if (!table || !table->selectionModel())
+		return;
+	QSignalBlocker block(table);
+	table->clearSelection();
+	QModelIndex firstSelected;
+	QModelIndex current;
 	for (const quint64 runtimeId : runtimeIds)
 	{
-		if (const int row = findRuleRowForRuntimeId(table, runtimeId); row >= 0)
-		{
-			selectRow(table, row);
-			return;
-		}
+		QTableWidgetItem *const item = itemsByRuntimeId.value(runtimeId, nullptr);
+		if (!item)
+			continue;
+		const QModelIndex index = table->model()->index(item->row(), 0);
+		table->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+		if (!firstSelected.isValid())
+			firstSelected = index;
+		if (runtimeId == currentRuntimeId)
+			current = index;
 	}
+	if (!current.isValid())
+		current = firstSelected;
+	table->selectionModel()->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
 }
 
 /**
@@ -762,52 +864,80 @@ static void selectRuleRowByRuntimeId(QTableWidget *table, const QList<quint64> &
  * @param table Sorted rule table carrying runtime identities in `Qt::UserRole`.
  * @param tree Grouped rule tree carrying runtime identities in `Qt::UserRole`.
  * @param treeMode Whether the grouped tree is the active presentation.
- * @param removedRuntimeId Runtime identity of the rule being removed.
+ * @param removedRuntimeIds Runtime identities of the rules being removed.
  * @return Runtime identities in selection priority order. Previous displayed rules are preferred,
  * followed by subsequent rules; tree candidates remain within the selected group.
  */
 static QList<quint64> displayedRuleRuntimeIdsAfterRemoval(const QTableWidget *table, const QTreeWidget *tree,
-                                                          const bool treeMode, const quint64 removedRuntimeId)
+                                                          const bool           treeMode,
+                                                          const QSet<quint64> &removedRuntimeIds)
 {
 	QList<quint64> candidates;
 	if (treeMode)
 	{
-		QTreeWidgetItem *current               = tree ? tree->currentItem() : nullptr;
-		QTreeWidgetItem *group                 = current ? current->parent() : nullptr;
-		bool             currentRuntimeIdValid = false;
-		const quint64    currentRuntimeId =
-		    current ? current->data(0, Qt::UserRole).toULongLong(&currentRuntimeIdValid) : 0;
-		if (!group || !currentRuntimeIdValid || currentRuntimeId != removedRuntimeId)
+		QTreeWidgetItem *anchor = tree ? tree->currentItem() : nullptr;
+		if (!anchor || !anchor->parent())
+		{
+			for (QTreeWidgetItem *item : tree ? tree->selectedItems() : QList<QTreeWidgetItem *>{})
+			{
+				bool          valid     = false;
+				const quint64 runtimeId = item ? item->data(0, Qt::UserRole).toULongLong(&valid) : 0;
+				if (valid && removedRuntimeIds.contains(runtimeId))
+				{
+					anchor = item;
+					break;
+				}
+			}
+		}
+		QTreeWidgetItem *group                = anchor ? anchor->parent() : nullptr;
+		bool             anchorRuntimeIdValid = false;
+		const quint64    anchorRuntimeId =
+		    anchor ? anchor->data(0, Qt::UserRole).toULongLong(&anchorRuntimeIdValid) : 0;
+		if (!group || !anchorRuntimeIdValid || !removedRuntimeIds.contains(anchorRuntimeId))
 			return {};
-		const int childIndex = group->indexOfChild(current);
+		const int childIndex = group->indexOfChild(anchor);
 		for (int index = childIndex - 1; index >= 0; --index)
 		{
 			bool          valid     = false;
 			const quint64 runtimeId = group->child(index)->data(0, Qt::UserRole).toULongLong(&valid);
-			if (valid && runtimeId != 0)
+			if (valid && runtimeId != 0 && !removedRuntimeIds.contains(runtimeId))
 				candidates.push_back(runtimeId);
 		}
 		for (int index = childIndex + 1; index < group->childCount(); ++index)
 		{
 			bool          valid     = false;
 			const quint64 runtimeId = group->child(index)->data(0, Qt::UserRole).toULongLong(&valid);
-			if (valid && runtimeId != 0)
+			if (valid && runtimeId != 0 && !removedRuntimeIds.contains(runtimeId))
 				candidates.push_back(runtimeId);
 		}
 	}
 	else
 	{
-		const int row = selectedRow(table);
-		if (row < 0 || ruleRuntimeIdForRow(table, row) != removedRuntimeId)
+		int row = table ? table->currentRow() : -1;
+		if (row < 0 || !removedRuntimeIds.contains(ruleRuntimeIdForRow(table, row)))
+		{
+			row = -1;
+			for (const int selected : selectedRuleRows(table))
+			{
+				if (removedRuntimeIds.contains(ruleRuntimeIdForRow(table, selected)))
+				{
+					row = selected;
+					break;
+				}
+			}
+		}
+		if (row < 0)
 			return {};
 		for (int index = row - 1; index >= 0; --index)
 		{
-			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, index); runtimeId != 0)
+			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, index);
+			    runtimeId != 0 && !removedRuntimeIds.contains(runtimeId))
 				candidates.push_back(runtimeId);
 		}
 		for (int index = row + 1; table && index < table->rowCount(); ++index)
 		{
-			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, index); runtimeId != 0)
+			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, index);
+			    runtimeId != 0 && !removedRuntimeIds.contains(runtimeId))
 				candidates.push_back(runtimeId);
 		}
 	}
@@ -828,27 +958,104 @@ static quint64 currentTreeRuleRuntimeId(const QTreeWidget *tree)
 	return 0;
 }
 
-static QTreeWidgetItem *findTreeItemByRuntimeId(const QTreeWidget *tree, const quint64 runtimeId)
+/**
+ * @brief Replaces a grouped rule tree's selected items by stable runtime identity.
+ * @param tree Grouped rule tree to update.
+ * @param itemsByRuntimeId Direct lookup for the tree's rule items.
+ * @param runtimeIds Runtime identities to select.
+ * @param currentRuntimeId Preferred current identity within the selection.
+ * @param expandSelectedGroups Whether to expand every group containing a selected rule.
+ */
+static void setSelectedRuleRuntimeIds(QTreeWidget                             *tree,
+                                      const QHash<quint64, QTreeWidgetItem *> &itemsByRuntimeId,
+                                      const QList<quint64> &runtimeIds, const quint64 currentRuntimeId,
+                                      const bool expandSelectedGroups)
 {
-	if (!tree || runtimeId == 0)
-		return nullptr;
-	for (int i = 0; i < tree->topLevelItemCount(); ++i)
+	if (!tree)
+		return;
+	QSignalBlocker block(tree);
+	tree->clearSelection();
+	QTreeWidgetItem *firstSelected = nullptr;
+	QTreeWidgetItem *current       = nullptr;
+	for (const quint64 runtimeId : runtimeIds)
 	{
-		const QTreeWidgetItem *groupItem = tree->topLevelItem(i);
-		if (!groupItem)
+		QTreeWidgetItem *const item = itemsByRuntimeId.value(runtimeId, nullptr);
+		if (!item)
 			continue;
-		for (int j = 0; j < groupItem->childCount(); ++j)
+		item->setSelected(true);
+		if (expandSelectedGroups && item->parent())
+			item->parent()->setExpanded(true);
+		if (!firstSelected)
+			firstSelected = item;
+		if (runtimeId == currentRuntimeId)
+			current = item;
+	}
+	if (!current)
+		current = firstSelected;
+	tree->setCurrentItem(current, 0, QItemSelectionModel::NoUpdate);
+}
+
+/**
+ * @brief Returns selected identities from the currently displayed rule view.
+ * @param table Flat rule view.
+ * @param tree Grouped rule view.
+ * @param stack Stack selecting the active view.
+ * @return Selected runtime identities in active-view display order.
+ */
+static QList<quint64> activeSelectedRuleRuntimeIds(const QTableWidget *table, const QTreeWidget *tree,
+                                                   const QStackedWidget *stack)
+{
+	return stack && stack->currentWidget() == tree ? selectedRuleRuntimeIds(tree)
+	                                               : selectedRuleRuntimeIds(table);
+}
+
+/**
+ * @brief Selects the first available candidate in the currently displayed rule view.
+ * @param table Flat rule view.
+ * @param tree Grouped rule view.
+ * @param stack Stack selecting the active view.
+ * @param tableItems Direct runtime-identity lookup for the table.
+ * @param treeItems Direct runtime-identity lookup for the tree.
+ * @param candidates Runtime identities in selection priority order.
+ */
+static void selectFirstAvailableRule(QTableWidget *table, QTreeWidget *tree, const QStackedWidget *stack,
+                                     const QHash<quint64, QTableWidgetItem *> &tableItems,
+                                     const QHash<quint64, QTreeWidgetItem *>  &treeItems,
+                                     const QList<quint64>                     &candidates)
+{
+	const bool treeMode = stack && stack->currentWidget() == tree;
+	for (const quint64 runtimeId : candidates)
+	{
+		if (treeMode ? treeItems.contains(runtimeId) : tableItems.contains(runtimeId))
 		{
-			QTreeWidgetItem *child = groupItem->child(j);
-			if (!child)
-				continue;
-			bool ok = false;
-			if (const quint64 childRuntimeId = child->data(0, Qt::UserRole).toULongLong(&ok);
-			    ok && childRuntimeId == runtimeId)
-				return child;
+			if (treeMode)
+				setSelectedRuleRuntimeIds(tree, treeItems, {runtimeId}, runtimeId, false);
+			else
+				setSelectedRuleRuntimeIds(table, tableItems, {runtimeId}, runtimeId);
+			return;
 		}
 	}
-	return nullptr;
+	if (treeMode)
+		setSelectedRuleRuntimeIds(tree, treeItems, {}, 0, false);
+	else
+		setSelectedRuleRuntimeIds(table, tableItems, {}, 0);
+}
+
+/**
+ * @brief Selects one candidate in the currently displayed rule view.
+ * @param table Flat rule view.
+ * @param tree Grouped rule view.
+ * @param stack Stack selecting the active view.
+ * @param tableItems Direct runtime-identity lookup for the table.
+ * @param treeItems Direct runtime-identity lookup for the tree.
+ * @param candidate Runtime identity to select.
+ */
+static void selectFirstAvailableRule(QTableWidget *table, QTreeWidget *tree, const QStackedWidget *stack,
+                                     const QHash<quint64, QTableWidgetItem *> &tableItems,
+                                     const QHash<quint64, QTreeWidgetItem *>  &treeItems,
+                                     const quint64                             candidate)
+{
+	selectFirstAvailableRule(table, tree, stack, tableItems, treeItems, QList<quint64>{candidate});
 }
 
 static bool lessCaseInsensitive(const QString &lhs, const QString &rhs)
@@ -884,21 +1091,23 @@ static QString timerWhenText(const WorldRuntime::Timer &timer)
 	return when;
 }
 
+/**
+ * @brief Rebuilds one grouped rule tree and its runtime-identity lookup.
+ * @param table Source rule table.
+ * @param tree Grouped tree to rebuild.
+ * @param itemsByRuntimeId Lookup populated with each new rule item.
+ * @param descriptionForRow Provides child display text for one source row.
+ * @param expandedGroup Group name to expand after rebuilding.
+ */
 static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
+                               QHash<quint64, QTreeWidgetItem *> &itemsByRuntimeId,
                                const std::function<QString(int)> &descriptionForRow,
                                const QString                     &expandedGroup)
 {
 	if (!table || !tree)
 		return;
 
-	const quint64 selectedRuntimeId = [&]
-	{
-		const int tableRow = selectedRow(table);
-		if (const quint64 fromTable = ruleRuntimeIdForRow(table, tableRow); fromTable != 0)
-			return fromTable;
-		return currentTreeRuleRuntimeId(tree);
-	}();
-
+	itemsByRuntimeId.clear();
 	tree->clear();
 
 	QStringList   groupNames;
@@ -930,7 +1139,9 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 			continue;
 		auto *child = new QTreeWidgetItem(parent);
 		child->setText(0, descriptionForRow(row));
-		child->setData(0, Qt::UserRole, ruleRuntimeIdForRow(table, row));
+		const quint64 runtimeId = ruleRuntimeIdForRow(table, row);
+		child->setData(0, Qt::UserRole, runtimeId);
+		itemsByRuntimeId.insert(runtimeId, child);
 	}
 
 	bool restoredExpandedGroup = false;
@@ -951,7 +1162,6 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 				groupItem->setExpanded(false);
 		}
 	}
-	tree->setCurrentItem(findTreeItemByRuntimeId(tree, selectedRuntimeId));
 }
 
 static QString serializeStringMap(const QMap<QString, QString> &values)
@@ -3966,7 +4176,6 @@ void WorldPreferencesDialog::updateAliasControls() const
 	if (!m_aliasesTable)
 		return;
 	const int  rowCount    = m_aliasesTable->rowCount();
-	const int  row         = selectedRow(m_aliasesTable);
 	const bool hasDefaults = hasDefaultAliasesFile();
 	if (m_useDefaultAliases)
 		m_useDefaultAliases->setEnabled(hasDefaults || m_useDefaultAliases->isChecked());
@@ -3977,15 +4186,15 @@ void WorldPreferencesDialog::updateAliasControls() const
 	if (m_loadAliasesButton)
 		m_loadAliasesButton->setEnabled(allowEdit);
 	if (m_editAliasButton)
-		m_editAliasButton->setEnabled(allowEdit && row >= 0);
+		m_editAliasButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_deleteAliasButton)
-		m_deleteAliasButton->setEnabled(allowEdit && row >= 0);
+		m_deleteAliasButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_moveAliasUpButton)
-		m_moveAliasUpButton->setEnabled(allowEdit && row > 0);
+		m_moveAliasUpButton->setEnabled(allowEdit && rowCount > 1);
 	if (m_moveAliasDownButton)
-		m_moveAliasDownButton->setEnabled(allowEdit && row >= 0 && row < rowCount - 1);
+		m_moveAliasDownButton->setEnabled(allowEdit && rowCount > 1);
 	if (m_copyAliasButton)
-		m_copyAliasButton->setEnabled(allowEdit && row >= 0);
+		m_copyAliasButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_pasteAliasButton)
 		m_pasteAliasButton->setEnabled(allowEdit);
 	if (m_findAliasButton)
@@ -4001,7 +4210,6 @@ void WorldPreferencesDialog::updateTriggerControls() const
 	if (!m_triggersTable)
 		return;
 	const int  rowCount    = m_triggersTable->rowCount();
-	const int  row         = selectedRow(m_triggersTable);
 	const bool hasDefaults = hasDefaultTriggersFile();
 	if (m_useDefaultTriggers)
 		m_useDefaultTriggers->setEnabled(hasDefaults || m_useDefaultTriggers->isChecked());
@@ -4012,15 +4220,15 @@ void WorldPreferencesDialog::updateTriggerControls() const
 	if (m_loadTriggersButton)
 		m_loadTriggersButton->setEnabled(allowEdit);
 	if (m_editTriggerButton)
-		m_editTriggerButton->setEnabled(allowEdit && row >= 0);
+		m_editTriggerButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_deleteTriggerButton)
-		m_deleteTriggerButton->setEnabled(allowEdit && row >= 0);
+		m_deleteTriggerButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_moveTriggerUpButton)
-		m_moveTriggerUpButton->setEnabled(allowEdit && row > 0);
+		m_moveTriggerUpButton->setEnabled(allowEdit && rowCount > 1);
 	if (m_moveTriggerDownButton)
-		m_moveTriggerDownButton->setEnabled(allowEdit && row >= 0 && row < rowCount - 1);
+		m_moveTriggerDownButton->setEnabled(allowEdit && rowCount > 1);
 	if (m_copyTriggerButton)
-		m_copyTriggerButton->setEnabled(allowEdit && row >= 0);
+		m_copyTriggerButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_pasteTriggerButton)
 		m_pasteTriggerButton->setEnabled(allowEdit);
 	if (m_findTriggerButton)
@@ -4036,7 +4244,6 @@ void WorldPreferencesDialog::updateTimerControls() const
 	if (!m_timersTable)
 		return;
 	const int  rowCount    = m_timersTable->rowCount();
-	const int  row         = selectedRow(m_timersTable);
 	const bool hasDefaults = hasDefaultTimersFile();
 	if (m_useDefaultTimers)
 		m_useDefaultTimers->setEnabled(hasDefaults || m_useDefaultTimers->isChecked());
@@ -4047,11 +4254,11 @@ void WorldPreferencesDialog::updateTimerControls() const
 	if (m_loadTimersButton)
 		m_loadTimersButton->setEnabled(allowEdit);
 	if (m_editTimerButton)
-		m_editTimerButton->setEnabled(allowEdit && row >= 0);
+		m_editTimerButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_deleteTimerButton)
-		m_deleteTimerButton->setEnabled(allowEdit && row >= 0);
+		m_deleteTimerButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_copyTimerButton)
-		m_copyTimerButton->setEnabled(allowEdit && row >= 0);
+		m_copyTimerButton->setEnabled(allowEdit && rowCount > 0);
 	if (m_pasteTimerButton)
 		m_pasteTimerButton->setEnabled(allowEdit);
 	if (m_findTimerButton)
@@ -4064,43 +4271,35 @@ void WorldPreferencesDialog::updateTimerControls() const
 		m_resetTimersButton->setEnabled(rowCount > 0);
 }
 
-void WorldPreferencesDialog::updateRuleViewModes()
+void WorldPreferencesDialog::updateRuleViewModes() const
 {
-	auto applyMode =
-	    [this](const QCheckBox *toggle, QStackedWidget *stack, QTableWidget *table, QTreeWidget *tree)
+	auto applyMode = [](const QCheckBox *toggle, QStackedWidget *stack, QTableWidget *table,
+	                    QTreeWidget *tree, const RuleViewItems &items)
 	{
 		if (!toggle || !stack || !table || !tree)
 			return;
 
-		const bool treeMode = toggle->isChecked();
-		stack->setCurrentWidget(treeMode ? static_cast<QWidget *>(tree) : static_cast<QWidget *>(table));
+		const bool     treeMode = toggle->isChecked();
+		QWidget *const target   = treeMode ? static_cast<QWidget *>(tree) : static_cast<QWidget *>(table);
+		if (stack->currentWidget() == target)
+			return;
 
+		const bool           leavingTree = stack->currentWidget() == tree;
+		const QList<quint64> selected =
+		    leavingTree ? selectedRuleRuntimeIds(tree) : selectedRuleRuntimeIds(table);
+		const quint64 current =
+		    leavingTree ? currentTreeRuleRuntimeId(tree) : currentTableRuleRuntimeId(table);
+		stack->setCurrentWidget(target);
 		if (treeMode)
-		{
-			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, selectedRow(table)); runtimeId != 0)
-			{
-				QSignalBlocker block(tree);
-				m_syncingRuleSelection = true;
-				tree->setCurrentItem(findTreeItemByRuntimeId(tree, runtimeId));
-				m_syncingRuleSelection = false;
-			}
-		}
+			setSelectedRuleRuntimeIds(tree, items.tree, selected, current, true);
 		else
-		{
-			const quint64 runtimeId = currentTreeRuleRuntimeId(tree);
-			if (runtimeId != 0)
-			{
-				QSignalBlocker block(table);
-				m_syncingRuleSelection = true;
-				selectRuleRowByRuntimeId(table, runtimeId);
-				m_syncingRuleSelection = false;
-			}
-		}
+			setSelectedRuleRuntimeIds(table, items.table, selected, current);
 	};
 
-	applyMode(m_triggerTreeView, m_triggersViewStack, m_triggersTable, m_triggersTree);
-	applyMode(m_aliasTreeView, m_aliasesViewStack, m_aliasesTable, m_aliasesTree);
-	applyMode(m_timerTreeView, m_timersViewStack, m_timersTable, m_timersTree);
+	applyMode(m_triggerTreeView, m_triggersViewStack, m_triggersTable, m_triggersTree,
+	          m_triggerRuleViewItems);
+	applyMode(m_aliasTreeView, m_aliasesViewStack, m_aliasesTable, m_aliasesTree, m_aliasRuleViewItems);
+	applyMode(m_timerTreeView, m_timersViewStack, m_timersTable, m_timersTree, m_timerRuleViewItems);
 }
 
 void WorldPreferencesDialog::updateVariableControls() const
@@ -6754,7 +6953,7 @@ void WorldPreferencesDialog::buildUi()
 			        const QString fileName = m_beepSound->text().trimmed();
 			        if (fileName.isEmpty())
 				        return;
-			        m_runtime->playSound(0, fileName, false, 0.0, 0.0);
+			        m_runtime->playSoundIntercepted(0, fileName, false, 0.0, 0.0);
 		        });
 	if (m_browseActivitySound && m_newActivitySound)
 		connect(m_browseActivitySound, &QPushButton::clicked, this,
@@ -6768,7 +6967,7 @@ void WorldPreferencesDialog::buildUi()
 			        const QString fileName = m_newActivitySound->text().trimmed();
 			        if (fileName.isEmpty() || fileName == QStringLiteral("(No sound)"))
 				        return;
-			        m_runtime->playSound(0, fileName, false, 0.0, 0.0);
+			        m_runtime->playSoundIntercepted(0, fileName, false, 0.0, 0.0);
 		        });
 	if (m_noActivitySound && m_newActivitySound)
 		connect(m_noActivitySound, &QPushButton::clicked, this,
@@ -8125,7 +8324,7 @@ void WorldPreferencesDialog::buildUi()
 		tree->setRootIsDecorated(true);
 		tree->setUniformRowHeights(true);
 		tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
-		tree->setSelectionMode(QAbstractItemView::SingleSelection);
+		tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
 		tree->setSelectionBehavior(QAbstractItemView::SelectRows);
 		return tree;
 	};
@@ -8135,7 +8334,8 @@ void WorldPreferencesDialog::buildUi()
 	m_triggersTable      = makeTable(triggersPage, {QStringLiteral("Trigger"), QStringLiteral("Sequence"),
 	                                                QStringLiteral("Contents"), QStringLiteral("Label"),
 	                                                QStringLiteral("Group")});
-	m_triggersTree       = makeRuleTree(triggersPage);
+	m_triggersTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	m_triggersTree = makeRuleTree(triggersPage);
 	m_triggersViewStack->addWidget(m_triggersTable);
 	m_triggersViewStack->addWidget(m_triggersTree);
 	triggersLayout->addWidget(m_triggersViewStack);
@@ -8198,7 +8398,8 @@ void WorldPreferencesDialog::buildUi()
 	m_aliasesTable      = makeTable(aliasesPage, {QStringLiteral("Alias"), QStringLiteral("Sequence"),
 	                                              QStringLiteral("Contents"), QStringLiteral("Label"),
 	                                              QStringLiteral("Group")});
-	m_aliasesTree       = makeRuleTree(aliasesPage);
+	m_aliasesTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	m_aliasesTree = makeRuleTree(aliasesPage);
 	m_aliasesViewStack->addWidget(m_aliasesTable);
 	m_aliasesViewStack->addWidget(m_aliasesTree);
 	aliasesLayout->addWidget(m_aliasesViewStack);
@@ -8267,6 +8468,7 @@ void WorldPreferencesDialog::buildUi()
 	m_timersTable =
 	    makeTable(timersPage, {QStringLiteral("Type"), QStringLiteral("When"), QStringLiteral("Contents"),
 	                           QStringLiteral("Label"), QStringLiteral("Group"), QStringLiteral("Next")});
+	m_timersTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
 	m_timersTree = makeRuleTree(timersPage);
 	m_timersViewStack->addWidget(m_timersTable);
 	m_timersViewStack->addWidget(m_timersTree);
@@ -9082,36 +9284,111 @@ void WorldPreferencesDialog::buildUi()
 	auto refreshTriggerView = [this](const auto &selection)
 	{
 		populateTriggers();
-		selectRuleRowByRuntimeId(m_triggersTable, selection);
+		selectFirstAvailableRule(m_triggersTable, m_triggersTree, m_triggersViewStack,
+		                         m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree, selection);
 		updateTriggerControls();
 	};
 	auto refreshAliasView = [this](const auto &selection)
 	{
 		populateAliases();
-		selectRuleRowByRuntimeId(m_aliasesTable, selection);
+		selectFirstAvailableRule(m_aliasesTable, m_aliasesTree, m_aliasesViewStack,
+		                         m_aliasRuleViewItems.table, m_aliasRuleViewItems.tree, selection);
 		updateAliasControls();
 	};
 	auto refreshTimerView = [this](const auto &selection)
 	{
 		populateTimers();
-		selectRuleRowByRuntimeId(m_timersTable, selection);
+		selectFirstAvailableRule(m_timersTable, m_timersTree, m_timersViewStack, m_timerRuleViewItems.table,
+		                         m_timerRuleViewItems.tree, selection);
 		updateTimerControls();
 	};
-	auto pruneMissingRuntimeRules = [](auto &working, const QSet<quint64> &initialIds, const auto &current)
+	auto selectFoundRuleInActiveView = [](QTableWidget *table, QTreeWidget *tree, const QStackedWidget *stack,
+	                                      const QHash<quint64, QTableWidgetItem *> &tableItems,
+	                                      const QHash<quint64, QTreeWidgetItem *>  &treeItems)
+	{
+		if (!stack || stack->currentWidget() != tree)
+			return;
+		selectFirstAvailableRule(table, tree, stack, tableItems, treeItems, currentTableRuleRuntimeId(table));
+	};
+	auto availableWorkingRuleIds = [](const auto &working, const bool restoredFromPersistence,
+	                                  const QSet<quint64> &initialIds, const auto &current)
 	{
 		QSet<quint64> currentIds;
 		currentIds.reserve(current.size());
 		for (const auto &item : current)
 			currentIds.insert(item.runtimeId);
-		for (int index = working.size() - 1; index >= 0; --index)
+
+		QSet<quint64> availableIds;
+		availableIds.reserve(working.size());
+		for (const auto &item : working)
 		{
-			const quint64 runtimeId = working.at(index).runtimeId;
-			if (initialIds.contains(runtimeId) && !currentIds.contains(runtimeId))
-				working.removeAt(index);
+			if (restoredFromPersistence || !initialIds.contains(item.runtimeId) ||
+			    currentIds.contains(item.runtimeId))
+				availableIds.insert(item.runtimeId);
+		}
+		return availableIds;
+	};
+	auto removeSelectedRules = [this, availableWorkingRuleIds](
+	                               const QTableWidget *table, const QTreeWidget *tree,
+	                               const QStackedWidget *viewStack, auto &working,
+	                               const bool restoredFromPersistence, const QSet<quint64> &initialIds,
+	                               const auto &currentRuntimeRules, QSet<quint64> &deletedIds, bool &staged,
+	                               const QString &singular, const QString &plural, const auto &refreshView)
+	{
+		const bool     treeMode = viewStack && viewStack->currentWidget() == tree;
+		QList<quint64> selectedRuntimeIds =
+		    treeMode ? selectedRuleRuntimeIds(tree) : selectedRuleRuntimeIds(table);
+		if (selectedRuntimeIds.isEmpty())
+			return;
+
+		QSet<quint64> selectedRuntimeIdSet;
+		selectedRuntimeIdSet.reserve(selectedRuntimeIds.size());
+		for (const quint64 runtimeId : std::as_const(selectedRuntimeIds))
+			selectedRuntimeIdSet.insert(runtimeId);
+		const QList<quint64> selectionCandidates =
+		    displayedRuleRuntimeIdsAfterRemoval(table, tree, treeMode, selectedRuntimeIdSet);
+
+		QSet<quint64> availableIds =
+		    availableWorkingRuleIds(working, restoredFromPersistence, initialIds, currentRuntimeRules());
+		selectedRuntimeIds.removeIf([&availableIds](const quint64 runtimeId)
+		                            { return !availableIds.contains(runtimeId); });
+		if (selectedRuntimeIds.isEmpty())
+			return;
+		if (!confirmRemoval(this, singular, selectedRuntimeIds.size(), plural))
+			return;
+
+		availableIds =
+		    availableWorkingRuleIds(working, restoredFromPersistence, initialIds, currentRuntimeRules());
+		QSet<quint64> remainingSelectedIds;
+		remainingSelectedIds.reserve(selectedRuntimeIds.size());
+		for (const quint64 runtimeId : std::as_const(selectedRuntimeIds))
+		{
+			if (availableIds.contains(runtimeId))
+				remainingSelectedIds.insert(runtimeId);
+		}
+		if (remainingSelectedIds.isEmpty())
+			return;
+		bool removedAny = false;
+		for (qsizetype index = working.size(); index > 0; --index)
+		{
+			const quint64 runtimeId = working.at(index - 1).runtimeId;
+			if (!remainingSelectedIds.contains(runtimeId))
+				continue;
+			deletedIds.insert(runtimeId);
+			working.removeAt(index - 1);
+			removedAny = true;
+		}
+		staged = staged || removedAny;
+		if (removedAny)
+		{
+			QList<quint64> availableCandidates = selectionCandidates;
+			availableCandidates.removeIf([&availableIds](const quint64 runtimeId)
+			                             { return !availableIds.contains(runtimeId); });
+			refreshView(availableCandidates);
 		}
 	};
 
-	auto editAliasItem = [this, refreshAliasView](const int row, const bool isNew) -> bool
+	auto editAliasItem = [this, refreshAliasView](const quint64 runtimeId, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
@@ -9120,8 +9397,9 @@ void WorldPreferencesDialog::buildUi()
 		QList<WorldRuntime::Alias> &workingAliases = m_workingLists->aliases;
 		WorldRuntime::Alias         alias;
 		int                         index = -1;
-		quint64       selectedRuntimeId   = ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		const quint64 runtimeId           = isNew ? 0 : ruleRuntimeIdForRow(m_aliasesTable, row);
+		const QList<quint64>        selectedRuntimeIds =
+		    activeSelectedRuleRuntimeIds(m_aliasesTable, m_aliasesTree, m_aliasesViewStack);
+		quint64 selectedRuntimeId = selectedRuntimeIds.size() == 1 ? selectedRuntimeIds.constFirst() : 0;
 		if (!isNew)
 		{
 			index = ruleIndexForRuntimeId(workingAliases, runtimeId);
@@ -9183,7 +9461,7 @@ void WorldPreferencesDialog::buildUi()
 		return true;
 	};
 
-	auto editTriggerItem = [this, refreshTriggerView](const int row, const bool isNew) -> bool
+	auto editTriggerItem = [this, refreshTriggerView](const quint64 runtimeId, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
@@ -9192,8 +9470,9 @@ void WorldPreferencesDialog::buildUi()
 		QList<WorldRuntime::Trigger> &workingTriggers = m_workingLists->triggers;
 		WorldRuntime::Trigger         trigger;
 		int                           index = -1;
-		quint64       selectedRuntimeId = ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		const quint64 runtimeId         = isNew ? 0 : ruleRuntimeIdForRow(m_triggersTable, row);
+		const QList<quint64>          selectedRuntimeIds =
+		    activeSelectedRuleRuntimeIds(m_triggersTable, m_triggersTree, m_triggersViewStack);
+		quint64 selectedRuntimeId = selectedRuntimeIds.size() == 1 ? selectedRuntimeIds.constFirst() : 0;
 		if (!isNew)
 		{
 			index = ruleIndexForRuntimeId(workingTriggers, runtimeId);
@@ -9256,7 +9535,7 @@ void WorldPreferencesDialog::buildUi()
 		return true;
 	};
 
-	auto editTimerItem = [this, refreshTimerView](const int row, const bool isNew) -> bool
+	auto editTimerItem = [this, refreshTimerView](const quint64 runtimeId, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
@@ -9265,8 +9544,9 @@ void WorldPreferencesDialog::buildUi()
 		QList<WorldRuntime::Timer> &workingTimers = m_workingLists->timers;
 		WorldRuntime::Timer         timer;
 		int                         index = -1;
-		quint64       selectedRuntimeId   = ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
-		const quint64 runtimeId           = isNew ? 0 : ruleRuntimeIdForRow(m_timersTable, row);
+		const QList<quint64>        selectedRuntimeIds =
+		    activeSelectedRuleRuntimeIds(m_timersTable, m_timersTree, m_timersViewStack);
+		quint64 selectedRuntimeId = selectedRuntimeIds.size() == 1 ? selectedRuntimeIds.constFirst() : 0;
 		if (!isNew)
 		{
 			index = ruleIndexForRuntimeId(workingTimers, runtimeId);
@@ -9312,23 +9592,17 @@ void WorldPreferencesDialog::buildUi()
 			return;
 		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			return;
-		const QList<int> rows = selectedRows(m_triggersTable);
-		if (rows.isEmpty())
+		const QList<quint64> runtimeIds =
+		    activeSelectedRuleRuntimeIds(m_triggersTable, m_triggersTree, m_triggersViewStack);
+		if (runtimeIds.isEmpty())
 			return;
 		const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
-		QList<WorldRuntime::Trigger>        selected;
-		for (int row : rows)
+		const auto                          selected = rulesForRuntimeIds(triggers, runtimeIds);
+		if (!selected)
 		{
-			const int index = ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
-			if (index < 0)
-			{
-				populateTriggers();
-				return;
-			}
-			selected.push_back(triggers.at(index));
-		}
-		if (selected.isEmpty())
+			populateTriggers();
 			return;
+		}
 		const QString nl = QStringLiteral("\r\n");
 		QString       output;
 		QTextStream   out(&output);
@@ -9349,7 +9623,7 @@ void WorldPreferencesDialog::buildUi()
 		out << "   world_file_version=\"" << m_runtime->worldFileVersion() << "\" " << nl;
 		out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 		out << "  >" << nl;
-		for (const auto &tr : selected)
+		for (const auto &tr : *selected)
 		{
 			out << nl << "  <trigger ";
 			for (auto it = tr.attributes.begin(); it != tr.attributes.end(); ++it)
@@ -9374,23 +9648,17 @@ void WorldPreferencesDialog::buildUi()
 			return;
 		if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			return;
-		const QList<int> rows = selectedRows(m_aliasesTable);
-		if (rows.isEmpty())
+		const QList<quint64> runtimeIds =
+		    activeSelectedRuleRuntimeIds(m_aliasesTable, m_aliasesTree, m_aliasesViewStack);
+		if (runtimeIds.isEmpty())
 			return;
-		const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
-		QList<WorldRuntime::Alias>        selected;
-		for (int row : rows)
+		const QList<WorldRuntime::Alias> &aliases  = m_workingLists->aliases;
+		const auto                        selected = rulesForRuntimeIds(aliases, runtimeIds);
+		if (!selected)
 		{
-			const int index = ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
-			if (index < 0)
-			{
-				populateAliases();
-				return;
-			}
-			selected.push_back(aliases.at(index));
-		}
-		if (selected.isEmpty())
+			populateAliases();
 			return;
+		}
 		const QString nl = QStringLiteral("\r\n");
 		QString       output;
 		QTextStream   out(&output);
@@ -9411,7 +9679,7 @@ void WorldPreferencesDialog::buildUi()
 		out << "   world_file_version=\"" << m_runtime->worldFileVersion() << "\" " << nl;
 		out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 		out << "  >" << nl;
-		for (const auto &al : selected)
+		for (const auto &al : *selected)
 		{
 			out << nl << "  <alias ";
 			for (auto it = al.attributes.begin(); it != al.attributes.end(); ++it)
@@ -9436,23 +9704,17 @@ void WorldPreferencesDialog::buildUi()
 			return;
 		if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 			return;
-		const QList<int> rows = selectedRows(m_timersTable);
-		if (rows.isEmpty())
+		const QList<quint64> runtimeIds =
+		    activeSelectedRuleRuntimeIds(m_timersTable, m_timersTree, m_timersViewStack);
+		if (runtimeIds.isEmpty())
 			return;
-		const QList<WorldRuntime::Timer> &timers = m_workingLists->timers;
-		QList<WorldRuntime::Timer>        selected;
-		for (int row : rows)
+		const QList<WorldRuntime::Timer> &timers   = m_workingLists->timers;
+		const auto                        selected = rulesForRuntimeIds(timers, runtimeIds);
+		if (!selected)
 		{
-			const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
-			if (index < 0)
-			{
-				populateTimers();
-				return;
-			}
-			selected.push_back(timers.at(index));
-		}
-		if (selected.isEmpty())
+			populateTimers();
 			return;
+		}
 		const QString nl = QStringLiteral("\r\n");
 		QString       output;
 		QTextStream   out(&output);
@@ -9473,7 +9735,7 @@ void WorldPreferencesDialog::buildUi()
 		out << "   world_file_version=\"" << m_runtime->worldFileVersion() << "\" " << nl;
 		out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 		out << "  >" << nl;
-		for (const auto &tm : selected)
+		for (const auto &tm : *selected)
 		{
 			out << nl << "  <timer ";
 			for (auto it = tm.attributes.begin(); it != tm.attributes.end(); ++it)
@@ -9736,54 +9998,28 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 		        });
 
-	connect(m_addAliasButton, &QPushButton::clicked, this, [editAliasItem] { editAliasItem(-1, true); });
+	connect(m_addAliasButton, &QPushButton::clicked, this, [editAliasItem] { editAliasItem(0, true); });
 	connect(m_editAliasButton, &QPushButton::clicked, this,
 	        [this, editAliasItem]
 	        {
-		        const int row = selectedRow(m_aliasesTable);
-		        editAliasItem(row, false);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_aliasesTable, m_aliasesTree, m_aliasesViewStack);
+		        if (runtimeIds.size() == 1)
+			        editAliasItem(runtimeIds.constFirst(), false);
 	        });
 	connect(m_deleteAliasButton, &QPushButton::clicked, this,
-	        [this, refreshAliasView, pruneMissingRuntimeRules]
+	        [this, refreshAliasView, removeSelectedRules]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		        const bool treeMode =
-		            m_aliasesViewStack && m_aliasesViewStack->currentWidget() == m_aliasesTree;
-		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
-		            m_aliasesTable, m_aliasesTree, treeMode, selectedRuntimeId);
-		        if (!m_workingLists->aliasesRestoredFromPersistence)
-		        {
-			        pruneMissingRuntimeRules(m_workingLists->aliases, m_workingLists->initialAliasIds,
-			                                 m_runtime->aliases());
-		        }
-		        int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
-		        if (index < 0)
-		        {
-			        refreshAliasView(selectionCandidates);
-			        return;
-		        }
-		        if (!confirmRemoval(this, QStringLiteral("alias")))
-			        return;
-		        if (!m_workingLists->aliasesRestoredFromPersistence)
-		        {
-			        pruneMissingRuntimeRules(m_workingLists->aliases, m_workingLists->initialAliasIds,
-			                                 m_runtime->aliases());
-		        }
-		        index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
-		        if (index < 0)
-		        {
-			        refreshAliasView(selectionCandidates);
-			        return;
-		        }
-		        m_workingLists->deletedAliasIds.insert(selectedRuntimeId);
-		        m_workingLists->aliases.removeAt(index);
-		        m_workingLists->aliasesStaged = true;
-		        refreshAliasView(selectionCandidates);
+		        removeSelectedRules(
+		            m_aliasesTable, m_aliasesTree, m_aliasesViewStack, m_workingLists->aliases,
+		            m_workingLists->aliasesRestoredFromPersistence, m_workingLists->initialAliasIds,
+		            [this] { return m_runtime->aliases(); }, m_workingLists->deletedAliasIds,
+		            m_workingLists->aliasesStaged, QStringLiteral("alias"), QStringLiteral("aliases"),
+		            refreshAliasView);
 	        });
 	connect(m_moveAliasUpButton, &QPushButton::clicked, this,
 	        [this, refreshAliasView]
@@ -9792,9 +10028,12 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		        const int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_aliasesTable, m_aliasesTree, m_aliasesViewStack);
+		        if (runtimeIds.size() != 1)
+			        return;
+		        const quint64 selectedRuntimeId = runtimeIds.constFirst();
+		        const int     index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index <= 0)
 		        {
 			        if (index < 0)
@@ -9810,11 +10049,14 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
 			        return;
-		        const int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_aliasesTable, m_aliasesTree, m_aliasesViewStack);
+		        if (runtimeIds.size() != 1)
+			        return;
+		        const quint64 selectedRuntimeId = runtimeIds.constFirst();
+		        const int     index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectedRuntimeId);
@@ -9831,7 +10073,7 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_pasteAliasButton, &QPushButton::clicked, this,
 	        [pasteAliasesFromClipboard] { pasteAliasesFromClipboard(); });
 	connect(m_findAliasButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, selectFoundRuleInActiveView]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -9853,10 +10095,12 @@ void WorldPreferencesDialog::buildUi()
 		        doFindAdvanced(this, m_aliasesTable, rowText, m_aliasFindText, m_aliasFindIndex,
 		                       m_aliasFindHistory, m_aliasFindMatchCase, m_aliasFindRegex,
 		                       m_aliasFindForwards, QStringLiteral("Find alias"), false);
+		        selectFoundRuleInActiveView(m_aliasesTable, m_aliasesTree, m_aliasesViewStack,
+		                                    m_aliasRuleViewItems.table, m_aliasRuleViewItems.tree);
 		        updateAliasControls();
 	        });
 	connect(m_findNextAliasButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, selectFoundRuleInActiveView]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -9878,58 +10122,33 @@ void WorldPreferencesDialog::buildUi()
 		        doFindAdvanced(this, m_aliasesTable, rowText, m_aliasFindText, m_aliasFindIndex,
 		                       m_aliasFindHistory, m_aliasFindMatchCase, m_aliasFindRegex,
 		                       m_aliasFindForwards, QStringLiteral("Find alias"), true);
+		        selectFoundRuleInActiveView(m_aliasesTable, m_aliasesTree, m_aliasesViewStack,
+		                                    m_aliasRuleViewItems.table, m_aliasRuleViewItems.tree);
 		        updateAliasControls();
 	        });
 
-	connect(m_addTriggerButton, &QPushButton::clicked, this,
-	        [editTriggerItem] { editTriggerItem(-1, true); });
+	connect(m_addTriggerButton, &QPushButton::clicked, this, [editTriggerItem] { editTriggerItem(0, true); });
 	connect(m_editTriggerButton, &QPushButton::clicked, this,
 	        [this, editTriggerItem]
 	        {
-		        const int row = selectedRow(m_triggersTable);
-		        editTriggerItem(row, false);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_triggersTable, m_triggersTree, m_triggersViewStack);
+		        if (runtimeIds.size() == 1)
+			        editTriggerItem(runtimeIds.constFirst(), false);
 	        });
 	connect(m_deleteTriggerButton, &QPushButton::clicked, this,
-	        [this, refreshTriggerView, pruneMissingRuntimeRules]
+	        [this, refreshTriggerView, removeSelectedRules]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        const bool treeMode =
-		            m_triggersViewStack && m_triggersViewStack->currentWidget() == m_triggersTree;
-		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
-		            m_triggersTable, m_triggersTree, treeMode, selectedRuntimeId);
-		        if (!m_workingLists->triggersRestoredFromPersistence)
-		        {
-			        pruneMissingRuntimeRules(m_workingLists->triggers, m_workingLists->initialTriggerIds,
-			                                 m_runtime->triggers());
-		        }
-		        int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
-		        if (index < 0)
-		        {
-			        refreshTriggerView(selectionCandidates);
-			        return;
-		        }
-		        if (!confirmRemoval(this, QStringLiteral("trigger")))
-			        return;
-		        if (!m_workingLists->triggersRestoredFromPersistence)
-		        {
-			        pruneMissingRuntimeRules(m_workingLists->triggers, m_workingLists->initialTriggerIds,
-			                                 m_runtime->triggers());
-		        }
-		        index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
-		        if (index < 0)
-		        {
-			        refreshTriggerView(selectionCandidates);
-			        return;
-		        }
-		        m_workingLists->deletedTriggerIds.insert(selectedRuntimeId);
-		        m_workingLists->triggers.removeAt(index);
-		        m_workingLists->triggersStaged = true;
-		        refreshTriggerView(selectionCandidates);
+		        removeSelectedRules(
+		            m_triggersTable, m_triggersTree, m_triggersViewStack, m_workingLists->triggers,
+		            m_workingLists->triggersRestoredFromPersistence, m_workingLists->initialTriggerIds,
+		            [this] { return m_runtime->triggers(); }, m_workingLists->deletedTriggerIds,
+		            m_workingLists->triggersStaged, QStringLiteral("trigger"), QStringLiteral("triggers"),
+		            refreshTriggerView);
 	        });
 	connect(m_moveTriggerUpButton, &QPushButton::clicked, this,
 	        [this, refreshTriggerView]
@@ -9938,9 +10157,12 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        const int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_triggersTable, m_triggersTree, m_triggersViewStack);
+		        if (runtimeIds.size() != 1)
+			        return;
+		        const quint64 selectedRuntimeId = runtimeIds.constFirst();
+		        const int     index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index <= 0)
 		        {
 			        if (index < 0)
@@ -9958,9 +10180,12 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        const int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_triggersTable, m_triggersTree, m_triggersViewStack);
+		        if (runtimeIds.size() != 1)
+			        return;
+		        const quint64 selectedRuntimeId = runtimeIds.constFirst();
+		        const int     index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectedRuntimeId);
@@ -9977,7 +10202,7 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_pasteTriggerButton, &QPushButton::clicked, this,
 	        [pasteTriggersFromClipboard] { pasteTriggersFromClipboard(); });
 	connect(m_findTriggerButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, selectFoundRuleInActiveView]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -9999,10 +10224,12 @@ void WorldPreferencesDialog::buildUi()
 		        doFindAdvanced(this, m_triggersTable, rowText, m_triggerFindText, m_triggerFindIndex,
 		                       m_triggerFindHistory, m_triggerFindMatchCase, m_triggerFindRegex,
 		                       m_triggerFindForwards, QStringLiteral("Find trigger"), false);
+		        selectFoundRuleInActiveView(m_triggersTable, m_triggersTree, m_triggersViewStack,
+		                                    m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree);
 		        updateTriggerControls();
 	        });
 	connect(m_findNextTriggerButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, selectFoundRuleInActiveView]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -10024,63 +10251,40 @@ void WorldPreferencesDialog::buildUi()
 		        doFindAdvanced(this, m_triggersTable, rowText, m_triggerFindText, m_triggerFindIndex,
 		                       m_triggerFindHistory, m_triggerFindMatchCase, m_triggerFindRegex,
 		                       m_triggerFindForwards, QStringLiteral("Find trigger"), true);
+		        selectFoundRuleInActiveView(m_triggersTable, m_triggersTree, m_triggersViewStack,
+		                                    m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree);
 		        updateTriggerControls();
 	        });
 
-	connect(m_addTimerButton, &QPushButton::clicked, this, [editTimerItem] { editTimerItem(-1, true); });
+	connect(m_addTimerButton, &QPushButton::clicked, this, [editTimerItem] { editTimerItem(0, true); });
 	connect(m_editTimerButton, &QPushButton::clicked, this,
 	        [this, editTimerItem]
 	        {
-		        const int row = selectedRow(m_timersTable);
-		        editTimerItem(row, false);
+		        const QList<quint64> runtimeIds =
+		            activeSelectedRuleRuntimeIds(m_timersTable, m_timersTree, m_timersViewStack);
+		        if (runtimeIds.size() == 1)
+			        editTimerItem(runtimeIds.constFirst(), false);
 	        });
 	connect(m_deleteTimerButton, &QPushButton::clicked, this,
-	        [this, refreshTimerView, pruneMissingRuntimeRules]
+	        [this, refreshTimerView, removeSelectedRules]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
 			        return;
-		        const quint64 selectedRuntimeId =
-		            ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
-		        const bool treeMode = m_timersViewStack && m_timersViewStack->currentWidget() == m_timersTree;
-		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
-		            m_timersTable, m_timersTree, treeMode, selectedRuntimeId);
-		        if (!m_workingLists->timersRestoredFromPersistence)
-		        {
-			        pruneMissingRuntimeRules(m_workingLists->timers, m_workingLists->initialTimerIds,
-			                                 m_runtime->timers());
-		        }
-		        int index = ruleIndexForRuntimeId(m_workingLists->timers, selectedRuntimeId);
-		        if (index < 0)
-		        {
-			        refreshTimerView(selectionCandidates);
-			        return;
-		        }
-		        if (!confirmRemoval(this, QStringLiteral("timer")))
-			        return;
-		        if (!m_workingLists->timersRestoredFromPersistence)
-		        {
-			        pruneMissingRuntimeRules(m_workingLists->timers, m_workingLists->initialTimerIds,
-			                                 m_runtime->timers());
-		        }
-		        index = ruleIndexForRuntimeId(m_workingLists->timers, selectedRuntimeId);
-		        if (index < 0)
-		        {
-			        refreshTimerView(selectionCandidates);
-			        return;
-		        }
-		        m_workingLists->deletedTimerIds.insert(selectedRuntimeId);
-		        m_workingLists->timers.removeAt(index);
-		        m_workingLists->timersStaged = true;
-		        refreshTimerView(selectionCandidates);
+		        removeSelectedRules(
+		            m_timersTable, m_timersTree, m_timersViewStack, m_workingLists->timers,
+		            m_workingLists->timersRestoredFromPersistence, m_workingLists->initialTimerIds,
+		            [this] { return m_runtime->timers(); }, m_workingLists->deletedTimerIds,
+		            m_workingLists->timersStaged, QStringLiteral("timer"), QStringLiteral("timers"),
+		            refreshTimerView);
 	        });
 	connect(m_copyTimerButton, &QPushButton::clicked, this,
 	        [copyTimersToClipboard] { copyTimersToClipboard(); });
 	connect(m_pasteTimerButton, &QPushButton::clicked, this,
 	        [pasteTimersFromClipboard] { pasteTimersFromClipboard(); });
 	connect(m_findTimerButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, selectFoundRuleInActiveView]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -10100,10 +10304,12 @@ void WorldPreferencesDialog::buildUi()
 		        doFindAdvanced(this, m_timersTable, rowText, m_timerFindText, m_timerFindIndex,
 		                       m_timerFindHistory, m_timerFindMatchCase, m_timerFindRegex,
 		                       m_timerFindForwards, QStringLiteral("Find timer"), false);
+		        selectFoundRuleInActiveView(m_timersTable, m_timersTree, m_timersViewStack,
+		                                    m_timerRuleViewItems.table, m_timerRuleViewItems.tree);
 		        updateTimerControls();
 	        });
 	connect(m_findNextTimerButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, selectFoundRuleInActiveView]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -10123,6 +10329,8 @@ void WorldPreferencesDialog::buildUi()
 		        doFindAdvanced(this, m_timersTable, rowText, m_timerFindText, m_timerFindIndex,
 		                       m_timerFindHistory, m_timerFindMatchCase, m_timerFindRegex,
 		                       m_timerFindForwards, QStringLiteral("Find timer"), true);
+		        selectFoundRuleInActiveView(m_timersTable, m_timersTree, m_timersViewStack,
+		                                    m_timerRuleViewItems.table, m_timerRuleViewItems.tree);
 		        updateTimerControls();
 	        });
 	connect(m_resetTimersButton, &QPushButton::clicked, this,
@@ -10134,45 +10342,13 @@ void WorldPreferencesDialog::buildUi()
 		        populateTimers();
 	        });
 
-	connect(m_aliasesTable, &QTableWidget::cellDoubleClicked, this,
-	        [editAliasItem](const int row, int) { editAliasItem(row, false); });
+	connect(m_aliasesTable, &QTableWidget::cellDoubleClicked, this, [this, editAliasItem](const int row, int)
+	        { editAliasItem(ruleRuntimeIdForRow(m_aliasesTable, row), false); });
 	connect(m_triggersTable, &QTableWidget::cellDoubleClicked, this,
-	        [editTriggerItem](const int row, int) { editTriggerItem(row, false); });
-	connect(m_timersTable, &QTableWidget::cellDoubleClicked, this,
-	        [editTimerItem](const int row, int) { editTimerItem(row, false); });
-	auto syncTreeFromTable = [this](const QTableWidget *table, QTreeWidget *tree)
-	{
-		if (!table || !tree || m_syncingRuleSelection)
-			return;
-		const quint64  runtimeId = ruleRuntimeIdForRow(table, selectedRow(table));
-		QSignalBlocker block(tree);
-		m_syncingRuleSelection = true;
-		tree->setCurrentItem(findTreeItemByRuntimeId(tree, runtimeId));
-		m_syncingRuleSelection = false;
-	};
-	auto syncTableFromTree = [this](const QTreeWidget *tree, QTableWidget *table)
-	{
-		if (!table || !tree || m_syncingRuleSelection)
-			return;
-		const quint64  runtimeId = currentTreeRuleRuntimeId(tree);
-		QSignalBlocker block(table);
-		m_syncingRuleSelection = true;
-		if (runtimeId != 0)
-			selectRuleRowByRuntimeId(table, runtimeId);
-		else
-			table->clearSelection();
-		m_syncingRuleSelection = false;
-	};
-	auto rowForTreeItem = [](const QTreeWidgetItem *item, const QTableWidget *table) -> int
-	{
-		if (!item || !table || item->childCount() > 0)
-			return -1;
-		bool          ok        = false;
-		const quint64 runtimeId = item->data(0, Qt::UserRole).toULongLong(&ok);
-		if (!ok)
-			return -1;
-		return findRuleRowForRuntimeId(table, runtimeId);
-	};
+	        [this, editTriggerItem](const int row, int)
+	        { editTriggerItem(ruleRuntimeIdForRow(m_triggersTable, row), false); });
+	connect(m_timersTable, &QTableWidget::cellDoubleClicked, this, [this, editTimerItem](const int row, int)
+	        { editTimerItem(ruleRuntimeIdForRow(m_timersTable, row), false); });
 	auto connectSingleGroupExpansion =
 	    [this](QTreeWidget *tree, const std::function<void(const QString &)> &save)
 	{
@@ -10225,27 +10401,24 @@ void WorldPreferencesDialog::buildUi()
 	};
 	if (m_aliasesTree)
 		connect(m_aliasesTree, &QTreeWidget::itemDoubleClicked, this,
-		        [this, editAliasItem, rowForTreeItem](const QTreeWidgetItem *item, int)
+		        [editAliasItem](const QTreeWidgetItem *item, int)
 		        {
-			        const int row = rowForTreeItem(item, m_aliasesTable);
-			        if (row >= 0)
-				        editAliasItem(row, false);
+			        if (item && item->parent())
+				        editAliasItem(item->data(0, Qt::UserRole).toULongLong(), false);
 		        });
 	if (m_triggersTree)
 		connect(m_triggersTree, &QTreeWidget::itemDoubleClicked, this,
-		        [this, editTriggerItem, rowForTreeItem](const QTreeWidgetItem *item, int)
+		        [editTriggerItem](const QTreeWidgetItem *item, int)
 		        {
-			        const int row = rowForTreeItem(item, m_triggersTable);
-			        if (row >= 0)
-				        editTriggerItem(row, false);
+			        if (item && item->parent())
+				        editTriggerItem(item->data(0, Qt::UserRole).toULongLong(), false);
 		        });
 	if (m_timersTree)
 		connect(m_timersTree, &QTreeWidget::itemDoubleClicked, this,
-		        [this, editTimerItem, rowForTreeItem](const QTreeWidgetItem *item, int)
+		        [editTimerItem](const QTreeWidgetItem *item, int)
 		        {
-			        const int row = rowForTreeItem(item, m_timersTable);
-			        if (row >= 0)
-				        editTimerItem(row, false);
+			        if (item && item->parent())
+				        editTimerItem(item->data(0, Qt::UserRole).toULongLong(), false);
 		        });
 	connectSingleGroupExpansion(m_triggersTree,
 	                            [this](const QString &group)
@@ -10265,34 +10438,6 @@ void WorldPreferencesDialog::buildUi()
 		                            if (m_runtime)
 			                            m_runtime->setLastTimerTreeExpandedGroup(group);
 	                            });
-	if (m_triggersTable)
-		connect(m_triggersTable, &QTableWidget::itemSelectionChanged, this,
-		        [this, syncTreeFromTable]
-		        {
-			        syncTreeFromTable(m_triggersTable, m_triggersTree);
-			        updateTriggerControls();
-		        });
-	if (m_aliasesTable)
-		connect(m_aliasesTable, &QTableWidget::itemSelectionChanged, this,
-		        [this, syncTreeFromTable]
-		        {
-			        syncTreeFromTable(m_aliasesTable, m_aliasesTree);
-			        updateAliasControls();
-		        });
-	if (m_triggersTree)
-		connect(m_triggersTree, &QTreeWidget::currentItemChanged, this,
-		        [this, syncTableFromTree](QTreeWidgetItem *, QTreeWidgetItem *)
-		        {
-			        syncTableFromTree(m_triggersTree, m_triggersTable);
-			        updateTriggerControls();
-		        });
-	if (m_aliasesTree)
-		connect(m_aliasesTree, &QTreeWidget::currentItemChanged, this,
-		        [this, syncTableFromTree](QTreeWidgetItem *, QTreeWidgetItem *)
-		        {
-			        syncTableFromTree(m_aliasesTree, m_aliasesTable);
-			        updateAliasControls();
-		        });
 	if (m_useDefaultAliases)
 		connect(m_useDefaultAliases, &QCheckBox::toggled, this,
 		        [this](const bool enabled)
@@ -10308,20 +10453,6 @@ void WorldPreferencesDialog::buildUi()
 			        handleDefaultOverrideToggle(QStringLiteral("use_default_triggers"), m_useDefaultTriggers,
 			                                    enabled);
 			        updateTriggerControls();
-		        });
-	if (m_timersTable)
-		connect(m_timersTable, &QTableWidget::itemSelectionChanged, this,
-		        [this, syncTreeFromTable]
-		        {
-			        syncTreeFromTable(m_timersTable, m_timersTree);
-			        updateTimerControls();
-		        });
-	if (m_timersTree)
-		connect(m_timersTree, &QTreeWidget::currentItemChanged, this,
-		        [this, syncTableFromTree](QTreeWidgetItem *, QTreeWidgetItem *)
-		        {
-			        syncTableFromTree(m_timersTree, m_timersTable);
-			        updateTimerControls();
 		        });
 	if (m_useDefaultTimers)
 		connect(m_useDefaultTimers, &QCheckBox::toggled, this,
@@ -11930,6 +12061,7 @@ void WorldPreferencesDialog::populateTriggers()
 			                             serializeStringMap(trigger.children));
 		}
 	}
+	m_triggerRuleViewItems.table.clear();
 	m_triggersTable->setRowCount(0);
 	const QMap<QString, QString> &multi = m_runtime->worldMultilineAttributes();
 	if (!m_triggerFilterLoaded)
@@ -12108,6 +12240,7 @@ void WorldPreferencesDialog::populateTriggers()
 		auto         *triggerItem = new QTableWidgetItem(trigger);
 		triggerItem->setData(Qt::UserRole, tr.runtimeId);
 		m_triggersTable->setItem(row, 0, triggerItem);
+		m_triggerRuleViewItems.table.insert(tr.runtimeId, triggerItem);
 		m_triggersTable->setItem(row, 1, new QTableWidgetItem(sequence));
 		m_triggersTable->setItem(row, 2, new QTableWidgetItem(contents));
 		m_triggersTable->setItem(row, 3, new QTableWidgetItem(label));
@@ -12151,7 +12284,7 @@ void WorldPreferencesDialog::populateTriggers()
 	if (m_triggersTree)
 	{
 		rebuildGroupedTree(
-		    m_triggersTable, m_triggersTree,
+		    m_triggersTable, m_triggersTree, m_triggerRuleViewItems.tree,
 		    [this](const int row) -> QString
 		    {
 			    if (QTableWidgetItem *item = m_triggersTable->item(row, 0))
@@ -12180,6 +12313,7 @@ void WorldPreferencesDialog::populateAliases()
 			pluginOwnedSignatures.insert(signature);
 		}
 	}
+	m_aliasRuleViewItems.table.clear();
 	m_aliasesTable->setRowCount(0);
 	const QMap<QString, QString> &multi = m_runtime->worldMultilineAttributes();
 	if (!m_aliasFilterLoaded)
@@ -12333,6 +12467,7 @@ void WorldPreferencesDialog::populateAliases()
 		auto *aliasItem = new QTableWidgetItem(alias);
 		aliasItem->setData(Qt::UserRole, al.runtimeId);
 		m_aliasesTable->setItem(row, 0, aliasItem);
+		m_aliasRuleViewItems.table.insert(al.runtimeId, aliasItem);
 		m_aliasesTable->setItem(row, 1, new QTableWidgetItem(sequence));
 		m_aliasesTable->setItem(row, 2, new QTableWidgetItem(contents));
 		m_aliasesTable->setItem(row, 3, new QTableWidgetItem(label));
@@ -12371,7 +12506,7 @@ void WorldPreferencesDialog::populateAliases()
 	if (m_aliasesTree)
 	{
 		rebuildGroupedTree(
-		    m_aliasesTable, m_aliasesTree,
+		    m_aliasesTable, m_aliasesTree, m_aliasRuleViewItems.tree,
 		    [this](const int row) -> QString
 		    {
 			    if (QTableWidgetItem *item = m_aliasesTable->item(row, 0))
@@ -12400,6 +12535,7 @@ void WorldPreferencesDialog::populateTimers()
 			pluginOwnedSignatures.insert(signature);
 		}
 	}
+	m_timerRuleViewItems.table.clear();
 	m_timersTable->setRowCount(0);
 	const QMap<QString, QString> &multi = m_runtime->worldMultilineAttributes();
 	if (!m_timerFilterLoaded)
@@ -12570,6 +12706,7 @@ void WorldPreferencesDialog::populateTimers()
 		auto *typeItem = new QTableWidgetItem(type);
 		typeItem->setData(Qt::UserRole, tm.runtimeId);
 		m_timersTable->setItem(row, 0, typeItem);
+		m_timerRuleViewItems.table.insert(tm.runtimeId, typeItem);
 		m_timersTable->setItem(row, 1, new QTableWidgetItem(when));
 		m_timersTable->setItem(row, 2, new QTableWidgetItem(contents));
 		m_timersTable->setItem(row, 3, new QTableWidgetItem(label));
@@ -12595,7 +12732,7 @@ void WorldPreferencesDialog::populateTimers()
 	if (m_timersTree)
 	{
 		rebuildGroupedTree(
-		    m_timersTable, m_timersTree,
+		    m_timersTable, m_timersTree, m_timerRuleViewItems.tree,
 		    [this](const int row)
 		    {
 			    QString type = m_timersTable->item(row, 0) ? m_timersTable->item(row, 0)->text() : QString();

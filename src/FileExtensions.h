@@ -106,7 +106,8 @@ namespace QMudFileExtensions
 		for (qsizetype index = 1; index < arguments.size(); ++index)
 		{
 			const QString &argument = arguments.at(index);
-			if (argument.compare(QStringLiteral("--noauto"), Qt::CaseInsensitive) == 0 ||
+			if (argument.compare(QStringLiteral("--no-autoconnect"), Qt::CaseInsensitive) == 0 ||
+			    argument.compare(QStringLiteral("--noauto"), Qt::CaseInsensitive) == 0 ||
 			    argument.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
 			    argument.compare(QStringLiteral("--allow-multi-instance"), Qt::CaseInsensitive) == 0)
 			{

@@ -13,6 +13,7 @@
 #include "LogCompressionUtils.h"
 #include "MainFrame.h"
 #include "ShortcutPreferenceUtils.h"
+#include "SoundEngine.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -1223,6 +1224,37 @@ QWidget *GlobalPreferencesDialog::buildGeneralPage()
 		    QMessageBox::warning(this, QStringLiteral("Global Preferences"), message);
 	    });
 	rightBottom->addWidget(registerFileExtensions);
+	auto *soundEngineGroup  = new QGroupBox(QStringLiteral("Sound Engine"));
+	auto *soundEngineLayout = new QHBoxLayout(soundEngineGroup);
+	auto *ramCacheLayout    = new QVBoxLayout;
+	auto *ramCacheLabel     = new QLabel(QStringLiteral("RAM Cache Size (in MB)"));
+	auto *ramCacheSize      = new QSpinBox;
+	ramCacheSize->setRange(SoundEngine::CachePolicy::kMinimumRamCacheSizeMiB,
+	                       SoundEngine::CachePolicy::kMaximumRamCacheSizeMiB);
+	ramCacheSize->setSuffix(QStringLiteral(" MB"));
+	ramCacheSize->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	registerSpin(QStringLiteral("SoundEngineRamCacheSizeMB"), ramCacheSize);
+	ramCacheLabel->setBuddy(ramCacheSize);
+	ramCacheLayout->addWidget(ramCacheLabel);
+	ramCacheLayout->addWidget(ramCacheSize);
+
+	auto *idleEvictionLayout = new QVBoxLayout;
+	auto *idleEvictionLabel  = new QLabel(QStringLiteral("Idle Cache Eviction (in seconds)"));
+	auto *idleEviction       = new QSpinBox;
+	idleEviction->setRange(SoundEngine::CachePolicy::kMinimumIdleEvictionSeconds,
+	                       SoundEngine::CachePolicy::kMaximumIdleEvictionSeconds);
+	idleEviction->setSuffix(QStringLiteral(" s"));
+	idleEviction->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	registerSpin(QStringLiteral("SoundEngineIdleCacheEvictionSeconds"), idleEviction);
+	idleEvictionLabel->setBuddy(idleEviction);
+	idleEvictionLayout->addWidget(idleEvictionLabel);
+	idleEvictionLayout->addWidget(idleEviction);
+
+	soundEngineLayout->addLayout(ramCacheLayout);
+	soundEngineLayout->addLayout(idleEvictionLayout);
+	rightBottom->addWidget(soundEngineGroup);
+	setTabOrder(registerFileExtensions, ramCacheSize);
+	setTabOrder(ramCacheSize, idleEviction);
 	rightBottom->addStretch();
 
 	auto *bottomRow = new QHBoxLayout;

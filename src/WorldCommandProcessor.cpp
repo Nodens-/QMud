@@ -5864,7 +5864,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			    triggerSoundEnabled)
 			{
 				if (!decoded.soundIfInactive || !m_runtime->isActive())
-					m_runtime->playSound(0, decoded.sound, false, 0.0, 0.0);
+					m_runtime->playSoundIntercepted(0, decoded.sound, false, 0.0, 0.0);
 			}
 
 			if (decoded.oneShot)

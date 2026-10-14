@@ -30,6 +30,7 @@ class QComboBox;
 class QGridLayout;
 class QTextEdit;
 class QTableWidget;
+class QTableWidgetItem;
 class QLabel;
 class QPushButton;
 class QToolButton;
@@ -468,9 +469,9 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                updateVariableControls() const;
 		/**
-		 * @brief Switches between table/tree rule views.
+		 * @brief Switches rule views and transfers selection once by runtime identity.
 		 */
-		void                updateRuleViewModes();
+		void                updateRuleViewModes() const;
 		/**
 		 * @brief Updates spell-check UI enable state.
 		 */
@@ -970,44 +971,53 @@ class WorldPreferencesDialog : public QDialog
 		QTextEdit                           *m_connectText{nullptr};
 		QComboBox                           *m_connectMethod{nullptr};
 		QSpinBox                            *m_connectDelay{nullptr};
-		QCheckBox      *m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops{nullptr};
-		QCheckBox      *m_onlyNegotiateTelnetOptionsOnce{nullptr};
-		QLabel         *m_connectLineCount{nullptr};
+		QCheckBox   *m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops{nullptr};
+		QCheckBox   *m_onlyNegotiateTelnetOptionsOnce{nullptr};
+		QLabel      *m_connectLineCount{nullptr};
 
 		// MXP
-		QComboBox      *m_useMxp{nullptr};
-		QLabel         *m_mxpActive{nullptr};
-		QComboBox      *m_mxpDebugLevel{nullptr};
-		QCheckBox      *m_detectPueblo{nullptr};
-		QLineEdit      *m_hyperlinkColour{nullptr};
-		QCheckBox      *m_useCustomLinkColour{nullptr};
-		QCheckBox      *m_mudCanChangeLinkColour{nullptr};
-		QCheckBox      *m_underlineHyperlinks{nullptr};
-		QCheckBox      *m_mudCanRemoveUnderline{nullptr};
-		QCheckBox      *m_hyperlinkAddsToCommandHistory{nullptr};
-		QCheckBox      *m_echoHyperlinkInOutput{nullptr};
-		QCheckBox      *m_ignoreMxpColourChanges{nullptr};
-		QCheckBox      *m_sendMxpAfkResponse{nullptr};
-		QCheckBox      *m_mudCanChangeOptions{nullptr};
-		QPushButton    *m_resetMxpTagsButton{nullptr};
+		QComboBox   *m_useMxp{nullptr};
+		QLabel      *m_mxpActive{nullptr};
+		QComboBox   *m_mxpDebugLevel{nullptr};
+		QCheckBox   *m_detectPueblo{nullptr};
+		QLineEdit   *m_hyperlinkColour{nullptr};
+		QCheckBox   *m_useCustomLinkColour{nullptr};
+		QCheckBox   *m_mudCanChangeLinkColour{nullptr};
+		QCheckBox   *m_underlineHyperlinks{nullptr};
+		QCheckBox   *m_mudCanRemoveUnderline{nullptr};
+		QCheckBox   *m_hyperlinkAddsToCommandHistory{nullptr};
+		QCheckBox   *m_echoHyperlinkInOutput{nullptr};
+		QCheckBox   *m_ignoreMxpColourChanges{nullptr};
+		QCheckBox   *m_sendMxpAfkResponse{nullptr};
+		QCheckBox   *m_mudCanChangeOptions{nullptr};
+		QPushButton *m_resetMxpTagsButton{nullptr};
 
 		// Chat
-		QLineEdit      *m_chatName{nullptr};
-		QCheckBox      *m_autoAllowSnooping{nullptr};
-		QCheckBox      *m_acceptIncomingChatConnections{nullptr};
-		QSpinBox       *m_incomingChatPort{nullptr};
-		QCheckBox      *m_validateIncomingCalls{nullptr};
-		QCheckBox      *m_ignoreChatColours{nullptr};
-		QLineEdit      *m_chatMessagePrefix{nullptr};
-		QSpinBox       *m_maxChatLines{nullptr};
-		QSpinBox       *m_maxChatBytes{nullptr};
-		QLineEdit      *m_chatSaveDirectory{nullptr};
-		QPushButton    *m_chatSaveBrowse{nullptr};
-		QCheckBox      *m_autoAllowFiles{nullptr};
-		QLineEdit      *m_chatTextColour{nullptr};
-		QLineEdit      *m_chatBackColour{nullptr};
+		QLineEdit   *m_chatName{nullptr};
+		QCheckBox   *m_autoAllowSnooping{nullptr};
+		QCheckBox   *m_acceptIncomingChatConnections{nullptr};
+		QSpinBox    *m_incomingChatPort{nullptr};
+		QCheckBox   *m_validateIncomingCalls{nullptr};
+		QCheckBox   *m_ignoreChatColours{nullptr};
+		QLineEdit   *m_chatMessagePrefix{nullptr};
+		QSpinBox    *m_maxChatLines{nullptr};
+		QSpinBox    *m_maxChatBytes{nullptr};
+		QLineEdit   *m_chatSaveDirectory{nullptr};
+		QPushButton *m_chatSaveBrowse{nullptr};
+		QCheckBox   *m_autoAllowFiles{nullptr};
+		QLineEdit   *m_chatTextColour{nullptr};
+		QLineEdit   *m_chatBackColour{nullptr};
 
 		// Lists
+		/**
+		 * @brief Direct runtime-identity lookups for one rule page's two presentations.
+		 */
+		struct RuleViewItems
+		{
+				QHash<quint64, QTableWidgetItem *> table;
+				QHash<quint64, QTreeWidgetItem *>  tree;
+		};
+
 		QTableWidget   *m_triggersTable{nullptr};
 		QTableWidget   *m_aliasesTable{nullptr};
 		QTableWidget   *m_timersTable{nullptr};
@@ -1017,6 +1027,9 @@ class WorldPreferencesDialog : public QDialog
 		QStackedWidget *m_triggersViewStack{nullptr};
 		QStackedWidget *m_aliasesViewStack{nullptr};
 		QStackedWidget *m_timersViewStack{nullptr};
+		RuleViewItems   m_triggerRuleViewItems;
+		RuleViewItems   m_aliasRuleViewItems;
+		RuleViewItems   m_timerRuleViewItems;
 		QTableWidget   *m_variablesTable{nullptr};
 		QCheckBox      *m_filterVariables{nullptr};
 		QToolButton    *m_editVariablesFilter{nullptr};
@@ -1117,7 +1130,6 @@ class WorldPreferencesDialog : public QDialog
 		QString         m_timerFilterText;
 		bool            m_timerFilterLoaded{false};
 		bool            m_useDefaultTimersLoaded{false};
-		bool            m_syncingRuleSelection{false};
 		bool            m_dialogSizingRefreshPending{false};
 		bool            m_initialDialogSizingFinalized{false};
 		QSize           m_dialogSizeBeforeRefresh;

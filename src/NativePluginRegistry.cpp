@@ -12,7 +12,6 @@
 #include "TtsEngine.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
-#include "helpers/PluginPathUtils.h"
 #include "scripting/ScriptingErrors.h"
 #include <QDir>
 
@@ -420,6 +419,16 @@ namespace
 		return mutex;
 	}
 
+	/**
+	 * @brief Returns the mutex protecting LuaAudio runtime state independently of other native shims.
+	 * @return Process-wide LuaAudio state mutex.
+	 */
+	QMutex &luaAudioStateMutex()
+	{
+		static QMutex mutex;
+		return mutex;
+	}
+
 	std::unordered_map<const WorldRuntime *, std::shared_ptr<MushReaderState>> &states()
 	{
 		static std::unordered_map<const WorldRuntime *, std::shared_ptr<MushReaderState>> runtimeStates;
@@ -749,14 +758,14 @@ namespace
 
 	struct LuaAudioNativeState
 	{
-			QMudNativePluginRegistry::LuaAudioRuntimeMasterState             master;
-			QSet<int>                                                        ownedBuffers;
-			QHash<int, QMudNativePluginRegistry::LuaAudioRuntimeBufferState> buffers;
-			QHash<QString, int>                                              loopBuffersByName;
-			QHash<int, QList<std::shared_ptr<std::atomic_bool>>>             pendingOperationCancels;
-			quint64                                                          nextBufferGeneration{0};
-			double                                                           commandVolume{100.0};
-			bool                                                             soundsEnabled{true};
+			QMudNativePluginRegistry::LuaAudioRuntimeMasterState                master;
+			QSet<int>                                                           ownedBuffers;
+			QHash<int, QMudNativePluginRegistry::LuaAudioRuntimeBufferState>    buffers;
+			QHash<QString, int>                                                 loopBuffersByName;
+			QHash<int, QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard> operationGuards;
+			quint64                                                             nextBufferGeneration{0};
+			double                                                              commandVolume{100.0};
+			bool                                                                soundsEnabled{true};
 	};
 
 	std::unordered_map<const WorldRuntime *, LuaAudioNativeState> &luaAudioNativeStates()
@@ -770,41 +779,80 @@ namespace
 		return luaAudioNativeStates()[runtime];
 	}
 
-	bool luaAudioFileExists(const WorldRuntime *runtime, const QString &fileName)
-	{
-		if (fileName.isEmpty())
-			return false;
-		const QString relative = QMudPluginPathUtils::legacyPathRelativeToQmudHome(fileName);
-		QStringList   candidates;
-		if (!relative.isEmpty() && !relative.startsWith(QStringLiteral("sounds/"), Qt::CaseInsensitive))
-			candidates.push_back(QStringLiteral("sounds/%1").arg(relative));
-		candidates.push_back(fileName);
-		for (const QString &candidate : candidates)
-		{
-			QString normalizedCandidate;
-			QString error;
-			if (!QMudPluginPathUtils::resolveInsideQmudHome(runtime->startupDirectory(), candidate,
-			                                                &normalizedCandidate, &error))
-				continue;
-			if (QFileInfo::exists(normalizedCandidate))
-				return true;
-		}
-		return false;
-	}
-
 	void cancelLuaAudioPendingWork(const QMudNativePluginRegistry::LuaAudioRuntimeBufferState &state)
 	{
 		if (state.pendingCancel)
 			state.pendingCancel->store(true, std::memory_order_release);
 	}
 
-	void cancelLuaAudioPendingOperations(LuaAudioNativeState &state, const int buffer)
+	/**
+	 * @brief Cancels the shared delayed-operation guard for one buffer generation.
+	 * @param state Runtime LuaAudio state containing the guard.
+	 * @param buffer Buffer whose current operation generation is canceled.
+	 */
+	void cancelLuaAudioOperationGeneration(LuaAudioNativeState &state, const int buffer)
 	{
-		const QList<std::shared_ptr<std::atomic_bool>> tokens = state.pendingOperationCancels.take(buffer);
-		for (const std::shared_ptr<std::atomic_bool> &token : tokens)
+		const QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard guard =
+		    state.operationGuards.take(buffer);
+		if (guard.cancelled)
+			guard.cancelled->store(true, std::memory_order_release);
+	}
+
+	/**
+	 * @brief Ensures one shared delayed-operation guard exists for a buffer generation.
+	 * @param state Runtime LuaAudio state receiving the guard.
+	 * @param buffer Buffer owning the guard.
+	 * @param generation Current ownership generation.
+	 */
+	void ensureLuaAudioOperationGeneration(LuaAudioNativeState &state, const int buffer,
+	                                       const quint64 generation)
+	{
+		auto guardIt = state.operationGuards.find(buffer);
+		if (guardIt != state.operationGuards.end() && guardIt->generation == generation &&
+		    guardIt->cancelled && !guardIt->cancelled->load(std::memory_order_acquire))
 		{
-			if (token)
-				token->store(true, std::memory_order_release);
+			return;
+		}
+		if (guardIt != state.operationGuards.end() && guardIt->cancelled)
+			guardIt->cancelled->store(true, std::memory_order_release);
+		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard guard;
+		guard.generation = generation;
+		guard.cancelled  = std::make_shared<std::atomic_bool>(false);
+		state.operationGuards.insert(buffer, std::move(guard));
+	}
+
+	/**
+	 * @brief Cancels every buffer-generation guard during runtime-wide teardown.
+	 * @param state Runtime LuaAudio state whose guards are canceled.
+	 */
+	void cancelAllLuaAudioOperationGenerations(LuaAudioNativeState &state)
+	{
+		for (const QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard &guard :
+		     std::as_const(state.operationGuards))
+		{
+			if (guard.cancelled)
+				guard.cancelled->store(true, std::memory_order_release);
+		}
+	}
+
+	/**
+	 * @brief Removes all registry state belonging to one LuaAudio buffer while holding stateMutex().
+	 * @param state Runtime LuaAudio state containing the buffer.
+	 * @param buffer Buffer whose ownership and delayed work are removed.
+	 */
+	void eraseLuaAudioBufferState(LuaAudioNativeState &state, const int buffer)
+	{
+		if (const auto bufferIt = state.buffers.constFind(buffer); bufferIt != state.buffers.constEnd())
+			cancelLuaAudioPendingWork(bufferIt.value());
+		cancelLuaAudioOperationGeneration(state, buffer);
+		state.ownedBuffers.remove(buffer);
+		state.buffers.remove(buffer);
+		for (auto loopIt = state.loopBuffersByName.begin(); loopIt != state.loopBuffersByName.end();)
+		{
+			if (loopIt.value() == buffer)
+				loopIt = state.loopBuffersByName.erase(loopIt);
+			else
+				++loopIt;
 		}
 	}
 
@@ -813,11 +861,12 @@ namespace
 	                              const double pan, std::shared_ptr<std::atomic_bool> pendingCancel = {})
 	{
 		QMudNativePluginRegistry::LuaAudioRuntimeBufferState state;
-		state.loop          = loop;
-		state.volume        = qBound(0.0, volume, 100.0);
-		state.pan           = pan;
-		state.pitch         = QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime).pitch;
-		state.pendingCancel = std::move(pendingCancel);
+		state.loop              = loop;
+		state.volume            = qBound(0.0, volume, 100.0);
+		state.pan               = pan;
+		state.pitch             = QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime).pitch;
+		state.pendingCancel     = std::move(pendingCancel);
+		state.playbackSubmitted = !state.pendingCancel;
 		return state;
 	}
 
@@ -830,8 +879,9 @@ namespace
 			return;
 		}
 		auto *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-		static_cast<void>(mutableRuntime->stopSoundBypassingPluginCallbacks(buffer));
-		QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(runtime, buffer);
+		static_cast<void>(mutableRuntime->stopSoundForNativeAudio(buffer, state.generation));
+		static_cast<void>(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+		    runtime, buffer, state.generation));
 	}
 
 	void stopLuaAudioNativeBuffers(const WorldRuntime *runtime)
@@ -843,7 +893,7 @@ namespace
 
 	QHash<QString, int> luaAudioLoopBuffers(const WorldRuntime *runtime)
 	{
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		return it == luaAudioNativeStates().end() ? QHash<QString, int>() : it->second.loopBuffersByName;
 	}
@@ -852,7 +902,7 @@ namespace
 	{
 		if (fileName.isEmpty() || buffer < 1)
 			return;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
 		    !it->second.buffers.contains(buffer) || !it->second.buffers.value(buffer).loop)
@@ -866,7 +916,7 @@ namespace
 	{
 		if (fileName.isEmpty())
 			return 0;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end())
 			return 0;
@@ -875,7 +925,7 @@ namespace
 
 	void clearLuaAudioLoopBuffers(const WorldRuntime *runtime)
 	{
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it != luaAudioNativeStates().end())
 			it->second.loopBuffersByName.clear();
@@ -891,122 +941,123 @@ namespace
 				scheduleLuaAudioNativeStop(runtime, ownedBuffer, delayMs);
 			return;
 		}
-		auto    cancelToken = std::make_shared<std::atomic_bool>(false);
-		quint64 generation  = 0;
-		if (!QMudNativePluginRegistry::luaAudioTrackRuntimeBufferPendingOperation(runtime, buffer,
-		                                                                          cancelToken, &generation))
+		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
+		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
+		                                                                          operationGuard))
 			return;
 		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
-		QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
-		                   [runtimeGuard, cancelToken, buffer, generation]
-		                   {
-			                   if (!runtimeGuard)
-				                   return;
-			                   QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			                   if (!QMudNativePluginRegistry::luaAudioConsumeRuntimeBufferPendingOperation(
-			                           runtimeGuard, buffer, generation, cancelToken, bufferState))
-				                   return;
-			                   stopLuaAudioNativeBuffer(runtimeGuard, buffer);
-		                   });
+		QTimer::singleShot(
+		    delayMs, const_cast<WorldRuntime *>(runtime),
+		    [runtimeGuard, operationGuard, buffer]
+		    {
+			    if (!runtimeGuard)
+				    return;
+			    QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
+			    if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
+			            runtimeGuard, buffer, operationGuard, bufferState))
+				    return;
+			    static_cast<void>(runtimeGuard->stopSoundForNativeAudio(buffer, bufferState.generation));
+			    static_cast<void>(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+			        runtimeGuard, buffer, bufferState.generation));
+		    });
 	}
 
 	void scheduleLuaAudioNativeSetVolume(const WorldRuntime *runtime, const int buffer, const double volume,
 	                                     const int delayMs)
 	{
-		auto    cancelToken = std::make_shared<std::atomic_bool>(false);
-		quint64 generation  = 0;
-		if (!QMudNativePluginRegistry::luaAudioTrackRuntimeBufferPendingOperation(runtime, buffer,
-		                                                                          cancelToken, &generation))
+		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
+		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
+		                                                                          operationGuard))
 			return;
 		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
-		QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
-		                   [runtimeGuard, cancelToken, buffer, volume, generation]
-		                   {
-			                   if (!runtimeGuard)
-				                   return;
-			                   QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			                   if (!QMudNativePluginRegistry::luaAudioConsumeRuntimeBufferPendingOperation(
-			                           runtimeGuard, buffer, generation, cancelToken, bufferState))
-				                   return;
-			                   bufferState.volume = qBound(0.0, volume, 100.0);
-			                   QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtimeGuard, buffer,
-			                                                                       bufferState);
-			                   static_cast<void>(runtimeGuard->playSoundBypassingPluginCallbacks(
-			                       buffer, QString(), bufferState.loop,
-			                       luaAudioVolumeToQmudVolume(bufferState.volume), bufferState.pan));
-		                   });
+		QTimer::singleShot(
+		    delayMs, const_cast<WorldRuntime *>(runtime),
+		    [runtimeGuard, operationGuard, buffer, volume]
+		    {
+			    if (!runtimeGuard)
+				    return;
+			    QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
+			    if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
+			            runtimeGuard, buffer, operationGuard, bufferState))
+				    return;
+			    bufferState.volume = qBound(0.0, volume, 100.0);
+			    if (QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(runtimeGuard, buffer,
+			                                                                          bufferState))
+			    {
+				    static_cast<void>(runtimeGuard->updateSoundForNativeAudio(
+				        buffer, bufferState.loop, luaAudioVolumeToQmudVolume(bufferState.volume),
+				        bufferState.pan, bufferState.generation));
+			    }
+		    });
 	}
 
 	void scheduleLuaAudioNativeSetPan(const WorldRuntime *runtime, const int buffer, const double pan,
 	                                  const int delayMs)
 	{
-		auto    cancelToken = std::make_shared<std::atomic_bool>(false);
-		quint64 generation  = 0;
-		if (!QMudNativePluginRegistry::luaAudioTrackRuntimeBufferPendingOperation(runtime, buffer,
-		                                                                          cancelToken, &generation))
+		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
+		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
+		                                                                          operationGuard))
 			return;
 		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
 		QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
-		                   [runtimeGuard, cancelToken, buffer, pan, generation]
+		                   [runtimeGuard, operationGuard, buffer, pan]
 		                   {
 			                   if (!runtimeGuard)
 				                   return;
 			                   QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			                   if (!QMudNativePluginRegistry::luaAudioConsumeRuntimeBufferPendingOperation(
-			                           runtimeGuard, buffer, generation, cancelToken, bufferState))
+			                   if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
+			                           runtimeGuard, buffer, operationGuard, bufferState))
 				                   return;
 			                   bufferState.pan = pan;
-			                   QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtimeGuard, buffer,
-			                                                                       bufferState);
+			                   static_cast<void>(
+			                       QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
+			                           runtimeGuard, buffer, bufferState));
 		                   });
 	}
 
 	void scheduleLuaAudioNativeSetPitch(const WorldRuntime *runtime, const int buffer, const double pitch,
 	                                    const int delayMs)
 	{
-		auto    cancelToken = std::make_shared<std::atomic_bool>(false);
-		quint64 generation  = 0;
-		if (!QMudNativePluginRegistry::luaAudioTrackRuntimeBufferPendingOperation(runtime, buffer,
-		                                                                          cancelToken, &generation))
+		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
+		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
+		                                                                          operationGuard))
 			return;
 		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
 		QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
-		                   [runtimeGuard, cancelToken, buffer, pitch, generation]
+		                   [runtimeGuard, operationGuard, buffer, pitch]
 		                   {
 			                   if (!runtimeGuard)
 				                   return;
 			                   QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			                   if (!QMudNativePluginRegistry::luaAudioConsumeRuntimeBufferPendingOperation(
-			                           runtimeGuard, buffer, generation, cancelToken, bufferState))
+			                   if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
+			                           runtimeGuard, buffer, operationGuard, bufferState))
 				                   return;
 			                   bufferState.pitch = pitch;
-			                   QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtimeGuard, buffer,
-			                                                                       bufferState);
+			                   static_cast<void>(
+			                       QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
+			                           runtimeGuard, buffer, bufferState));
 		                   });
 	}
 
 	int playLuaAudioNativeBuffer(const WorldRuntime *runtime, const QString &fileName, const bool loop,
 	                             const double volume, const double pan, const int delayMs)
 	{
-		if (fileName.isEmpty() || !luaAudioFileExists(runtime, fileName))
+		if (fileName.isEmpty())
 			return 0;
-		const int buffer = QMudNativePluginRegistry::luaAudioReserveRuntimeBuffer(
-		    runtime,
-		    [runtime](const int candidate) { return runtime->soundBufferReusableForNativeAudio(candidate); });
-		if (buffer < 1)
+		const quint64 generation = QMudNativePluginRegistry::luaAudioNextRuntimeBufferGeneration(runtime);
+		if (generation == 0)
 			return 0;
 		if (delayMs > 0)
 		{
-			auto cancelToken = std::make_shared<std::atomic_bool>(false);
-			QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(
-			    runtime, buffer, luaAudioBufferStateFromMaster(runtime, loop, volume, pan, cancelToken));
-			QMudNativePluginRegistry::LuaAudioRuntimeBufferState pendingState;
-			if (!QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, pendingState))
-			{
-				QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(runtime, buffer);
+			auto     *mutableRuntime = const_cast<WorldRuntime *>(runtime);
+			const int buffer         = mutableRuntime->reserveSoundBufferForNativeAudio(fileName, generation);
+			if (buffer < 1)
 				return 0;
-			}
-			const quint64          generation = pendingState.generation;
+			auto cancelToken       = std::make_shared<std::atomic_bool>(false);
+			auto bufferState       = luaAudioBufferStateFromMaster(runtime, loop, volume, pan, cancelToken);
+			bufferState.generation = generation;
+			QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
+			mutableRuntime->confirmSoundBufferForNativeAudio(buffer, generation);
 			QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
 			QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
 			                   [runtimeGuard, cancelToken, buffer, fileName, generation]
@@ -1017,51 +1068,53 @@ namespace
 				                   if (!QMudNativePluginRegistry::luaAudioConsumeRuntimeBufferPendingPlay(
 				                           runtimeGuard, buffer, generation, cancelToken, bufferState))
 					                   return;
-				                   const int status = runtimeGuard->playSoundBypassingPluginCallbacks(
+				                   int       selectedBuffer = 0;
+				                   const int status         = runtimeGuard->playSoundForNativeAudio(
 				                       buffer, fileName, bufferState.loop,
-				                       luaAudioVolumeToQmudVolume(bufferState.volume), bufferState.pan);
+				                       luaAudioVolumeToQmudVolume(bufferState.volume), bufferState.pan,
+				                       generation, true, &selectedBuffer);
 				                   if (status != eOK)
 					                   QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
 					                       runtimeGuard, buffer, generation);
 			                   });
 			return buffer;
 		}
-		QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(
-		    runtime, buffer, luaAudioBufferStateFromMaster(runtime, loop, volume, pan));
 		auto     *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-		const int status         = mutableRuntime->playSoundBypassingPluginCallbacks(
-		    buffer, fileName, loop, luaAudioVolumeToQmudVolume(volume), pan);
+		int       buffer         = 0;
+		const int status         = mutableRuntime->playSoundForNativeAudio(
+		    0, fileName, loop, luaAudioVolumeToQmudVolume(volume), pan, generation, false, &buffer);
 		if (status != eOK)
-		{
-			QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(runtime, buffer);
 			return 0;
-		}
+		auto bufferState       = luaAudioBufferStateFromMaster(runtime, loop, volume, pan);
+		bufferState.generation = generation;
+		QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
+		mutableRuntime->confirmSoundBufferForNativeAudio(buffer, generation);
 		return buffer;
 	}
 
 	void setLuaAudioMasterVolumeAndCommandVolume(const WorldRuntime *runtime, const double volume)
 	{
 		QMudNativePluginRegistry::luaAudioSetRuntimeMasterVolume(runtime, volume);
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).commandVolume = qBound(0.0, volume, 100.0);
 	}
 
 	bool luaAudioSoundsEnabled(const WorldRuntime *runtime)
 	{
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		return it == luaAudioNativeStates().end() ? true : it->second.soundsEnabled;
 	}
 
 	void setLuaAudioSoundsEnabled(const WorldRuntime *runtime, const bool enabled)
 	{
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).soundsEnabled = enabled;
 	}
 
 	double luaAudioCommandVolume(const WorldRuntime *runtime)
 	{
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		return it == luaAudioNativeStates().end() ? 100.0 : it->second.commandVolume;
 	}
@@ -1207,7 +1260,8 @@ namespace
 					else
 					{
 						bufferState.pitch = pitch;
-						QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
+						static_cast<void>(QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
+						    runtime, buffer, bufferState));
 					}
 				}
 				else if (buffer <= 0)
@@ -1235,7 +1289,8 @@ namespace
 					else
 					{
 						bufferState.pan = pan;
-						QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
+						static_cast<void>(QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
+						    runtime, buffer, bufferState));
 					}
 				}
 				else if (buffer <= 0)
@@ -1263,11 +1318,14 @@ namespace
 					else
 					{
 						bufferState.volume = qBound(0.0, volume, 100.0);
-						QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
-						auto *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-						static_cast<void>(mutableRuntime->playSoundBypassingPluginCallbacks(
-						    buffer, QString(), bufferState.loop,
-						    luaAudioVolumeToQmudVolume(bufferState.volume), bufferState.pan));
+						if (QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(runtime, buffer,
+						                                                                      bufferState))
+						{
+							auto *mutableRuntime = const_cast<WorldRuntime *>(runtime);
+							static_cast<void>(mutableRuntime->updateSoundForNativeAudio(
+							    buffer, bufferState.loop, luaAudioVolumeToQmudVolume(bufferState.volume),
+							    bufferState.pan, bufferState.generation));
+						}
 					}
 				}
 				else if (buffer <= 0)
@@ -1372,7 +1430,7 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return {};
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		return it == luaAudioNativeStates().end() ? LuaAudioRuntimeMasterState{} : it->second.master;
 	}
@@ -1381,7 +1439,7 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).master.volume = qBound(0.0, volume, 100.0);
 	}
 
@@ -1389,7 +1447,7 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).master.pan = pan;
 	}
 
@@ -1397,48 +1455,16 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).master.pitch = pitch;
 	}
 
-	int luaAudioReserveRuntimeBuffer(const WorldRuntime             *runtime,
-	                                 const std::function<bool(int)> &bufferReusableResolver)
+	quint64 luaAudioNextRuntimeBufferGeneration(const WorldRuntime *runtime)
 	{
-		if (!runtime || !bufferReusableResolver)
+		if (!runtime)
 			return 0;
-		for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
-		{
-			bool                                                 owned = false;
-			QMudNativePluginRegistry::LuaAudioRuntimeBufferState ownedState;
-			{
-				QMutexLocker locker(&stateMutex());
-				const auto   it = luaAudioNativeStates().find(runtime);
-				owned = it != luaAudioNativeStates().end() && it->second.ownedBuffers.contains(buffer);
-				if (owned)
-					ownedState = it->second.buffers.value(buffer);
-			}
-			const bool reusable = bufferReusableResolver(buffer);
-			if (owned)
-			{
-				const bool hasPendingDelayedPlay =
-				    ownedState.pendingCancel && !ownedState.pendingCancel->load(std::memory_order_acquire);
-				if (hasPendingDelayedPlay || !reusable)
-					continue;
-				luaAudioReleaseRuntimeBuffer(runtime, buffer);
-			}
-			if (!reusable)
-				continue;
-			QMutexLocker         locker(&stateMutex());
-			LuaAudioNativeState &state = luaAudioNativeStateFor(runtime);
-			if (state.ownedBuffers.contains(buffer))
-				continue;
-			state.ownedBuffers.insert(buffer);
-			LuaAudioRuntimeBufferState bufferState;
-			bufferState.generation = ++state.nextBufferGeneration;
-			state.buffers.insert(buffer, bufferState);
-			return buffer;
-		}
-		return 0;
+		QMutexLocker locker(&luaAudioStateMutex());
+		return ++luaAudioNativeStateFor(runtime).nextBufferGeneration;
 	}
 
 	void luaAudioMarkRuntimeBuffer(const WorldRuntime *runtime, const int buffer,
@@ -1446,14 +1472,9 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 			return;
-		QMutexLocker               locker(&stateMutex());
+		QMutexLocker               locker(&luaAudioStateMutex());
 		LuaAudioNativeState       &state    = luaAudioNativeStateFor(runtime);
 		LuaAudioRuntimeBufferState newState = bufferState;
-		if (state.buffers.contains(buffer) && state.buffers[buffer].pendingCancel &&
-		    state.buffers[buffer].pendingCancel != newState.pendingCancel)
-		{
-			cancelLuaAudioPendingWork(state.buffers[buffer]);
-		}
 		if (newState.generation == 0)
 		{
 			if (state.buffers.contains(buffer))
@@ -1465,40 +1486,88 @@ namespace QMudNativePluginRegistry
 		{
 			state.nextBufferGeneration = newState.generation;
 		}
+		const auto currentIt = state.buffers.constFind(buffer);
+		if (currentIt != state.buffers.constEnd() && currentIt->generation != newState.generation)
+		{
+			eraseLuaAudioBufferState(state, buffer);
+		}
+		else if (currentIt != state.buffers.constEnd() && currentIt->pendingCancel &&
+		         currentIt->pendingCancel != newState.pendingCancel)
+		{
+			cancelLuaAudioPendingWork(currentIt.value());
+		}
 		state.ownedBuffers.insert(buffer);
 		state.buffers[buffer] = newState;
+		ensureLuaAudioOperationGeneration(state, buffer, newState.generation);
 	}
 
-	bool luaAudioTrackRuntimeBufferPendingOperation(const WorldRuntime *runtime, const int buffer,
-	                                                const std::shared_ptr<std::atomic_bool> &cancelToken,
-	                                                quint64                                 *generation)
+	bool luaAudioUpdateRuntimeBufferIfGeneration(const WorldRuntime *runtime, const int buffer,
+	                                             const LuaAudioRuntimeBufferState &bufferState)
 	{
-		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers || !cancelToken)
+		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers || bufferState.generation == 0)
 			return false;
-		QMutexLocker locker(&stateMutex());
-		const auto   it = luaAudioNativeStates().find(runtime);
-		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
-		    !it->second.buffers.contains(buffer))
+		QMutexLocker locker(&luaAudioStateMutex());
+		const auto   stateIt = luaAudioNativeStates().find(runtime);
+		if (stateIt == luaAudioNativeStates().end() || !stateIt->second.ownedBuffers.contains(buffer))
 			return false;
-		it->second.pendingOperationCancels[buffer].push_back(cancelToken);
-		if (generation)
-			*generation = it->second.buffers.value(buffer).generation;
+		auto bufferIt = stateIt->second.buffers.find(buffer);
+		if (bufferIt == stateIt->second.buffers.end() || bufferIt->generation != bufferState.generation)
+			return false;
+		if (bufferIt->pendingCancel && bufferIt->pendingCancel != bufferState.pendingCancel)
+			cancelLuaAudioPendingWork(bufferIt.value());
+		bufferIt.value() = bufferState;
 		return true;
 	}
 
-	void luaAudioForgetRuntimeBufferPendingOperation(const WorldRuntime *runtime, const int buffer,
-	                                                 const std::shared_ptr<std::atomic_bool> &cancelToken)
+	bool luaAudioCaptureRuntimeBufferOperationGuard(const WorldRuntime *runtime, const int buffer,
+	                                                LuaAudioRuntimeOperationGuard &guard)
 	{
-		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers || !cancelToken)
-			return;
-		QMutexLocker locker(&stateMutex());
+		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
+			return false;
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
-		if (it == luaAudioNativeStates().end())
-			return;
-		QList<std::shared_ptr<std::atomic_bool>> &tokens = it->second.pendingOperationCancels[buffer];
-		tokens.removeAll(cancelToken);
-		if (tokens.isEmpty())
-			it->second.pendingOperationCancels.remove(buffer);
+		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
+		    !it->second.buffers.contains(buffer) || !it->second.operationGuards.contains(buffer))
+		{
+			return false;
+		}
+		const LuaAudioRuntimeBufferState    &bufferState = it->second.buffers.value(buffer);
+		const LuaAudioRuntimeOperationGuard &current     = it->second.operationGuards.value(buffer);
+		if (current.generation != bufferState.generation || !current.cancelled ||
+		    current.cancelled->load(std::memory_order_acquire))
+		{
+			return false;
+		}
+		guard = current;
+		return true;
+	}
+
+	bool luaAudioResolveRuntimeBufferOperation(const WorldRuntime *runtime, const int buffer,
+	                                           const LuaAudioRuntimeOperationGuard &guard,
+	                                           LuaAudioRuntimeBufferState          &bufferState)
+	{
+		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers || guard.generation == 0 ||
+		    !guard.cancelled || guard.cancelled->load(std::memory_order_acquire))
+		{
+			return false;
+		}
+		QMutexLocker locker(&luaAudioStateMutex());
+		const auto   it = luaAudioNativeStates().find(runtime);
+		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
+		    !it->second.buffers.contains(buffer) || !it->second.operationGuards.contains(buffer))
+		{
+			return false;
+		}
+		const LuaAudioRuntimeBufferState    &currentState = it->second.buffers.value(buffer);
+		const LuaAudioRuntimeOperationGuard &currentGuard = it->second.operationGuards.value(buffer);
+		if (currentState.generation != guard.generation || currentGuard.generation != guard.generation ||
+		    currentGuard.cancelled != guard.cancelled ||
+		    currentGuard.cancelled->load(std::memory_order_acquire))
+		{
+			return false;
+		}
+		bufferState = currentState;
+		return true;
 	}
 
 	bool luaAudioConsumeRuntimeBufferPendingPlay(const WorldRuntime *runtime, const int buffer,
@@ -1511,7 +1580,7 @@ namespace QMudNativePluginRegistry
 		{
 			return false;
 		}
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
 		    !it->second.buffers.contains(buffer))
@@ -1522,37 +1591,9 @@ namespace QMudNativePluginRegistry
 		if (current.generation != generation || current.pendingCancel != cancelToken)
 			return false;
 		current.pendingCancel.reset();
+		current.playbackSubmitted  = true;
 		it->second.buffers[buffer] = current;
 		bufferState                = current;
-		return true;
-	}
-
-	bool luaAudioConsumeRuntimeBufferPendingOperation(const WorldRuntime *runtime, const int buffer,
-	                                                  const quint64                            generation,
-	                                                  const std::shared_ptr<std::atomic_bool> &cancelToken,
-	                                                  LuaAudioRuntimeBufferState              &bufferState)
-	{
-		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers || generation == 0 ||
-		    !cancelToken || cancelToken->load(std::memory_order_acquire))
-		{
-			return false;
-		}
-		QMutexLocker locker(&stateMutex());
-		const auto   it = luaAudioNativeStates().find(runtime);
-		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
-		    !it->second.buffers.contains(buffer))
-		{
-			return false;
-		}
-		LuaAudioRuntimeBufferState current = it->second.buffers.value(buffer);
-		if (current.generation != generation)
-			return false;
-		QList<std::shared_ptr<std::atomic_bool>> &tokens = it->second.pendingOperationCancels[buffer];
-		if (!tokens.removeOne(cancelToken))
-			return false;
-		if (tokens.isEmpty())
-			it->second.pendingOperationCancels.remove(buffer);
-		bufferState = current;
 		return true;
 	}
 
@@ -1561,7 +1602,7 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 			return false;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end() || !it->second.ownedBuffers.contains(buffer) ||
 		    !it->second.buffers.contains(buffer))
@@ -1576,7 +1617,7 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return {};
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end())
 			return {};
@@ -1593,23 +1634,11 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 			return;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end())
 			return;
-		if (it->second.buffers.contains(buffer))
-			cancelLuaAudioPendingWork(it->second.buffers.value(buffer));
-		cancelLuaAudioPendingOperations(it->second, buffer);
-		it->second.ownedBuffers.remove(buffer);
-		it->second.buffers.remove(buffer);
-		for (auto loopIt = it->second.loopBuffersByName.begin();
-		     loopIt != it->second.loopBuffersByName.end();)
-		{
-			if (loopIt.value() == buffer)
-				loopIt = it->second.loopBuffersByName.erase(loopIt);
-			else
-				++loopIt;
-		}
+		eraseLuaAudioBufferState(it->second, buffer);
 	}
 
 	bool luaAudioReleaseRuntimeBufferIfGeneration(const WorldRuntime *runtime, const int buffer,
@@ -1617,26 +1646,14 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers || generation == 0)
 			return false;
-		QMutexLocker locker(&stateMutex());
+		QMutexLocker locker(&luaAudioStateMutex());
 		const auto   it = luaAudioNativeStates().find(runtime);
 		if (it == luaAudioNativeStates().end() || !it->second.buffers.contains(buffer) ||
 		    it->second.buffers.value(buffer).generation != generation)
 		{
 			return false;
 		}
-		if (it->second.buffers.contains(buffer))
-			cancelLuaAudioPendingWork(it->second.buffers.value(buffer));
-		cancelLuaAudioPendingOperations(it->second, buffer);
-		it->second.ownedBuffers.remove(buffer);
-		it->second.buffers.remove(buffer);
-		for (auto loopIt = it->second.loopBuffersByName.begin();
-		     loopIt != it->second.loopBuffersByName.end();)
-		{
-			if (loopIt.value() == buffer)
-				loopIt = it->second.loopBuffersByName.erase(loopIt);
-			else
-				++loopIt;
-		}
+		eraseLuaAudioBufferState(it->second, buffer);
 		return true;
 	}
 
@@ -1676,8 +1693,12 @@ namespace QMudNativePluginRegistry
 		if (!runtime)
 			return;
 		luaAudioStopRuntime(runtime);
-		QMutexLocker locker(&stateMutex());
-		luaAudioNativeStates().erase(runtime);
+		QMutexLocker locker(&luaAudioStateMutex());
+		if (const auto it = luaAudioNativeStates().find(runtime); it != luaAudioNativeStates().end())
+		{
+			cancelAllLuaAudioOperationGenerations(it->second);
+			luaAudioNativeStates().erase(it);
+		}
 	}
 
 	bool isShimId(const QString &pluginId)
@@ -2173,9 +2194,16 @@ namespace QMudNativePluginRegistry
 				removedMushReaderState = std::move(it->second);
 				states().erase(it);
 			}
-			luaAudioNativeStates().erase(runtime);
 		}
 		removedMushReaderState.reset();
+		{
+			QMutexLocker locker(&luaAudioStateMutex());
+			if (const auto it = luaAudioNativeStates().find(runtime); it != luaAudioNativeStates().end())
+			{
+				cancelAllLuaAudioOperationGenerations(it->second);
+				luaAudioNativeStates().erase(it);
+			}
+		}
 	}
 
 	std::size_t mushReaderTestBackendCount(const WorldRuntime *runtime)

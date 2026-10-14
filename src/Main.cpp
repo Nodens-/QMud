@@ -172,6 +172,7 @@ int main(int argc, char *argv[])
 
 	const QStringList args      = QCoreApplication::arguments();
 	bool allowMultipleInstances = isEnabledValue(qEnvironmentVariable("QMUD_ALLOW_MULTI_INSTANCE").trimmed());
+	bool suppressAutoConnect    = false;
 	QString    reloadStatePathArg;
 	QString    reloadTokenArg;
 	const bool reloadLaunchArguments =
@@ -183,6 +184,11 @@ int main(int argc, char *argv[])
 		    arg.compare(QStringLiteral("--allow-multi-instance"), Qt::CaseInsensitive) == 0)
 		{
 			allowMultipleInstances = true;
+			continue;
+		}
+		if (arg.compare(QStringLiteral("--no-autoconnect"), Qt::CaseInsensitive) == 0)
+		{
+			suppressAutoConnect = true;
 			continue;
 		}
 		if (arg.compare(QStringLiteral("--dump-lua-api"), Qt::CaseInsensitive) != 0)
@@ -215,7 +221,9 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 	}
-
+	suppressAutoConnect =
+	    suppressAutoConnect ||
+	    isEnabledValue(qmudEnvironmentVariable(QStringLiteral("QMUD_NO_AUTOCONNECT")).trimmed());
 	QLocalServer instanceServer;
 	if (!allowMultipleInstances)
 	{
@@ -226,7 +234,10 @@ int main(int argc, char *argv[])
 			requestToForward.emplace();
 			requestToForward->fileAssociationPath = QMudFileExtensions::fileAssociationPathArgument(args);
 			if (!requestToForward->fileAssociationPath.isEmpty())
-				requestToForward->action = QMudSingleInstanceIpc::Action::OpenFileAssociation;
+			{
+				requestToForward->action              = QMudSingleInstanceIpc::Action::OpenFileAssociation;
+				requestToForward->suppressAutoConnect = suppressAutoConnect;
+			}
 		}
 
 		QString                                          errorMessage;
@@ -242,7 +253,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	AppController controller;
+	AppController controller(suppressAutoConnect);
 	MainWindow   *mainWindow = nullptr;
 	QObject::connect(&instanceServer, &QLocalServer::newConnection, &app,
 	                 [&instanceServer, &controller, &mainWindow]()
@@ -255,7 +266,8 @@ int main(int argc, char *argv[])
 			                     {
 				                     if (request.action == QMudSingleInstanceIpc::Action::OpenFileAssociation)
 				                     {
-					                     controller.handleFileAssociationRequest(request.fileAssociationPath);
+					                     controller.handleFileAssociationRequest(request.fileAssociationPath,
+					                                                             request.suppressAutoConnect);
 				                     }
 				                     activateMainWindow(mainWindow);
 			                     });

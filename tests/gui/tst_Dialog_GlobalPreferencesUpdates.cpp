@@ -8,6 +8,7 @@
 
 #include "AppController.h"
 #include "ShortcutPreferenceUtils.h"
+#include "SoundEngine.h"
 #include "dialogs/GlobalPreferencesDialog.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -51,6 +52,16 @@
 class AppControllerTestAccess final
 {
 	public:
+		/**
+		 * @brief Returns the process-wide sound cache policy applied by the controller.
+		 * @param controller Application controller under test.
+		 * @return Current normalized sound cache policy.
+		 */
+		static SoundEngine::CachePolicy soundCachePolicy(const AppController &controller)
+		{
+			return controller.m_soundEngine->cachePolicy();
+		}
+
 		/**
 		 * @brief Shows the production update dialog using the supplied test owner.
 		 * @param controller Application controller under test.
@@ -376,6 +387,74 @@ namespace
 			}
 
 			/**
+			 * @brief Verifies sound-cache controls, focus order, persistence, and live engine application.
+			 */
+			void soundEnginePreferencesFollowRegistrationAndPersist() const
+			{
+				resetPreferences();
+
+				{
+					GlobalPreferencesDialog dialog;
+					auto                   *tabs = dialog.findChild<QTabWidget *>();
+					QVERIFY(tabs);
+					tabs->setCurrentIndex(1);
+					dialog.show();
+					QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+					QCoreApplication::processEvents();
+
+					QPushButton *registerButton =
+					    findButtonByText(dialog, QStringLiteral("Register File Extensions"));
+					QLabel *ramLabel = findLabelByText(dialog, QStringLiteral("RAM Cache Size (in MB)"));
+					QLabel *idleLabel =
+					    findLabelByText(dialog, QStringLiteral("Idle Cache Eviction (in seconds)"));
+					QVERIFY(registerButton);
+					QVERIFY(ramLabel);
+					QVERIFY(idleLabel);
+					auto *ramSpin  = qobject_cast<QSpinBox *>(ramLabel->buddy());
+					auto *idleSpin = qobject_cast<QSpinBox *>(idleLabel->buddy());
+					QVERIFY(ramSpin);
+					QVERIFY(idleSpin);
+					QCOMPARE(ramSpin->minimum(), SoundEngine::CachePolicy::kMinimumRamCacheSizeMiB);
+					QCOMPARE(ramSpin->maximum(), SoundEngine::CachePolicy::kMaximumRamCacheSizeMiB);
+					QCOMPARE(ramSpin->value(), SoundEngine::CachePolicy::kDefaultRamCacheSizeMiB);
+					QCOMPARE(idleSpin->minimum(), SoundEngine::CachePolicy::kMinimumIdleEvictionSeconds);
+					QCOMPARE(idleSpin->maximum(), SoundEngine::CachePolicy::kMaximumIdleEvictionSeconds);
+					QCOMPARE(idleSpin->value(), SoundEngine::CachePolicy::kDefaultIdleEvictionSeconds);
+					QVERIFY(ramSpin->mapTo(&dialog, QPoint()).y() >
+					        registerButton->mapTo(&dialog, QPoint()).y());
+					QVERIFY(idleSpin->mapTo(&dialog, QPoint()).x() > ramSpin->mapTo(&dialog, QPoint()).x());
+
+					registerButton->setFocus(Qt::OtherFocusReason);
+					QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(registerButton));
+					QTest::keyClick(registerButton, Qt::Key_Tab);
+					QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(ramSpin));
+					QTest::keyClick(ramSpin, Qt::Key_Tab);
+					QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(idleSpin));
+
+					ramSpin->setValue(384);
+					idleSpin->setValue(10800);
+					dialog.accept();
+				}
+
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("SoundEngineRamCacheSizeMB")).toInt(), 384);
+				QCOMPARE(
+				    m_app->getGlobalOption(QStringLiteral("SoundEngineIdleCacheEvictionSeconds")).toInt(),
+				    10800);
+				QCOMPARE(AppControllerTestAccess::soundCachePolicy(*m_app),
+				         (SoundEngine::CachePolicy{384, 10800}));
+
+				GlobalPreferencesDialog restoredDialog;
+				QLabel                 *restoredRamLabel =
+				    findLabelByText(restoredDialog, QStringLiteral("RAM Cache Size (in MB)"));
+				QLabel *restoredIdleLabel =
+				    findLabelByText(restoredDialog, QStringLiteral("Idle Cache Eviction (in seconds)"));
+				QVERIFY(restoredRamLabel);
+				QVERIFY(restoredIdleLabel);
+				QCOMPARE(qobject_cast<QSpinBox *>(restoredRamLabel->buddy())->value(), 384);
+				QCOMPARE(qobject_cast<QSpinBox *>(restoredIdleLabel->buddy())->value(), 10800);
+			}
+
+			/**
 			 * @brief Verifies the dialog and combo boxes follow enlarged application fonts.
 			 */
 			void dialogMinimumTracksFontChanges() const
@@ -384,7 +463,7 @@ namespace
 
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 
 				QList<QSize> initialPageHints;
 				QList<QSize> initialComboHints;
@@ -1037,6 +1116,10 @@ namespace
 				Q_ASSERT(m_app);
 				m_app->setGlobalOptionString(QStringLiteral("Locale"), QStringLiteral("en"));
 				m_app->setGlobalOptionInt(QStringLiteral("SplitViewDividerWidth"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("SoundEngineRamCacheSizeMB"),
+				                          SoundEngine::CachePolicy::kDefaultRamCacheSizeMiB);
+				m_app->setGlobalOptionInt(QStringLiteral("SoundEngineIdleCacheEvictionSeconds"),
+				                          SoundEngine::CachePolicy::kDefaultIdleEvictionSeconds);
 				m_app->setGlobalOptionInt(QStringLiteral("AutoCheckForUpdates"), 1);
 				m_app->setGlobalOptionInt(QStringLiteral("UpdateCheckIntervalHours"), 1);
 				m_app->setGlobalOptionInt(QStringLiteral("EnableReloadFeature"), 1);

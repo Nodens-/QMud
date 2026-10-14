@@ -45,6 +45,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
+#include <QMutex>
 #include <QPlainTextEdit>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QProcess>
@@ -725,7 +726,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void deferredTraceSuspendsHandlingDecisionWithoutBlockingCompletionDelivery();
 		void chatNotesPreserveOrderAcrossSuspendedDisplayDecision();
 #if QMUD_ENABLE_SOUND
-		void deferredPlaySoundSuspendsHandlingDecisionWithoutBlockingCompletionDelivery();
+		void directPlaySoundBypassesInterceptionFromCallbackLane();
+		void interceptedSoundCallbacksAreSerializedAndAllowNonrecursiveReplacement();
 #endif
 		void crossWorldCompletedMutationCallbacksQueueOnTargetCausalLane();
 		void workerQueuedRetainedScreendrawAppendDoesNotDeadlock();
@@ -11821,11 +11823,9 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 		return it == snapshot.keypadEntriesSnapshot.cend() ? QString() : it->content;
 	};
 
-	int                            soundStatus   = -2;
-	bool                           soundReusable = false;
+	int                            soundStatus = -2;
 	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.status   = [&soundStatus](const int buffer) { return buffer == 1 ? soundStatus : -2; };
-	soundBackend.reusable = [&soundReusable](const int buffer) { return buffer == 1 && soundReusable; };
+	soundBackend.status = [&soundStatus](const int buffer) { return buffer == 1 ? soundStatus : -2; };
 	runtime.setSoundBackendForTest(std::move(soundBackend));
 
 	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
@@ -11840,7 +11840,6 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	QCOMPARE(macroSend(*initial, QStringLiteral("F1")), QStringLiteral("macro-before"));
 	QCOMPARE(keypadSend(*initial, QStringLiteral("1")), QStringLiteral("keypad-before"));
 	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
-	QVERIFY(!initial->soundBufferReusableByBuffer.value(1));
 
 	WorldRuntime::Trigger &mutableTrigger = WorldRuntimeTestAccess::triggers(runtime).first();
 	mutableTrigger.matched                = 7;
@@ -11948,11 +11947,9 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	QCOMPARE(acceleratorIt->key, 0x1234);
 
 	soundStatus             = 2;
-	soundReusable           = true;
 	const auto soundChanged = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(soundChanged);
 	QCOMPARE(soundChanged->soundStatusByBuffer.value(1), 2);
-	QVERIFY(soundChanged->soundBufferReusableByBuffer.value(1));
 	QCOMPARE(acceleratorChanged->soundStatusByBuffer.value(1), -2);
 	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
 }
@@ -12129,11 +12126,9 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectChatState()
 void tst_LuaCallbackEngine::callbackDispatchSnapshotsAreIndependent()
 {
 	WorldRuntime                   runtime;
-	int                            soundStatus   = 2;
-	bool                           soundReusable = true;
+	int                            soundStatus = 2;
 	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.status   = [&soundStatus](const int buffer) { return buffer == 1 ? soundStatus : -2; };
-	soundBackend.reusable = [&soundReusable](const int buffer) { return buffer == 1 && soundReusable; };
+	soundBackend.status = [&soundStatus](const int buffer) { return buffer == 1 ? soundStatus : -2; };
 	runtime.setSoundBackendForTest(std::move(soundBackend));
 
 	const QString windowName = QStringLiteral("dispatch-state");
@@ -12160,8 +12155,7 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsAreIndependent()
 	window.mouseOverHotspot    = QStringLiteral("new-over");
 	window.mouseDownHotspot    = QStringLiteral("new-down");
 	runtime.publishMiniWindowPresentation(windowName);
-	soundStatus   = -2;
-	soundReusable = false;
+	soundStatus = -2;
 	runtime.setVariable(QStringLiteral("dispatch-value"), QStringLiteral("second"));
 
 	const auto second = captureVariableDispatchSnapshotForTest(runtime);
@@ -12185,8 +12179,6 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsAreIndependent()
 	QCOMPARE(secondPresentation->mouseOverHotspot, QStringLiteral("new-over"));
 	QCOMPARE(first->soundStatusByBuffer.value(1), 2);
 	QCOMPARE(second->soundStatusByBuffer.value(1), -2);
-	QVERIFY(first->soundBufferReusableByBuffer.value(1));
-	QVERIFY(!second->soundBufferReusableByBuffer.value(1));
 	QCOMPARE(first->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")), QStringLiteral("first"));
 	QCOMPARE(second->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")),
 	         QStringLiteral("second"));
@@ -14598,7 +14590,32 @@ end
 
 void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 {
-	WorldRuntime  runtime;
+	WorldRuntime                   runtime;
+	QSet<int>                      reservedBuffers;
+	WorldRuntime::TestSoundBackend soundBackend;
+	soundBackend.play = [](const int, const QString &, const bool, const double, const double)
+	{ return eOK; };
+	soundBackend.stop = [&reservedBuffers](const int buffer)
+	{
+		if (buffer == 0)
+			reservedBuffers.clear();
+		else
+			reservedBuffers.remove(buffer);
+		return eOK;
+	};
+	soundBackend.reserve = [&reservedBuffers](const QString &, const quint64)
+	{
+		for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
+		{
+			if (!reservedBuffers.contains(buffer))
+			{
+				reservedBuffers.insert(buffer);
+				return buffer;
+			}
+		}
+		return 0;
+	};
+	runtime.setSoundBackendForTest(std::move(soundBackend));
 	QTemporaryDir soundRoot;
 	QVERIFY(soundRoot.isValid());
 	QVERIFY(QDir(soundRoot.path()).mkpath(QStringLiteral("sounds")));
@@ -14643,9 +14660,7 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 	auto snapshot = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
 	snapshot->soundStatusByBuffer.insert(1, -2);
-	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(9, 1);
-	snapshot->soundBufferReusableByBuffer.insert(9, false);
 
 	LuaBatchDispatchRequest request;
 	request.engines             = {engine};
@@ -14948,28 +14963,33 @@ void tst_LuaCallbackEngine::nativeMushReaderDeferredCallPluginUsesRuntimeSpeechS
 void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallPlugin()
 {
 	QSet<int>                      activeSoundBuffers;
+	QSet<int>                      reservedSoundBuffers;
+	QStringList                    reservedFileNames;
 	WorldRuntime                   runtime;
 	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.play = [&activeSoundBuffers](const int buffer, const QString &fileName, const bool,
-	                                          const double, const double)
+	soundBackend.play = [&activeSoundBuffers, &reservedSoundBuffers](
+	                        const int buffer, const QString &fileName, const bool, const double, const double)
 	{
 		if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 			return eBadParameter;
 		if (fileName.isEmpty())
 			return activeSoundBuffers.contains(buffer) ? eOK : eCannotPlaySound;
 		activeSoundBuffers.insert(buffer);
+		reservedSoundBuffers.remove(buffer);
 		return eOK;
 	};
-	soundBackend.stop = [&activeSoundBuffers](const int buffer)
+	soundBackend.stop = [&activeSoundBuffers, &reservedSoundBuffers](const int buffer)
 	{
 		if (buffer == 0)
 		{
 			activeSoundBuffers.clear();
+			reservedSoundBuffers.clear();
 			return eOK;
 		}
 		if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 			return eBadParameter;
 		activeSoundBuffers.remove(buffer);
+		reservedSoundBuffers.remove(buffer);
 		return eOK;
 	};
 	soundBackend.status = [&activeSoundBuffers](const int buffer)
@@ -14978,10 +14998,24 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 			return -1;
 		return activeSoundBuffers.contains(buffer) ? 1 : -2;
 	};
-	soundBackend.reusable = [&activeSoundBuffers](const int buffer)
+	soundBackend.reusable = [&activeSoundBuffers, &reservedSoundBuffers](const int buffer)
 	{
 		return buffer >= 1 && buffer <= WorldRuntime::kMaxSoundBuffers &&
-		       !activeSoundBuffers.contains(buffer);
+		       !activeSoundBuffers.contains(buffer) && !reservedSoundBuffers.contains(buffer);
+	};
+	soundBackend.reserve = [&activeSoundBuffers, &reservedSoundBuffers,
+	                        &reservedFileNames](const QString &fileName, const quint64)
+	{
+		reservedFileNames.push_back(fileName);
+		for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
+		{
+			if (!activeSoundBuffers.contains(buffer) && !reservedSoundBuffers.contains(buffer))
+			{
+				reservedSoundBuffers.insert(buffer);
+				return buffer;
+			}
+		}
+		return 0;
 	};
 	runtime.setSoundBackendForTest(std::move(soundBackend));
 
@@ -15005,6 +15039,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QCOMPARE(nativeDelayed.errorCode, eOK);
 	QCOMPARE(nativeDelayed.returnValues.size(), 1);
 	QCOMPARE(nativeDelayed.returnValues.constFirst().toInt(), 1);
+	QCOMPARE(reservedFileNames, QStringList{QStringLiteral("coin.wav")});
 
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
@@ -15030,9 +15065,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 
 	auto snapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->soundStatusByBuffer.insert(1, -2);
-	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(2, -2);
-	snapshot->soundBufferReusableByBuffer.insert(2, true);
 
 	LuaBatchDispatchRequest request;
 	request.engines             = {engine};
@@ -15040,6 +15073,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	request.functionName        = QStringLiteral("OnPluginEnable");
 	request.callbackSnapshotArg = snapshot;
 	QVERIFY(dispatchWorkerAndWait(executor, request));
+	QCOMPARE(reservedFileNames, (QStringList{QStringLiteral("coin.wav"), QStringLiteral("coin.wav")}));
 
 	request.kind                = LuaBatchDispatchKind::StringInOut;
 	request.functionName        = QStringLiteral("lua_audio_shared_status");
@@ -15064,9 +15098,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	auto preStartSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	activeSoundBuffers.insert(1);
 	preStartSnapshot->soundStatusByBuffer.insert(1, 0);
-	preStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	preStartSnapshot->soundStatusByBuffer.insert(2, -2);
-	preStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
 	request.engines             = {preStartEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -15098,9 +15130,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	auto callPluginPreStartSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	activeSoundBuffers.insert(1);
 	callPluginPreStartSnapshot->soundStatusByBuffer.insert(1, 0);
-	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	callPluginPreStartSnapshot->soundStatusByBuffer.insert(2, -2);
-	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
 	request.engines             = {callPluginPreStartEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -15131,7 +15161,6 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 		QFAIL("Worker engine initialization failed");
 	auto callPluginStringBoolSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	callPluginStringBoolSnapshot->soundStatusByBuffer.insert(1, -2);
-	callPluginStringBoolSnapshot->soundBufferReusableByBuffer.insert(1, true);
 	request.engines             = {callPluginStringBoolEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -15161,7 +15190,6 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 		QFAIL("Worker engine initialization failed");
 	auto callPluginBadArgumentSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	callPluginBadArgumentSnapshot->soundStatusByBuffer.insert(1, -2);
-	callPluginBadArgumentSnapshot->soundBufferReusableByBuffer.insert(1, true);
 	request.engines             = {callPluginBadArgumentEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -15221,13 +15249,9 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	activeSoundBuffers.insert(3);
 	auto callPluginBranchSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(1, 1);
-	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(2, 1);
-	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(2, false);
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(3, 1);
-	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(3, false);
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(4, -2);
-	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(4, true);
 	request.engines             = {callPluginBranchEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -15271,7 +15295,6 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 		QFAIL("Worker engine initialization failed");
 	auto pendingSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	pendingSnapshot->soundStatusByBuffer.insert(1, -2);
-	pendingSnapshot->soundBufferReusableByBuffer.insert(1, true);
 	request.engines             = {pendingEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -15317,9 +15340,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	activeSoundBuffers.insert(2);
 	auto timedSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	timedSnapshot->soundStatusByBuffer.insert(1, 1);
-	timedSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	timedSnapshot->soundStatusByBuffer.insert(2, 1);
-	timedSnapshot->soundBufferReusableByBuffer.insert(2, false);
 	request.engines             = {timedEngine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
@@ -26148,52 +26169,6 @@ void tst_LuaCallbackEngine::cancelledResultOperationsPreserveCurrentGenerationQu
 	QVERIFY(styledOutput.join(QLatin1Char('\n')).contains(QStringLiteral("current-chat")));
 	QVERIFY(!styledOutput.join(QLatin1Char('\n')).contains(QStringLiteral("stale-chat")));
 
-#if QMUD_ENABLE_SOUND
-	QString                        playedSound;
-	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.play =
-	    [&playedSound](const int, const QString &fileName, const bool, const double, const double)
-	{
-		playedSound = fileName;
-		return eOK;
-	};
-	runtime.setSoundBackendForTest(std::move(soundBackend));
-	int                                 activeSoundStatus     = eOK;
-	int                                 staleSoundStatus      = eOK;
-	int                                 currentSoundStatus    = eCannotPlaySound;
-	bool                                activeSoundCancelled  = false;
-	bool                                staleSoundCancelled   = false;
-	bool                                currentSoundCancelled = true;
-	WorldRuntime::PendingSoundOperation staleSound;
-	staleSound.fileName           = QStringLiteral("stale.wav");
-	staleSound.callerContext      = oldRuntimeContext;
-	staleSound.completion         = [&staleSoundStatus](const int status) { staleSoundStatus = status; };
-	staleSound.mutationCompletion = [&staleSoundCancelled](const bool cancelled)
-	{ staleSoundCancelled = cancelled; };
-	WorldRuntime::PendingSoundOperation currentSound;
-	currentSound.fileName      = QStringLiteral("current.wav");
-	currentSound.callerContext = currentRuntimeContext;
-	currentSound.completion    = [&currentSoundStatus](const int status) { currentSoundStatus = status; };
-	currentSound.mutationCompletion = [&currentSoundCancelled](const bool cancelled)
-	{ currentSoundCancelled = cancelled; };
-	runtime.m_pendingSoundOperations.enqueue(std::move(staleSound));
-	runtime.m_pendingSoundOperations.enqueue(std::move(currentSound));
-	runtime.m_soundPluginCallbackPending = true;
-	WorldRuntime::PendingSoundOperation activeSound;
-	activeSound.completion         = [&activeSoundStatus](const int status) { activeSoundStatus = status; };
-	activeSound.mutationCompletion = [&activeSoundCancelled](const bool cancelled)
-	{ activeSoundCancelled = cancelled; };
-	runtime.cancelSoundPluginDecision(activeSound);
-	QCOMPARE(activeSoundStatus, eCannotPlaySound);
-	QVERIFY(activeSoundCancelled);
-	QCOMPARE(staleSoundStatus, eCannotPlaySound);
-	QVERIFY(staleSoundCancelled);
-	QCOMPARE(currentSoundStatus, eOK);
-	QVERIFY(!currentSoundCancelled);
-	QCOMPARE(playedSound, QStringLiteral("current.wav"));
-	QVERIFY(runtime.m_pendingSoundOperations.isEmpty());
-#endif
-
 	runtime.m_socketReadyForWorld = false;
 }
 
@@ -26289,41 +26264,11 @@ void tst_LuaCallbackEngine::shutdownCancellationDoesNotExecuteQueuedResultOperat
 	activeChat.mutationCompletion = [&activeChatCancelled](const bool cancelled)
 	{ activeChatCancelled = cancelled; };
 
-#if QMUD_ENABLE_SOUND
-	QString                        playedSound;
-	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.play =
-	    [&playedSound](const int, const QString &fileName, const bool, const double, const double)
-	{
-		playedSound = fileName;
-		return eOK;
-	};
-	runtime.setSoundBackendForTest(std::move(soundBackend));
-	int                                 activeSoundStatus    = eOK;
-	int                                 queuedSoundStatus    = eOK;
-	bool                                activeSoundCancelled = false;
-	bool                                queuedSoundCancelled = false;
-	WorldRuntime::PendingSoundOperation queuedSound;
-	queuedSound.fileName           = QStringLiteral("queued.wav");
-	queuedSound.completion         = [&queuedSoundStatus](const int status) { queuedSoundStatus = status; };
-	queuedSound.mutationCompletion = [&queuedSoundCancelled](const bool cancelled)
-	{ queuedSoundCancelled = cancelled; };
-	runtime.m_pendingSoundOperations.enqueue(std::move(queuedSound));
-	runtime.m_soundPluginCallbackPending = true;
-	WorldRuntime::PendingSoundOperation activeSound;
-	activeSound.completion         = [&activeSoundStatus](const int status) { activeSoundStatus = status; };
-	activeSound.mutationCompletion = [&activeSoundCancelled](const bool cancelled)
-	{ activeSoundCancelled = cancelled; };
-#endif
-
 	runtime.m_runtimeDestructionStarted = true;
 	commandProcessor->cancelPluginSendDecision([&activeSendCancelled](const bool cancelled)
 	                                           { activeSendCancelled = cancelled; }, {});
 	runtime.cancelTraceDispatch(activeTrace, runtime.m_traceEnabled, runtime.m_traceStateRevision);
 	runtime.cancelChatNoteDispatch(activeChat);
-#if QMUD_ENABLE_SOUND
-	runtime.cancelSoundPluginDecision(activeSound);
-#endif
 
 	QVERIFY(activeSendCancelled);
 	QVERIFY(activeTraceCancelled);
@@ -26331,11 +26276,6 @@ void tst_LuaCallbackEngine::shutdownCancellationDoesNotExecuteQueuedResultOperat
 	QCOMPARE(commandProcessor->m_pendingPluginSends.size(), qsizetype{1});
 	QCOMPARE(runtime.m_pendingTraceOperations.size(), qsizetype{1});
 	QCOMPARE(runtime.m_pendingChatNoteOperations.size(), qsizetype{1});
-#if QMUD_ENABLE_SOUND
-	QCOMPARE(activeSoundStatus, eCannotPlaySound);
-	QVERIFY(activeSoundCancelled);
-	QCOMPARE(runtime.m_pendingSoundOperations.size(), qsizetype{1});
-#endif
 
 	runtime.cancelPendingResultOperationsForShutdown();
 	QVERIFY(queuedSendCancelled);
@@ -26344,12 +26284,6 @@ void tst_LuaCallbackEngine::shutdownCancellationDoesNotExecuteQueuedResultOperat
 	QVERIFY(commandProcessor->m_pendingPluginSends.isEmpty());
 	QVERIFY(runtime.m_pendingTraceOperations.isEmpty());
 	QVERIFY(runtime.m_pendingChatNoteOperations.isEmpty());
-#if QMUD_ENABLE_SOUND
-	QCOMPARE(queuedSoundStatus, eCannotPlaySound);
-	QVERIFY(queuedSoundCancelled);
-	QVERIFY(runtime.m_pendingSoundOperations.isEmpty());
-	QVERIFY(playedSound.isEmpty());
-#endif
 	QVERIFY(plainOutput.isEmpty());
 	QVERIFY(styledOutput.isEmpty());
 	QCOMPARE(runtime.totalLinesSent(), 0);
@@ -26359,9 +26293,9 @@ void tst_LuaCallbackEngine::shutdownCancellationDoesNotExecuteQueuedResultOperat
 	runtime.chatNote(1, QStringLiteral("late-chat"));
 #if QMUD_ENABLE_SOUND
 	int lateSoundStatus = eOK;
-	QCOMPARE(runtime.playSoundWithCompletion(1, QStringLiteral("late.wav"), false, 1.0, 0.0,
-	                                         [&lateSoundStatus](const int status)
-	                                         { lateSoundStatus = status; }),
+	QCOMPARE(runtime.playSoundInterceptedWithCompletion(1, QStringLiteral("late.wav"), false, 1.0, 0.0,
+	                                                    [&lateSoundStatus](const int status)
+	                                                    { lateSoundStatus = status; }),
 	         eCannotPlaySound);
 	QCOMPARE(lateSoundStatus, eCannotPlaySound);
 #endif
@@ -27188,16 +27122,30 @@ end
 }
 
 #if QMUD_ENABLE_SOUND
-void tst_LuaCallbackEngine::deferredPlaySoundSuspendsHandlingDecisionWithoutBlockingCompletionDelivery()
+void tst_LuaCallbackEngine::directPlaySoundBypassesInterceptionFromCallbackLane()
 {
 	WorldRuntime                   runtime;
-	QString                        playedFile;
+	QStringList                    playedFiles;
+	QSet<int>                      activeBuffers;
+	QMutex                         playedFilesMutex;
 	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.play =
-	    [&playedFile](const int, const QString &fileName, const bool, const double, const double)
+	soundBackend.play = [&playedFiles, &activeBuffers, &playedFilesMutex](
+	                        const int buffer, const QString &fileName, const bool, const double, const double)
 	{
-		playedFile = fileName;
+		QMutexLocker locker(&playedFilesMutex);
+		playedFiles.push_back(fileName);
+		activeBuffers.insert(buffer);
 		return eOK;
+	};
+	soundBackend.status = [&activeBuffers, &playedFilesMutex](const int buffer)
+	{
+		QMutexLocker locker(&playedFilesMutex);
+		return buffer < 1 ? -1 : (activeBuffers.contains(buffer) ? 1 : -2);
+	};
+	soundBackend.reusable = [&activeBuffers, &playedFilesMutex](const int buffer)
+	{
+		QMutexLocker locker(&playedFilesMutex);
+		return buffer >= 1 && !activeBuffers.contains(buffer);
 	};
 	runtime.setSoundBackendForTest(std::move(soundBackend));
 	const auto *executor = runtime.luaExecutor();
@@ -27208,6 +27156,8 @@ void tst_LuaCallbackEngine::deferredPlaySoundSuspendsHandlingDecisionWithoutBloc
 	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
 function run_deferred_sound()
   PlaySound(1, "continuation.wav")
+  SetVariable("direct_sound_status", tostring(GetSoundStatus(1)))
+  SetVariable("direct_audio_buffer", tostring(audio.play("second.wav")))
 end
 function OnPluginPlaySound(sound)
   SetVariable("observed_sound", sound)
@@ -27238,15 +27188,108 @@ end
 	runtime.queuePluginCallbackDispatchAsync(request);
 
 	QTRY_VERIFY_WITH_TIMEOUT(runtime.m_pendingPluginCallbackResultContinuations.isEmpty() &&
-	                             !runtime.m_soundPluginCallbackPending &&
 	                             !runtime.m_pluginCallbackDispatchWorkerInFlight &&
 	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
 	                         5000);
-	QVERIFY(playedFile.isEmpty());
+	{
+		QMutexLocker locker(&playedFilesMutex);
+		QCOMPARE(playedFiles,
+		         QStringList({QStringLiteral("continuation.wav"), QStringLiteral("second.wav")}));
+	}
 
 	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
 	             QStringLiteral("observed_sound")),
-	         QStringLiteral("continuation.wav"));
+	         QString());
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	             QStringLiteral("direct_sound_status")),
+	         QStringLiteral("1.0"));
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	             QStringLiteral("direct_audio_buffer")),
+	         QStringLiteral("2"));
+
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
+void tst_LuaCallbackEngine::interceptedSoundCallbacksAreSerializedAndAllowNonrecursiveReplacement()
+{
+	WorldRuntime                   runtime;
+	QStringList                    playedFiles;
+	QMutex                         playedFilesMutex;
+	WorldRuntime::TestSoundBackend soundBackend;
+	soundBackend.play = [&playedFiles, &playedFilesMutex](const int, const QString &fileName, const bool,
+	                                                      const double, const double)
+	{
+		QMutexLocker locker(&playedFilesMutex);
+		playedFiles.push_back(fileName);
+		return eOK;
+	};
+	soundBackend.automaticBuffer = [] { return 1; };
+	runtime.setSoundBackendForTest(std::move(soundBackend));
+	const auto *executor = runtime.luaExecutor();
+	QVERIFY(executor);
+
+	const QString pluginId = QStringLiteral("111111111111111111111107");
+	auto          engine   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function run_intercepted_sound()
+  Sound("original.wav")
+  Sound("committed.wav")
+end
+function OnPluginPlaySound(sound)
+  SetVariable("observed_sound", sound)
+  SetVariable("play_sound_count", tostring(tonumber(GetVariable("play_sound_count") or "0") + 1))
+	  if sound == "original.wav" then
+	    Sound("replacement.wav")
+	    SetVariable("replacement_status", tostring(GetSoundStatus(1)))
+	    return true
+  end
+  return false
+end
+)lua"),
+	                               &runtime, pluginId));
+
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Intercepted sound replacement"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::PlaySound);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	LuaBatchDispatchRequest request;
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.engines      = {engine};
+	request.functionName = QStringLiteral("run_intercepted_sound");
+	runtime.queuePluginCallbackDispatchAsync(request);
+
+	QTRY_COMPARE_WITH_TIMEOUT(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	                              QStringLiteral("play_sound_count")),
+	                          QStringLiteral("2"), 5000);
+	QTRY_VERIFY_WITH_TIMEOUT(runtime.m_pendingPluginCallbackResultContinuations.isEmpty() &&
+	                             !runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	{
+		QMutexLocker locker(&playedFilesMutex);
+		QCOMPARE(playedFiles, QStringList({QStringLiteral("replacement.wav")}));
+	}
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	             QStringLiteral("observed_sound")),
+	         QStringLiteral("committed.wav"));
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	             QStringLiteral("play_sound_count")),
+	         QStringLiteral("2"));
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	             QStringLiteral("replacement_status")),
+	         QStringLiteral("1.0"));
 
 	WorldRuntimeTestAccess::plugins(runtime).clear();
 	QVERIFY(teardownWorkerEngine(*executor, engine));

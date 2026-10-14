@@ -34,6 +34,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -139,7 +140,11 @@ namespace
 			QTreeWidget  *tree{nullptr};
 			QPushButton  *editButton{nullptr};
 			QPushButton  *removeButton{nullptr};
+			QPushButton  *copyButton{nullptr};
 			QPushButton  *pasteButton{nullptr};
+			QPushButton  *moveUpButton{nullptr};
+			QPushButton  *moveDownButton{nullptr};
+			QCheckBox    *treeToggle{nullptr};
 	};
 
 	/**
@@ -191,7 +196,7 @@ namespace
 	}
 
 	/**
-	 * @brief Locates the table, grouped tree, and remove button for one rule page.
+	 * @brief Locates the rule views and selection-sensitive buttons for one rule page.
 	 * @param dialog Preferences dialog to inspect.
 	 * @param kind Rule kind to locate.
 	 * @return Located widgets; unavailable entries remain null.
@@ -225,10 +230,112 @@ namespace
 				result.editButton = button;
 			else if (button->text() == QStringLiteral("&Remove"))
 				result.removeButton = button;
+			else if (button->text() == QStringLiteral("&Copy"))
+				result.copyButton = button;
 			else if (button->text() == QStringLiteral("&Paste"))
 				result.pasteButton = button;
+			else if (button->text() == QStringLiteral("Move &Up"))
+				result.moveUpButton = button;
+			else if (button->text() == QStringLiteral("Move &Down"))
+				result.moveDownButton = button;
+		}
+		for (QCheckBox *checkBox : page->findChildren<QCheckBox *>())
+		{
+			if (checkBox && checkBox->text() == QStringLiteral("Tree View"))
+			{
+				result.treeToggle = checkBox;
+				break;
+			}
 		}
 		return result;
+	}
+
+	/**
+	 * @brief Replaces a rule table's selection with the requested rows.
+	 * @param table Rule table to update.
+	 * @param rows Rows to select.
+	 * @param currentRow Row to make current without changing the selection.
+	 */
+	void selectRuleRows(QTableWidget &table, const QList<int> &rows, const int currentRow)
+	{
+		QItemSelectionModel *const selection = table.selectionModel();
+		QVERIFY(selection);
+		table.clearSelection();
+		for (const int row : rows)
+		{
+			QVERIFY(row >= 0);
+			QVERIFY(row < table.rowCount());
+			selection->select(table.model()->index(row, 0),
+			                  QItemSelectionModel::Select | QItemSelectionModel::Rows);
+		}
+		selection->setCurrentIndex(table.model()->index(currentRow, 0), QItemSelectionModel::NoUpdate);
+	}
+
+	/**
+	 * @brief Returns selected rule identities from a table in display order.
+	 * @param table Rule table to inspect.
+	 * @return Selected runtime identities.
+	 */
+	QList<quint64> selectedRuleIds(const QTableWidget &table)
+	{
+		QList<quint64> result;
+		for (int row = 0; row < table.rowCount(); ++row)
+		{
+			const QTableWidgetItem *const item = table.item(row, 0);
+			if (item && item->isSelected())
+				result.push_back(item->data(Qt::UserRole).toULongLong());
+		}
+		return result;
+	}
+
+	/**
+	 * @brief Returns selected rule identities from a grouped tree in display order.
+	 * @param tree Rule tree to inspect.
+	 * @return Selected runtime identities.
+	 */
+	QList<quint64> selectedRuleIds(const QTreeWidget &tree)
+	{
+		QList<quint64> result;
+		for (int groupIndex = 0; groupIndex < tree.topLevelItemCount(); ++groupIndex)
+		{
+			const QTreeWidgetItem *const group = tree.topLevelItem(groupIndex);
+			for (int childIndex = 0; group && childIndex < group->childCount(); ++childIndex)
+			{
+				const QTreeWidgetItem *const child = group->child(childIndex);
+				if (child && child->isSelected())
+					result.push_back(child->data(0, Qt::UserRole).toULongLong());
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * @brief Replaces a grouped rule tree's selection with the requested identities.
+	 * @param tree Rule tree to update.
+	 * @param runtimeIds Runtime identities to select.
+	 * @param currentRuntimeId Identity to make current without changing the selection.
+	 */
+	void selectRuleTreeItems(QTreeWidget &tree, const QList<quint64> &runtimeIds,
+	                         const quint64 currentRuntimeId)
+	{
+		tree.clearSelection();
+		QTreeWidgetItem *current = nullptr;
+		for (int groupIndex = 0; groupIndex < tree.topLevelItemCount(); ++groupIndex)
+		{
+			QTreeWidgetItem *const group = tree.topLevelItem(groupIndex);
+			for (int childIndex = 0; group && childIndex < group->childCount(); ++childIndex)
+			{
+				QTreeWidgetItem *const child     = group->child(childIndex);
+				const quint64          runtimeId = child ? child->data(0, Qt::UserRole).toULongLong() : 0;
+				if (!runtimeIds.contains(runtimeId))
+					continue;
+				child->setSelected(true);
+				if (runtimeId == currentRuntimeId)
+					current = child;
+			}
+		}
+		QVERIFY(current);
+		tree.setCurrentItem(current, 0, QItemSelectionModel::NoUpdate);
 	}
 
 	/**
@@ -264,6 +371,24 @@ namespace
 				return row;
 		}
 		return -1;
+	}
+
+	/**
+	 * @brief Selects one runtime identity in the currently displayed rule view.
+	 * @param widgets Rule views to update.
+	 * @param treeMode Whether the grouped tree is displayed.
+	 * @param runtimeId Runtime identity to select.
+	 */
+	void selectRuleInActiveView(const RuleViewWidgets &widgets, const bool treeMode, const quint64 runtimeId)
+	{
+		if (treeMode)
+			selectRuleTreeItems(*widgets.tree, {runtimeId}, runtimeId);
+		else
+		{
+			const int row = findRuleRowByRuntimeId(*widgets.table, runtimeId);
+			QVERIFY(row >= 0);
+			selectRuleRows(*widgets.table, {row}, row);
+		}
 	}
 
 	/**
@@ -337,6 +462,36 @@ namespace
 			break;
 		}
 		}
+	}
+
+	/**
+	 * @brief Returns a unique serialized attribute for one fixture rule.
+	 * @param runtime Runtime containing the fixture.
+	 * @param kind Rule kind to inspect.
+	 * @param runtimeId Runtime identity to resolve.
+	 * @return Attribute fragment expected in copied XML.
+	 */
+	QString copiedRuleIdentity(const WorldRuntime &runtime, const RuleKind kind, const quint64 runtimeId)
+	{
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+			for (const auto &rule : runtime.triggers())
+				if (rule.runtimeId == runtimeId)
+					return QStringLiteral("match=\"%1\"").arg(rule.attributes.value(QStringLiteral("match")));
+			break;
+		case RuleKind::Alias:
+			for (const auto &rule : runtime.aliases())
+				if (rule.runtimeId == runtimeId)
+					return QStringLiteral("match=\"%1\"").arg(rule.attributes.value(QStringLiteral("match")));
+			break;
+		case RuleKind::Timer:
+			for (const auto &rule : runtime.timers())
+				if (rule.runtimeId == runtimeId)
+					return QStringLiteral("hour=\"%1\"").arg(rule.attributes.value(QStringLiteral("hour")));
+			break;
+		}
+		return {};
 	}
 
 	/**
@@ -2413,6 +2568,254 @@ namespace
 				         QStringLiteral("::"));
 			}
 
+			void ruleViewsSupportMultiSelectionForCopyAndRemoval()
+			{
+				for (const RuleKind kind : {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer})
+				{
+					for (const bool treeMode : {false, true})
+					{
+						WorldRuntime runtime;
+						populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+						WorldPreferencesDialog dialog(&runtime, nullptr);
+						dialog.setInitialPage(rulePage(kind));
+						const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+						QVERIFY(widgets.table);
+						QVERIFY(widgets.tree);
+						QVERIFY(widgets.editButton);
+						QVERIFY(widgets.removeButton);
+						QVERIFY(widgets.copyButton);
+						QVERIFY(widgets.treeToggle);
+						QCOMPARE(widgets.table->selectionMode(), QAbstractItemView::ExtendedSelection);
+						QCOMPARE(widgets.tree->selectionMode(), QAbstractItemView::ExtendedSelection);
+						QCOMPARE(widgets.treeToggle->isChecked(), treeMode);
+						QCOMPARE(widgets.table->rowCount(), 3);
+
+						const QList<quint64> expectedIds = {
+						    widgets.table->item(0, 0)->data(Qt::UserRole).toULongLong(),
+						    widgets.table->item(2, 0)->data(Qt::UserRole).toULongLong()};
+						if (treeMode)
+							selectRuleTreeItems(*widgets.tree, expectedIds, expectedIds.constLast());
+						else
+							selectRuleRows(*widgets.table, {0, 2}, 2);
+
+						QCOMPARE(selectedRuleIds(*widgets.table), treeMode ? QList<quint64>{} : expectedIds);
+						QCOMPARE(selectedRuleIds(*widgets.tree), treeMode ? expectedIds : QList<quint64>{});
+						QVERIFY(widgets.removeButton->isEnabled());
+						QVERIFY(widgets.copyButton->isEnabled());
+						if (kind != RuleKind::Timer)
+						{
+							QVERIFY(widgets.moveUpButton);
+							QVERIFY(widgets.moveDownButton);
+						}
+
+						QClipboard *const clipboard = QGuiApplication::clipboard();
+						QVERIFY(clipboard);
+						clipboard->clear();
+						widgets.copyButton->click();
+						const QString xml       = clipboard->text();
+						const QString itemStart = kind == RuleKind::Trigger ? QStringLiteral("<trigger ")
+						                          : kind == RuleKind::Alias ? QStringLiteral("<alias ")
+						                                                    : QStringLiteral("<timer ");
+						QCOMPARE(xml.count(itemStart), 2);
+						QVERIFY(xml.contains(copiedRuleIdentity(runtime, kind, expectedIds.at(0))));
+						QVERIFY(xml.contains(copiedRuleIdentity(runtime, kind, expectedIds.at(1))));
+
+						widgets.treeToggle->setChecked(!treeMode);
+						QCOMPARE(selectedRuleIds(*widgets.table), expectedIds);
+						QCOMPARE(selectedRuleIds(*widgets.tree), expectedIds);
+						const quint64 middleId = widgets.table->item(1, 0)->data(Qt::UserRole).toULongLong();
+						QVERIFY(!xml.contains(copiedRuleIdentity(runtime, kind, middleId)));
+						if (treeMode)
+							selectRuleRows(*widgets.table, {1}, 1);
+						else
+							selectRuleTreeItems(*widgets.tree, {middleId}, middleId);
+						QCOMPARE(treeMode ? selectedRuleIds(*widgets.tree) : selectedRuleIds(*widgets.table),
+						         expectedIds);
+						QCOMPARE(treeMode ? selectedRuleIds(*widgets.table) : selectedRuleIds(*widgets.tree),
+						         QList<quint64>{middleId});
+						widgets.treeToggle->setChecked(treeMode);
+						QCOMPARE(selectedRuleIds(*widgets.table), QList<quint64>{middleId});
+						QCOMPARE(selectedRuleIds(*widgets.tree), QList<quint64>{middleId});
+					}
+				}
+			}
+
+			/** @brief Verifies table-to-tree selection transfer exposes every selected rule group. */
+			void switchingToTreeExpandsAllSelectedRuleGroups()
+			{
+				for (const RuleKind kind : {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer})
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, false, true);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.tree);
+					QVERIFY(widgets.treeToggle);
+
+					QTreeWidgetItem *const primaryGroup =
+					    findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QTreeWidgetItem *const soleGroup = findRuleGroup(*widgets.tree, QStringLiteral("sole"));
+					QVERIFY(primaryGroup);
+					QVERIFY(soleGroup);
+					QVERIFY(!primaryGroup->isExpanded());
+					QVERIFY(!soleGroup->isExpanded());
+
+					QList<int>     rows;
+					QList<quint64> runtimeIds;
+					for (const QString &groupName : {QStringLiteral("primary"), QStringLiteral("sole")})
+					{
+						for (int row = 0; row < widgets.table->rowCount(); ++row)
+						{
+							const QTableWidgetItem *const groupItem = widgets.table->item(row, 4);
+							if (!groupItem || groupItem->text() != groupName)
+								continue;
+							rows.push_back(row);
+							runtimeIds.push_back(
+							    widgets.table->item(row, 0)->data(Qt::UserRole).toULongLong());
+							break;
+						}
+					}
+					QCOMPARE(rows.size(), 2);
+					selectRuleRows(*widgets.table, rows, rows.constLast());
+					QVERIFY(selectedRuleIds(*widgets.tree).isEmpty());
+					QVERIFY(!primaryGroup->isExpanded());
+					QVERIFY(!soleGroup->isExpanded());
+
+					widgets.treeToggle->setChecked(true);
+					QVERIFY(primaryGroup->isExpanded());
+					QVERIFY(soleGroup->isExpanded());
+					const QList<quint64> selectedTreeIds = selectedRuleIds(*widgets.tree);
+					QCOMPARE(QSet<quint64>(selectedTreeIds.cbegin(), selectedTreeIds.cend()),
+					         QSet<quint64>(runtimeIds.cbegin(), runtimeIds.cend()));
+
+					auto lastExpandedGroup = [&runtime, kind]
+					{
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+							return runtime.lastTriggerTreeExpandedGroup();
+						case RuleKind::Alias:
+							return runtime.lastAliasTreeExpandedGroup();
+						case RuleKind::Timer:
+							return runtime.lastTimerTreeExpandedGroup();
+						}
+						return QString();
+					};
+					QVERIFY(lastExpandedGroup().isEmpty());
+					primaryGroup->setExpanded(false);
+					QCOMPARE(lastExpandedGroup(), QStringLiteral("sole"));
+					primaryGroup->setExpanded(true);
+					QVERIFY(primaryGroup->isExpanded());
+					QVERIFY(!soleGroup->isExpanded());
+					QCOMPARE(lastExpandedGroup(), QStringLiteral("primary"));
+				}
+			}
+
+			void multipleRuleRemovalIsConfirmedOnceAndStagedByIdentity()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				for (const RuleKind kind : {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer})
+				{
+					for (const bool treeMode : {false, true})
+					{
+						WorldRuntime runtime;
+						runtime.applyDefaultWorldOptions();
+						runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Test World"));
+						runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+						runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+						populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+						WorldPreferencesDialog dialog(&runtime, nullptr);
+						dialog.setInitialPage(rulePage(kind));
+						const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+						QVERIFY(widgets.table);
+						QVERIFY(widgets.tree);
+						QVERIFY(widgets.removeButton);
+
+						const QList<quint64> removedIds = {
+						    widgets.table->item(0, 0)->data(Qt::UserRole).toULongLong(),
+						    widgets.table->item(2, 0)->data(Qt::UserRole).toULongLong()};
+						const quint64 survivorId =
+						    widgets.table->item(1, 0)->data(Qt::UserRole).toULongLong();
+						auto selectRemovedRules = [&]
+						{
+							if (treeMode)
+								selectRuleTreeItems(*widgets.tree, removedIds, removedIds.constLast());
+							else
+								selectRuleRows(*widgets.table, {0, 2}, 2);
+						};
+						selectRemovedRules();
+
+						bool cancellationHandled = false;
+						QVERIFY(QMetaObject::invokeMethod(
+						    &dialog,
+						    [&cancellationHandled]
+						    {
+							    auto *const message =
+							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    if (!message)
+								    return;
+							    cancellationHandled = true;
+							    message->button(QMessageBox::No)->click();
+						    },
+						    Qt::QueuedConnection));
+						widgets.removeButton->click();
+						QVERIFY(cancellationHandled);
+						QCOMPARE(widgets.table->rowCount(), 3);
+						QCOMPARE(selectedRuleIds(*widgets.table), treeMode ? QList<quint64>{} : removedIds);
+						QCOMPARE(selectedRuleIds(*widgets.tree), treeMode ? removedIds : QList<quint64>{});
+
+						QString confirmationText;
+						QVERIFY(QMetaObject::invokeMethod(
+						    &dialog,
+						    [&confirmationText]
+						    {
+							    auto *const message =
+							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    if (!message)
+								    return;
+							    confirmationText = message->text();
+							    message->button(QMessageBox::Yes)->click();
+						    },
+						    Qt::QueuedConnection));
+						widgets.removeButton->click();
+						const QString plural = kind == RuleKind::Alias     ? QStringLiteral("aliases")
+						                       : kind == RuleKind::Trigger ? QStringLiteral("triggers")
+						                                                   : QStringLiteral("timers");
+						QCOMPARE(confirmationText,
+						         QStringLiteral("Delete these 2 %1 - are you sure?").arg(plural));
+						QCOMPARE(widgets.table->rowCount(), 1);
+						QCOMPARE(widgets.table->item(0, 0)->data(Qt::UserRole).toULongLong(), survivorId);
+
+						auto runtimeIds = [&runtime, kind]
+						{
+							QList<quint64> result;
+							switch (kind)
+							{
+							case RuleKind::Trigger:
+								for (const auto &rule : runtime.triggers())
+									result.push_back(rule.runtimeId);
+								break;
+							case RuleKind::Alias:
+								for (const auto &rule : runtime.aliases())
+									result.push_back(rule.runtimeId);
+								break;
+							case RuleKind::Timer:
+								for (const auto &rule : runtime.timers())
+									result.push_back(rule.runtimeId);
+								break;
+							}
+							return result;
+						};
+						QCOMPARE(runtimeIds().size(), 3);
+						dialog.accept();
+						QCOMPARE(runtimeIds(), QList<quint64>{survivorId});
+					}
+				}
+			}
+
 			void ruleRemovalUsesAdjacentItemInDisplayedSortOrder()
 			{
 				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
@@ -3122,28 +3525,45 @@ namespace
 							QVERIFY(widgets.removeButton);
 
 							quint64 targetRuntimeId{0};
+							quint64 secondSelectedRuntimeId{0};
 							quint64 expectedSelectionRuntimeId{0};
 							switch (kind)
 							{
 							case RuleKind::Trigger:
-								targetRuntimeId = runtime.triggers().at(1).runtimeId;
-								expectedSelectionRuntimeId =
-								    runtime.triggers().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								targetRuntimeId            = runtime.triggers().at(1).runtimeId;
+								secondSelectedRuntimeId    = runtime.triggers().at(0).runtimeId;
+								expectedSelectionRuntimeId = runtime.triggers().at(2).runtimeId;
 								break;
 							case RuleKind::Alias:
-								targetRuntimeId = runtime.aliases().at(1).runtimeId;
-								expectedSelectionRuntimeId =
-								    runtime.aliases().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								targetRuntimeId            = runtime.aliases().at(1).runtimeId;
+								secondSelectedRuntimeId    = runtime.aliases().at(0).runtimeId;
+								expectedSelectionRuntimeId = runtime.aliases().at(2).runtimeId;
 								break;
 							case RuleKind::Timer:
-								targetRuntimeId = runtime.timers().at(1).runtimeId;
-								expectedSelectionRuntimeId =
-								    runtime.timers().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								targetRuntimeId            = runtime.timers().at(1).runtimeId;
+								secondSelectedRuntimeId    = runtime.timers().at(0).runtimeId;
+								expectedSelectionRuntimeId = runtime.timers().at(2).runtimeId;
 								break;
 							}
-							const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
-							QVERIFY(targetRow >= 0);
-							widgets.table->setCurrentCell(targetRow, 0);
+							if (removeSelectedDuringConfirmation)
+							{
+								if (treeMode)
+									selectRuleTreeItems(*widgets.tree,
+									                    {secondSelectedRuntimeId, targetRuntimeId},
+									                    targetRuntimeId);
+								else
+								{
+									const int secondRow =
+									    findRuleRowByRuntimeId(*widgets.table, secondSelectedRuntimeId);
+									const int targetRow =
+									    findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+									QVERIFY(secondRow >= 0);
+									QVERIFY(targetRow >= 0);
+									selectRuleRows(*widgets.table, {secondRow, targetRow}, targetRow);
+								}
+							}
+							else
+								selectRuleInActiveView(widgets, treeMode, targetRuntimeId);
 							if (treeMode)
 							{
 								QVERIFY(widgets.tree->currentItem());
@@ -3209,6 +3629,12 @@ namespace
 							         "Removal confirmation callback did not run.");
 							QVERIFY2(confirmationCallbackFailure.isEmpty(),
 							         qPrintable(confirmationCallbackFailure));
+							QCOMPARE(widgets.table->rowCount(), 2);
+							if (removeSelectedDuringConfirmation)
+							{
+								QVERIFY(findRuleRowByRuntimeId(*widgets.table, targetRuntimeId) >= 0);
+								QCOMPARE(findRuleRowByRuntimeId(*widgets.table, secondSelectedRuntimeId), -1);
+							}
 
 							switch (kind)
 							{
@@ -3222,10 +3648,6 @@ namespace
 								QCOMPARE(runtime.timers().size(), 2);
 								break;
 							}
-							const int remainingRow =
-							    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
-							QVERIFY(remainingRow >= 0);
-							QCOMPARE(widgets.table->currentRow(), remainingRow);
 							if (treeMode)
 							{
 								QVERIFY(widgets.tree->currentItem());
@@ -3235,7 +3657,92 @@ namespace
 								QCOMPARE(widgets.tree->currentItem()->parent()->text(0),
 								         QStringLiteral("primary"));
 							}
+							else
+							{
+								const int remainingRow =
+								    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
+								QVERIFY(remainingRow >= 0);
+								QCOMPARE(widgets.table->currentRow(), remainingRow);
+							}
 						}
+					}
+				}
+			}
+
+			void rejectedRemovalLeavesStaleRuleViewUntouched()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				for (const RuleKind kind : {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer})
+				{
+					for (const bool treeMode : {false, true})
+					{
+						WorldRuntime runtime;
+						populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+						WorldPreferencesDialog dialog(&runtime, nullptr);
+						dialog.setInitialPage(rulePage(kind));
+						const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+						QVERIFY(widgets.table);
+						QVERIFY(widgets.tree);
+						QVERIFY(widgets.removeButton);
+
+						const QList<quint64> selectedRuntimeIds = {
+						    widgets.table->item(0, 0)->data(Qt::UserRole).toULongLong(),
+						    widgets.table->item(2, 0)->data(Qt::UserRole).toULongLong()};
+						const quint64 removedRuntimeId = selectedRuntimeIds.constFirst();
+						if (treeMode)
+							selectRuleTreeItems(*widgets.tree, selectedRuntimeIds,
+							                    selectedRuntimeIds.constLast());
+						else
+							selectRuleRows(*widgets.table, {0, 2}, 2);
+						bool confirmationHandled = false;
+						QVERIFY(QMetaObject::invokeMethod(
+						    &dialog,
+						    [&runtime, &confirmationHandled, kind, removedRuntimeId]
+						    {
+							    switch (kind)
+							    {
+							    case RuleKind::Trigger:
+							    {
+								    QList<WorldRuntime::Trigger> rules = runtime.triggers();
+								    rules.removeIf([removedRuntimeId](const auto &rule)
+								                   { return rule.runtimeId == removedRuntimeId; });
+								    runtime.setTriggers(rules);
+								    break;
+							    }
+							    case RuleKind::Alias:
+							    {
+								    QList<WorldRuntime::Alias> rules = runtime.aliases();
+								    rules.removeIf([removedRuntimeId](const auto &rule)
+								                   { return rule.runtimeId == removedRuntimeId; });
+								    runtime.setAliases(rules);
+								    break;
+							    }
+							    case RuleKind::Timer:
+							    {
+								    QList<WorldRuntime::Timer> rules = runtime.timers();
+								    rules.removeIf([removedRuntimeId](const auto &rule)
+								                   { return rule.runtimeId == removedRuntimeId; });
+								    runtime.setTimers(rules);
+								    break;
+							    }
+							    }
+							    auto *const message =
+							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    if (!message)
+								    return;
+							    confirmationHandled = true;
+							    message->button(QMessageBox::No)->click();
+						    },
+						    Qt::QueuedConnection));
+						widgets.removeButton->click();
+						QVERIFY(confirmationHandled);
+						QCOMPARE(widgets.table->rowCount(), 3);
+						QVERIFY(findRuleRowByRuntimeId(*widgets.table, removedRuntimeId) >= 0);
+						QCOMPARE(selectedRuleIds(*widgets.table),
+						         treeMode ? QList<quint64>{} : selectedRuntimeIds);
+						QCOMPARE(selectedRuleIds(*widgets.tree),
+						         treeMode ? selectedRuntimeIds : QList<quint64>{});
 					}
 				}
 			}
@@ -3279,9 +3786,7 @@ namespace
 							otherRuntimeId             = runtime.timers().at(2).runtimeId;
 							break;
 						}
-						const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
-						QVERIFY(targetRow >= 0);
-						widgets.table->setCurrentCell(targetRow, 0);
+						selectRuleInActiveView(widgets, treeMode, targetRuntimeId);
 						if (treeMode)
 						{
 							QVERIFY(widgets.tree->currentItem());
@@ -3333,6 +3838,7 @@ namespace
 						removeClickReturned = true;
 						QCoreApplication::sendPostedEvents(&dialog, QEvent::MetaCall);
 						QVERIFY(!unexpectedConfirmation);
+						QCOMPARE(widgets.table->rowCount(), 3);
 
 						switch (kind)
 						{
@@ -3352,18 +3858,20 @@ namespace
 							QCOMPARE(runtime.timers().at(1).runtimeId, otherRuntimeId);
 							break;
 						}
-						const int selectedRow =
-						    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
-						QVERIFY(selectedRow >= 0);
-						QCOMPARE(widgets.table->currentRow(), selectedRow);
 						if (treeMode)
 						{
 							QVERIFY(widgets.tree->currentItem());
 							QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
-							         expectedSelectionRuntimeId);
+							         targetRuntimeId);
 							QVERIFY(widgets.tree->currentItem()->parent());
 							QCOMPARE(widgets.tree->currentItem()->parent()->text(0),
 							         QStringLiteral("primary"));
+						}
+						else
+						{
+							const int selectedRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+							QVERIFY(selectedRow >= 0);
+							QCOMPARE(widgets.table->currentRow(), selectedRow);
 						}
 					}
 				}
