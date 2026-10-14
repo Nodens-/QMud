@@ -11,6 +11,7 @@
 #define QMUD_WORLDRUNTIME_H
 
 #include "AnsiSgrParseUtils.h"
+#include "AtomicSharedPtrCompat.h"
 #include "IndexedRingBuffer.h"
 #include "LuaCallbackContinuation.h"
 #include "LuaExecutor.h"
@@ -8958,79 +8959,78 @@ class WorldRuntime : public QObject
 		    std::make_shared<LuaCallbackRuntimeLifetimeState>()};
 		std::shared_ptr<LuaScriptReloadCancellationState> m_luaScriptReloadCancellationState{
 		    std::make_shared<LuaScriptReloadCancellationState>()};
-		QDateTime                                        m_statusTime;
-		QDateTime                                        m_lastFlushTime;
-		QDateTime                                        m_clientStartTime;
-		QDateTime                                        m_worldStartTime;
-		int                                              m_mxpErrors{0};
-		bool                                             m_mxpActive{false};
-		bool                                             m_outputFrozen{false};
-		TextRectangleSettings                            m_textRectangle;
-		QMap<int, UdpListener>                           m_udpListeners;
-		TestSoundBackend                                 m_testSoundBackend;
-		mutable QMutex                                   m_testSoundBackendMutex;
-		std::atomic_bool                                 m_hasTestSoundBackend{false};
-		QPointer<SoundEngine>                            m_soundEngine;
-		std::atomic<std::shared_ptr<SoundEngineSession>> m_soundSession{
-		    std::shared_ptr<SoundEngineSession>{}};
-		std::atomic<quint64>           m_nextTestSoundPreparationToken{1};
-		int                            m_outputFontHeight{0};
-		int                            m_outputFontWidth{0};
-		int                            m_inputFontHeight{0};
-		int                            m_inputFontWidth{0};
-		int                            m_queuedCommandCount{0};
-		bool                           m_removeMapReverses{true};
-		qint64                         m_bytesIn{0};
-		qint64                         m_bytesOut{0};
-		int                            m_inputPacketCount{0};
-		int                            m_outputPacketCount{0};
-		bool                           m_isMapping{false};
-		bool                           m_variablesChanged{false};
-		bool                           m_lineOmittedFromOutput{false};
-		bool                           m_traceEnabled{false};
-		bool                           m_worldFileModified{false};
-		qint64                         m_newlinesReceived{0};
-		bool                           m_scriptFileChanged{false};
-		bool                           m_loadingDocument{false};
-		int                            m_drawOutputWindowCallbackInFlightDepth{0};
-		int                            m_screendrawMutationReplayDepth{0};
-		int                            m_drawOutputWindowMutationReplayDepth{0};
-		int                            m_suppressWorldOutputResizedCallbacks{0};
-		bool                           m_pluginInstallDeferred{false};
-		bool                           m_pluginInstallInProgress{false};
-		bool                           m_pluginInstallRetryQueued{false};
-		QVector<std::function<void()>> m_pluginInstallCommittedWaiters;
-		bool                           m_deferredConnectAfterPluginInstallPending{false};
-		bool                           m_deferredWorldConnectHandlersPending{false};
-		QString                        m_deferredConnectHost;
-		quint16                        m_deferredConnectPort{0};
-		int                            m_outputWindowRedrawCount{0};
-		QFileSystemWatcher            *m_scriptWatcher{nullptr};
-		mutable QString                m_cachedScriptFileModTimePath;
-		mutable QDateTime              m_cachedScriptFileModTime;
-		mutable bool                   m_cachedScriptFileModTimeInitialized{false};
-		mutable bool                   m_cachedScriptFileExists{false};
-		QVector<MxpTagFrame>           m_mxpTagStack;
-		QVector<MxpOpenTag>            m_mxpOpenTags;
-		QByteArray                     m_mxpTextBuffer;
-		QString                        m_windowTitleOverride;
-		QString                        m_mainTitleOverride;
-		class LuaCallbackEngine       *m_luaCallbacks{nullptr};
+		QDateTime                               m_statusTime;
+		QDateTime                               m_lastFlushTime;
+		QDateTime                               m_clientStartTime;
+		QDateTime                               m_worldStartTime;
+		int                                     m_mxpErrors{0};
+		bool                                    m_mxpActive{false};
+		bool                                    m_outputFrozen{false};
+		TextRectangleSettings                   m_textRectangle;
+		QMap<int, UdpListener>                  m_udpListeners;
+		TestSoundBackend                        m_testSoundBackend;
+		mutable QMutex                          m_testSoundBackendMutex;
+		std::atomic_bool                        m_hasTestSoundBackend{false};
+		QPointer<SoundEngine>                   m_soundEngine;
+		QMudAtomicSharedPtr<SoundEngineSession> m_soundSession{std::shared_ptr<SoundEngineSession>{}};
+		std::atomic<quint64>                    m_nextTestSoundPreparationToken{1};
+		int                                     m_outputFontHeight{0};
+		int                                     m_outputFontWidth{0};
+		int                                     m_inputFontHeight{0};
+		int                                     m_inputFontWidth{0};
+		int                                     m_queuedCommandCount{0};
+		bool                                    m_removeMapReverses{true};
+		qint64                                  m_bytesIn{0};
+		qint64                                  m_bytesOut{0};
+		int                                     m_inputPacketCount{0};
+		int                                     m_outputPacketCount{0};
+		bool                                    m_isMapping{false};
+		bool                                    m_variablesChanged{false};
+		bool                                    m_lineOmittedFromOutput{false};
+		bool                                    m_traceEnabled{false};
+		bool                                    m_worldFileModified{false};
+		qint64                                  m_newlinesReceived{0};
+		bool                                    m_scriptFileChanged{false};
+		bool                                    m_loadingDocument{false};
+		int                                     m_drawOutputWindowCallbackInFlightDepth{0};
+		int                                     m_screendrawMutationReplayDepth{0};
+		int                                     m_drawOutputWindowMutationReplayDepth{0};
+		int                                     m_suppressWorldOutputResizedCallbacks{0};
+		bool                                    m_pluginInstallDeferred{false};
+		bool                                    m_pluginInstallInProgress{false};
+		bool                                    m_pluginInstallRetryQueued{false};
+		QVector<std::function<void()>>          m_pluginInstallCommittedWaiters;
+		bool                                    m_deferredConnectAfterPluginInstallPending{false};
+		bool                                    m_deferredWorldConnectHandlersPending{false};
+		QString                                 m_deferredConnectHost;
+		quint16                                 m_deferredConnectPort{0};
+		int                                     m_outputWindowRedrawCount{0};
+		QFileSystemWatcher                     *m_scriptWatcher{nullptr};
+		mutable QString                         m_cachedScriptFileModTimePath;
+		mutable QDateTime                       m_cachedScriptFileModTime;
+		mutable bool                            m_cachedScriptFileModTimeInitialized{false};
+		mutable bool                            m_cachedScriptFileExists{false};
+		QVector<MxpTagFrame>                    m_mxpTagStack;
+		QVector<MxpOpenTag>                     m_mxpOpenTags;
+		QByteArray                              m_mxpTextBuffer;
+		QString                                 m_windowTitleOverride;
+		QString                                 m_mainTitleOverride;
+		class LuaCallbackEngine                *m_luaCallbacks{nullptr};
 		/**
 		 * Owns asynchronous mutation-delivery recovery as well as the Lua worker lanes. Its recovery
 		 * consumer re-enters this WorldRuntime, so the destructor must reset it explicitly before
 		 * destroying callback engines or any runtime cache/state; declaration order is not sufficient.
 		 */
-		std::unique_ptr<ILuaExecutor>  m_luaExecutor;
-		QString                        m_luaScriptText;
-		WorldCommandProcessor         *m_commandProcessor{nullptr};
-		bool                           m_initialStartPausedStateApplied{false};
-		QList<QString>                 m_mappingList;
-		qint64                         m_triggerTimeNs{0};
-		qint64                         m_aliasTimeNs{0};
-		QElapsedTimer                  m_lineTimer;
-		qint64                         m_nextLineNumber{1};
-		int                            m_outputLineNumberDiscontinuityCount{0};
+		std::unique_ptr<ILuaExecutor>           m_luaExecutor;
+		QString                                 m_luaScriptText;
+		WorldCommandProcessor                  *m_commandProcessor{nullptr};
+		bool                                    m_initialStartPausedStateApplied{false};
+		QList<QString>                          m_mappingList;
+		qint64                                  m_triggerTimeNs{0};
+		qint64                                  m_aliasTimeNs{0};
+		QElapsedTimer                           m_lineTimer;
+		qint64                                  m_nextLineNumber{1};
+		int                                     m_outputLineNumberDiscontinuityCount{0};
 		enum class LuaContextLineState : quint8
 		{
 			Inactive,

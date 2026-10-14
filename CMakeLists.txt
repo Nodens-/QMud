@@ -406,6 +406,7 @@ set(QMUD_SOURCES
 # Optionally collect headers (helps IDEs) — not required for build
 set(QMUD_HEADERS
         MainWindowHost.h
+        AtomicSharedPtrCompat.h
         helpers/MainWindowHostResolver.h
         Version.h
         MainFrame.h

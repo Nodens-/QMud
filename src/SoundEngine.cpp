@@ -8,6 +8,7 @@
 
 #include "SoundEngine.h"
 
+#include "AtomicSharedPtrCompat.h"
 #include "helpers/PluginPathUtils.h"
 #include "helpers/SoundCacheUtils.h"
 #include "helpers/SoundFileRoutingUtils.h"
@@ -55,7 +56,7 @@ namespace
 
 	struct SoundSessionPublishedState
 	{
-			std::atomic<std::shared_ptr<const SoundEngineSession::Snapshot>> snapshot{
+			QMudAtomicSharedPtr<const SoundEngineSession::Snapshot> snapshot{
 			    std::make_shared<SoundEngineSession::Snapshot>()};
 	};
 
