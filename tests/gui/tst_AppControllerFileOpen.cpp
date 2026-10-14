@@ -189,9 +189,10 @@ void tst_AppControllerFileOpen::startupFinalizationDrainsContainedRequestsInOrde
 		QVERIFY(!request.suppressAutoConnect);
 	QVERIFY(openTextDocumentPaths(window).isEmpty());
 
-	controller.m_splashMinDelayElapsed = true;
-	controller.m_initializeFinished    = true;
-	controller.m_initializeSucceeded   = true;
+	controller.m_splashMinDelayElapsed       = true;
+	controller.m_initializeFinished          = true;
+	controller.m_initializeSucceeded         = true;
+	controller.m_soundInitializationResolved = true;
 	controller.finalizeStartupIfReady();
 
 	QVERIFY(controller.m_startupFinalized);

@@ -334,6 +334,7 @@ set(QMUD_SOURCES
         helpers/NoteColourUtils.cpp
         helpers/WorldCommandProcessorUtils.cpp
         helpers/SoundFileRoutingUtils.cpp
+        SoundEngine.cpp
         helpers/ShortcutPreferenceUtils.cpp
         helpers/LuaExecutionUtils.cpp
         helpers/LuaModalDialogUtils.cpp
@@ -435,6 +436,7 @@ set(QMUD_HEADERS
         CommandMappingTypes.h
         helpers/WorldCommandProcessorUtils.h
         helpers/SoundFileRoutingUtils.h
+        SoundEngine.h
         helpers/ShortcutPreferenceUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h

@@ -6953,7 +6953,7 @@ void WorldPreferencesDialog::buildUi()
 			        const QString fileName = m_beepSound->text().trimmed();
 			        if (fileName.isEmpty())
 				        return;
-			        m_runtime->playSound(0, fileName, false, 0.0, 0.0);
+			        m_runtime->playSoundIntercepted(0, fileName, false, 0.0, 0.0);
 		        });
 	if (m_browseActivitySound && m_newActivitySound)
 		connect(m_browseActivitySound, &QPushButton::clicked, this,
@@ -6967,7 +6967,7 @@ void WorldPreferencesDialog::buildUi()
 			        const QString fileName = m_newActivitySound->text().trimmed();
 			        if (fileName.isEmpty() || fileName == QStringLiteral("(No sound)"))
 				        return;
-			        m_runtime->playSound(0, fileName, false, 0.0, 0.0);
+			        m_runtime->playSoundIntercepted(0, fileName, false, 0.0, 0.0);
 		        });
 	if (m_noActivitySound && m_newActivitySound)
 		connect(m_noActivitySound, &QPushButton::clicked, this,

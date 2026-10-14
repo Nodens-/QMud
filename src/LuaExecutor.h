@@ -2913,12 +2913,13 @@ struct LuaCallbackUdpPresentationSnapshot
 };
 
 /**
- * @brief Immutable owner-published sound-buffer presentation used by callback snapshots.
+ * @brief Immutable owner-published sound-buffer presentation keyed by sound session and revision.
  */
 struct LuaCallbackSoundPresentationSnapshot
 {
-		QHash<int, int>  statusByBuffer;
-		QHash<int, bool> reusableByBuffer;
+		quint64         sessionId{0};
+		quint64         revision{0};
+		QHash<int, int> statusByBuffer;
 };
 
 /**
@@ -3305,7 +3306,6 @@ struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
 		QSet<int>                                           usedUdpPortsSnapshot;
 		QHash<int, int>                                     usedUdpPortReferenceCountsSnapshot;
 		QHash<int, int>                                     soundStatusByBuffer;
-		QHash<int, bool>                                    soundBufferReusableByBuffer;
 		// Request-local callback line context and overlays.
 		bool                                                hasLineBufferSnapshot{false};
 		int                                                 lineBufferCount{0};

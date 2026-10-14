@@ -45,6 +45,7 @@ class WorldChildWindow;
 class WorldDocument;
 class WorldRuntime;
 class WorldView;
+class SoundEngine;
 class QMdiSubWindow;
 class NameGenerator;
 class QDialog;
@@ -1325,6 +1326,7 @@ class AppController : public QObject
 		bool                                 m_splashMinDelayElapsed{false};
 		bool                                 m_initializeFinished{false};
 		bool                                 m_initializeSucceeded{false};
+		bool                                 m_soundInitializationResolved{false};
 		bool                                 m_startupFinalized{false};
 		bool                                 m_fileAssociationDispatchReady{false};
 		bool                                 m_startupFirstTime{false};
@@ -1360,6 +1362,7 @@ class AppController : public QObject
 		QVector<QMudColorRef>            m_xterm256Colours = QVector<QMudColorRef>(256);
 		QHash<QString, MapDirection>     m_mapDirections;
 		QScopedPointer<NameGenerator>    m_nameGenerator;
+		std::unique_ptr<SoundEngine>     m_soundEngine;
 		QSqlDatabase                     m_db;
 		QString                          m_dbConnectionName;
 		ActivityDocument                *m_activityDoc{nullptr};

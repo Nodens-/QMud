@@ -27,6 +27,7 @@
 #include "MushclientImportUtils.h"
 #include "NameGeneration.h"
 #include "ReloadUtils.h"
+#include "SoundEngine.h"
 #include "SqliteCompat.h"
 #include "UpdateCheckUtils.h"
 #include "Version.h"
@@ -1952,69 +1953,71 @@ static const struct
 } kGlobalOptionsTable[] = {
 
     // option name                          default
-    {"AllTypingToCommandWindow",        1                       },
-    {"AlwaysOnTop",                     0                       },
-    {"AppendToLogFiles",                0                       },
-    {"AutoConnectWorlds",               1                       },
-    {"AutoExpandConfig",                1                       },
-    {"AutoCheckForUpdates",             1                       },
-    {"BackupOnUpgrades",                1                       },
-    {"FlatToolbars",                    1                       },
-    {"AutoLogWorld",                    0                       },
-    {"BleedBackground",                 0                       },
-    {"ColourGradientConfig",            1                       },
-    {"ConfirmBeforeClosingMXPdebug",    0                       },
-    {"ConfirmBeforeClosingQmud",        0                       },
-    {"ConfirmBeforeClosingWorld",       1                       },
-    {"ConfirmBeforeSavingVariables",    1                       },
-    {"ConfirmLogFileClose",             1                       },
-    {"EnableSpellCheck",                1                       },
-    {"AllowLoadingDlls",                1                       },
-    {"F1macro",                         0                       },
-    {"DisableWindowScaler",             1                       },
-    {"FixedFontForEditing",             1                       },
-    {"NotepadWordWrap",                 1                       },
-    {"NotifyIfCannotConnect",           1                       },
-    {"ErrorNotificationToOutputWindow", 1                       },
-    {"NotifyOnDisconnect",              1                       },
-    {"OpenActivityWindow",              0                       },
-    {"OpenWorldsMaximised",             0                       },
-    {"WindowTabsStyle",                 0                       },
-    {"SplitViewDividerWidth",           kSplitDividerDefault    },
-    {"ReconnectOnLinkFailure",          0                       },
-    {"EnableReloadFeature",             1                       },
-    {"RegexpMatchEmpty",                1                       },
-    {"ShowGridLinesInListViews",        1                       },
-    {"SmoothScrolling",                 0                       },
-    {"SmootherScrolling",               0                       },
-    {"DisableKeyboardMenuActivation",   0                       },
-    {"TriggerRemoveCheck",              1                       },
-    {"NotepadBackColour",               0                       },
-    {"NotepadTextColour",               0                       },
-    {"ActivityButtonBarStyle",          0                       },
-    {"AsciiArtLayout",                  0                       },
-    {"DefaultInputFontHeight",          9                       },
-    {"DefaultInputFontItalic",          0                       },
-    {"DefaultInputFontWeight",          400                     },
-    {"DefaultOutputFontHeight",         9                       },
-    {"Icon Placement",                  0                       },
-    {"Tray Icon",                       0                       }, // normal icon
-    {"ActivityWindowRefreshInterval",   15                      },
-    {"ActivityWindowRefreshType",       2                       },
-    {"ParenMatchFlags",                 0x0001 | 0x0020 | 0x0040},
-    {"PrinterFontSize",                 10                      },
-    {"PrinterFontItalic",               0                       },
-    {"PrinterFontWeight",               400                     },
-    {"PrinterLeftMargin",               15                      },
-    {"PrinterLinesPerPage",             60                      },
-    {"PrinterTopMargin",                15                      },
-    {"ReloadMccpDisableTimeoutMs",      1000                    },
-    {"TimerInterval",                   0                       },
-    {"UpdateCheckIntervalHours",        1                       },
-    {"FixedPitchFontSize",              9                       },
-    {"TabInsertsTabInMultiLineDialogs", 0                       },
+    {"AllTypingToCommandWindow",            1                                                    },
+    {"AlwaysOnTop",                         0                                                    },
+    {"AppendToLogFiles",                    0                                                    },
+    {"AutoConnectWorlds",                   1                                                    },
+    {"AutoExpandConfig",                    1                                                    },
+    {"AutoCheckForUpdates",                 1                                                    },
+    {"BackupOnUpgrades",                    1                                                    },
+    {"FlatToolbars",                        1                                                    },
+    {"AutoLogWorld",                        0                                                    },
+    {"BleedBackground",                     0                                                    },
+    {"ColourGradientConfig",                1                                                    },
+    {"ConfirmBeforeClosingMXPdebug",        0                                                    },
+    {"ConfirmBeforeClosingQmud",            0                                                    },
+    {"ConfirmBeforeClosingWorld",           1                                                    },
+    {"ConfirmBeforeSavingVariables",        1                                                    },
+    {"ConfirmLogFileClose",                 1                                                    },
+    {"EnableSpellCheck",                    1                                                    },
+    {"AllowLoadingDlls",                    1                                                    },
+    {"F1macro",                             0                                                    },
+    {"DisableWindowScaler",                 1                                                    },
+    {"FixedFontForEditing",                 1                                                    },
+    {"NotepadWordWrap",                     1                                                    },
+    {"NotifyIfCannotConnect",               1                                                    },
+    {"ErrorNotificationToOutputWindow",     1                                                    },
+    {"NotifyOnDisconnect",                  1                                                    },
+    {"OpenActivityWindow",                  0                                                    },
+    {"OpenWorldsMaximised",                 0                                                    },
+    {"WindowTabsStyle",                     0                                                    },
+    {"SplitViewDividerWidth",               kSplitDividerDefault                                 },
+    {"SoundEngineRamCacheSizeMB",           SoundEngine::CachePolicy::kDefaultRamCacheSizeMiB    },
+    {"SoundEngineIdleCacheEvictionSeconds", SoundEngine::CachePolicy::kDefaultIdleEvictionSeconds},
+    {"ReconnectOnLinkFailure",              0                                                    },
+    {"EnableReloadFeature",                 1                                                    },
+    {"RegexpMatchEmpty",                    1                                                    },
+    {"ShowGridLinesInListViews",            1                                                    },
+    {"SmoothScrolling",                     0                                                    },
+    {"SmootherScrolling",                   0                                                    },
+    {"DisableKeyboardMenuActivation",       0                                                    },
+    {"TriggerRemoveCheck",                  1                                                    },
+    {"NotepadBackColour",                   0                                                    },
+    {"NotepadTextColour",                   0                                                    },
+    {"ActivityButtonBarStyle",              0                                                    },
+    {"AsciiArtLayout",                      0                                                    },
+    {"DefaultInputFontHeight",              9                                                    },
+    {"DefaultInputFontItalic",              0                                                    },
+    {"DefaultInputFontWeight",              400                                                  },
+    {"DefaultOutputFontHeight",             9                                                    },
+    {"Icon Placement",                      0                                                    },
+    {"Tray Icon",                           0                                                    }, // normal icon
+    {"ActivityWindowRefreshInterval",       15                                                   },
+    {"ActivityWindowRefreshType",           2                                                    },
+    {"ParenMatchFlags",                     0x0001 | 0x0020 | 0x0040                             },
+    {"PrinterFontSize",                     10                                                   },
+    {"PrinterFontItalic",                   0                                                    },
+    {"PrinterFontWeight",                   400                                                  },
+    {"PrinterLeftMargin",                   15                                                   },
+    {"PrinterLinesPerPage",                 60                                                   },
+    {"PrinterTopMargin",                    15                                                   },
+    {"ReloadMccpDisableTimeoutMs",          1000                                                 },
+    {"TimerInterval",                       0                                                    },
+    {"UpdateCheckIntervalHours",            1                                                    },
+    {"FixedPitchFontSize",                  9                                                    },
+    {"TabInsertsTabInMultiLineDialogs",     0                                                    },
 
-    {nullptr,                           0                       }  // end of table marker
+    {nullptr,                               0                                                    }  // end of table marker
 }; // end of table
 
 // strings
@@ -2370,6 +2373,15 @@ AppController::AppController(const bool disableAutoConnectForExecution, QObject 
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
+	m_soundEngine = std::make_unique<SoundEngine>(this);
+	connect(m_soundEngine.get(), &SoundEngine::playbackInitializationFinished, this,
+	        [this](const bool available)
+	        {
+		        if (!available)
+			        qWarning() << "Sound engine initialization timed out; sound is disabled.";
+		        m_soundInitializationResolved = true;
+		        finalizeStartupIfReady();
+	        });
 	refreshWorldViewGlobalSettings();
 	if (QCoreApplication *application = QCoreApplication::instance())
 		application->installEventFilter(this);
@@ -2534,6 +2546,11 @@ void AppController::startWithSplash()
 {
 	if (m_startupFinalized)
 		return;
+	m_soundInitializationResolved = false;
+	if (m_soundEngine)
+		m_soundEngine->initializePlayback();
+	else
+		m_soundInitializationResolved = true;
 
 	static constexpr int kMinSplashVisibleMs = 500;
 	m_splashMinDelayElapsed                  = false;
@@ -5001,6 +5018,7 @@ bool AppController::openWorldDocument(const QString &path, const InitialAutoConn
 		auto *runtime = new WorldRuntime(m_mainWindow);
 		runtime->setClientStartTime(m_whenClientStarted);
 		runtime->setStartupDirectory(m_workingDir);
+		runtime->attachSoundEngine(m_soundEngine.get());
 		runtime->setDefaultWorldDirectory(
 		    makeAbsolutePath(getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString()));
 		runtime->setDefaultLogDirectory(
@@ -5213,6 +5231,7 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 	runtime->applyDefaultWorldOptions();
 	runtime->setClientStartTime(m_whenClientStarted);
 	runtime->setStartupDirectory(m_workingDir);
+	runtime->attachSoundEngine(m_soundEngine.get());
 	runtime->setDefaultWorldDirectory(
 	    makeAbsolutePath(getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString()));
 	runtime->setDefaultLogDirectory(
@@ -5816,6 +5835,14 @@ void AppController::loadToolbarLayout() const
 
 void AppController::applyGlobalPreferences()
 {
+	if (m_soundEngine)
+	{
+		SoundEngine::CachePolicy cachePolicy;
+		cachePolicy.ramCacheSizeMiB = getGlobalOption(QStringLiteral("SoundEngineRamCacheSizeMB")).toInt();
+		cachePolicy.idleEvictionSeconds =
+		    getGlobalOption(QStringLiteral("SoundEngineIdleCacheEvictionSeconds")).toInt();
+		m_soundEngine->configureCache(cachePolicy);
+	}
 	applyWindowPreferences();
 	applyUpdatePreferences();
 	applyViewPreferences();
@@ -8245,6 +8272,8 @@ void AppController::finalizeStartupIfReady()
 {
 	if (m_startupFinalized || !m_splashMinDelayElapsed || !m_initializeFinished)
 		return;
+	if (m_initializeSucceeded && !m_soundInitializationResolved)
+		return;
 
 	m_startupFinalized = true;
 	hideSplashScreen();
@@ -9898,7 +9927,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		auto *runtime = world->runtime();
 		if (!runtime)
 			return;
-		runtime->stopSound(0);
+		runtime->cancelSoundIntercepted();
 	}
 	else if (cmdName == QStringLiteral("MultiLineTrigger"))
 	{

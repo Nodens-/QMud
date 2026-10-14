@@ -37,6 +37,7 @@
 #include "PluginCallbackCatalogUtils.h"
 #include "PluginCallbackDispatchUtils.h"
 #include "ReloadUtils.h"
+#include "SoundEngine.h"
 #include "SqliteCompat.h"
 #include "StartTlsFallbackUtils.h"
 #include "StringUtils.h"
@@ -56,7 +57,6 @@
 #include "helpers/NoteColourUtils.h"
 #include "helpers/OutputWrapUtils.h"
 #include "helpers/PluginPathUtils.h"
-#include "helpers/SoundFileRoutingUtils.h"
 #include "helpers/TimerSchedulingUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -92,6 +92,8 @@
 #include <QScopeGuard>
 #include <QStringConverter>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QPointer>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -101,17 +103,10 @@
 #include <QTimeZone>
 #include <QTimer>
 #include <QUdpSocket>
-#include <QtSql/QSqlError>
-#include <QtSql/QSqlRecord>
-#if QMUD_ENABLE_SOUND
-#include <QAudioOutput>
-#include <QMediaPlayer>
-#include <QSoundEffect>
-#include <QTemporaryFile>
-#endif
-#include <QPointer>
 #include <QUrl>
 #include <QtMath>
+#include <QtSql/QSqlError>
+#include <QtSql/QSqlRecord>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -7446,8 +7441,7 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 	m_worldStartTime = QDateTime::currentDateTimeUtc();
 	m_lineTimer.start();
 	m_nextLineNumber = 1;
-	m_soundBuffers.resize(kMaxSoundBuffers);
-	m_scriptWatcher = new QFileSystemWatcher(this);
+	m_scriptWatcher  = new QFileSystemWatcher(this);
 	connect(m_scriptWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &changedPath)
 	        { refreshScriptFileWatcher(true, changedPath == m_cachedScriptFileModTimePath); });
 	connect(m_scriptWatcher, &QFileSystemWatcher::directoryChanged, this,
@@ -7752,11 +7746,6 @@ WorldRuntime::~WorldRuntime()
 	for (const QString &name : dbNames)
 		databaseClose(name);
 
-#if QMUD_ENABLE_SOUND
-	for (SoundBuffer &buffer : m_soundBuffers)
-		clearSoundBuffer(buffer);
-#endif
-
 	for (int const fontId : std::as_const(m_specialFontIds))
 		QFontDatabase::removeApplicationFont(fontId);
 	m_specialFontIds.clear();
@@ -7782,7 +7771,8 @@ void WorldRuntime::beginRuntimeDestruction()
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::beginRuntimeDestruction");
 	if (m_runtimeDestructionStarted)
 		return;
-	m_runtimeDestructionStarted        = true;
+	m_runtimeDestructionStarted = true;
+	detachSoundEngine();
 	auto discardPacketDebugTransaction = [](const QSharedPointer<OutboundCommandTransaction> &transaction)
 	{
 		if (!transaction)
@@ -9399,7 +9389,7 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 			if (!beepSound.isEmpty())
 			{
 				for (int i = 0; i < bellCount; ++i)
-					playSound(0, beepSound, false, 0.0, 0.0);
+					playSoundIntercepted(0, beepSound, false, 0.0, 0.0);
 			}
 			else
 			{
@@ -12735,7 +12725,7 @@ void WorldRuntime::incrementNewLines()
 			const bool allowBackground =
 			    isEnabledFlag(m_worldAttributes.value(QStringLiteral("play_sounds_in_background")));
 			if (appFocusedForSound || allowBackground)
-				playSound(0, sound, false, 0.0, 0.0);
+				playSoundIntercepted(0, sound, false, 0.0, 0.0);
 		}
 	}
 }
@@ -16032,7 +16022,6 @@ void WorldRuntime::clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot 
 	snapshot.usedUdpPortReferenceCountsSnapshot.clear();
 
 	snapshot.soundStatusByBuffer.clear();
-	snapshot.soundBufferReusableByBuffer.clear();
 
 	snapshot.hasUiSnapshot = false;
 	snapshot.guiSystemValues.clear();
@@ -16885,8 +16874,7 @@ void WorldRuntime::populateLuaCallbackSoundSnapshot(LuaCallbackSnapshot &snapsho
 	snapshot.soundPresentation = luaCallbackSoundPresentationSnapshot();
 	if (!snapshot.soundPresentation)
 		return;
-	snapshot.soundStatusByBuffer         = snapshot.soundPresentation->statusByBuffer;
-	snapshot.soundBufferReusableByBuffer = snapshot.soundPresentation->reusableByBuffer;
+	snapshot.soundStatusByBuffer = snapshot.soundPresentation->statusByBuffer;
 }
 
 QSharedPointer<const LuaCallbackCommandUiPresentationSnapshot>
@@ -16922,17 +16910,36 @@ QSharedPointer<const LuaCallbackSoundPresentationSnapshot>
 WorldRuntime::luaCallbackSoundPresentationSnapshot() const
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::luaCallbackSoundPresentationSnapshot");
-	const bool testBackendCanChangeExternally = m_testSoundBackend.status || m_testSoundBackend.reusable;
+	TestSoundBackend testBackend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		testBackend = m_testSoundBackend;
+	}
+	const bool testBackendCanChangeExternally           = static_cast<bool>(testBackend.status);
+	const std::shared_ptr<SoundEngineSession> session   = m_soundSession.load(std::memory_order_acquire);
+	const quint64                             sessionId = session ? session->id() : 0;
+	const std::shared_ptr<const SoundEngineSession::Snapshot> engineSnapshot =
+	    session ? session->snapshot() : nullptr;
+	const quint64 sessionRevision = engineSnapshot ? engineSnapshot->revision : 0;
 	if (!testBackendCanChangeExternally && m_luaCallbackSoundPresentationSnapshot &&
-	    !m_luaCallbackSoundPresentationDirty)
+	    !m_luaCallbackSoundPresentationDirty &&
+	    m_luaCallbackSoundPresentationSnapshot->sessionId == sessionId &&
+	    m_luaCallbackSoundPresentationSnapshot->revision == sessionRevision)
 	{
 		return m_luaCallbackSoundPresentationSnapshot;
 	}
-	auto presentation = QSharedPointer<LuaCallbackSoundPresentationSnapshot>::create();
+	auto presentation       = QSharedPointer<LuaCallbackSoundPresentationSnapshot>::create();
+	presentation->sessionId = sessionId;
+	presentation->revision  = sessionRevision;
+	presentation->statusByBuffer.reserve(kMaxSoundBuffers);
 	for (int buffer = 1; buffer <= kMaxSoundBuffers; ++buffer)
 	{
-		presentation->statusByBuffer.insert(buffer, soundStatus(buffer));
-		presentation->reusableByBuffer.insert(buffer, soundBufferReusableForNativeAudio(buffer));
+		const auto index  = static_cast<std::size_t>(buffer - 1);
+		const int  status = testBackend.status ? testBackend.status(buffer)
+		                    : engineSnapshot   ? engineSnapshot->status[index]
+		                                       : -3;
+		presentation->statusByBuffer.insert(buffer, status);
 	}
 	m_luaCallbackSoundPresentationSnapshot = std::move(presentation);
 	m_luaCallbackSoundPresentationDirty    = false;
@@ -18063,114 +18070,6 @@ QString WorldRuntime::lastTelnetSubnegotiation() const
 	return m_lastTelnetSubnegotiation;
 }
 
-#if QMUD_ENABLE_SOUND
-static double normalizeSoundVolume(double volume)
-{
-	if (volume > 0.0 || volume < -100.0)
-		volume = 0.0;
-	const double scaled = 1.0 + (volume / 100.0);
-	return qBound(0.0, scaled, 1.0);
-}
-
-static QString mediaPlayerErrorName(const QMediaPlayer::Error error)
-{
-	switch (error)
-	{
-	case QMediaPlayer::NoError:
-		return QStringLiteral("NoError");
-	case QMediaPlayer::ResourceError:
-		return QStringLiteral("ResourceError");
-	case QMediaPlayer::FormatError:
-		return QStringLiteral("FormatError");
-	case QMediaPlayer::NetworkError:
-		return QStringLiteral("NetworkError");
-	case QMediaPlayer::AccessDeniedError:
-		return QStringLiteral("AccessDeniedError");
-	}
-	return QStringLiteral("UnknownError");
-}
-
-bool WorldRuntime::soundBufferHasBackend(const SoundBuffer &entry)
-{
-	return entry.effect || entry.player;
-}
-
-bool WorldRuntime::soundBufferIsPlaying(const SoundBuffer &entry)
-{
-	if (entry.effect)
-		return entry.effect->isPlaying();
-	if (entry.player)
-		return entry.player->playbackState() == QMediaPlayer::PlayingState;
-	return false;
-}
-
-bool WorldRuntime::soundBufferIsReusable(const SoundBuffer &entry)
-{
-	if (!soundBufferHasBackend(entry))
-		return true;
-	if (!entry.playbackStarted)
-		return false;
-	if (entry.looping)
-		return false;
-	return !soundBufferIsPlaying(entry);
-}
-
-bool WorldRuntime::soundBufferIsStealable(const SoundBuffer &entry)
-{
-	return soundBufferHasBackend(entry) && entry.playbackStarted;
-}
-
-void WorldRuntime::clearSoundBuffer(SoundBuffer &entry)
-{
-	QSoundEffect   *effect   = std::exchange(entry.effect, nullptr);
-	QMediaPlayer   *player   = std::exchange(entry.player, nullptr);
-	QTemporaryFile *tempFile = std::exchange(entry.tempFile, nullptr);
-	entry.audioOutput        = nullptr;
-	entry.playbackStarted    = false;
-	entry.looping            = false;
-	entry.volume             = 1.0;
-	entry.pan                = 0.0;
-
-	if (effect)
-	{
-		QObject::disconnect(effect, nullptr, nullptr, nullptr);
-		effect->stop();
-		effect->setSource(QUrl());
-		effect->deleteLater();
-	}
-	if (player)
-	{
-		QObject::disconnect(player, nullptr, nullptr, nullptr);
-		player->stop();
-		player->setSource(QUrl());
-		player->deleteLater();
-	}
-	delete tempFile;
-}
-
-WorldRuntime::SoundBuffer *WorldRuntime::soundBufferForEffectSignal(const QSoundEffect *effect,
-                                                                    const int           targetBuffer)
-{
-	if (!effect || targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
-		return nullptr;
-	SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
-	return current.effect == effect ? &current : nullptr;
-}
-
-WorldRuntime::SoundBuffer *WorldRuntime::soundBufferForPlayerSignal(const QMediaPlayer *player,
-                                                                    const int           targetBuffer)
-{
-	if (!player || targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
-		return nullptr;
-	SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
-	return current.player == player ? &current : nullptr;
-}
-
-bool WorldRuntime::shouldUseMediaPlayerForSoundFile(const QString &fileName)
-{
-	return soundFilePlaybackBackendForFile(fileName) == SoundFilePlaybackBackend::QMediaPlayer;
-}
-
 struct WorldRuntime::PendingSoundPluginDecision final : LuaCallbackResultContinuation
 {
 		QPointer<WorldRuntime> runtime;
@@ -18180,8 +18079,10 @@ struct WorldRuntime::PendingSoundPluginDecision final : LuaCallbackResultContinu
 		{
 			if (!runtime)
 			{
-				if (operation.mutationCompletion)
-					operation.mutationCompletion(true);
+				if (operation.soundSession && operation.preparationToken != 0)
+					operation.soundSession->cancelPrepared(operation.preparationToken);
+				if (operation.completion)
+					operation.completion(eCannotPlaySound);
 				return;
 			}
 			static_cast<void>(runtime->completeSoundPluginDecision(
@@ -18192,10 +18093,10 @@ struct WorldRuntime::PendingSoundPluginDecision final : LuaCallbackResultContinu
 		{
 			if (!runtime)
 			{
+				if (operation.soundSession && operation.preparationToken != 0)
+					operation.soundSession->cancelPrepared(operation.preparationToken);
 				if (operation.completion)
 					operation.completion(eCannotPlaySound);
-				if (operation.mutationCompletion)
-					operation.mutationCompletion(true);
 				return;
 			}
 			runtime->cancelSoundPluginDecision(operation);
@@ -18205,9 +18106,11 @@ struct WorldRuntime::PendingSoundPluginDecision final : LuaCallbackResultContinu
 int WorldRuntime::startSoundPluginDecision(const PendingSoundOperation &operation)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::startSoundPluginDecision");
-	Q_ASSERT(!m_soundPluginCallbackPending);
-	m_soundPluginCallbackPending = true;
-
+	if (m_runtimeDestructionStarted)
+	{
+		finishCancelledSoundOperation(operation);
+		return eCannotPlaySound;
+	}
 	LuaBatchDispatchRequest request;
 	request.kind          = LuaBatchDispatchKind::StringHandled;
 	request.callbackEvent = LuaCallbackEvent::PlaySound;
@@ -18232,90 +18135,60 @@ int WorldRuntime::startSoundPluginDecision(const PendingSoundOperation &operatio
 	                                   callback.result.boolResultValid ? callback.result.boolResult : false);
 }
 
-int WorldRuntime::completeSoundPluginDecision(const PendingSoundOperation &operation, const bool handled)
+int WorldRuntime::completeSoundPluginDecision(const PendingSoundOperation &operation,
+                                              const bool                   handled) const
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::completeSoundPluginDecision");
+	const QString callbackArgument =
+	    operation.kind == PendingSoundOperation::Kind::Play ? operation.fileName : QString();
+	const bool handledByNative =
+	    !handled && QMudNativePluginRegistry::handleLuaAudioPlaySound(this, callbackArgument);
+
 	int result = eOK;
-	if (!handled &&
-	    !QMudNativePluginRegistry::handleLuaAudioPlaySound(
-	        this, operation.kind == PendingSoundOperation::Kind::Play ? operation.fileName : QString()))
+	if (handled || handledByNative)
 	{
-		result = operation.kind == PendingSoundOperation::Kind::Play
-		             ? playSoundBypassingPluginCallbacks(operation.buffer, operation.fileName, operation.loop,
-		                                                 operation.volume, operation.pan)
-		             : stopSoundBypassingPluginCallbacks(operation.buffer);
+		if (operation.soundSession && operation.preparationToken != 0)
+			operation.soundSession->cancelPrepared(operation.preparationToken);
+	}
+	else if (operation.kind == PendingSoundOperation::Kind::Play)
+	{
+		if (operation.soundSession && operation.preparationToken != 0)
+		{
+			result = operation.soundSession->commitPrepared(operation.preparationToken, operation.buffer,
+			                                                operation.loop, operation.volume, operation.pan);
+		}
+		else
+		{
+			result = playSoundDirect(operation.buffer, operation.fileName, operation.loop, operation.volume,
+			                         operation.pan);
+		}
+	}
+	else
+	{
+		result = stopSoundDirect(0);
 	}
 	if (operation.completion)
 		operation.completion(result);
-	if (operation.mutationCompletion)
-		operation.mutationCompletion(false);
-	m_soundPluginCallbackPending = false;
-	drainPendingSoundOperations();
 	return result;
 }
 
-void WorldRuntime::cancelSoundPluginDecision(const PendingSoundOperation &operation)
+void WorldRuntime::cancelSoundPluginDecision(const PendingSoundOperation &operation) const
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::cancelSoundPluginDecision");
-	Q_ASSERT(m_soundPluginCallbackPending);
 	finishCancelledSoundOperation(operation);
-	m_soundPluginCallbackPending = false;
-	if (!m_runtimeDestructionStarted)
-		drainPendingSoundOperations();
 }
 
-void WorldRuntime::drainPendingSoundOperations()
+int WorldRuntime::playSoundIntercepted(const int buffer, const QString &fileName, const bool loop,
+                                       const double volume, const double pan)
 {
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::drainPendingSoundOperations");
-	if (m_runtimeDestructionStarted || m_drainingPendingSoundOperations || m_soundPluginCallbackPending)
-		return;
-	m_drainingPendingSoundOperations = true;
-	const auto finishDraining        = qScopeGuard([this] { m_drainingPendingSoundOperations = false; });
-	Q_UNUSED(finishDraining);
-	while (!m_soundPluginCallbackPending && !m_pendingSoundOperations.isEmpty())
-	{
-		PendingSoundOperation operation     = m_pendingSoundOperations.dequeue();
-		auto                  callerContext = operation.callerContext;
-		auto                  start         = [this, operation = std::move(operation)]() mutable
-		{
-			if (currentConnectionCallbackContextCancelled())
-			{
-				m_soundPluginCallbackPending = true;
-				finishCancelledSoundOperation(operation);
-				m_soundPluginCallbackPending = false;
-				return;
-			}
-			static_cast<void>(startSoundPluginDecision(operation));
-		};
-		if (callerContext)
-			callerContext.run(start);
-		else
-			start();
-	}
+	return playSoundInterceptedWithCompletion(buffer, fileName, loop, volume, pan, {});
 }
 
-int WorldRuntime::playSound(int buffer, const QString &fileName, bool loop, double volume, double pan)
+int WorldRuntime::playSoundInterceptedWithCompletion(const int buffer, const QString &fileName,
+                                                     const bool loop, const double volume, const double pan,
+                                                     std::function<void(int)> completion)
 {
-	return playSoundWithCompletion(buffer, fileName, loop, volume, pan, {});
-}
-
-int WorldRuntime::playSoundWithCompletion(int buffer, const QString &fileName, bool loop, double volume,
-                                          double pan, std::function<void(int)> completion)
-{
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(
-		    this, eCannotPlaySound,
-		    [this, buffer, fileName, loop, volume, pan, completion = std::move(completion)]() mutable
-		    { return playSoundWithCompletion(buffer, fileName, loop, volume, pan, std::move(completion)); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSound");
-	if (m_runtimeDestructionStarted)
-	{
-		if (completion)
-			completion(eCannotPlaySound);
-		return eCannotPlaySound;
-	}
-	if (fileName.isEmpty() && buffer == 0)
+	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()))
 	{
 		if (completion)
 			completion(eBadParameter);
@@ -18323,594 +18196,287 @@ int WorldRuntime::playSoundWithCompletion(int buffer, const QString &fileName, b
 	}
 	if (fileName.isEmpty())
 	{
-		const int result = playSoundBypassingPluginCallbacks(buffer, fileName, loop, volume, pan);
+		const int result = playSoundDirect(buffer, fileName, loop, volume, pan);
 		if (completion)
 			completion(result);
 		return result;
 	}
+
+	TestSoundBackend testBackend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		testBackend = m_testSoundBackend;
+	}
+	std::shared_ptr<SoundEngineSession> session          = m_soundSession.load(std::memory_order_acquire);
+	quint64                             preparationToken = 0;
+	if (testBackend.play)
+		preparationToken = m_nextTestSoundPreparationToken.fetch_add(1, std::memory_order_relaxed);
+	else if (session)
+		preparationToken = session->prepareFile(fileName);
+	if (preparationToken == 0)
+	{
+		if (completion)
+			completion(eCannotPlaySound);
+		return eCannotPlaySound;
+	}
+
 	PendingSoundOperation operation;
-	operation.kind               = PendingSoundOperation::Kind::Play;
-	operation.buffer             = buffer;
-	operation.fileName           = fileName;
-	operation.loop               = loop;
-	operation.volume             = volume;
-	operation.pan                = pan;
-	operation.completion         = std::move(completion);
-	operation.mutationCompletion = retainLuaDeferredRuntimeMutationPlayback();
-	operation.callerContext      = captureRuntimeCallerContext();
-	if (m_soundPluginCallbackPending)
-	{
-		const bool replayingSoundMutations =
-		    !m_pluginCallbackMutationPlaybackContexts.isEmpty() &&
-		    m_pluginCallbackMutationPlaybackContexts.constLast().event == LuaCallbackEvent::PlaySound;
-		if (replayingSoundMutations)
-		{
-			const int result = playSoundBypassingPluginCallbacks(buffer, fileName, loop, volume, pan);
-			if (operation.completion)
-				operation.completion(result);
-			if (operation.mutationCompletion)
-				operation.mutationCompletion(false);
-			return result;
-		}
-		m_pendingSoundOperations.enqueue(std::move(operation));
+	operation.kind             = PendingSoundOperation::Kind::Play;
+	operation.buffer           = buffer;
+	operation.fileName         = fileName;
+	operation.loop             = loop;
+	operation.volume           = volume;
+	operation.pan              = pan;
+	operation.preparationToken = preparationToken;
+	operation.soundSession     = std::move(session);
+	operation.completion       = std::move(completion);
+
+	if (QThread::currentThread() == thread())
+		return startSoundPluginDecision(operation);
+	const QPointer<WorldRuntime> runtimeGuard(this);
+	const bool                   queued =
+	    qmudInvokeMethodQueued(this,
+	                           [runtimeGuard, operation]
+	                           {
+		                           if (runtimeGuard)
+			                           static_cast<void>(runtimeGuard->startSoundPluginDecision(operation));
+		                           else if (operation.soundSession)
+			                           operation.soundSession->cancelPrepared(operation.preparationToken);
+	                           });
+	if (queued)
 		return eOK;
-	}
-	return startSoundPluginDecision(operation);
+	finishCancelledSoundOperation(operation);
+	return eCannotPlaySound;
 }
 
-int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &fileName, bool loop,
-                                                    double volume, double pan)
+int WorldRuntime::playSoundDirect(const int buffer, const QString &fileName, const bool loop,
+                                  const double volume, const double pan, int *selectedBuffer) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(
-		    this, eCannotPlaySound, [this, buffer, fileName, loop, volume, pan]
-		    { return playSoundBypassingPluginCallbacks(buffer, fileName, loop, volume, pan); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSoundBypassingPluginCallbacks");
-	[[maybe_unused]] const auto invalidatePresentation =
-	    qScopeGuard([this] { invalidateLuaCallbackSoundPresentationSnapshot(); });
-	if (m_testSoundBackend.play)
-		return m_testSoundBackend.play(buffer, fileName, loop, volume, pan);
-	if (fileName.isEmpty() && buffer == 0)
+	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()))
 		return eBadParameter;
-	if (buffer >= 1 && buffer <= kMaxSoundBuffers && fileName.isEmpty())
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
 	{
-		SoundBuffer &entry = m_soundBuffers[buffer - 1];
-		if (!soundBufferHasBackend(entry))
-			return eBadParameter;
-		if (!soundBufferIsPlaying(entry))
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.play)
+	{
+		const int result = backend.play(buffer, fileName, loop, volume, pan);
+		if (result == eOK && selectedBuffer)
+			*selectedBuffer = buffer > 0 ? buffer : (backend.automaticBuffer ? backend.automaticBuffer() : 0);
+		return result;
+	}
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	if (!session)
+		return eCannotPlaySound;
+	return session->playFile(buffer, fileName, loop, volume, pan, 0, selectedBuffer);
+}
+
+int WorldRuntime::playSoundMemoryDirect(const int buffer, const QByteArray &data, const bool loop,
+                                        const double volume, const double pan, int *selectedBuffer) const
+{
+	if (buffer < 0 || buffer > kMaxSoundBuffers || data.isEmpty())
+		return eBadParameter;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.play)
+	{
+		const int result = backend.play(buffer, QStringLiteral("<memory>"), loop, volume, pan);
+		if (result == eOK && selectedBuffer)
+			*selectedBuffer = buffer > 0 ? buffer : (backend.automaticBuffer ? backend.automaticBuffer() : 0);
+		return result;
+	}
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	if (!session)
+		return eCannotPlaySound;
+	return session->playMemory(buffer, data, loop, volume, pan, 0, selectedBuffer);
+}
+
+int WorldRuntime::playSoundForNativeAudio(const int buffer, const QString &fileName, const bool loop,
+                                          const double volume, const double pan, const quint64 generation,
+                                          const bool requireReservation, int *selectedBuffer) const
+{
+	if (buffer < 0 || buffer > kMaxSoundBuffers || fileName.isEmpty() || generation == 0 || !selectedBuffer)
+		return eBadParameter;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.play)
+	{
+		int targetBuffer = buffer;
+		if (targetBuffer == 0)
+		{
+			for (int candidate = 1; candidate <= kMaxSoundBuffers; ++candidate)
+			{
+				if (!backend.reusable || backend.reusable(candidate))
+				{
+					targetBuffer = candidate;
+					break;
+				}
+			}
+		}
+		if (targetBuffer == 0)
 			return eCannotPlaySound;
-		entry.looping = loop;
-		entry.volume  = normalizeSoundVolume(volume);
-		entry.pan     = pan;
-		if (entry.effect)
-		{
-			entry.effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
-			entry.effect->setVolume(static_cast<float>(entry.volume));
-		}
-		if (entry.player)
-			entry.player->setLoops(loop ? QMediaPlayer::Infinite : QMediaPlayer::Once);
-		if (entry.audioOutput)
-			entry.audioOutput->setVolume(static_cast<float>(entry.volume));
-		return eOK;
+		const int result = backend.play(targetBuffer, fileName, loop, volume, pan);
+		if (result == eOK)
+			*selectedBuffer = targetBuffer;
+		return result;
 	}
-
-	if (buffer < 0 || buffer > kMaxSoundBuffers)
-		return eBadParameter;
-
-	int targetBuffer = buffer;
-	if (targetBuffer == 0)
-	{
-		for (int i = 0; i < (kMaxSoundBuffers / 2); ++i)
-		{
-			if (!soundBufferHasBackend(m_soundBuffers[i]))
-			{
-				targetBuffer = i + 1;
-				break;
-			}
-		}
-	}
-	if (targetBuffer == 0)
-	{
-		for (int i = 0; i < kMaxSoundBuffers; ++i)
-		{
-			if (soundBufferIsReusable(m_soundBuffers[i]))
-			{
-				targetBuffer = i + 1;
-				break;
-			}
-		}
-	}
-	if (targetBuffer == 0)
-	{
-		for (int i = 0; i < kMaxSoundBuffers; ++i)
-		{
-			if (soundBufferIsStealable(m_soundBuffers[i]))
-			{
-				targetBuffer = i + 1;
-				break;
-			}
-		}
-	}
-	if (targetBuffer == 0)
-		return eCannotPlaySound;
-
-	if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
-		return eBadParameter;
-
-	SoundBuffer &entry = m_soundBuffers[targetBuffer - 1];
-	clearSoundBuffer(entry);
-
-	const QString relative = QMudPluginPathUtils::legacyPathRelativeToQmudHome(fileName);
-	QString       resolved;
-	QStringList   candidates;
-	if (!relative.isEmpty() && !relative.startsWith(QStringLiteral("sounds/"), Qt::CaseInsensitive))
-		candidates.push_back(QStringLiteral("sounds/%1").arg(relative));
-	candidates.push_back(fileName);
-
-	for (const QString &candidate : candidates)
-	{
-		QString normalizedCandidate;
-		QString error;
-		if (!QMudPluginPathUtils::resolveInsideQmudHome(m_startupDirectory, candidate, &normalizedCandidate,
-		                                                &error))
-			continue;
-		if (QFileInfo::exists(normalizedCandidate))
-		{
-			resolved = normalizedCandidate;
-			break;
-		}
-	}
-
-	if (resolved.isEmpty())
-		return eFileNotFound;
-
-	QMudNativePluginRegistry::LuaAudioRuntimeBufferState luaAudioState;
-	const quint64                                        luaAudioGeneration =
-	    QMudNativePluginRegistry::luaAudioRuntimeBufferState(this, targetBuffer, luaAudioState)
-	        ? luaAudioState.generation
-	        : 0;
-	entry.looping = loop;
-	entry.volume  = normalizeSoundVolume(volume);
-	entry.pan     = pan;
-	if (shouldUseMediaPlayerForSoundFile(resolved))
-	{
-		auto                  *player      = new QMediaPlayer(this);
-		auto                  *audioOutput = new QAudioOutput(player);
-		QPointer<QMediaPlayer> playerGuard(player);
-		player->setAudioOutput(audioOutput);
-		player->setLoops(loop ? QMediaPlayer::Infinite : QMediaPlayer::Once);
-		audioOutput->setVolume(static_cast<float>(entry.volume));
-		const QString mediaBackend = QString::fromUtf8(qgetenv("QT_MEDIA_BACKEND")).trimmed();
-		const QString backendText  = mediaBackend.isEmpty() ? QStringLiteral("default") : mediaBackend;
-		const auto    reportMediaPlayerError =
-		    [this, resolved, backendText](const QMediaPlayer::Error error, const QString &errorText)
-		{
-			const QString trimmedError = errorText.trimmed();
-			const QString detail =
-			    trimmedError.isEmpty() ? QStringLiteral("unknown media-player error") : trimmedError;
-			const QString message =
-			    QStringLiteral("QMud sound playback failed: %1 (file: %2, Qt media backend: %3, error: "
-			                   "%4)")
-			        .arg(detail, resolved, backendText, mediaPlayerErrorName(error));
-			qWarning().noquote() << message;
-			outputText(message, true, true);
-		};
-		connect(player, &QMediaPlayer::errorOccurred, this,
-		        [this, playerGuard, targetBuffer, luaAudioGeneration,
-		         reportMediaPlayerError](const QMediaPlayer::Error error, const QString &errorText)
-		        {
-			        invalidateLuaCallbackSoundPresentationSnapshot();
-			        QMediaPlayer *player  = playerGuard.data();
-			        SoundBuffer  *current = soundBufferForPlayerSignal(player, targetBuffer);
-			        if (!current)
-				        return;
-
-			        if (luaAudioGeneration != 0)
-				        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
-				            this, targetBuffer, luaAudioGeneration);
-			        reportMediaPlayerError(error, errorText);
-			        clearSoundBuffer(*current);
-		        });
-		connect(player, &QMediaPlayer::playbackStateChanged, this,
-		        [this, playerGuard, loop, targetBuffer,
-		         luaAudioGeneration](const QMediaPlayer::PlaybackState state)
-		        {
-			        invalidateLuaCallbackSoundPresentationSnapshot();
-			        SoundBuffer *current = soundBufferForPlayerSignal(playerGuard.data(), targetBuffer);
-			        if (!current)
-				        return;
-			        if (state == QMediaPlayer::PlayingState)
-			        {
-				        current->playbackStarted = true;
-				        return;
-			        }
-			        if (loop || state != QMediaPlayer::StoppedState || !current->playbackStarted ||
-			            luaAudioGeneration == 0)
-				        return;
-			        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, targetBuffer,
-			                                                                           luaAudioGeneration);
-		        });
-		player->setSource(QUrl::fromLocalFile(resolved));
-		if (player->error() != QMediaPlayer::NoError)
-		{
-			reportMediaPlayerError(player->error(), player->errorString());
-			delete player;
-			entry.playbackStarted = false;
-			entry.looping         = false;
-			entry.volume          = 1.0;
-			entry.pan             = 0.0;
-			return eCannotPlaySound;
-		}
-		entry.player      = player;
-		entry.audioOutput = audioOutput;
-		player->play();
-		return eOK;
-	}
-
-	auto                  *effect = new QSoundEffect(this);
-	QPointer<QSoundEffect> effectGuard(effect);
-	connect(effect, &QSoundEffect::statusChanged, this,
-	        [this, effectGuard, targetBuffer, luaAudioGeneration]
-	        {
-		        invalidateLuaCallbackSoundPresentationSnapshot();
-		        QSoundEffect *effect  = effectGuard.data();
-		        SoundBuffer  *current = soundBufferForEffectSignal(effect, targetBuffer);
-		        if (!current)
-			        return;
-		        if (effect->status() != QSoundEffect::Error)
-			        return;
-		        if (luaAudioGeneration != 0)
-			        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, targetBuffer,
-			                                                                           luaAudioGeneration);
-		        clearSoundBuffer(*current);
-	        });
-	effect->setSource(QUrl::fromLocalFile(resolved));
-	if (effect->status() == QSoundEffect::Error)
-	{
-		delete effect;
-		entry.looping = false;
-		entry.volume  = 1.0;
-		entry.pan     = 0.0;
-		return eCannotPlaySound;
-	}
-	effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
-	effect->setVolume(static_cast<float>(entry.volume));
-	connect(effect, &QSoundEffect::playingChanged, this,
-	        [this, effectGuard, loop, targetBuffer, luaAudioGeneration]
-	        {
-		        invalidateLuaCallbackSoundPresentationSnapshot();
-		        QSoundEffect *effect  = effectGuard.data();
-		        SoundBuffer  *current = soundBufferForEffectSignal(effect, targetBuffer);
-		        if (!current)
-			        return;
-		        if (effect->isPlaying())
-		        {
-			        current->playbackStarted = true;
-			        return;
-		        }
-		        if (loop || !current->playbackStarted || luaAudioGeneration == 0)
-			        return;
-		        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, targetBuffer,
-		                                                                           luaAudioGeneration);
-	        });
-	entry.effect = effect;
-	effect->play();
-	return eOK;
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->playFile(buffer, fileName, loop, volume, pan, generation, selectedBuffer,
+	                                   requireReservation)
+	               : eCannotPlaySound;
 }
 
-int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop, double volume, double pan)
+int WorldRuntime::reserveSoundBufferForNativeAudio(const QString &fileName, const quint64 generation) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound, [this, buffer, data, loop, volume, pan]
-		                          { return playSoundMemory(buffer, data, loop, volume, pan); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSoundMemory");
-	[[maybe_unused]] const auto invalidatePresentation =
-	    qScopeGuard([this] { invalidateLuaCallbackSoundPresentationSnapshot(); });
-	if (data.isEmpty())
-		return eBadParameter;
-	if (buffer < 0 || buffer > kMaxSoundBuffers)
-		return eBadParameter;
-	int targetBuffer = buffer;
-	if (targetBuffer == 0)
-	{
-		for (int i = 0; i < (kMaxSoundBuffers / 2); ++i)
-		{
-			if (!soundBufferHasBackend(m_soundBuffers[i]))
-			{
-				targetBuffer = i + 1;
-				break;
-			}
-		}
-	}
-	if (targetBuffer == 0)
-	{
-		for (int i = 0; i < kMaxSoundBuffers; ++i)
-		{
-			if (soundBufferIsReusable(m_soundBuffers[i]))
-			{
-				targetBuffer = i + 1;
-				break;
-			}
-		}
-	}
-	if (targetBuffer == 0)
-	{
-		for (int i = 0; i < kMaxSoundBuffers; ++i)
-		{
-			if (soundBufferIsStealable(m_soundBuffers[i]))
-			{
-				targetBuffer = i + 1;
-				break;
-			}
-		}
-	}
-	if (targetBuffer == 0)
-		return eCannotPlaySound;
-
-	if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
-		return eBadParameter;
-
-	SoundBuffer &entry = m_soundBuffers[targetBuffer - 1];
-	clearSoundBuffer(entry);
-
-	auto *temp = new QTemporaryFile(this);
-	temp->setAutoRemove(true);
-	if (!temp->open())
-	{
-		delete temp;
-		return eCannotPlaySound;
-	}
-	if (temp->write(data) != data.size())
-	{
-		delete temp;
-		return eCannotPlaySound;
-	}
-	temp->flush();
-	entry.tempFile = temp;
-
-	auto                  *effect = new QSoundEffect(this);
-	QPointer<QSoundEffect> effectGuard(effect);
-	connect(effect, &QSoundEffect::statusChanged, this,
-	        [this, effectGuard, targetBuffer]
-	        {
-		        invalidateLuaCallbackSoundPresentationSnapshot();
-		        QSoundEffect *effect  = effectGuard.data();
-		        SoundBuffer  *current = soundBufferForEffectSignal(effect, targetBuffer);
-		        if (!current)
-			        return;
-		        if (effect->status() != QSoundEffect::Error)
-			        return;
-		        clearSoundBuffer(*current);
-	        });
-	effect->setSource(QUrl::fromLocalFile(temp->fileName()));
-	if (effect->status() == QSoundEffect::Error)
-	{
-		delete effect;
-		clearSoundBuffer(entry);
-		return eCannotPlaySound;
-	}
-	entry.looping = loop;
-	entry.volume  = normalizeSoundVolume(volume);
-	entry.pan     = pan;
-	effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
-	effect->setVolume(static_cast<float>(entry.volume));
-	connect(effect, &QSoundEffect::playingChanged, this,
-	        [this, effectGuard, targetBuffer]
-	        {
-		        invalidateLuaCallbackSoundPresentationSnapshot();
-		        QSoundEffect *effect  = effectGuard.data();
-		        SoundBuffer  *current = soundBufferForEffectSignal(effect, targetBuffer);
-		        if (!current || !effect->isPlaying())
-			        return;
-		        current->playbackStarted = true;
-	        });
-	entry.effect = effect;
-	effect->play();
-	return eOK;
-}
-
-int WorldRuntime::stopSound(int buffer)
-{
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound, [this, buffer] { return stopSound(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::stopSound");
-	if (buffer != 0)
-		return stopSoundBypassingPluginCallbacks(buffer);
-	if (m_runtimeDestructionStarted)
-		return eCannotPlaySound;
-	PendingSoundOperation operation;
-	operation.kind               = PendingSoundOperation::Kind::StopAll;
-	operation.buffer             = buffer;
-	operation.mutationCompletion = retainLuaDeferredRuntimeMutationPlayback();
-	operation.callerContext      = captureRuntimeCallerContext();
-	if (m_soundPluginCallbackPending)
-	{
-		const bool replayingSoundMutations =
-		    !m_pluginCallbackMutationPlaybackContexts.isEmpty() &&
-		    m_pluginCallbackMutationPlaybackContexts.constLast().event == LuaCallbackEvent::PlaySound;
-		if (replayingSoundMutations)
-		{
-			const int result = stopSoundBypassingPluginCallbacks(buffer);
-			if (operation.mutationCompletion)
-				operation.mutationCompletion(false);
-			return result;
-		}
-		m_pendingSoundOperations.enqueue(std::move(operation));
-		return eOK;
-	}
-	return startSoundPluginDecision(operation);
-}
-
-int WorldRuntime::stopSoundBypassingPluginCallbacks(int buffer)
-{
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound,
-		                          [this, buffer] { return stopSoundBypassingPluginCallbacks(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::stopSoundBypassingPluginCallbacks");
-	[[maybe_unused]] const auto invalidatePresentation =
-	    qScopeGuard([this] { invalidateLuaCallbackSoundPresentationSnapshot(); });
-	if (m_testSoundBackend.stop)
-		return m_testSoundBackend.stop(buffer);
-	if (buffer == 0)
-	{
-		for (SoundBuffer &entry : m_soundBuffers)
-			clearSoundBuffer(entry);
-		return eOK;
-	}
-
-	if (buffer < 1 || buffer > kMaxSoundBuffers)
-		return eBadParameter;
-
-	SoundBuffer &entry = m_soundBuffers[buffer - 1];
-	clearSoundBuffer(entry);
-	return eOK;
-}
-
-int WorldRuntime::soundStatus(int buffer) const
-{
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), -3,
-		                          [this, buffer] { return soundStatus(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundStatus");
-	if (m_testSoundBackend.status)
-		return m_testSoundBackend.status(buffer);
-	if (buffer < 1 || buffer > kMaxSoundBuffers)
-		return -1;
-	const SoundBuffer &entry = m_soundBuffers[buffer - 1];
-	if (!soundBufferHasBackend(entry))
-		return -2;
-	if (!soundBufferIsPlaying(entry))
+	if (fileName.isEmpty() || generation == 0)
 		return 0;
-	return entry.looping ? 2 : 1;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.play)
+		return backend.reserve ? backend.reserve(fileName, generation) : 0;
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->reserveLuaAudioChannel(fileName, generation) : 0;
 }
 
-bool WorldRuntime::soundBufferReusableForNativeAudio(int buffer) const
+void WorldRuntime::confirmSoundBufferForNativeAudio(const int buffer, const quint64 generation) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
-		                          [this, buffer] { return soundBufferReusableForNativeAudio(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundBufferReusableForNativeAudio");
-	if (m_testSoundBackend.reusable)
-		return m_testSoundBackend.reusable(buffer);
-	if (buffer < 1 || buffer > kMaxSoundBuffers)
-		return false;
-	return soundBufferIsReusable(m_soundBuffers[buffer - 1]);
-}
-#else
-int WorldRuntime::playSound(int, const QString &, bool, double, double)
-{
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound,
-		                          [this] { return playSound(0, QString(), false, 0.0, 0.0); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSound");
-	return eCannotPlaySound;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.play)
+	{
+		if (backend.confirm)
+			backend.confirm(buffer, generation);
+		return;
+	}
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	if (session && session->confirmLuaAudioOwnership(buffer, generation))
+		return;
+	static_cast<void>(
+	    QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, buffer, generation));
 }
 
-int WorldRuntime::playSoundWithCompletion(int buffer, const QString &fileName, bool loop, double volume,
-                                          double pan, std::function<void(int)> completion)
+int WorldRuntime::updateSoundForNativeAudio(const int buffer, const bool loop, const double volume,
+                                            const double pan, const quint64 generation) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(
-		    this, eCannotPlaySound,
-		    [this, buffer, fileName, loop, volume, pan, completion = std::move(completion)]() mutable
-		    { return playSoundWithCompletion(buffer, fileName, loop, volume, pan, std::move(completion)); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSoundWithCompletion");
-	if (completion)
-		completion(eCannotPlaySound);
-	return eCannotPlaySound;
+	if (buffer < 1 || buffer > kMaxSoundBuffers || generation == 0)
+		return eBadParameter;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.play)
+		return backend.play(buffer, QString(), loop, volume, pan);
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->playFile(buffer, QString(), loop, volume, pan, generation) : eCannotPlaySound;
 }
 
-int WorldRuntime::playSoundBypassingPluginCallbacks(const int buffer, const QString &fileName,
-                                                    const bool loop, const double volume, const double pan)
+int WorldRuntime::stopSoundForNativeAudio(const int buffer, const quint64 generation) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(
-		    this, eCannotPlaySound, [this, buffer, fileName, loop, volume, pan]
-		    { return playSoundBypassingPluginCallbacks(buffer, fileName, loop, volume, pan); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSoundBypassingPluginCallbacks");
-	if (m_testSoundBackend.play)
-		return m_testSoundBackend.play(buffer, fileName, loop, volume, pan);
-	return eCannotPlaySound;
+	if (buffer < 1 || buffer > kMaxSoundBuffers || generation == 0)
+		return eBadParameter;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.stop)
+		return backend.stop(buffer);
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->stopLuaAudioChannel(buffer, generation) : eCannotPlaySound;
 }
 
-int WorldRuntime::playSoundMemory(int, const QByteArray &, bool, double, double)
+int WorldRuntime::stopSoundDirect(const int buffer) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound,
-		                          [this] { return playSoundMemory(0, QByteArray(), false, 0.0, 0.0); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::playSoundMemory");
-	return eCannotPlaySound;
+	if (buffer < 0 || buffer > kMaxSoundBuffers)
+		return eBadParameter;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.stop)
+		return backend.stop(buffer);
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->stop(buffer) : eCannotPlaySound;
 }
 
-int WorldRuntime::stopSound(int)
+int WorldRuntime::cancelSoundIntercepted()
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound, [this] { return stopSound(0); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::stopSound");
-	return eCannotPlaySound;
-}
-
-int WorldRuntime::stopSoundBypassingPluginCallbacks(const int buffer)
-{
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, eCannotPlaySound,
-		                          [this, buffer] { return stopSoundBypassingPluginCallbacks(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::stopSoundBypassingPluginCallbacks");
-	if (m_testSoundBackend.stop)
-		return m_testSoundBackend.stop(buffer);
-	return eCannotPlaySound;
+	PendingSoundOperation operation;
+	operation.kind   = PendingSoundOperation::Kind::StopAll;
+	operation.buffer = 0;
+	if (QThread::currentThread() == thread())
+		return startSoundPluginDecision(operation);
+	const QPointer<WorldRuntime> runtimeGuard(this);
+	return qmudInvokeMethodQueued(this,
+	                              [runtimeGuard, operation]
+	                              {
+		                              if (runtimeGuard)
+			                              static_cast<void>(
+			                                  runtimeGuard->startSoundPluginDecision(operation));
+	                              })
+	           ? eOK
+	           : eCannotPlaySound;
 }
 
 int WorldRuntime::soundStatus(const int buffer) const
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), -3,
-		                          [this, buffer] { return soundStatus(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundStatus");
-	if (m_testSoundBackend.status)
-		return m_testSoundBackend.status(buffer);
-	return -3;
+	if (buffer < 1 || buffer > kMaxSoundBuffers)
+		return -1;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.status)
+		return backend.status(buffer);
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->status(buffer) : -3;
 }
 
-bool WorldRuntime::soundBufferReusableForNativeAudio(const int buffer) const
+void WorldRuntime::finishCancelledSoundOperation(const PendingSoundOperation &operation)
 {
-	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
-		                          [this, buffer] { return soundBufferReusableForNativeAudio(buffer); });
-
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundBufferReusableForNativeAudio");
-	if (m_testSoundBackend.reusable)
-		return m_testSoundBackend.reusable(buffer);
-	return false;
-}
-#endif
-
-void WorldRuntime::finishCancelledSoundOperation(const PendingSoundOperation &operation) const
-{
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::finishCancelledSoundOperation");
+	if (operation.soundSession && operation.preparationToken != 0)
+		operation.soundSession->cancelPrepared(operation.preparationToken);
 	if (operation.completion)
 		operation.completion(eCannotPlaySound);
-	if (operation.mutationCompletion)
-		operation.mutationCompletion(true);
 }
 
 void WorldRuntime::setSoundBackendForTest(TestSoundBackend backend)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setSoundBackendForTest");
-	m_testSoundBackend = std::move(backend);
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		m_testSoundBackend = std::move(backend);
+		m_hasTestSoundBackend.store(m_testSoundBackend.play || m_testSoundBackend.stop ||
+		                                m_testSoundBackend.status || m_testSoundBackend.reusable ||
+		                                m_testSoundBackend.reserve || m_testSoundBackend.confirm,
+		                            std::memory_order_release);
+	}
 	invalidateLuaCallbackSoundPresentationSnapshot();
 }
 
@@ -21943,7 +21509,53 @@ void WorldRuntime::setDefaultLogDirectory(const QString &path)
 void WorldRuntime::setStartupDirectory(const QString &path)
 {
 	m_startupDirectory = path;
+	updateSoundStartupDirectory(path);
 	refreshScriptFileWatcher(false);
+}
+
+void WorldRuntime::updateSoundStartupDirectory(const QString &path) const
+{
+	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
+	if (session)
+		session->updateStartupDirectory(path);
+}
+
+void WorldRuntime::attachSoundEngine(SoundEngine *engine)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::attachSoundEngine");
+	detachSoundEngine();
+	if (!engine || m_runtimeDestructionStarted)
+		return;
+
+	const QPointer<WorldRuntime>  runtimeGuard(this);
+	SoundEngine::SessionCallbacks callbacks;
+	callbacks.luaAudioOwnershipReleased = [runtimeKey = this](const int buffer, const quint64 generation)
+	{
+		static_cast<void>(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+		    runtimeKey, buffer, generation));
+	};
+	callbacks.playbackError = [runtimeGuard](const QString &message)
+	{
+		if (!runtimeGuard)
+			return;
+		qWarning().noquote() << message;
+		runtimeGuard->outputText(message, true, true);
+	};
+	m_soundEngine = engine;
+	m_soundSession.store(engine->registerSession(m_startupDirectory, std::move(callbacks)),
+	                     std::memory_order_release);
+}
+
+void WorldRuntime::detachSoundEngine()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::detachSoundEngine");
+	std::shared_ptr<SoundEngineSession> session = m_soundSession.exchange({}, std::memory_order_acq_rel);
+	if (m_soundEngine && session)
+		m_soundEngine->unregisterSession(session);
+	else if (session)
+		session->close();
+	m_soundEngine = nullptr;
+	invalidateLuaCallbackSoundPresentationSnapshot();
 }
 
 QString WorldRuntime::startupDirectory() const
@@ -24380,20 +23992,6 @@ void WorldRuntime::cancelPendingResultOperationsForShutdown()
 
 	if (m_commandProcessor)
 		m_commandProcessor->cancelPendingPluginSendsForShutdown();
-
-	const bool wasDrainingSounds     = m_drainingPendingSoundOperations;
-	m_drainingPendingSoundOperations = true;
-	while (!m_pendingSoundOperations.isEmpty())
-	{
-		PendingSoundOperation operation     = m_pendingSoundOperations.dequeue();
-		auto                  callerContext = operation.callerContext;
-		auto cancel = [this, operation = std::move(operation)] { finishCancelledSoundOperation(operation); };
-		if (callerContext)
-			callerContext.run(cancel);
-		else
-			cancel();
-	}
-	m_drainingPendingSoundOperations = wasDrainingSounds;
 
 	const bool wasDrainingTraces     = m_drainingPendingTraceOperations;
 	m_drainingPendingTraceOperations = true;

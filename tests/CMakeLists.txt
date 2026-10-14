@@ -438,6 +438,12 @@ qmud_add_qtest(tst_SoundFileRoutingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_SoundCacheUtils
+        SOURCES
+        unit/tst_SoundCacheUtils.cpp
+        LABELS
+        unit)
+
 if (QMUD_ENABLE_SOUND_VALUE)
     qmud_add_qtest(tst_WorldRuntime_SoundLifetime
             GUI

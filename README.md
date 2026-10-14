@@ -33,6 +33,8 @@ use the issue tracker, with the appropriate template to report issues, request f
   Upgrade).
 - Lua scripting. The FIRST and ONLY, currently, MUD client with a multithreaded Lua engine that allows ridiculously
   heavy Lua plugin workloads without lagging the client.
+- High performance sound engine offloaded from the main thread, reducing playback latency as much as possible for VI
+  users.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
 - MushReader and LuaAudio implemented natively for VI workflows and are activated by the presence of those plugins in
   existing world files or by loading the included stub plugins.

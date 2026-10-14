@@ -57,6 +57,8 @@
 
 class WorldDocument;
 class WorldSocketService;
+class SoundEngine;
+class SoundEngineSession;
 class QFileSystemWatcher;
 class LuaCallbackEngine;
 class LuaCallbackRuntimeMutationAccess;
@@ -134,10 +136,6 @@ class WorldRuntimeTestAccess;
 class WorldView;
 class WorldOutputRenderModel;
 class QUdpSocket;
-class QAudioOutput;
-class QMediaPlayer;
-class QSoundEffect;
-class QTemporaryFile;
 class QTcpServer;
 class tst_WorldRuntime_PluginLifecycle;
 namespace QMudNativePluginRegistry
@@ -262,7 +260,6 @@ class WorldRuntime : public QObject
 		friend class WorldCommandProcessorMutationAccess;
 		friend class WorldRuntimeTestAccess;
 		friend class tst_LuaCallbackEngine;
-		friend class tst_WorldRuntime_SoundLifetime;
 		friend class tst_WorldRuntime_PluginLifecycle;
 		friend struct LuaDeferredRuntimeMutationBatchSequence;
 		friend void QMudLuaDeferredRuntimeMutation::apply(QVector<LuaDeferredRuntimeMutationBatch> batches);
@@ -914,20 +911,6 @@ class WorldRuntime : public QObject
 				QString     bindAddress;
 		};
 		/**
-		 * @brief Managed audio playback slot for queued/looping sound commands.
-		 */
-		struct SoundBuffer
-		{
-				QSoundEffect   *effect{nullptr};
-				QMediaPlayer   *player{nullptr};
-				QAudioOutput   *audioOutput{nullptr};
-				QTemporaryFile *tempFile{nullptr};
-				bool            playbackStarted{false};
-				bool            looping{false};
-				double          volume{1.0};
-				double          pan{0.0};
-		};
-		/**
 		 * @brief Per-runtime sound backend replacement used by tests.
 		 *
 		 * The replacement lives at the WorldRuntime boundary so every sound caller exercises the same
@@ -936,9 +919,12 @@ class WorldRuntime : public QObject
 		struct TestSoundBackend
 		{
 				std::function<int(int, const QString &, bool, double, double)> play;
+				std::function<int()>                                           automaticBuffer;
 				std::function<int(int)>                                        stop;
 				std::function<int(int)>                                        status;
 				std::function<bool(int)>                                       reusable;
+				std::function<int(const QString &, quint64)>                   reserve;
+				std::function<void(int, quint64)>                              confirm;
 		};
 		/**
 		 * @brief Owner metadata produced while resolving a stable rule location.
@@ -4223,7 +4209,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] QString lastTelnetSubnegotiation() const;
 		/**
-		 * @brief Plays sound file in buffer slot.
+		 * @brief Plays a callback-interceptable configured sound.
 		 * @param buffer Sound buffer slot index.
 		 * @param fileName Sound file path.
 		 * @param loop Loop playback when `true`.
@@ -4231,7 +4217,7 @@ class WorldRuntime : public QObject
 		 * @param pan Stereo pan value.
 		 * @return API status code.
 		 */
-		int playSound(int buffer, const QString &fileName, bool loop, double volume, double pan);
+		int playSoundIntercepted(int buffer, const QString &fileName, bool loop, double volume, double pan);
 		/**
 		 * @brief Plays a sound and reports the final plugin/backend status after any suspension.
 		 * @param buffer Sound buffer slot index.
@@ -4241,23 +4227,65 @@ class WorldRuntime : public QObject
 		 * @param pan Stereo pan value.
 		 * @param completion Final status consumer.
 		 */
-		int playSoundWithCompletion(int buffer, const QString &fileName, bool loop, double volume, double pan,
-		                            std::function<void(int)> completion);
+		int playSoundInterceptedWithCompletion(int buffer, const QString &fileName, bool loop, double volume,
+		                                       double pan, std::function<void(int)> completion);
 		/**
-		 * @brief Plays sound file in a buffer slot without firing plugin sound callbacks.
-		 *
-		 * Only native compatibility shims that implement `OnPluginPlaySound` replacement behavior should
-		 * use this API. Normal MUSHclient `Sound` behavior must use `playSound()` so plugins can intercept it.
-		 *
+		 * @brief Immediately submits direct file playback without firing plugin sound callbacks.
 		 * @param buffer Sound buffer slot index.
 		 * @param fileName Sound file path.
 		 * @param loop Loop playback when `true`.
 		 * @param volume Playback volume.
 		 * @param pan Stereo pan value.
+		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
 		 * @return API status code.
 		 */
-		int playSoundBypassingPluginCallbacks(int buffer, const QString &fileName, bool loop, double volume,
-		                                      double pan);
+		int playSoundDirect(int buffer, const QString &fileName, bool loop, double volume, double pan,
+		                    int *selectedBuffer = nullptr) const;
+		/**
+		 * @brief Selects and starts one LuaAudio-owned file play on the sound worker.
+		 * @param buffer Zero for atomic automatic selection, or a fixed reserved channel.
+		 * @param fileName Sound file path.
+		 * @param loop Loop playback when `true`.
+		 * @param volume Playback volume.
+		 * @param pan Stereo pan value.
+		 * @param generation LuaAudio ownership generation for completion validation.
+		 * @param requireReservation Require the fixed channel to hold this generation's reservation.
+		 * @param selectedBuffer Destination receiving the selected one-based channel on success.
+		 * @return API status code.
+		 */
+		int playSoundForNativeAudio(int buffer, const QString &fileName, bool loop, double volume, double pan,
+		                            quint64 generation, bool requireReservation, int *selectedBuffer) const;
+		/**
+		 * @brief Validates a delayed LuaAudio file and reserves one worker-owned channel.
+		 * @param fileName Legacy QMud-home-relative or absolute-safe sound path.
+		 * @param generation LuaAudio ownership generation attached to the reservation.
+		 * @return Selected one-based channel, or zero when none is reusable.
+		 */
+		[[nodiscard]] int reserveSoundBufferForNativeAudio(const QString &fileName, quint64 generation) const;
+		/**
+		 * @brief Synchronously confirms or releases registry ownership after a LuaAudio play or reservation.
+		 * @param buffer One-based selected channel.
+		 * @param generation LuaAudio ownership generation to confirm.
+		 */
+		void              confirmSoundBufferForNativeAudio(int buffer, quint64 generation) const;
+		/**
+		 * @brief Updates a LuaAudio channel only while its ownership generation remains current.
+		 * @param buffer Fixed one-based channel.
+		 * @param loop Loop playback when `true`.
+		 * @param volume Playback volume.
+		 * @param pan Stereo pan value.
+		 * @param generation Expected LuaAudio ownership generation.
+		 * @return API status code.
+		 */
+		int               updateSoundForNativeAudio(int buffer, bool loop, double volume, double pan,
+		                                            quint64 generation) const;
+		/**
+		 * @brief Stops a LuaAudio channel only while its ownership generation remains current.
+		 * @param buffer Fixed one-based channel.
+		 * @param generation Expected LuaAudio ownership generation.
+		 * @return API status code.
+		 */
+		int               stopSoundForNativeAudio(int buffer, quint64 generation) const;
 		/**
 		 * @brief Plays sound from memory bytes.
 		 * @param buffer Sound buffer slot index.
@@ -4265,38 +4293,28 @@ class WorldRuntime : public QObject
 		 * @param loop Loop playback when `true`.
 		 * @param volume Playback volume.
 		 * @param pan Stereo pan value.
+		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
 		 * @return API status code.
 		 */
-		int playSoundMemory(int buffer, const QByteArray &data, bool loop, double volume, double pan);
+		int playSoundMemoryDirect(int buffer, const QByteArray &data, bool loop, double volume, double pan,
+		                          int *selectedBuffer = nullptr) const;
 		/**
-		 * @brief Stops playback in buffer slot.
+		 * @brief Immediately stops direct playback in one buffer or every buffer.
 		 * @param buffer Sound buffer slot index.
 		 * @return API status code.
 		 */
-		int stopSound(int buffer);
+		int stopSoundDirect(int buffer) const;
 		/**
-		 * @brief Stops playback in a buffer slot without firing plugin sound callbacks.
-		 *
-		 * Only native compatibility shims that implement `OnPluginPlaySound` replacement behavior should
-		 * use this API. Normal MUSHclient `StopSound` behavior must use `stopSound()` so plugins can
-		 * intercept stop-all requests.
-		 *
-		 * @param buffer Sound buffer slot index.
+		 * @brief Requests callback-interceptable cancellation of all sound playback.
 		 * @return API status code.
 		 */
-		int stopSoundBypassingPluginCallbacks(int buffer);
+		int cancelSoundIntercepted();
 		/**
 		 * @brief Returns playback status for buffer slot.
 		 * @param buffer Sound buffer slot index.
 		 * @return Playback status code.
 		 */
 		[[nodiscard]] int     soundStatus(int buffer) const;
-		/**
-		 * @brief Returns whether a buffer may be reused for native audio allocation.
-		 * @param buffer Sound buffer slot index.
-		 * @return `true` when the slot has no live backend or completed playback.
-		 */
-		[[nodiscard]] bool    soundBufferReusableForNativeAudio(int buffer) const;
 		/**
 		 * @brief Replaces this runtime's platform sound boundary for tests.
 		 * @param backend Complete replacement; an empty value restores normal playback.
@@ -5388,6 +5406,18 @@ class WorldRuntime : public QObject
 		 * @param path Startup directory path.
 		 */
 		void                  setStartupDirectory(const QString &path);
+		/**
+		 * @brief Immediately orders a sound-session root update before later direct sound commands.
+		 * @param path New startup directory path.
+		 */
+		void                  updateSoundStartupDirectory(const QString &path) const;
+		/**
+		 * @brief Registers this world with the process-wide sound engine.
+		 * @param engine Application-owned sound engine that outlives this runtime.
+		 */
+		void                  attachSoundEngine(SoundEngine *engine);
+		/** @brief Closes this world's sound session and removes engine callbacks. */
+		void                  detachSoundEngine();
 		/**
 		 * @brief Sets world window title override.
 		 * @param title Window title text.
@@ -7349,15 +7379,15 @@ class WorldRuntime : public QObject
 					StopAll
 				};
 
-				Kind                      kind{Kind::Play};
-				int                       buffer{0};
-				QString                   fileName;
-				bool                      loop{false};
-				double                    volume{0.0};
-				double                    pan{0.0};
-				std::function<void(int)>  completion;
-				std::function<void(bool)> mutationCompletion;
-				RuntimeCallerContext      callerContext;
+				Kind                                kind{Kind::Play};
+				int                                 buffer{0};
+				QString                             fileName;
+				bool                                loop{false};
+				double                              volume{0.0};
+				double                              pan{0.0};
+				quint64                             preparationToken{0};
+				std::shared_ptr<SoundEngineSession> soundSession;
+				std::function<void(int)>            completion;
 		};
 		struct PendingSoundPluginDecision;
 		/**
@@ -7365,24 +7395,24 @@ class WorldRuntime : public QObject
 		 * @param operation Sound operation awaiting plugin interception.
 		 * @return Immediate status, or `eOK` when completion was suspended.
 		 */
-		int  startSoundPluginDecision(const PendingSoundOperation &operation);
+		int         startSoundPluginDecision(const PendingSoundOperation &operation);
 		/**
 		 * @brief Applies one completed plugin sound decision.
 		 * @param operation Sound operation associated with the decision.
 		 * @param handled Whether a Lua plugin handled the operation.
 		 * @return Final sound status.
 		 */
-		int  completeSoundPluginDecision(const PendingSoundOperation &operation, bool handled);
-		void cancelSoundPluginDecision(const PendingSoundOperation &operation);
+		int         completeSoundPluginDecision(const PendingSoundOperation &operation, bool handled) const;
+		/**
+		 * @brief Cancels one pending plugin sound decision on the runtime thread.
+		 * @param operation Sound operation whose prepared playback and completion are cancelled.
+		 */
+		void        cancelSoundPluginDecision(const PendingSoundOperation &operation) const;
 		/**
 		 * @brief Completes callbacks retained by a cancelled sound operation.
 		 * @param operation Cancelled sound operation.
 		 */
-		void finishCancelledSoundOperation(const PendingSoundOperation &operation) const;
-		/**
-		 * @brief Advances sound operations queued behind an active plugin decision.
-		 */
-		void drainPendingSoundOperations();
+		static void finishCancelledSoundOperation(const PendingSoundOperation &operation);
 		struct PendingChatNoteOperation
 		{
 				short                     noteType{0};
@@ -8743,7 +8773,6 @@ class WorldRuntime : public QObject
 		QHash<quint64, SuspendedPluginCallbackDispatch>         m_suspendedPluginCallbackDispatches;
 		QHash<quint64, PendingPluginCallbackResultContinuation> m_pendingPluginCallbackResultContinuations;
 		QQueue<PendingTraceOperation>                           m_pendingTraceOperations;
-		QQueue<PendingSoundOperation>                           m_pendingSoundOperations;
 		QQueue<PendingChatNoteOperation>                        m_pendingChatNoteOperations;
 		QQueue<OutgoingPacketDebugRecord>                       m_outgoingPacketDebugRecords;
 		std::optional<OutgoingPacketDebugPublication>           m_outgoingPacketDebugPublication;
@@ -8767,8 +8796,6 @@ class WorldRuntime : public QObject
 		bool                                     m_pendingTraceDrainQueued{false};
 		bool                                     m_drainingPendingTraceOperations{false};
 		quint64                                  m_traceStateRevision{0};
-		bool                                     m_soundPluginCallbackPending{false};
-		bool                                     m_drainingPendingSoundOperations{false};
 		bool                                     m_chatNotePluginCallbackPending{false};
 		bool                                     m_drainingPendingChatNoteOperations{false};
 		bool                                     m_drainingOutgoingPacketDebugRecords{false};
@@ -8931,27 +8958,22 @@ class WorldRuntime : public QObject
 		    std::make_shared<LuaCallbackRuntimeLifetimeState>()};
 		std::shared_ptr<LuaScriptReloadCancellationState> m_luaScriptReloadCancellationState{
 		    std::make_shared<LuaScriptReloadCancellationState>()};
-		QDateTime                 m_statusTime;
-		QDateTime                 m_lastFlushTime;
-		QDateTime                 m_clientStartTime;
-		QDateTime                 m_worldStartTime;
-		int                       m_mxpErrors{0};
-		bool                      m_mxpActive{false};
-		bool                      m_outputFrozen{false};
-		TextRectangleSettings     m_textRectangle;
-		QMap<int, UdpListener>    m_udpListeners;
-		[[nodiscard]] static bool soundBufferHasBackend(const SoundBuffer &entry);
-		[[nodiscard]] static bool soundBufferIsPlaying(const SoundBuffer &entry);
-		[[nodiscard]] static bool soundBufferIsReusable(const SoundBuffer &entry);
-		[[nodiscard]] static bool soundBufferIsStealable(const SoundBuffer &entry);
-		static void               clearSoundBuffer(SoundBuffer &entry);
-#if QMUD_ENABLE_SOUND
-		[[nodiscard]] SoundBuffer *soundBufferForEffectSignal(const QSoundEffect *effect, int targetBuffer);
-		[[nodiscard]] SoundBuffer *soundBufferForPlayerSignal(const QMediaPlayer *player, int targetBuffer);
-#endif
-		[[nodiscard]] static bool      shouldUseMediaPlayerForSoundFile(const QString &fileName);
-		QVector<SoundBuffer>           m_soundBuffers;
-		TestSoundBackend               m_testSoundBackend;
+		QDateTime                                        m_statusTime;
+		QDateTime                                        m_lastFlushTime;
+		QDateTime                                        m_clientStartTime;
+		QDateTime                                        m_worldStartTime;
+		int                                              m_mxpErrors{0};
+		bool                                             m_mxpActive{false};
+		bool                                             m_outputFrozen{false};
+		TextRectangleSettings                            m_textRectangle;
+		QMap<int, UdpListener>                           m_udpListeners;
+		TestSoundBackend                                 m_testSoundBackend;
+		mutable QMutex                                   m_testSoundBackendMutex;
+		std::atomic_bool                                 m_hasTestSoundBackend{false};
+		QPointer<SoundEngine>                            m_soundEngine;
+		std::atomic<std::shared_ptr<SoundEngineSession>> m_soundSession{
+		    std::shared_ptr<SoundEngineSession>{}};
+		std::atomic<quint64>           m_nextTestSoundPreparationToken{1};
 		int                            m_outputFontHeight{0};
 		int                            m_outputFontWidth{0};
 		int                            m_inputFontHeight{0};
