@@ -335,6 +335,7 @@ set(QMUD_SOURCES
         helpers/WorldCommandProcessorUtils.cpp
         helpers/SoundFileRoutingUtils.cpp
         SoundEngine.cpp
+        MspProtocol.cpp
         helpers/ShortcutPreferenceUtils.cpp
         helpers/LuaExecutionUtils.cpp
         helpers/LuaModalDialogUtils.cpp

@@ -10,6 +10,7 @@
 #include "ColorPacking.h"
 #include "StringUtils.h"
 #include "WorldOptions.h"
+#include "helpers/SoundFileRoutingUtils.h"
 
 #include <QCryptographicHash>
 #include <QUuid>
@@ -79,10 +80,10 @@ namespace
 
 	QString colorRefToName(int colorRef)
 	{
-		const auto         ref = static_cast<QMudColorRef>(colorRef);
-		const int          r   = qmudRed(ref);
-		const int          g   = qmudGreen(ref);
-		const int          b   = qmudBlue(ref);
+		const auto ref = static_cast<QMudColorRef>(colorRef);
+		const int  r   = qmudRed(ref);
+		const int  g   = qmudGreen(ref);
+		const int  b   = qmudBlue(ref);
 		struct NamedColor
 		{
 				int         r;

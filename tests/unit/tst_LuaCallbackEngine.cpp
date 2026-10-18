@@ -403,6 +403,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void overriddenWorldCollectionMutationsDoNotDirtyPersistentState();
 		void setAlphaOptionSupportsTwoCharacterCommandStackSeparator();
 		void setAlphaOptionUpdatesEveryPresentationFromDeferredCallback();
+		void setAlphaOptionRejectsWorldSoundDirectory();
 		void setOptionItemAppliesChatListenerSettings();
 		/** @brief Verifies NAWS tracks effective view geometry and output metrics only. */
 		void nawsTracksEffectiveOutputGeometryAndMetrics();
@@ -5832,6 +5833,38 @@ end
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
 	         QStringLiteral("::"));
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")), QStringLiteral("0"));
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::setAlphaOptionRejectsWorldSoundDirectory()
+{
+	WorldRuntime runtime;
+	runtime.applyDefaultWorldOptions();
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function reject_world_sound_directory()
+  assert(GetAlphaOption("default_world_sound_directory") == "./sounds/")
+  assert(SetAlphaOption("default_world_sound_directory", "./sounds/other/") == 30032)
+  assert(GetAlphaOption("default_world_sound_directory") == "./sounds/")
+end
+)lua"),
+	                            &runtime))
+	{
+		QFAIL("Worker engine initialization failed");
+	}
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("reject_world_sound_directory");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("default_world_sound_directory")),
+	         QStringLiteral("./sounds/"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -15422,8 +15455,9 @@ void tst_LuaCallbackEngine::blacklistedPluginsAreHiddenFromPluginApis()
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
 	const QString     blacklistedId = QStringLiteral("bb6a05ed7534b5db1ed40511");
-	const QStringList blacklistedIds{blacklistedId, QStringLiteral("b8e6dac1ee7fe8e3de931fb7"),
-	                                 QStringLiteral("8238deec7c06bade8ebc3819")};
+	const QStringList blacklistedIds{
+	    blacklistedId, QStringLiteral("b8e6dac1ee7fe8e3de931fb7"), QStringLiteral("8238deec7c06bade8ebc3819"),
+	    QStringLiteral("7da63d78d9f91bebb5285127"), QStringLiteral("1df4fa3b486a36ededa19433")};
 	for (const QString &id : blacklistedIds)
 		QVERIFY(QMudNativePluginRegistry::isBlacklistedId(id));
 

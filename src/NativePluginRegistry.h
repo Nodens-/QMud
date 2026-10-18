@@ -43,6 +43,7 @@ namespace QMudNativePluginRegistry
 			double    version{0.0};
 			double    requiredVersion{0.0};
 			int       sequence{QMudPluginSequence::kDefault};
+			bool      availableWithoutShadow{false};
 			QDateTime dateWritten;
 			QDateTime dateModified;
 	};

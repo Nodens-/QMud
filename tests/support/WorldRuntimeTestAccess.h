@@ -21,6 +21,16 @@ class WorldRuntimeTestAccess final
 {
 	public:
 		/**
+		 * @brief Returns the runtime's current sound-engine session.
+		 * @param runtime Runtime whose session is inspected.
+		 * @return Current session, or an empty pointer when sound is detached.
+		 */
+		static std::shared_ptr<SoundEngineSession> soundSession(const WorldRuntime &runtime)
+		{
+			return runtime.m_soundSession.load(std::memory_order_acquire);
+		}
+
+		/**
 		 * @brief Installs initial world Lua source for a test before callback dispatch begins.
 		 * @param runtime Runtime whose world engine receives the source.
 		 * @param script Lua script text.

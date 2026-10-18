@@ -7,6 +7,8 @@
  */
 
 #include "AppController.h"
+#include "SoundEngine.h"
+#include "SoundEngineTestAccess.h"
 #include "WorldDocument.h"
 #include "WorldOptions.h"
 #include "WorldPreferencesRoutingUtils.h"
@@ -47,6 +49,9 @@
 #include <QStackedWidget>
 #include <QStyleOptionSpinBox>
 #include <QTableWidget>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
@@ -879,6 +884,98 @@ namespace
 				         concurrentHistoryValue);
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("auto_log_file_name")),
 				         QStringLiteral("keep.log"));
+			}
+
+			/** @brief Verifies the output page validates and persists the per-world sound directory. */
+			void worldSoundDirectoryPersistsOnlyWhenContained()
+			{
+				QTemporaryDir root(
+				    QDir::current().filePath(QStringLiteral("world-sound-preferences-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds")));
+
+				SoundEngine engine;
+				engine.configureSoundDirectory(root.path());
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(root.path());
+				runtime.applyDefaultWorldOptions();
+				runtime.attachSoundEngine(&engine);
+				{
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(WorldPreferencesDialog::PageOutput);
+					auto *const directory =
+					    dialog.findChild<QLineEdit *>(QStringLiteral("defaultWorldSoundDirectoryEdit"));
+					auto *const embedded =
+					    dialog.findChild<QCheckBox *>(QStringLiteral("enableEmbeddedMspCheckBox"));
+					auto *const disabled =
+					    dialog.findChild<QCheckBox *>(QStringLiteral("disableMspPlaybackCheckBox"));
+					QVERIFY(directory);
+					QVERIFY(embedded);
+					QVERIFY(disabled);
+					QVERIFY(!embedded->isChecked());
+					QVERIFY(!disabled->isChecked());
+					directory->setText(QStringLiteral("sounds/world-one"));
+					embedded->setChecked(true);
+					disabled->setChecked(true);
+					dialog.accept();
+					QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
+				}
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("default_world_sound_directory")),
+				         QStringLiteral("./sounds/world-one/"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_embedded_msp")),
+				         QStringLiteral("1"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("disable_msp_playback")),
+				         QStringLiteral("1"));
+				QTRY_VERIFY(QDir(QDir(root.path()).filePath(QStringLiteral("sounds/world-one"))).exists());
+				const QString worldFile = QDir(root.path()).filePath(QStringLiteral("world.qdl"));
+				QString       saveError;
+				QVERIFY2(runtime.saveWorldFile(worldFile, &saveError), qPrintable(saveError));
+				WorldDocument saved;
+				QVERIFY2(saved.loadFromFile(worldFile), qPrintable(saved.errorString()));
+				QCOMPARE(saved.worldAttributes().value(QStringLiteral("default_world_sound_directory")),
+				         QStringLiteral("./sounds/world-one/"));
+				QCOMPARE(saved.worldAttributes().value(QStringLiteral("enable_embedded_msp")),
+				         QStringLiteral("1"));
+				QCOMPARE(saved.worldAttributes().value(QStringLiteral("disable_msp_playback")),
+				         QStringLiteral("1"));
+
+				{
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(WorldPreferencesDialog::PageOutput);
+					auto *const directory =
+					    dialog.findChild<QLineEdit *>(QStringLiteral("defaultWorldSoundDirectoryEdit"));
+					QVERIFY(directory);
+					directory->setText(QStringLiteral(R"(.\sounds\world-two)"));
+					dialog.accept();
+					QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
+				}
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("default_world_sound_directory")),
+				         QStringLiteral("./sounds/world-two/"));
+				QTRY_VERIFY(QDir(QDir(root.path()).filePath(QStringLiteral("sounds/world-two"))).exists());
+
+				WorldPreferencesDialog invalidDialog(&runtime, nullptr);
+				invalidDialog.setInitialPage(WorldPreferencesDialog::PageOutput);
+				auto *const directory =
+				    invalidDialog.findChild<QLineEdit *>(QStringLiteral("defaultWorldSoundDirectoryEdit"));
+				QVERIFY(directory);
+				directory->setText(QStringLiteral("./logs"));
+				QTimer::singleShot(0,
+				                   []
+				                   {
+					                   for (QWidget *widget : QApplication::topLevelWidgets())
+					                   {
+						                   if (auto *box = qobject_cast<QMessageBox *>(widget))
+						                   {
+							                   box->accept();
+							                   return;
+						                   }
+					                   }
+				                   });
+				invalidDialog.accept();
+				QCOMPARE(invalidDialog.result(), static_cast<int>(QDialog::Rejected));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("default_world_sound_directory")),
+				         QStringLiteral("./sounds/world-two/"));
 			}
 
 			/**

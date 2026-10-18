@@ -104,6 +104,85 @@ namespace
 			Q_OBJECT
 
 		private slots:
+			/** @brief Verifies world sound directories normalize beneath the shared sounds tree. */
+			static void worldSoundDirectoryIsNormalizedAndContained()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-directory-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds")));
+
+				WorldSoundDirectoryPaths paths;
+				QVERIFY(resolveWorldSoundDirectory(root.path(), {}, &paths));
+				QCOMPARE(paths.storedPath, QStringLiteral("./sounds/"));
+				QCOMPARE(paths.absolutePath, QDir(root.path()).filePath(QStringLiteral("sounds")));
+				QVERIFY(paths.catalogPrefix.isEmpty());
+
+				QVERIFY(resolveWorldSoundDirectory(root.path(), QStringLiteral("sounds/world/zone"), &paths));
+				QCOMPARE(paths.storedPath, QStringLiteral("./sounds/world/zone/"));
+				QCOMPARE(paths.catalogPrefix, QStringLiteral("world/zone"));
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds/Actual-World/Zone")));
+				QVERIFY(resolveWorldSoundDirectory(
+				    root.path(), QStringLiteral("./SOUNDS/actual-world/zone/missing"), &paths));
+				QCOMPARE(paths.storedPath, QStringLiteral("./sounds/Actual-World/Zone/missing/"));
+				QCOMPARE(paths.absolutePath,
+				         QDir(root.path()).filePath(QStringLiteral("sounds/Actual-World/Zone/missing")));
+				QCOMPARE(paths.catalogPrefix, QStringLiteral("Actual-World/Zone/missing"));
+				QVERIFY(resolveWorldSoundDirectory(root.path(), QStringLiteral(R"(.\sounds\world\zone)"),
+				                                   &paths));
+				QCOMPARE(paths.storedPath, QStringLiteral("./sounds/world/zone/"));
+				QVERIFY(resolveWorldSoundDirectory(
+				    root.path(), QStringLiteral(R"(C:\MUSHclient\sounds\world\zone)"), &paths));
+				QCOMPARE(paths.catalogPrefix, QStringLiteral("world/zone"));
+				QVERIFY(!resolveWorldSoundDirectory(root.path(), QStringLiteral("./logs"), &paths));
+				QVERIFY(
+				    !resolveWorldSoundDirectory(root.path(), QStringLiteral("./sounds/../../logs"), &paths));
+				QVERIFY(resolveWorldSoundDirectory(
+				    root.path(), QDir(root.path()).filePath(QStringLiteral("sounds/world")), &paths));
+				QCOMPARE(paths.storedPath, QStringLiteral("./sounds/world/"));
+				QFile soundFile(QDir(root.path()).filePath(QStringLiteral("sounds/not-a-directory.wav")));
+				QVERIFY(soundFile.open(QIODevice::WriteOnly));
+				soundFile.close();
+				QVERIFY(!resolveWorldSoundDirectory(root.path(),
+				                                    QStringLiteral("./sounds/not-a-directory.wav"), &paths));
+
+				bool explicitlyRooted = false;
+				QCOMPARE(soundTreeRelativePath(QStringLiteral(R"(combat\hit.wav)"), &explicitlyRooted),
+				         QStringLiteral("combat/hit.wav"));
+				QVERIFY(!explicitlyRooted);
+				QCOMPARE(soundTreeRelativePath(QStringLiteral(R"(C:\MUSHclient\sounds\combat\hit.wav)"),
+				                               &explicitlyRooted),
+				         QStringLiteral("combat/hit.wav"));
+				QVERIFY(explicitlyRooted);
+			}
+
+			/** @brief Verifies an existing symlink cannot redirect a world sound directory outside sounds. */
+			static void worldSoundDirectoryRejectsSymlinkEscape()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-directory-link-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds")));
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("outside")));
+				const QString link = QDir(root.path()).filePath(QStringLiteral("sounds/escape"));
+				QVERIFY(QFile::link(QDir(root.path()).filePath(QStringLiteral("outside")), link));
+
+				WorldSoundDirectoryPaths paths;
+				QVERIFY(!resolveWorldSoundDirectory(root.path(), QStringLiteral("./sounds/escape"), &paths));
+
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds/real")));
+				const QString containedLink =
+				    QDir(root.path()).filePath(QStringLiteral("sounds/contained-link"));
+				if (!QFile::link(QDir(root.path()).filePath(QStringLiteral("sounds/real")), containedLink))
+					QSKIP("Directory symlinks are unavailable on this platform");
+				QVERIFY(!resolveWorldSoundDirectory(root.path(), QStringLiteral("./sounds/contained-link"),
+				                                    &paths));
+				QVERIFY(soundPathContainsSymlink(QDir(root.path()).filePath(QStringLiteral("sounds")),
+				                                 QDir(containedLink).filePath(QStringLiteral("file.wav"))));
+				QVERIFY(soundPathContainsSymlink(
+				    containedLink, QDir(root.path()).filePath(QStringLiteral("sounds/real/file.wav"))));
+				QVERIFY(!soundPathContainsSymlink(QDir(root.path()).filePath(QStringLiteral("sounds")),
+				                                  QDir(root.path()).filePath(QStringLiteral("sounds/real"))));
+			}
+
 			/**
 			 * @brief Verifies ordinary PCM WAV files are routed to QSoundEffect.
 			 */
@@ -175,6 +254,25 @@ namespace
 				QVERIFY(!path.isEmpty());
 
 				QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
+			}
+
+			/**
+			 * @brief Verifies playback suffix validation follows Qt Multimedia decode capabilities.
+			 */
+			static void supportedSuffixesFollowMultimediaCapabilities()
+			{
+				const QSet<QString> &suffixes = soundPlaybackSupportedFileSuffixes();
+#if QMUD_ENABLE_SOUND
+				QVERIFY(!suffixes.isEmpty());
+				const QString suffix = *suffixes.cbegin();
+				QVERIFY(soundPlaybackSupportsFile(QStringLiteral("effect.%1").arg(suffix)));
+				QVERIFY(soundPlaybackSupportsFile(QStringLiteral("effect.%1").arg(suffix.toUpper())));
+				QVERIFY(!soundPlaybackSupportsFile(QStringLiteral("effect.qmud_unsupported_audio")));
+				QVERIFY(!soundPlaybackSupportsFile(QStringLiteral("effect")));
+#else
+				QVERIFY(suffixes.isEmpty());
+				QVERIFY(!soundPlaybackSupportsFile(QStringLiteral("effect.wav")));
+#endif
 			}
 	};
 

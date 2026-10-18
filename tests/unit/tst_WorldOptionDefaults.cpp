@@ -45,6 +45,10 @@ namespace
 				QVERIFY(attrs.contains(QStringLiteral("wrap")));
 				QCOMPARE(attrs.value(QStringLiteral("wrap")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("beep_sound")), QStringLiteral("sounds/QMud/beep.wav"));
+				QCOMPARE(attrs.value(QStringLiteral("default_world_sound_directory")),
+				         QStringLiteral("./sounds/"));
+				QCOMPARE(attrs.value(QStringLiteral("enable_embedded_msp")), QStringLiteral("n"));
+				QCOMPARE(attrs.value(QStringLiteral("disable_msp_playback")), QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("confirm_before_replacing_typing")), QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("utf_8")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("legacy_encoding")), QStringLiteral("windows-1252"));

@@ -22,6 +22,7 @@
 #include <QString>
 #include <QtGlobal>
 #include <cstdio>
+#include <utility>
 #include <zlib.h>
 
 /* Phases for processing input stream ...
@@ -73,6 +74,7 @@ static constexpr unsigned char TELOPT_CHARSET       = 42;
 static constexpr unsigned char TELOPT_START_TLS     = 46;
 static constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
 static constexpr unsigned char TELOPT_MUD_SPECIFIC  = 102;
+static constexpr unsigned char TELOPT_MSP           = 90;
 static constexpr unsigned char TELOPT_MXP           = 91;
 static constexpr unsigned char SGA                  = 3; // suppress go-ahead
 static constexpr unsigned char WILL_END_OF_RECORD   = 25;
@@ -86,6 +88,7 @@ static constexpr unsigned char START_TLS_FOLLOWS                     = 1;
 static constexpr int           MCCP_INFLATE_CHUNK_SIZE               = 8192;
 static constexpr int           kMaxMxpPendingBytes                   = 8192;
 static constexpr int           kMaxMxpAttlistBytes                   = 16384;
+static constexpr int           kMaxMspCandidateBytes                 = 1024 * 1024;
 static constexpr qsizetype     kRenegotiationAttemptLimit            = 10;
 static constexpr qint64        kRenegotiationWindowMilliseconds      = 60'000;
 static constexpr qint64        kRenegotiationSuppressionMilliseconds = 10'000;
@@ -413,11 +416,36 @@ void TelnetProcessor::setNawsEnabled(const bool enabled)
 	setNawsState(enabled, enabled && m_nawsWanted);
 }
 
+void TelnetProcessor::setMspAvailable(const bool available)
+{
+	if (!available && m_mspNegotiated)
+		sendIacDont(TELOPT_MSP);
+	m_mspAvailable = available;
+	if (!available)
+		setMspNegotiatedState(false);
+}
+
+void TelnetProcessor::setEmbeddedMspEnabled(const bool enabled)
+{
+	m_embeddedMspEnabled = enabled;
+}
+
 void TelnetProcessor::restoreNawsNegotiatedState(const bool negotiated)
 {
 	setNawsState(m_naws, negotiated);
 	if (isNawsNegotiated())
 		sendWindowSize();
+}
+
+void TelnetProcessor::restoreMspNegotiatedState(const bool negotiated)
+{
+	if (negotiated && !m_mspAvailable)
+	{
+		sendIacDont(TELOPT_MSP);
+		setMspNegotiatedState(false);
+		return;
+	}
+	setMspNegotiatedState(negotiated);
 }
 
 void TelnetProcessor::setNegotiateOptionsOnce(const bool enabled)
@@ -570,6 +598,14 @@ void TelnetProcessor::resetConnectionState()
 	m_startTlsNegotiationRejected = false;
 	m_requestedSga                = false;
 	m_requestedEor                = false;
+	m_mspNegotiated               = false;
+	m_mspInputPhase               = MspInputPhase::None;
+	m_mspCandidate.clear();
+	m_mspBangPending           = false;
+	m_mspArgumentQuoted        = false;
+	m_mspLineHasVisibleText    = false;
+	m_mspLineHadCommand        = false;
+	m_mspCarriageReturnPending = false;
 	m_seenWillWontOption.fill(false);
 	m_seenDoDontOption.fill(false);
 	resetRenegotiationLoopProtection();
@@ -727,6 +763,18 @@ void TelnetProcessor::handleWill(const unsigned char option)
 		sendIacDo(option);
 		break;
 
+	case TELOPT_MSP:
+		if (m_mspAvailable)
+		{
+			sendIacDo(option);
+			setMspNegotiatedState(true);
+		}
+		else
+		{
+			sendIacDont(option);
+		}
+		break;
+
 	default:
 		if (m_callbacks.onTelnetRequest && m_callbacks.onTelnetRequest(option, QStringLiteral("WILL")))
 		{
@@ -744,6 +792,8 @@ void TelnetProcessor::handleWill(const unsigned char option)
 
 void TelnetProcessor::handleWont(const unsigned char option)
 {
+	if (option == TELOPT_MSP)
+		setMspNegotiatedState(false);
 	if (option == TELOPT_COMPRESS || option == TELOPT_COMPRESS2)
 	{
 		m_compress = false;
@@ -821,6 +871,10 @@ void TelnetProcessor::handleDo(const unsigned char option)
 			if (m_useMxp == eQueryMXP)
 				mxpOn(false, false);
 		}
+		break;
+
+	case TELOPT_MSP:
+		sendIacWont(option);
 		break;
 
 	default:
@@ -1470,6 +1524,11 @@ bool TelnetProcessor::isNawsNegotiated() const
 	return m_naws && m_nawsWanted;
 }
 
+bool TelnetProcessor::isMspNegotiated() const
+{
+	return m_mspNegotiated;
+}
+
 int TelnetProcessor::windowRows() const
 {
 	return m_wrapRows;
@@ -1714,20 +1773,248 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 {
 	QByteArray output;
 	output.reserve(data.size());
-	int  outputSize       = m_outputSize;
-	auto appendOutputByte = [&](const char byte)
+	int  outputSize          = m_outputSize;
+	auto appendRawOutputByte = [&](const char byte)
 	{
 		output.append(byte);
 		++outputSize;
 		m_outputSize = outputSize;
 	};
-	auto appendOutputBytes = [&](const QByteArray &bytes)
+	auto appendMspVisibleOutputByte = [&](const char byte)
+	{
+		appendRawOutputByte(byte);
+		if (byte == '\n')
+		{
+			m_mspLineHasVisibleText = false;
+			m_mspLineHadCommand     = false;
+		}
+		else if (byte != '\r')
+		{
+			m_mspLineHasVisibleText = true;
+		}
+	};
+	auto appendDirectControlBytes = [&](const QByteArray &bytes)
 	{
 		if (bytes.isEmpty())
 			return;
 		output.append(bytes);
 		outputSize += static_cast<int>(bytes.size());
 		m_outputSize = outputSize;
+	};
+	auto resetMspCandidate = [this]
+	{
+		m_mspInputPhase     = MspInputPhase::None;
+		m_mspArgumentQuoted = false;
+		m_mspCandidate.clear();
+	};
+	auto flushMspCandidate = [&]
+	{
+		const QByteArray literal = m_mspCandidate;
+		resetMspCandidate();
+		for (const char byte : literal)
+			appendMspVisibleOutputByte(byte);
+	};
+	auto flushMspPendingLiteral = [&]
+	{
+		if (m_mspBangPending)
+		{
+			m_mspBangPending = false;
+			appendMspVisibleOutputByte('!');
+		}
+		if (!m_mspCandidate.isEmpty())
+			flushMspCandidate();
+	};
+	auto mspKeywordPrefixMatches = [this](const QByteArrayView keyword)
+	{
+		if (m_mspCandidate.size() > keyword.size())
+			return false;
+		auto asciiUpper = [](const unsigned char value)
+		{ return value >= 'a' && value <= 'z' ? static_cast<unsigned char>(value - ('a' - 'A')) : value; };
+		for (qsizetype i = 0; i < m_mspCandidate.size(); ++i)
+		{
+			const auto candidateByte = static_cast<unsigned char>(m_mspCandidate.at(i));
+			const auto keywordByte   = static_cast<unsigned char>(keyword.at(i));
+			if (asciiUpper(candidateByte) != asciiUpper(keywordByte))
+				return false;
+		}
+		return true;
+	};
+	auto dispatchMspCandidate = [&]
+	{
+		const QString commandText =
+		    m_utf8 ? QString::fromUtf8(m_mspCandidate)
+		           : qmudDecodeWorldTextIsolated(m_mspCandidate, m_legacyEncodingName, nullptr);
+		std::optional<QMudMspProtocol::Command> command = QMudMspProtocol::parseLine(commandText);
+		if (!command)
+		{
+			flushMspCandidate();
+			return false;
+		}
+		resetMspCandidate();
+		m_mspLineHadCommand = true;
+		if (m_callbacks.onMspCommand)
+			m_callbacks.onMspCommand(*command);
+		return true;
+	};
+	auto appendOutputByte = [&](const char byte)
+	{
+		const auto current = static_cast<unsigned char>(byte);
+		if (!m_mspNegotiated)
+		{
+			if (m_mspBangPending)
+			{
+				m_mspBangPending = false;
+				appendRawOutputByte('!');
+			}
+			if (!m_mspCandidate.isEmpty())
+				flushMspCandidate();
+			appendRawOutputByte(byte);
+			return;
+		}
+
+		if (m_mspBangPending)
+		{
+			m_mspBangPending = false;
+			if (current == '!')
+			{
+				m_mspCandidate  = QByteArrayLiteral("!!");
+				m_mspInputPhase = MspInputPhase::Keyword;
+				return;
+			}
+			appendMspVisibleOutputByte('!');
+		}
+
+		if (m_mspCandidate.isEmpty() && !m_mspCarriageReturnPending && !m_mspLineHadCommand)
+		{
+			if (!m_embeddedMspEnabled && m_mspLineHasVisibleText)
+			{
+				appendRawOutputByte(byte);
+				if (current == '\n')
+					m_mspLineHasVisibleText = false;
+				return;
+			}
+			if (current != '!')
+			{
+				appendMspVisibleOutputByte(byte);
+				return;
+			}
+		}
+
+		if (m_mspCarriageReturnPending)
+		{
+			m_mspCarriageReturnPending = false;
+			if (current == '\n' && m_mspLineHadCommand && !m_mspLineHasVisibleText)
+			{
+				m_mspLineHadCommand = false;
+				return;
+			}
+			appendMspVisibleOutputByte('\r');
+		}
+
+		if (m_mspCandidate.isEmpty())
+		{
+			if (current == '!' && (m_embeddedMspEnabled || !m_mspLineHasVisibleText))
+			{
+				m_mspBangPending = true;
+				return;
+			}
+			if (current == '\n' && m_mspLineHadCommand && !m_mspLineHasVisibleText)
+			{
+				m_mspLineHadCommand = false;
+				return;
+			}
+			if (current == '\r' && m_mspLineHadCommand && !m_mspLineHasVisibleText)
+			{
+				m_mspCarriageReturnPending = true;
+				return;
+			}
+			appendMspVisibleOutputByte(byte);
+			return;
+		}
+
+		m_mspCandidate.append(byte);
+		if (m_mspCandidate.size() > kMaxMspCandidateBytes)
+		{
+			flushMspCandidate();
+			return;
+		}
+		switch (m_mspInputPhase)
+		{
+		case MspInputPhase::Keyword:
+		{
+			static const auto kSoundKeyword = QByteArrayLiteral("!!SOUND");
+			static const auto kMusicKeyword = QByteArrayLiteral("!!MUSIC");
+			const bool        soundPrefix   = mspKeywordPrefixMatches(kSoundKeyword);
+			const bool        musicPrefix   = mspKeywordPrefixMatches(kMusicKeyword);
+			if (!soundPrefix && !musicPrefix)
+			{
+				flushMspCandidate();
+				return;
+			}
+			if (m_mspCandidate.size() == kSoundKeyword.size() ||
+			    m_mspCandidate.size() == kMusicKeyword.size())
+			{
+				m_mspInputPhase = MspInputPhase::BeforeArguments;
+			}
+			return;
+		}
+		case MspInputPhase::BeforeArguments:
+			if (current == '(')
+			{
+				m_mspInputPhase = MspInputPhase::Arguments;
+				return;
+			}
+			flushMspCandidate();
+			return;
+		case MspInputPhase::Arguments:
+			if (current == '\r' || current == '\n')
+			{
+				flushMspCandidate();
+				return;
+			}
+			if (current == '"')
+			{
+				m_mspArgumentQuoted = !m_mspArgumentQuoted;
+				return;
+			}
+			if (current != ')' || m_mspArgumentQuoted)
+				return;
+			if (!m_embeddedMspEnabled)
+			{
+				m_mspInputPhase = MspInputPhase::AwaitingLineEnd;
+				return;
+			}
+			static_cast<void>(dispatchMspCandidate());
+			return;
+		case MspInputPhase::AwaitingLineEnd:
+			if (current != '\r' && current != '\n')
+			{
+				flushMspCandidate();
+				return;
+			}
+			m_mspCandidate.chop(1);
+			if (!dispatchMspCandidate())
+			{
+				appendMspVisibleOutputByte(byte);
+				return;
+			}
+			if (current == '\r')
+				m_mspCarriageReturnPending = true;
+			else
+			{
+				m_mspLineHadCommand     = false;
+				m_mspLineHasVisibleText = false;
+			}
+			return;
+		case MspInputPhase::None:
+			break;
+		}
+		flushMspCandidate();
+	};
+	auto appendVisibleOutputBytes = [&](const QByteArray &bytes)
+	{
+		for (const char byte : bytes)
+			appendMspVisibleOutputByte(byte);
 	};
 	auto abortMxpCollectionOnOverflow = [this]
 	{
@@ -1885,7 +2172,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 					m_mxpPhase = MXP_NONE;
 					// here when entity collection complete
 					if (QByteArray resolved = mxpCollectedEntity(); !resolved.isEmpty())
-						appendOutputBytes(resolved);
+						appendVisibleOutputBytes(resolved);
 					m_mxpString.clear();
 					break;
 				case '&':
@@ -1916,6 +2203,11 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			// Legacy behavior: ignore NUL bytes in normal text stream.
 			if (c == 0)
 				break;
+			if ((m_mspBangPending || !m_mspCandidate.isEmpty()) &&
+			    (c == 0x1B || (mxpCanStartCollection() && (c == '<' || c == '&'))))
+			{
+				flushMspPendingLiteral();
+			}
 			if (c == IAC)
 			{
 				m_phase = HAVE_IAC;
@@ -1967,7 +2259,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				m_phase = NONE;
 				if (!m_ansiBuffer.isEmpty())
 				{
-					appendOutputBytes(m_ansiBuffer);
+					appendDirectControlBytes(m_ansiBuffer);
 					m_ansiBuffer.clear();
 				}
 				appendOutputByte(static_cast<char>(c));
@@ -1991,7 +2283,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				if (c == 'm')
 				{
 					if (!m_ansiBuffer.isEmpty())
-						appendOutputBytes(m_ansiBuffer);
+						appendDirectControlBytes(m_ansiBuffer);
 				}
 				else if (c == 'z') // MXP line security mode
 				{
@@ -2049,6 +2341,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 		case HAVE_WILL:
 		case HAVE_WONT:
 		{
+			const bool                   wasWont = m_phase == HAVE_WONT;
 			const NegotiationDisposition disposition =
 			    recordNegotiationAttempt(NegotiationDirection::ServerOption, c, m_negotiationClock.elapsed());
 			if (disposition == NegotiationDisposition::Suppress ||
@@ -2059,10 +2352,12 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			}
 
-			if (m_phase == HAVE_WILL)
+			if (!wasWont)
 				handleWill(c);
 			else
 				handleWont(c);
+			if (wasWont && c == TELOPT_MSP && !m_mspNegotiated)
+				flushMspPendingLiteral();
 			m_seenWillWontOption[c] = true;
 			m_phase                 = NONE;
 			break;
@@ -2521,6 +2816,23 @@ void TelnetProcessor::setNawsState(const bool enabled, const bool wanted)
 		appendTelnetStreamEvent(TelnetStreamEvent::NawsNegotiatedChanged, TELOPT_NAWS, {}, negotiated);
 	if (negotiated != wasNegotiated && m_callbacks.onNawsNegotiatedChanged)
 		m_callbacks.onNawsNegotiatedChanged(negotiated);
+}
+
+void TelnetProcessor::setMspNegotiatedState(const bool negotiated)
+{
+	if (m_mspNegotiated == negotiated)
+		return;
+	m_mspNegotiated = negotiated;
+	if (negotiated)
+	{
+		m_mspInputPhase = MspInputPhase::None;
+		m_mspCandidate.clear();
+		m_mspBangPending           = false;
+		m_mspArgumentQuoted        = false;
+		m_mspLineHasVisibleText    = false;
+		m_mspLineHadCommand        = false;
+		m_mspCarriageReturnPending = false;
+	}
 }
 
 void TelnetProcessor::appendTelnetStreamEvent(const TelnetStreamEvent::Type type, const int option,

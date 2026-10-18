@@ -69,6 +69,7 @@ namespace
 	constexpr unsigned char TELOPT_START_TLS     = 46;
 	constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
 	constexpr unsigned char TELOPT_COMPRESS2     = 86;
+	constexpr unsigned char TELOPT_MSP           = 90;
 	constexpr unsigned char CHARSET_REQUEST      = 1;
 	constexpr unsigned char CHARSET_ACCEPTED     = 2;
 	constexpr unsigned char CHARSET_REJECTED     = 3;
@@ -100,6 +101,186 @@ namespace
 
 				processor.queueInitialNegotiation(true, true);
 				QVERIFY(processor.takeOutboundData().isEmpty());
+			}
+
+			/** @brief Verifies native MSP follows Telnet WILL/WONT and live-session restoration. */
+			static void mspNegotiationTracksServerOptionState()
+			{
+				TelnetProcessor processor;
+				processor.setMspAvailable(true);
+				QVERIFY(!processor.isMspNegotiated());
+
+				processor.processBytes(bytes({IAC, WILL, TELOPT_MSP}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_MSP}));
+				QVERIFY(processor.isMspNegotiated());
+
+				processor.processBytes(bytes({IAC, WONT, TELOPT_MSP}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_MSP}));
+				QVERIFY(!processor.isMspNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_MSP}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_MSP}));
+				QVERIFY(!processor.isMspNegotiated());
+
+				processor.restoreMspNegotiatedState(true);
+				QVERIFY(processor.isMspNegotiated());
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				processor.setMspAvailable(false);
+				QVERIFY(!processor.isMspNegotiated());
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_MSP}));
+				processor.resetConnectionState();
+				QVERIFY(!processor.isMspNegotiated());
+			}
+
+			/** @brief Verifies standalone MSP is consumed and embedded MSP follows its explicit option. */
+			static void mspCommandsAreConsumedInTelnetStream()
+			{
+				TelnetProcessor                 processor;
+				QList<QMudMspProtocol::Command> commands;
+				TelnetProcessor::Callbacks      callbacks;
+				callbacks.onMspCommand = [&commands](const QMudMspProtocol::Command &command)
+				{ commands.push_back(command); };
+				processor.setCallbacks(callbacks);
+				processor.setMspAvailable(true);
+				processor.processBytes(bytes({IAC, WILL, TELOPT_MSP}));
+				processor.takeOutboundData();
+
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("before !!SO")),
+				         QByteArrayLiteral("before !!SO"));
+				QVERIFY(processor.takeTelnetStreamEvents().isEmpty());
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("UND(coin.wav V=40) after")),
+				         QByteArrayLiteral("UND(coin.wav V=40) after"));
+				QVERIFY(commands.isEmpty());
+				QVERIFY(processor.takeTelnetStreamEvents().isEmpty());
+
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("\r\n!!MUSIC(theme.ogg)")),
+				         QByteArrayLiteral("\r\n"));
+				QVERIFY(commands.isEmpty());
+				QVERIFY(processor.processBytes(QByteArrayLiteral("\r\n")).isEmpty());
+				QCOMPARE(commands.size(), 1);
+				QCOMPARE(commands.constLast().type, QMudMspProtocol::MediaType::Music);
+				QVERIFY(processor.takeTelnetStreamEvents().isEmpty());
+
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("!!SOUND(bad.wav V=101)\r\n")),
+				         QByteArrayLiteral("!!SOUND(bad.wav V=101)\r\n"));
+				QCOMPARE(commands.size(), 1);
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("!!SOUND (spaced.wav)\r\n")),
+				         QByteArrayLiteral("!!SOUND (spaced.wav)\r\n"));
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("!!SOUND(padded.wav) \r\n")),
+				         QByteArrayLiteral("!!SOUND(padded.wav) \r\n"));
+				QCOMPARE(commands.size(), 1);
+
+				processor.setEmbeddedMspEnabled(true);
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("before !!SO")),
+				         QByteArrayLiteral("before "));
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("UND(coin.wav V=40) after")),
+				         QByteArrayLiteral(" after"));
+				QCOMPARE(commands.size(), 2);
+				QCOMPARE(commands.constLast().fileName, QStringLiteral("coin.wav"));
+				QVERIFY(processor.takeTelnetStreamEvents().isEmpty());
+			}
+
+			/** @brief Verifies an unterminated MSP candidate is released after the one-mebibyte failsafe. */
+			static void oversizedMspCandidateFallsBackToLiteralText()
+			{
+				TelnetProcessor                 processor;
+				QList<QMudMspProtocol::Command> commands;
+				TelnetProcessor::Callbacks      callbacks;
+				callbacks.onMspCommand = [&commands](const QMudMspProtocol::Command &command)
+				{ commands.push_back(command); };
+				processor.setCallbacks(callbacks);
+				processor.setMspAvailable(true);
+				processor.processBytes(bytes({IAC, WILL, TELOPT_MSP}));
+				processor.takeOutboundData();
+
+				QByteArray oversized = QByteArrayLiteral("!!SOUND(");
+				oversized.append(QByteArray(1024 * 1024, 'a'));
+				oversized.append("\r\n");
+				QCOMPARE(processor.processBytes(oversized), oversized);
+				QVERIFY(commands.isEmpty());
+
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!!SOUND(valid.wav)\r\n")).isEmpty());
+				QCOMPARE(commands.size(), 1);
+				QCOMPARE(commands.constLast().fileName, QStringLiteral("valid.wav"));
+			}
+
+			/** @brief Verifies a lone MSP starter stays lightweight across stream boundaries. */
+			static void mspRequiresConfirmedDoubleBangBeforeCollecting()
+			{
+				TelnetProcessor                 processor;
+				QList<QMudMspProtocol::Command> commands;
+				TelnetProcessor::Callbacks      callbacks;
+				callbacks.onMspCommand = [&commands](const QMudMspProtocol::Command &command)
+				{ commands.push_back(command); };
+				processor.setCallbacks(callbacks);
+				processor.setMspAvailable(true);
+				processor.setEmbeddedMspEnabled(true);
+				processor.processBytes(bytes({IAC, WILL, TELOPT_MSP}));
+				processor.takeOutboundData();
+
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("ordinary !")),
+				         QByteArrayLiteral("ordinary "));
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("x text\r\n")),
+				         QByteArrayLiteral("!x text\r\n"));
+				QVERIFY(commands.isEmpty());
+
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!")).isEmpty());
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!SOUND(split.wav)\r\n")).isEmpty());
+				QCOMPARE(commands.size(), 1);
+				QCOMPARE(commands.constLast().fileName, QStringLiteral("split.wav"));
+
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!")).isEmpty());
+				QByteArray ansi = bytes({0x1B, '[', '3', '1', 'm'});
+				ansi.append("text\r\n");
+				QCOMPARE(processor.processBytes(ansi), QByteArrayLiteral("!") + ansi);
+
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!")).isEmpty());
+				QCOMPARE(processor.processBytes(bytes({IAC, WONT, TELOPT_MSP})), QByteArrayLiteral("!"));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_MSP}));
+				QVERIFY(!processor.isMspNegotiated());
+			}
+
+			/** @brief Verifies unrelated Telnet negotiation does not corrupt an MSP starter or candidate. */
+			static void telnetNegotiationPreservesPendingMspInput()
+			{
+				TelnetProcessor                 processor;
+				QList<QMudMspProtocol::Command> commands;
+				TelnetProcessor::Callbacks      callbacks;
+				callbacks.onMspCommand = [&commands](const QMudMspProtocol::Command &command)
+				{ commands.push_back(command); };
+				processor.setCallbacks(callbacks);
+				processor.setMspAvailable(true);
+				processor.setEmbeddedMspEnabled(true);
+				processor.processBytes(bytes({IAC, WILL, TELOPT_MSP}));
+				processor.takeOutboundData();
+
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!")).isEmpty());
+				QVERIFY(processor.processBytes(bytes({IAC, WILL, SGA})).isEmpty());
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!SOUND(first.wav)\r\n")).isEmpty());
+				QCOMPARE(commands.size(), 1);
+				QCOMPARE(commands.constLast().fileName, QStringLiteral("first.wav"));
+
+				QVERIFY(processor.processBytes(QByteArrayLiteral("!!MUS")).isEmpty());
+				QVERIFY(processor.processBytes(bytes({IAC, DO, SGA})).isEmpty());
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
+				QVERIFY(processor.processBytes(QByteArrayLiteral("IC(second.mid)\r\n")).isEmpty());
+				QCOMPARE(commands.size(), 2);
+				QCOMPARE(commands.constLast().type, QMudMspProtocol::MediaType::Music);
+				QCOMPARE(commands.constLast().fileName, QStringLiteral("second.mid"));
+			}
+
+			/** @brief Verifies unavailable sound support rejects live and restored MSP negotiation. */
+			static void unavailableSoundRejectsMspNegotiation()
+			{
+				TelnetProcessor processor;
+				processor.processBytes(bytes({IAC, WILL, TELOPT_MSP}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_MSP}));
+				QVERIFY(!processor.isMspNegotiated());
+
+				processor.restoreMspNegotiatedState(true);
+				QVERIFY(!processor.isMspNegotiated());
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_MSP}));
 			}
 
 			static void repeatedSgaNegotiationRemainsEnabledByDefault()
@@ -631,6 +812,12 @@ namespace
 			{
 				constexpr std::array testFunctions = {
 				    &queueInitialNegotiationIsIdempotent,
+				    &mspNegotiationTracksServerOptionState,
+				    &mspCommandsAreConsumedInTelnetStream,
+				    &oversizedMspCandidateFallsBackToLiteralText,
+				    &mspRequiresConfirmedDoubleBangBeforeCollecting,
+				    &telnetNegotiationPreservesPendingMspInput,
+				    &unavailableSoundRejectsMspNegotiation,
 				    &repeatedSgaNegotiationRemainsEnabledByDefault,
 				    &repeatedSgaNegotiationCanBeSuppressedWhenConfigured,
 				    &automaticProtectionOverridesManualNegotiateOnceMode,
@@ -657,7 +844,7 @@ namespace
 				    &startTlsRejectionIsReported,
 				    &gaCanConvertToNewline,
 				};
-				static_assert(testFunctions.size() == 26);
+				static_assert(testFunctions.size() == 32);
 			}
 	};
 

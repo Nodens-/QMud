@@ -39,6 +39,16 @@ namespace QMudPluginPathUtils
 	[[nodiscard]] bool    resolveInsideQmudHome(const QString &qmudHome, const QString &rawPath,
 	                                            QString *resolvedPath, QString *error = nullptr);
 	/**
+	 * @brief Resolves a relative path inside an existing directory and rejects canonical or symlink escapes.
+	 * @param rootDirectory Existing directory that owns the relative path.
+	 * @param relativePath Relative path using native or portable separators.
+	 * @param resolvedPath Receives the absolute normalized path on success.
+	 * @param error Receives a diagnostic on failure.
+	 * @return True when the relative path is safely contained inside the directory.
+	 */
+	[[nodiscard]] bool    resolveInsideDirectory(const QString &rootDirectory, const QString &relativePath,
+	                                             QString *resolvedPath, QString *error = nullptr);
+	/**
 	 * @brief Converts a path to a QMud-home-relative POSIX path for script metadata APIs.
 	 * @param qmudHome Resolved QMud home directory path.
 	 * @param path Path to convert.

@@ -16027,7 +16027,6 @@ static int luaChangeDir(lua_State *L)
 		QString current = QDir::currentPath();
 		if (!current.endsWith('/'))
 			current += '/';
-		runtime->updateSoundStartupDirectory(current);
 		enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [current](WorldRuntime &targetRuntime)
 		                                             { targetRuntime.setStartupDirectory(current); });
 		setCallbackStartupDirectorySnapshot(engine, runtime, current);
@@ -47162,7 +47161,8 @@ static int luaSetAlphaOption(lua_State *L)
 		lua_pushnumber(L, eUnknownOption);
 		return 1;
 	}
-	if (!pluginId.isEmpty() && option->flags & OPT_PLUGIN_CANNOT_WRITE)
+	if ((option->flags & OPT_CANNOT_WRITE) != 0 ||
+	    (!pluginId.isEmpty() && (option->flags & OPT_PLUGIN_CANNOT_WRITE) != 0))
 	{
 		lua_pushnumber(L, ePluginCannotSetOption);
 		return 1;

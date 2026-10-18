@@ -243,7 +243,6 @@ namespace
 				QCOMPARE(QMudNativePluginRegistry::pluginSupports(audioShimId,
 				                                                  QStringLiteral("plugin_update_url")),
 				         eOK);
-
 				QCOMPARE(
 				    QMudNativePluginRegistry::normalizeNativeSource(QStringLiteral("qmud:native/MushReader")),
 				    QStringLiteral("qmud:native/MushReader"));
@@ -1037,9 +1036,10 @@ namespace
 
 			void blacklistAndProtectedPluginXmlClassification() const
 			{
-				const QStringList blacklistIds{QStringLiteral("bb6a05ed7534b5db1ed40511"),
-				                               QStringLiteral("b8e6dac1ee7fe8e3de931fb7"),
-				                               QStringLiteral("8238deec7c06bade8ebc3819")};
+				const QStringList blacklistIds{
+				    QStringLiteral("bb6a05ed7534b5db1ed40511"), QStringLiteral("b8e6dac1ee7fe8e3de931fb7"),
+				    QStringLiteral("8238deec7c06bade8ebc3819"), QStringLiteral("7da63d78d9f91bebb5285127"),
+				    QStringLiteral("1df4fa3b486a36ededa19433")};
 				for (const QString &id : blacklistIds)
 				{
 					QVERIFY(QMudNativePluginRegistry::isBlacklistedId(id));
@@ -1065,8 +1065,17 @@ namespace
 					const QString parsedId = doc.plugins().front().attributes.value(QStringLiteral("id"));
 					QCOMPARE(parsedId, id);
 					QVERIFY(QMudNativePluginRegistry::isProtectedId(parsedId));
+					if (QMudNativePluginRegistry::isBlacklistedId(id))
+					{
+						WorldRuntime runtime;
+						runtime.setStartupDirectory(directory);
+						QString error;
+						QVERIFY2(runtime.loadPluginFile(path, &error), qPrintable(error));
+						QVERIFY(!runtime.isPluginInstalled(id));
+					}
 				}
 			}
+
 			// NOLINTEND(readability-convert-member-functions-to-static)
 
 		private:

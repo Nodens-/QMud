@@ -62,7 +62,9 @@ namespace
 		static const QSet<QString> ids{
 		    QStringLiteral("bb6a05ed7534b5db1ed40511"), // Automatic_Backup.xml
 		    QStringLiteral("b8e6dac1ee7fe8e3de931fb7"), // Automatic_Backup_7Days.xml
-		    QStringLiteral("8238deec7c06bade8ebc3819")  // AutoSave.xml
+		    QStringLiteral("8238deec7c06bade8ebc3819"), // AutoSave.xml
+		    QStringLiteral("7da63d78d9f91bebb5285127"), // MSP_lua.xml
+		    QStringLiteral("1df4fa3b486a36ededa19433")  // MM/msp_lua.xml
 		};
 		return ids;
 	}
@@ -103,14 +105,15 @@ namespace
 		    QStringLiteral("MushReader is implemented natively by QMud. Legacy XML and DLL content with "
 		                   "this plugin id is intentionally shadowed and never executed. %1")
 		        .arg(QString::fromLatin1(kNativeShimMarker));
-		metadata.language        = QStringLiteral("native");
-		metadata.source          = qmudNativeSourceName(metadata.name);
-		metadata.directory       = QStringLiteral("qmud:native/");
-		metadata.version         = 1.10;
-		metadata.requiredVersion = 0.0;
-		metadata.sequence        = QMudPluginSequence::kDefault;
-		metadata.dateWritten     = QDateTime::fromString(QStringLiteral("2026-06-06T00:00:00Z"), Qt::ISODate);
-		metadata.dateModified    = metadata.dateWritten;
+		metadata.language               = QStringLiteral("native");
+		metadata.source                 = qmudNativeSourceName(metadata.name);
+		metadata.directory              = QStringLiteral("qmud:native/");
+		metadata.version                = 1.10;
+		metadata.requiredVersion        = 0.0;
+		metadata.sequence               = QMudPluginSequence::kDefault;
+		metadata.availableWithoutShadow = false;
+		metadata.dateWritten  = QDateTime::fromString(QStringLiteral("2026-06-06T00:00:00Z"), Qt::ISODate);
+		metadata.dateModified = metadata.dateWritten;
 		return metadata;
 	}
 
@@ -125,14 +128,15 @@ namespace
 		    QStringLiteral("LuaAudio is implemented natively by QMud. Legacy XML and audio.dll content "
 		                   "with this plugin id is intentionally shadowed and never executed. %1")
 		        .arg(QString::fromLatin1(kNativeShimMarker));
-		metadata.language        = QStringLiteral("native");
-		metadata.source          = qmudNativeSourceName(metadata.name);
-		metadata.directory       = QStringLiteral("qmud:native/");
-		metadata.version         = 1.0;
-		metadata.requiredVersion = 0.0;
-		metadata.sequence        = QMudPluginSequence::kDefault;
-		metadata.dateWritten     = QDateTime::fromString(QStringLiteral("2026-06-07T00:00:00Z"), Qt::ISODate);
-		metadata.dateModified    = metadata.dateWritten;
+		metadata.language               = QStringLiteral("native");
+		metadata.source                 = qmudNativeSourceName(metadata.name);
+		metadata.directory              = QStringLiteral("qmud:native/");
+		metadata.version                = 1.0;
+		metadata.requiredVersion        = 0.0;
+		metadata.sequence               = QMudPluginSequence::kDefault;
+		metadata.availableWithoutShadow = true;
+		metadata.dateWritten  = QDateTime::fromString(QStringLiteral("2026-06-07T00:00:00Z"), Qt::ISODate);
+		metadata.dateModified = metadata.dateWritten;
 		return metadata;
 	}
 
@@ -1841,7 +1845,6 @@ namespace QMudNativePluginRegistry
 		{
 			return callLuaAudioRoutine(runtime, routine, arguments, executionMode);
 		}
-
 		if (id != mushReaderPluginId())
 		{
 			result.errorCode = eNoSuchPlugin;

@@ -1381,6 +1381,7 @@ class AppController : public QObject
 		int                              m_nextNewWorldActivationOverride{-1};
 		bool                             m_suppressAutoConnect{false};
 		const bool                       m_disableAutoConnectForExecution;
+		bool                             m_soundAvailableForExecution;
 		bool                             m_reloadInProgress{false};
 		QTimer                          *m_updateCheckTimer{nullptr};
 		QNetworkAccessManager           *m_updateNetworkManager{nullptr};

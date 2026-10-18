@@ -224,6 +224,22 @@ qmud_add_qtest(tst_NativePluginRegistry
         LABELS
         unit)
 
+qmud_add_qtest(tst_MspProtocol
+        SOURCES
+        unit/tst_MspProtocol.cpp
+        "${CMAKE_SOURCE_DIR}/src/MspProtocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_WorldRuntime_Msp
+        SOURCES
+        integration/tst_WorldRuntime_Msp.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        integration)
+
 if (QMUD_ENABLE_LUA_SCRIPTING)
     qmud_add_qtest(tst_LuaApiExport
             GUI
@@ -434,9 +450,17 @@ qmud_add_qtest(tst_WorldRuntimeAttributeUtils
 qmud_add_qtest(tst_SoundFileRoutingUtils
         SOURCES
         unit/tst_SoundFileRoutingUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/SoundFileRoutingUtils.cpp"
+        LIBRARIES
+        ${QMUD_QT_MULTIMEDIA_TARGET}
         LABELS
         unit)
+target_compile_definitions(tst_SoundFileRoutingUtils
+        PRIVATE
+        QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE})
+set_property(TEST tst_SoundFileRoutingUtils APPEND PROPERTY ENVIRONMENT
+        "QMUD_HOME=${CMAKE_BINARY_DIR}")
 
 qmud_add_qtest(tst_SoundCacheUtils
         SOURCES
@@ -453,6 +477,8 @@ if (QMUD_ENABLE_SOUND_VALUE)
             qmud_app_core
             LABELS
             unit)
+    set_property(TEST tst_WorldRuntime_SoundLifetime APPEND PROPERTY ENVIRONMENT
+            "QMUD_HOME=${CMAKE_BINARY_DIR}")
 endif ()
 
 qmud_add_qtest(tst_StartTlsFallbackUtils
@@ -499,6 +525,8 @@ qmud_add_qtest(tst_RegexCompat
 qmud_add_qtest(tst_TelnetProcessor_Options
         SOURCES
         integration/tst_TelnetProcessor_Options.cpp
+        "${CMAKE_SOURCE_DIR}/src/MspProtocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
@@ -512,11 +540,9 @@ qmud_add_qtest(tst_TelnetProcessor_Options
 qmud_add_qtest(tst_TelnetProcessor_Mxp
         SOURCES
         integration/tst_TelnetProcessor_Mxp.cpp
-        "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
-        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
-        ${QMUD_ZLIB_TARGET}
+        qmud_app_core
         LABELS
         integration
         TIMEOUT
@@ -525,6 +551,8 @@ qmud_add_qtest(tst_TelnetProcessor_Mxp
 qmud_add_qtest(tst_TelnetProcessor_Subnegotiation
         SOURCES
         integration/tst_TelnetProcessor_Subnegotiation.cpp
+        "${CMAKE_SOURCE_DIR}/src/MspProtocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
@@ -538,6 +566,8 @@ qmud_add_qtest(tst_TelnetProcessor_Subnegotiation
 qmud_add_qtest(tst_TelnetProcessor_Encoding
         SOURCES
         integration/tst_TelnetProcessor_Encoding.cpp
+        "${CMAKE_SOURCE_DIR}/src/MspProtocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
@@ -551,6 +581,8 @@ qmud_add_qtest(tst_TelnetProcessor_Encoding
 qmud_add_qtest(tst_TelnetProcessor_Compression
         SOURCES
         integration/tst_TelnetProcessor_Compression.cpp
+        "${CMAKE_SOURCE_DIR}/src/MspProtocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
@@ -564,6 +596,8 @@ qmud_add_qtest(tst_TelnetProcessor_Compression
 qmud_add_qtest(tst_TelnetProcessor_Malformed
         SOURCES
         integration/tst_TelnetProcessor_Malformed.cpp
+        "${CMAKE_SOURCE_DIR}/src/MspProtocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
@@ -873,6 +907,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui
             TIMEOUT
             20)
+    set_property(TEST tst_Dialog_WorldPreferences APPEND PROPERTY ENVIRONMENT
+            "QMUD_HOME=${CMAKE_BINARY_DIR}")
 
     qmud_add_qtest(tst_WorldView_Basic
             GUI

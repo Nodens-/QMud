@@ -69,6 +69,9 @@ struct ReloadWorldState
 		bool               mccpDisableAttempted{false};
 		bool               mccpDisableSucceeded{false};
 		bool               nawsNegotiated{false};
+		bool               mspNegotiated{false};
+		QString            mspDefaultSoundUrl;
+		QString            mxpDefaultSoundUrl;
 		bool               utf8Enabled{false};
 		QString            notes;
 };
@@ -175,11 +178,24 @@ struct ReloadMccpProbeIngressInput
 class ReloadSocketRecoveryOps
 {
 	public:
-		virtual ~ReloadSocketRecoveryOps()                                               = default;
+		virtual ~ReloadSocketRecoveryOps() = default;
+		/**
+		 * @brief Adopts a preserved connected socket and its negotiated protocol state.
+		 * @param descriptor Native socket descriptor.
+		 * @param nawsNegotiated Whether NAWS was active on the preserved connection.
+		 * @param mspNegotiated Whether MSP was active on the preserved connection.
+		 * @param mspDefaultSoundUrl MSP default sound URL associated with the preserved connection.
+		 * @param mxpDefaultSoundUrl MXP default sound URL associated with the preserved connection.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` when descriptor adoption succeeds.
+		 */
 		[[nodiscard]] virtual bool adoptConnectedSocketDescriptor(int descriptor, bool nawsNegotiated,
-		                                                          QString *errorMessage) = 0;
-		virtual void               markReloadReattachConnectActionsSuppressed()          = 0;
-		[[nodiscard]] virtual bool consumeReloadReattachConnectActionsSuppressed()       = 0;
+		                                                          bool           mspNegotiated,
+		                                                          const QString &mspDefaultSoundUrl,
+		                                                          const QString &mxpDefaultSoundUrl,
+		                                                          QString       *errorMessage) = 0;
+		virtual void               markReloadReattachConnectActionsSuppressed()                = 0;
+		[[nodiscard]] virtual bool consumeReloadReattachConnectActionsSuppressed()             = 0;
 };
 
 /**

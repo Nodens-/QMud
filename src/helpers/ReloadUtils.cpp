@@ -191,6 +191,9 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 		entry.insert(QStringLiteral("mccp_disable_attempted"), world.mccpDisableAttempted);
 		entry.insert(QStringLiteral("mccp_disable_succeeded"), world.mccpDisableSucceeded);
 		entry.insert(QStringLiteral("naws_negotiated"), world.nawsNegotiated);
+		entry.insert(QStringLiteral("msp_negotiated"), world.mspNegotiated);
+		entry.insert(QStringLiteral("msp_default_sound_url"), world.mspDefaultSoundUrl);
+		entry.insert(QStringLiteral("mxp_default_sound_url"), world.mxpDefaultSoundUrl);
 		entry.insert(QStringLiteral("utf8_enabled"), world.utf8Enabled);
 		entry.insert(QStringLiteral("notes"), world.notes);
 		worlds.append(entry);
@@ -340,11 +343,13 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 				*errorMessage = QStringLiteral("Reload world entry has inconsistent presentation state.");
 			return false;
 		}
-		world.worldId       = object.value(QStringLiteral("world_id")).toString().trimmed();
-		world.displayName   = object.value(QStringLiteral("display_name")).toString().trimmed();
-		world.worldFilePath = object.value(QStringLiteral("world_file_path")).toString();
-		world.host          = object.value(QStringLiteral("host")).toString().trimmed();
-		world.notes         = object.value(QStringLiteral("notes")).toString();
+		world.worldId            = object.value(QStringLiteral("world_id")).toString().trimmed();
+		world.displayName        = object.value(QStringLiteral("display_name")).toString().trimmed();
+		world.worldFilePath      = object.value(QStringLiteral("world_file_path")).toString();
+		world.host               = object.value(QStringLiteral("host")).toString().trimmed();
+		world.notes              = object.value(QStringLiteral("notes")).toString();
+		world.mspDefaultSoundUrl = object.value(QStringLiteral("msp_default_sound_url")).toString();
+		world.mxpDefaultSoundUrl = object.value(QStringLiteral("mxp_default_sound_url")).toString();
 		if (!policyFromString(object.value(QStringLiteral("policy")).toString(), world.policy))
 		{
 			if (errorMessage)
@@ -357,6 +362,8 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		    !parseBoolField(object, "mccp_disable_succeeded", world.mccpDisableSucceeded) ||
 		    (object.contains(QStringLiteral("naws_negotiated")) &&
 		     !parseBoolField(object, "naws_negotiated", world.nawsNegotiated)) ||
+		    (object.contains(QStringLiteral("msp_negotiated")) &&
+		     !parseBoolField(object, "msp_negotiated", world.mspNegotiated)) ||
 		    !parseBoolField(object, "utf8_enabled", world.utf8Enabled))
 		{
 			if (errorMessage)
@@ -543,7 +550,8 @@ ReloadRecoverySocketDecision applyReloadSocketRecovery(ReloadSocketRecoveryOps &
 		runtime.markReloadReattachConnectActionsSuppressed();
 		QString adoptError;
 		if (!runtime.adoptConnectedSocketDescriptor(worldState.socketDescriptor, worldState.nawsNegotiated,
-		                                            &adoptError))
+		                                            worldState.mspNegotiated, worldState.mspDefaultSoundUrl,
+		                                            worldState.mxpDefaultSoundUrl, &adoptError))
 		{
 			(void)runtime.consumeReloadReattachConnectActionsSuppressed();
 			decision.outcome          = ReloadRecoverySocketOutcome::ReconnectQueued;

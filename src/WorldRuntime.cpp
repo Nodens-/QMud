@@ -30,6 +30,7 @@
 #include "MainFrameMdiUtils.h"
 #include "MainWindowHostResolver.h"
 #include "MiniWindowUtils.h"
+#include "MspProtocol.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
 #include "NativePluginRegistry.h"
@@ -57,6 +58,7 @@
 #include "helpers/NoteColourUtils.h"
 #include "helpers/OutputWrapUtils.h"
 #include "helpers/PluginPathUtils.h"
+#include "helpers/SoundFileRoutingUtils.h"
 #include "helpers/TimerSchedulingUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -6816,7 +6818,8 @@ namespace
 
 	bool nativeShimAvailableWithoutShadowPlugin(const QString &shimId)
 	{
-		return shimId != QMudNativePluginRegistry::mushReaderPluginId();
+		QMudNativePluginRegistry::NativePluginMetadata metadata;
+		return QMudNativePluginRegistry::metadataForShim(shimId, metadata) && metadata.availableWithoutShadow;
 	}
 
 	bool nativeShimVisibleForPluginApi(const QList<WorldRuntime::Plugin> &plugins, const QString &shimId)
@@ -7447,6 +7450,12 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 	connect(m_scriptWatcher, &QFileSystemWatcher::directoryChanged, this,
 	        [this](const QString & /*changedPath*/) { refreshScriptFileWatcher(true); });
 	TelnetProcessor::Callbacks callbacks;
+	callbacks.onMspCommand = [this](const QMudMspProtocol::Command &command)
+	{
+		if (m_currentConnectionCancellationState && m_currentConnectionCancellationState->isCancelled())
+			return;
+		executeNativeMspCommand(command);
+	};
 	callbacks.onTelnetRequest = [this](int number, const QString &type)
 	{ return callPluginCallbacksStopOnTrue(LuaCallbackEvent::TelnetRequest, number, type); };
 	callbacks.onTelnetSubnegotiation = [](int number, const QByteArray &data)
@@ -7664,6 +7673,7 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 		        m_connectPhase        = eConnectNotConnected;
 		        m_socketReadyForWorld = false;
 		        m_telnet.resetConnectionState();
+		        resetNativeProtocolSoundState();
 		        resetAnsiRenderState();
 		        if (wasConnected)
 			        emit disconnected();
@@ -8706,6 +8716,7 @@ void WorldRuntime::dispatchTelnetStreamEvent(
 		request.numberArg1    = event.option;
 		request.bytesArg      = event.data;
 		break;
+	case TelnetProcessor::TelnetStreamEvent::NawsNegotiatedChanged:
 	default:
 		return;
 	}
@@ -10098,6 +10109,16 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 		{
 			const QByteArray unnamedForeLocal = activeAttributes.value("1");
 			const QByteArray unnamedBackLocal = activeAttributes.value("2");
+			if (activeTag == "sound" || activeTag == "music")
+			{
+				QMap<QString, QString> decodedAttributes;
+				for (auto it = activeAttributes.constBegin(); it != activeAttributes.constEnd(); ++it)
+				{
+					decodedAttributes.insert(QString::fromLatin1(it.key()).toLower(),
+					                         decodeMxpAttributeBytes(it.value(), attributesAreInternalUtf8));
+				}
+				executeMxpSoundTag(activeTag, decodedAttributes);
+			}
 
 			if (activeTag == "send" || activeTag == "a")
 			{
@@ -10400,7 +10421,6 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 			           ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(lineText.size()))
 			           : 0;
 		};
-
 		auto collectMxpTextActionBody = [&](const MxpStyleFrame &frame)
 		{
 			QString body;
@@ -11864,6 +11884,7 @@ bool WorldRuntime::connectToWorld(const QString &host, quint16 port)
 	m_disconnectOk        = false;
 	m_socketReadyForWorld = false;
 	m_telnet.resetConnectionState();
+	resetNativeProtocolSoundState();
 	resetAnsiRenderState();
 	m_tlsEncryptionEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("tls_encryption")));
 	if (m_tlsEncryptionEnabled)
@@ -12053,7 +12074,8 @@ int WorldRuntime::nativeSocketDescriptor() const
 }
 
 bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
-                                                  QString *errorMessage)
+                                                  const bool mspNegotiated, const QString &mspDefaultSoundUrl,
+                                                  const QString &mxpDefaultSoundUrl, QString *errorMessage)
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -12120,6 +12142,9 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 	m_socketReadyForWorld = true;
 	updateTelnetWindowSizeForNaws();
 	m_telnet.restoreNawsNegotiatedState(nawsNegotiated);
+	m_telnet.restoreMspNegotiatedState(mspNegotiated);
+	m_mspDefaultSoundUrl = mspDefaultSoundUrl;
+	m_mxpDefaultSoundUrl = mxpDefaultSoundUrl;
 	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
 		sendToWorld(outbound);
 	emit connected();
@@ -12149,6 +12174,7 @@ void WorldRuntime::closeSocketForReloadReconnect()
 	m_socketReadyForWorld                 = false;
 	m_socket->abortSocket();
 	m_telnet.resetConnectionState();
+	resetNativeProtocolSoundState();
 	m_telnet.setStartTlsEnabled(false);
 	resetAnsiRenderState();
 }
@@ -12898,6 +12924,21 @@ bool WorldRuntime::isConnected() const
 bool WorldRuntime::isNawsNegotiated() const
 {
 	return m_telnet.isNawsNegotiated();
+}
+
+bool WorldRuntime::isMspNegotiated() const
+{
+	return m_telnet.isMspNegotiated();
+}
+
+const QString &WorldRuntime::mspDefaultSoundUrl() const
+{
+	return m_mspDefaultSoundUrl;
+}
+
+const QString &WorldRuntime::mxpDefaultSoundUrl() const
+{
+	return m_mxpDefaultSoundUrl;
 }
 
 int WorldRuntime::outputWrapColumns() const
@@ -14407,6 +14448,8 @@ void WorldRuntime::setFixedPitchFont(const QString &value)
 void WorldRuntime::applyDefaultWorldOptions()
 {
 	QMudWorldOptionDefaults::applyWorldOptionDefaults(m_worldAttributes, m_worldMultilineAttributes);
+	m_telnet.setEmbeddedMspEnabled(
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("enable_embedded_msp"))));
 }
 
 QString WorldRuntime::fixedPitchFont() const
@@ -18274,6 +18317,138 @@ int WorldRuntime::playSoundDirect(const int buffer, const QString &fileName, con
 	return session->playFile(buffer, fileName, loop, volume, pan, 0, selectedBuffer);
 }
 
+void WorldRuntime::stopNativeMspPlayback() const
+{
+	for (const QMudNativeSoundMedia media : {QMudNativeSoundMedia::Sound, QMudNativeSoundMedia::Music})
+	{
+		QMudNativeSoundRequest request;
+		request.protocol = QMudNativeSoundProtocol::Msp;
+		request.media    = media;
+		request.stop     = true;
+		executeNativeSoundRequest(request);
+	}
+}
+
+void WorldRuntime::resetNativeProtocolSoundState()
+{
+	stopNativeMspPlayback();
+	for (const QMudNativeSoundMedia media : {QMudNativeSoundMedia::Sound, QMudNativeSoundMedia::Music})
+	{
+		QMudNativeSoundRequest request;
+		request.protocol = QMudNativeSoundProtocol::Mxp;
+		request.media    = media;
+		request.stop     = true;
+		executeNativeSoundRequest(request);
+	}
+	m_mspDefaultSoundUrl.clear();
+	m_mxpDefaultSoundUrl.clear();
+}
+
+void WorldRuntime::executeNativeMspCommand(const QMudMspProtocol::Command &command)
+{
+	if (command.setDefaultUrl)
+	{
+		m_mspDefaultSoundUrl = command.url;
+		return;
+	}
+	if (isEnabledFlag(m_worldAttributes.value(QStringLiteral("disable_msp_playback"))))
+		return;
+	QMudNativeSoundRequest request;
+	request.protocol    = QMudNativeSoundProtocol::Msp;
+	request.media       = command.type == QMudMspProtocol::MediaType::Sound ? QMudNativeSoundMedia::Sound
+	                                                                        : QMudNativeSoundMedia::Music;
+	request.filePattern = command.fileName;
+	request.downloadUrl = command.urlProvided ? command.url : m_mspDefaultSoundUrl;
+	request.volume      = command.volume;
+	request.repeatCount = command.repeatCount;
+	request.priority    = command.priority;
+	request.continuePlayback = command.continueMusic;
+	request.stop             = command.stop;
+	executeNativeSoundRequest(request);
+}
+
+void WorldRuntime::executeMxpSoundTag(const QByteArray &tag, const QMap<QString, QString> &attributes)
+{
+	QMudNativeSoundRequest request;
+	request.protocol         = QMudNativeSoundProtocol::Mxp;
+	request.media            = tag == "music" ? QMudNativeSoundMedia::Music : QMudNativeSoundMedia::Sound;
+	const auto argumentValue = [&attributes](const QString &name, const int position)
+	{
+		const auto named = attributes.constFind(name);
+		return named != attributes.constEnd() ? named.value() : attributes.value(QString::number(position));
+	};
+	request.filePattern = argumentValue(QStringLiteral("fname"), 1);
+	request.filePattern = request.filePattern.trimmed();
+	const bool urlProvided =
+	    attributes.contains(QStringLiteral("u")) || attributes.contains(QStringLiteral("6"));
+	const QString downloadUrl = argumentValue(QStringLiteral("u"), 6).trimmed();
+	if (request.filePattern.compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0)
+	{
+		if (urlProvided)
+		{
+			m_mxpDefaultSoundUrl = downloadUrl;
+			return;
+		}
+		request.stop = true;
+		executeNativeSoundRequest(request);
+		return;
+	}
+	if (request.filePattern.isEmpty())
+		return;
+	request.downloadUrl = urlProvided ? downloadUrl : m_mxpDefaultSoundUrl;
+
+	const auto parseAttribute =
+	    [&](const QString &name, const int position, const int minimum, const int maximum, int &target)
+	{
+		const QString value = argumentValue(name, position).trimmed();
+		if (value.isEmpty())
+			return true;
+		bool      ok     = false;
+		const int parsed = value.toInt(&ok);
+		if (!ok || parsed < minimum || parsed > maximum)
+			return false;
+		target = parsed;
+		return true;
+	};
+	if (!parseAttribute(QStringLiteral("v"), 2, 0, 100, request.volume) ||
+	    !parseAttribute(QStringLiteral("l"), 3, -1, 1000000, request.repeatCount) || request.repeatCount == 0)
+	{
+		return;
+	}
+	if (request.media == QMudNativeSoundMedia::Sound)
+	{
+		if (!parseAttribute(QStringLiteral("p"), 4, 0, 100, request.priority))
+			return;
+	}
+	else
+	{
+		int continuePlayback = 1;
+		if (!parseAttribute(QStringLiteral("c"), 4, 0, 1, continuePlayback))
+			return;
+		request.continuePlayback = continuePlayback != 0;
+	}
+	executeNativeSoundRequest(request);
+}
+
+void WorldRuntime::executeNativeSoundRequest(const QMudNativeSoundRequest &request) const
+{
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.nativeSound)
+	{
+		backend.nativeSound(request);
+		return;
+	}
+	if (const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire))
+	{
+		static_cast<void>(session->submitNativeSound(request));
+	}
+}
+
 int WorldRuntime::playSoundMemoryDirect(const int buffer, const QByteArray &data, const bool loop,
                                         const double volume, const double pan, int *selectedBuffer) const
 {
@@ -18472,9 +18647,10 @@ void WorldRuntime::setSoundBackendForTest(TestSoundBackend backend)
 	{
 		QMutexLocker locker(&m_testSoundBackendMutex);
 		m_testSoundBackend = std::move(backend);
-		m_hasTestSoundBackend.store(m_testSoundBackend.play || m_testSoundBackend.stop ||
-		                                m_testSoundBackend.status || m_testSoundBackend.reusable ||
-		                                m_testSoundBackend.reserve || m_testSoundBackend.confirm,
+		m_hasTestSoundBackend.store(m_testSoundBackend.play || m_testSoundBackend.nativeSound ||
+		                                m_testSoundBackend.stop || m_testSoundBackend.status ||
+		                                m_testSoundBackend.reusable || m_testSoundBackend.reserve ||
+		                                m_testSoundBackend.confirm,
 		                            std::memory_order_release);
 	}
 	invalidateLuaCallbackSoundPresentationSnapshot();
@@ -21509,15 +21685,28 @@ void WorldRuntime::setDefaultLogDirectory(const QString &path)
 void WorldRuntime::setStartupDirectory(const QString &path)
 {
 	m_startupDirectory = path;
-	updateSoundStartupDirectory(path);
 	refreshScriptFileWatcher(false);
 }
 
-void WorldRuntime::updateSoundStartupDirectory(const QString &path) const
+void WorldRuntime::setSoundAvailable(const bool available)
+{
+	m_telnet.setMspAvailable(available);
+	if (!available)
+		resetNativeProtocolSoundState();
+	if (isConnected())
+	{
+		if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
+			sendToWorld(outbound);
+	}
+}
+
+void WorldRuntime::updateWorldSoundDirectory() const
 {
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	if (session)
-		session->updateStartupDirectory(path);
+		session->updateWorldSoundDirectory(
+		    m_worldAttributes.value(QStringLiteral("default_world_sound_directory"),
+		                            QString::fromLatin1(kDefaultWorldSoundDirectory)));
 }
 
 void WorldRuntime::attachSoundEngine(SoundEngine *engine)
@@ -21542,8 +21731,11 @@ void WorldRuntime::attachSoundEngine(SoundEngine *engine)
 		runtimeGuard->outputText(message, true, true);
 	};
 	m_soundEngine = engine;
-	m_soundSession.store(engine->registerSession(m_startupDirectory, std::move(callbacks)),
-	                     std::memory_order_release);
+	m_soundSession.store(
+	    engine->registerSession(std::move(callbacks),
+	                            m_worldAttributes.value(QStringLiteral("default_world_sound_directory"),
+	                                                    QString::fromLatin1(kDefaultWorldSoundDirectory))),
+	    std::memory_order_release);
 }
 
 void WorldRuntime::detachSoundEngine()
@@ -27821,6 +28013,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	}
 	dispatchTeardownLuaEngines(pluginEnginesToTeardown, false);
 	QMudNativePluginRegistry::luaAudioResetRuntime(this);
+	resetNativeProtocolSoundState();
 	m_plugins.clear();
 	resetObservedPluginCallbackTracking(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
 	                                    m_observedPluginCallbackGeneration);
@@ -27878,7 +28071,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			shadow.attributes.insert(QStringLiteral("enabled"),
 			                         requestedEnabled ? QStringLiteral("1") : QStringLiteral("0"));
 			if (findPluginIndex(m_plugins, metadata.id) < 0)
-				m_plugins.push_back(shadow);
+				m_plugins.push_back(std::move(shadow));
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
 				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, requestedEnabled);
 			continue;
@@ -28134,6 +28327,10 @@ void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &valu
 		return;
 	}
 	m_worldAttributes.insert(key, normalizedValue);
+	if (key == QStringLiteral("enable_embedded_msp"))
+		m_telnet.setEmbeddedMspEnabled(isEnabledFlag(normalizedValue));
+	else if (key == QStringLiteral("disable_msp_playback") && isEnabledFlag(normalizedValue))
+		stopNativeMspPlayback();
 	const bool luaScriptingIsAvailable = luaScriptingAvailable();
 	if (luaScriptingIsAvailable != luaScriptingWasAvailable)
 		emit luaScriptingAvailabilityChanged(luaScriptingIsAvailable);
@@ -30940,42 +31137,8 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	const QString                pluginId = p.attributes.value(QStringLiteral("id"));
 	if (QMudNativePluginRegistry::isBlacklistedId(pluginId))
 		return true;
-	if (QMudNativePluginRegistry::isShimId(pluginId))
-	{
-		QMudNativePluginRegistry::NativePluginMetadata metadata;
-		if (!QMudNativePluginRegistry::metadataForShim(pluginId, metadata))
-			return true;
-		const int existingShimIndex = findPluginIndex(m_plugins, pluginId);
-		if (existingShimIndex >= 0)
-		{
-			const Plugin            &existing                 = m_plugins.at(existingShimIndex);
-			const bool               wasEnabled               = existing.enabled;
-			const bool               wasGlobal                = existing.global || markGlobal;
-			const std::optional<int> dispatchSequenceOverride = existing.dispatchSequenceOverride;
-			invalidatePluginRuntimeLocations(m_plugins[existingShimIndex]);
-			m_plugins[existingShimIndex] =
-			    makeNativeShimReplacement(metadata, wasGlobal, wasEnabled, dispatchSequenceOverride);
-			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
-				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, wasEnabled);
-		}
-		else
-		{
-			m_plugins.push_back(makeNativeShimShadowPlugin(metadata, markGlobal));
-			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
-				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, true);
-		}
-		sortPluginsBySequence();
-		m_pluginCount = safeQSizeToInt(m_plugins.size());
-		notePluginStructureMutation();
-		invalidatePluginCallbackPresenceCache();
-		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
-		QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
-		callPluginCallbacksNoArgs(LuaCallbackEvent::ListChanged,
-		                          WorldRuntime::PluginCallbackCompletionPolicy::Queued);
-		return true;
-	}
 	const int existingIndex = findPluginIndex(m_plugins, pluginId);
-	if (existingIndex >= 0)
+	if (existingIndex >= 0 && !QMudNativePluginRegistry::isShimId(pluginId))
 	{
 		Plugin &existing = m_plugins[existingIndex];
 		if (markGlobal)
@@ -31002,6 +31165,39 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 				*error = QStringLiteral("The plugin is already loaded.");
 		}
 		return false;
+	}
+	if (QMudNativePluginRegistry::isShimId(pluginId))
+	{
+		QMudNativePluginRegistry::NativePluginMetadata metadata;
+		if (!QMudNativePluginRegistry::metadataForShim(pluginId, metadata))
+			return true;
+		if (existingIndex >= 0)
+		{
+			const Plugin            &existing                 = m_plugins.at(existingIndex);
+			const bool               wasEnabled               = existing.enabled;
+			const bool               wasGlobal                = existing.global || markGlobal;
+			const std::optional<int> dispatchSequenceOverride = existing.dispatchSequenceOverride;
+			invalidatePluginRuntimeLocations(m_plugins[existingIndex]);
+			m_plugins[existingIndex] =
+			    makeNativeShimReplacement(metadata, wasGlobal, wasEnabled, dispatchSequenceOverride);
+			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
+				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, wasEnabled);
+		}
+		else
+		{
+			m_plugins.push_back(makeNativeShimShadowPlugin(metadata, markGlobal));
+			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
+				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, true);
+		}
+		sortPluginsBySequence();
+		m_pluginCount = safeQSizeToInt(m_plugins.size());
+		notePluginStructureMutation();
+		invalidatePluginCallbackPresenceCache();
+		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
+		QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
+		callPluginCallbacksNoArgs(LuaCallbackEvent::ListChanged,
+		                          WorldRuntime::PluginCallbackCompletionPolicy::Queued);
+		return true;
 	}
 
 	Plugin rp;
