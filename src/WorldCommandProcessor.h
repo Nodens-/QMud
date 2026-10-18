@@ -511,9 +511,10 @@ class WorldCommandProcessor : public QObject
 		           int startOffset = 0, bool multiLine = false, qint64 *executionTimeNs = nullptr,
 		           int *matchCount = nullptr, int *matchAttempts = nullptr,
 		           QRegularExpression::MatchOptions matchOptions = QRegularExpression::NoMatchOption) const;
+		struct CachedRegularExpression;
 		/**
 		 * @brief Matches subject text with an already compiled regex.
-		 * @param regex Compiled regex.
+		 * @param cachedRegex Compiled regex and its lazily cached validity.
 		 * @param warningKey Stable key used to coalesce invalid-regex warnings.
 		 * @param subject Subject text.
 		 * @param wildcards Output positional wildcard captures.
@@ -528,7 +529,7 @@ class WorldCommandProcessor : public QObject
 		 * @return `true` when the regex matches.
 		 */
 		bool compiledRegexMatch(
-		    const QRegularExpression &regex, const QString &warningKey, const QString &subject,
+		    const CachedRegularExpression &cachedRegex, const QString &warningKey, const QString &subject,
 		    QStringList &wildcards, QMap<QString, QString> &namedWildcards, int *startCol = nullptr,
 		    int *endCol = nullptr, int startOffset = 0, qint64 *executionTimeNs = nullptr,
 		    int *matchCount = nullptr, int *matchAttempts = nullptr,
@@ -774,10 +775,16 @@ class WorldCommandProcessor : public QObject
 				bool    dynamicPattern{false};
 				int     matcherIndex{-1};
 		};
+		struct CachedRegularExpression
+		{
+				QRegularExpression regex;
+				mutable bool       valid{false};
+				mutable bool       validityKnown{false};
+		};
 		struct CompiledTriggerMatcher
 		{
-				QString            warningKey;
-				QRegularExpression regex;
+				QString                 warningKey;
+				CachedRegularExpression cachedRegex;
 		};
 		struct TriggerEvaluationCacheEntry
 		{
@@ -1196,12 +1203,12 @@ class WorldCommandProcessor : public QObject
 		QSharedPointer<PendingIncomingLineOperation> m_activeIncomingLineOperation;
 		QQueue<PendingIncomingStreamItem>            m_pendingIncomingStreamItems;
 		QSharedPointer<WorldRuntime::IncomingStreamPresentationBatch>
-		                                           m_incomingStreamBacklogPresentationBatch;
-		bool                                       m_runtimeAutomationOwner{true};
-		int                                        m_executionDepth{0};
-		mutable QHash<QString, QRegularExpression> m_regexCache;
-		QHash<QString, QString>                    m_wildcardRegexCache;
-		mutable QSet<QString>                      m_invalidRegexWarnings;
+		                                                m_incomingStreamBacklogPresentationBatch;
+		bool                                            m_runtimeAutomationOwner{true};
+		int                                             m_executionDepth{0};
+		mutable QHash<QString, CachedRegularExpression> m_regexCache;
+		QHash<QString, QString>                         m_wildcardRegexCache;
+		mutable QSet<QString>                           m_invalidRegexWarnings;
 		QHash<quintptr, QSharedPointer<const TriggerEvaluationCacheEntry>> m_triggerEvaluationCache;
 		quint64                                    m_triggerEvaluationCacheGeneration{0};
 		QHash<quintptr, AliasEvaluationCacheEntry> m_aliasEvaluationCache;

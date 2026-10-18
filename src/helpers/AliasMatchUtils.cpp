@@ -30,14 +30,12 @@ namespace
 
 namespace QMudAliasMatch
 {
-	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
-	                              const bool allowEmptyMatch, const int startOffset, qint64 *executionTimeNs,
-	                              int *matchAttempts, const QRegularExpression::MatchOptions matchOptions)
+	MatchResult matchValidRegexWithCaptures(const QRegularExpression &regex, const QString &subject,
+	                                        const bool allowEmptyMatch, const int startOffset,
+	                                        qint64 *executionTimeNs, int *matchAttempts,
+	                                        const QRegularExpression::MatchOptions matchOptions)
 	{
 		MatchResult out;
-		if (!regex.isValid())
-			return out;
-
 		if (matchAttempts)
 			++*matchAttempts;
 		QElapsedTimer executionTimer;

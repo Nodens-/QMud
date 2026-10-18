@@ -31,8 +31,8 @@ namespace QMudAliasMatch
 	};
 
 	/**
-	 * @brief Executes regex match and extracts positional/named captures.
-	 * @param regex Compiled regex pattern.
+	 * @brief Executes a validated regex match and extracts positional/named captures.
+	 * @param regex Compiled regex pattern whose validity was established by the caller.
 	 * @param subject Input command text.
 	 * @param allowEmptyMatch Accept zero-length match when `true`.
 	 * @param startOffset Start offset for regex matching.
@@ -41,10 +41,10 @@ namespace QMudAliasMatch
 	 * @param matchOptions Qt match options applied to this execution.
 	 * @return Match result with capture data and span columns.
 	 */
-	MatchResult
-	matchWithCaptures(const QRegularExpression &regex, const QString &subject, bool allowEmptyMatch,
-	                  int startOffset = 0, qint64 *executionTimeNs = nullptr, int *matchAttempts = nullptr,
-	                  QRegularExpression::MatchOptions matchOptions = QRegularExpression::NoMatchOption);
+	MatchResult matchValidRegexWithCaptures(
+	    const QRegularExpression &regex, const QString &subject, bool allowEmptyMatch, int startOffset = 0,
+	    qint64 *executionTimeNs = nullptr, int *matchAttempts = nullptr,
+	    QRegularExpression::MatchOptions matchOptions = QRegularExpression::NoMatchOption);
 
 	/**
 	 * @brief Checks whether alias/trigger nested execution depth exceeds configured limit.

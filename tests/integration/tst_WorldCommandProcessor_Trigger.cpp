@@ -21,6 +21,7 @@
 #include <QFile>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
+#include <QMessageBox>
 #include <QScopeGuard>
 #include <QScopedPointer>
 #include <QTcpServer>
@@ -31,6 +32,56 @@
 
 namespace
 {
+	/**
+	 * @brief Captures and dismisses modal processor warnings so integration tests cannot block.
+	 */
+	class MessageBoxObserver final : public QObject
+	{
+		public:
+			/** @brief Installs the observer on the test application. */
+			MessageBoxObserver()
+			{
+				qApp->installEventFilter(this);
+			}
+
+			/** @brief Removes the observer from the test application. */
+			~MessageBoxObserver() override
+			{
+				qApp->removeEventFilter(this);
+			}
+
+			/**
+			 * @brief Returns the number of captured warning dialogs.
+			 * @return Number of message boxes shown while the observer was installed.
+			 */
+			[[nodiscard]] int messageCount() const
+			{
+				return m_messageCount;
+			}
+
+			/**
+			 * @brief Counts shown message boxes and queues their rejection.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the watched object.
+			 * @return Base event-filter result.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (event && event->type() == QEvent::Show)
+				{
+					if (auto *messageBox = qobject_cast<QMessageBox *>(watched))
+					{
+						++m_messageCount;
+						QMetaObject::invokeMethod(messageBox, &QDialog::reject, Qt::QueuedConnection);
+					}
+				}
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			int m_messageCount{0};
+	};
+
 	/**
 	 * @brief Creates a two-line regexp trigger that captures trailing whitespace.
 	 * @return Trigger configured to store captures in a world variable.
@@ -99,6 +150,51 @@ namespace
 			Q_OBJECT
 
 		private slots:
+			/**
+			 * @brief Verifies static trigger validity remains lazy and invalid execution stays warning-coalesced.
+			 */
+			static void staticRegexValidityIsLazyAndCached()
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("n"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("("));
+				trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+				runtime.setTriggers({trigger});
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+				MessageBoxObserver observer;
+
+				processor.onIncomingLineReceived(QStringLiteral("disabled"));
+				QCOMPARE(observer.messageCount(), 0);
+				QCOMPARE(runtime.triggers().constFirst().matchAttempts, 0);
+
+				WorldRuntime::Trigger &storedTrigger = WorldRuntimeTestAccess::triggers(runtime).first();
+				storedTrigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				runtime.markTriggersChanged();
+
+				processor.onIncomingLineReceived(QStringLiteral("invalid"));
+				QCOMPARE(observer.messageCount(), 1);
+				QCOMPARE(runtime.triggers().constFirst().matchAttempts, 0);
+				processor.onIncomingLineReceived(QStringLiteral("invalid-again"));
+				QCOMPARE(observer.messageCount(), 1);
+				QCOMPARE(runtime.triggers().constFirst().matchAttempts, 0);
+
+				storedTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^valid$"));
+				runtime.markTriggersChanged();
+
+				processor.onIncomingLineReceived(QStringLiteral("miss"));
+				QCOMPARE(runtime.triggers().constFirst().matchAttempts, 1);
+				processor.onIncomingLineReceived(QStringLiteral("valid"));
+				QCOMPARE(runtime.triggers().constFirst().matchAttempts, 2);
+				QCOMPARE(runtime.triggers().constFirst().matchCount, 1);
+				QCOMPARE(runtime.triggers().constFirst().matched, 1);
+			}
+
 			/**
 			 * @brief Verifies trigger output notes and matched world output use their own log options.
 			 */
