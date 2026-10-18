@@ -9,8 +9,67 @@
 #ifndef QMUD_SQLITE_COMPAT_H
 #define QMUD_SQLITE_COMPAT_H
 
+#include <QStringView>
+
 struct sqlite3;
 struct sqlite3_stmt;
+
+/**
+ * @brief Iterates executable statements using SQLite's statement-boundary rules.
+ *
+ * The referenced SQL text must outlive the scanner and every view returned by next().
+ */
+class SqliteStatementScanner final
+{
+	public:
+		/**
+		 * @brief Creates a scanner over one SQL text buffer.
+		 * @param sql SQL text whose storage remains valid for the scanner's lifetime.
+		 */
+		explicit SqliteStatementScanner(QStringView sql);
+
+		/**
+		 * @brief Returns the next non-empty executable statement.
+		 * @param statement Receives a view of the next statement in the original SQL buffer.
+		 * @return True when a statement was produced, or false after the input is exhausted.
+		 */
+		bool               next(QStringView &statement);
+
+		/**
+		 * @brief Consumes the remaining input and reports sqlite3_complete-compatible completeness.
+		 * @return True when the full SQL input ends at a complete statement boundary.
+		 */
+		[[nodiscard]] bool complete();
+
+	private:
+		enum class State : unsigned char
+		{
+			Invalid,
+			Start,
+			Normal,
+			Explain,
+			Create,
+			Trigger,
+			Semicolon,
+			End
+		};
+
+		QStringView m_sql;
+		qsizetype   m_sqlSize{0};
+		qsizetype   m_offset{0};
+		qsizetype   m_statementStart{0};
+		State       m_state{State::Invalid};
+		bool        m_statementHasToken{false};
+		bool        m_lexicallyComplete{true};
+		bool        m_exhausted{false};
+};
+
+/**
+ * @brief Reports whether SQL text ends at a complete SQLite statement boundary.
+ * @param sql SQL text to inspect.
+ * @return True when the input is complete according to sqlite3_complete semantics.
+ */
+[[nodiscard]] bool sqliteStatementIsComplete(QStringView sql);
 
 #ifndef SQLITE_OK
 inline constexpr int SQLITE_OK = 0;

@@ -357,6 +357,7 @@ set(QMUD_SOURCES
         dialogs/ImportXmlDialog.cpp
         WorldDocument.cpp
         NativePluginRegistry.cpp
+        SqliteCompat.cpp
         WorldRuntime.cpp
         WorldCommandProcessor.cpp
         SpeedwalkParser.cpp

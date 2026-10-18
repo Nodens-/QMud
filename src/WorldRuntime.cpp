@@ -29889,188 +29889,6 @@ namespace
 		}
 	}
 
-	enum class SqliteCompleteState : quint8
-	{
-		Invalid,
-		Start,
-		Normal,
-		Explain,
-		Create,
-		Trigger,
-		Semicolon,
-		End
-	};
-
-	enum class SqliteCompleteToken : quint8
-	{
-		Semicolon,
-		Whitespace,
-		Other,
-		Explain,
-		Create,
-		Temporary,
-		Trigger,
-		End
-	};
-
-	// Keep statement-boundary recognition identical to SQLite's sqlite3_complete() state machine. This permits
-	// QSqlQuery to reproduce sqlite3_exec() sequencing without mixing a Qt-owned connection with another SQLite.
-	constexpr std::array<std::array<SqliteCompleteState, 8>, 8> kSqliteCompleteTransitions{
-	    {{SqliteCompleteState::Start, SqliteCompleteState::Invalid, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Explain, SqliteCompleteState::Create, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
-	     {SqliteCompleteState::Start, SqliteCompleteState::Start, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Explain, SqliteCompleteState::Create, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
-	     {SqliteCompleteState::Start, SqliteCompleteState::Normal, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Normal, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
-	     {SqliteCompleteState::Start, SqliteCompleteState::Explain, SqliteCompleteState::Explain,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Create, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
-	     {SqliteCompleteState::Start, SqliteCompleteState::Create, SqliteCompleteState::Normal,
-	      SqliteCompleteState::Normal, SqliteCompleteState::Normal, SqliteCompleteState::Create,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::Normal},
-	     {SqliteCompleteState::Semicolon, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger},
-	     {SqliteCompleteState::Semicolon, SqliteCompleteState::Semicolon, SqliteCompleteState::Trigger,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::End},
-	     {SqliteCompleteState::Start, SqliteCompleteState::End, SqliteCompleteState::Trigger,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
-	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger}}
-    };
-
-	bool isSqliteIdentifierCodeUnit(const QChar codeUnit)
-	{
-		const ushort value = codeUnit.unicode();
-		return value >= 0x80 || (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
-		       (value >= '0' && value <= '9') || value == '_' || value == '$';
-	}
-
-	bool sqliteKeywordEquals(const QString &sql, const qsizetype offset, const qsizetype length,
-	                         const char *keyword)
-	{
-		for (qsizetype i = 0; i < length; ++i)
-		{
-			ushort value = sql.at(offset + i).unicode();
-			if (value >= 'A' && value <= 'Z')
-				value = static_cast<ushort>(value - 'A' + 'a');
-			if (value != static_cast<unsigned char>(keyword[i]))
-				return false;
-		}
-		return keyword[length] == '\0';
-	}
-
-	SqliteCompleteToken sqliteKeywordToken(const QString &sql, const qsizetype offset, const qsizetype length)
-	{
-		if (length == 3 && sqliteKeywordEquals(sql, offset, length, "end"))
-			return SqliteCompleteToken::End;
-		if (length == 4 && sqliteKeywordEquals(sql, offset, length, "temp"))
-			return SqliteCompleteToken::Temporary;
-		if (length == 6 && sqliteKeywordEquals(sql, offset, length, "create"))
-			return SqliteCompleteToken::Create;
-		if (length == 7 && sqliteKeywordEquals(sql, offset, length, "explain"))
-			return SqliteCompleteToken::Explain;
-		if (length == 7 && sqliteKeywordEquals(sql, offset, length, "trigger"))
-			return SqliteCompleteToken::Trigger;
-		if (length == 9 && sqliteKeywordEquals(sql, offset, length, "temporary"))
-			return SqliteCompleteToken::Temporary;
-		return SqliteCompleteToken::Other;
-	}
-
-	template <typename Visitor> bool visitSqliteExecStatements(const QString &sqlText, Visitor &&visitor)
-	{
-		const qsizetype     nul               = sqlText.indexOf(QChar::Null);
-		const qsizetype     sqlSize           = nul < 0 ? sqlText.size() : nul;
-		SqliteCompleteState state             = SqliteCompleteState::Invalid;
-		qsizetype           statementStart    = 0;
-		bool                statementHasToken = false;
-
-		for (qsizetype offset = 0; offset < sqlSize; ++offset)
-		{
-			SqliteCompleteToken token = SqliteCompleteToken::Other;
-			switch (sqlText.at(offset).unicode())
-			{
-			case ';':
-				token = SqliteCompleteToken::Semicolon;
-				break;
-			case ' ':
-			case '\r':
-			case '\t':
-			case '\n':
-			case '\f':
-				token = SqliteCompleteToken::Whitespace;
-				break;
-			case '/':
-				if (offset + 1 < sqlSize && sqlText.at(offset + 1) == QLatin1Char('*'))
-				{
-					offset += 2;
-					while (offset < sqlSize &&
-					       (sqlText.at(offset) != QLatin1Char('*') || offset + 1 >= sqlSize ||
-					        sqlText.at(offset + 1) != QLatin1Char('/')))
-						++offset;
-					if (offset < sqlSize)
-						++offset;
-					else
-						offset = sqlSize - 1;
-					token = SqliteCompleteToken::Whitespace;
-				}
-				break;
-			case '-':
-				if (offset + 1 < sqlSize && sqlText.at(offset + 1) == QLatin1Char('-'))
-				{
-					while (offset + 1 < sqlSize && sqlText.at(offset + 1) != QLatin1Char('\n'))
-						++offset;
-					token = SqliteCompleteToken::Whitespace;
-				}
-				break;
-			case '[':
-				while (offset + 1 < sqlSize && sqlText.at(offset + 1) != QLatin1Char(']'))
-					++offset;
-				if (offset + 1 < sqlSize)
-					++offset;
-				break;
-			case '`':
-			case '"':
-			case '\'':
-			{
-				const QChar quote = sqlText.at(offset);
-				while (offset + 1 < sqlSize && sqlText.at(offset + 1) != quote)
-					++offset;
-				if (offset + 1 < sqlSize)
-					++offset;
-				break;
-			}
-			default:
-				if (isSqliteIdentifierCodeUnit(sqlText.at(offset)))
-				{
-					const qsizetype identifierStart = offset;
-					while (offset + 1 < sqlSize && isSqliteIdentifierCodeUnit(sqlText.at(offset + 1)))
-						++offset;
-					token = sqliteKeywordToken(sqlText, identifierStart, offset - identifierStart + 1);
-				}
-				break;
-			}
-
-			state = kSqliteCompleteTransitions.at(static_cast<std::size_t>(state))
-			            .at(static_cast<std::size_t>(token));
-			if (token != SqliteCompleteToken::Whitespace && token != SqliteCompleteToken::Semicolon)
-				statementHasToken = true;
-
-			if (token == SqliteCompleteToken::Semicolon && state == SqliteCompleteState::Start)
-			{
-				if (statementHasToken &&
-				    !visitor(sqlText.sliced(statementStart, offset - statementStart + 1)))
-					return false;
-				statementStart    = offset + 1;
-				statementHasToken = false;
-			}
-		}
-
-		return !statementHasToken || visitor(sqlText.sliced(statementStart, sqlSize - statementStart));
-	}
 } // namespace
 
 namespace
@@ -30575,29 +30393,27 @@ int WorldRuntime::databaseExec(const QString &name, const QString &sql)
 	const auto patchSnapshot   = qScopeGuard([this, name] { patchLuaCallbackDatabaseSnapshot(name); });
 	const auto refreshCounters = qScopeGuard([&entry = it.value()] { refreshDatabaseChangeCounters(entry); });
 
-	const bool completed = visitSqliteExecStatements(sql,
-	                                                 [&it](const QString &statement)
-	                                                 {
-		                                                 QSqlQuery query(it->db);
-		                                                 if (query.exec(statement))
-		                                                 {
-			                                                 if (query.isSelect())
-			                                                 {
-				                                                 while (query.next())
-				                                                 {
-				                                                 }
-			                                                 }
-			                                                 if (!query.lastError().isValid())
-				                                                 return true;
-		                                                 }
+	SqliteStatementScanner scanner(sql);
+	QStringView            statement;
+	while (scanner.next(statement))
+	{
+		QSqlQuery query(it->db);
+		if (query.exec(statement.toString()))
+		{
+			if (query.isSelect())
+			{
+				while (query.next())
+				{
+				}
+			}
+			if (!query.lastError().isValid())
+				continue;
+		}
 
-		                                                 it->lastError =
-		                                                     mapSqlErrorToSqlite(query.lastError());
-		                                                 it->lastErrorMessage = query.lastError().text();
-		                                                 return false;
-	                                                 });
-	if (!completed)
+		it->lastError        = mapSqlErrorToSqlite(query.lastError());
+		it->lastErrorMessage = query.lastError().text();
 		return it->lastError;
+	}
 
 	it->lastError = SQLITE_OK;
 	it->lastErrorMessage.clear();

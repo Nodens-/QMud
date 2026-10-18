@@ -1906,6 +1906,109 @@ namespace
 				QCOMPARE(lua_gettop(state.get()), 0);
 			}
 
+			/**
+			 * @brief Verifies SQLite-compatible trigger boundaries for completeness and both execute overloads.
+			 */
+			void sqliteExecuteSupportsTriggerBodies()
+			{
+				LuaStateOwner state = makeCompatLuaState();
+				QVERIFY(state);
+
+				QString sqliteError;
+				QVERIFY2(openSqliteModule(state.get(), sqliteError), qPrintable(sqliteError));
+
+				const auto result = evaluateLuaToString(
+				    state.get(), QByteArrayLiteral(
+				                     "local db = assert(sqlite3.open_memory())\n"
+				                     "local schema = [[\n"
+				                     "CREATE TABLE source(id INTEGER PRIMARY KEY, value TEXT);\n"
+				                     "CREATE TABLE audit(source_id INTEGER, value TEXT);\n"
+				                     "CREATE TRIGGER source_insert AFTER INSERT ON source\n"
+				                     "BEGIN\n"
+				                     "  INSERT INTO audit(source_id, value) VALUES (NEW.id, 'first;value');\n"
+				                     "  INSERT INTO audit(source_id, value) VALUES (NEW.id, NEW.value);\n"
+				                     "END;\n"
+				                     "]]\n"
+				                     "assert(sqlite3.complete(schema))\n"
+				                     "assert(not sqlite3.complete([[\n"
+				                     "CREATE TRIGGER incomplete AFTER INSERT ON source\n"
+				                     "BEGIN\n"
+				                     "  INSERT INTO audit(source_id, value) VALUES (NEW.id, NEW.value);\n"
+				                     "]]))\n"
+				                     "assert(sqlite3.complete('SELECT 1; -- trailing comment'))\n"
+				                     "assert(not sqlite3.complete('SELECT 1; /*'))\n"
+				                     "assert(not sqlite3.complete([[SELECT 1; ']]))\n"
+				                     "assert(db:execute('/*') == sqlite3.ERROR)\n"
+				                     "assert(db:execute(schema) == sqlite3.OK)\n"
+				                     "assert(db:execute([[INSERT INTO source(value) VALUES ('original');]]) "
+				                     "== sqlite3.OK)\n"
+				                     "local observed = {}\n"
+				                     "local rc = db:execute([[\n"
+				                     "CREATE TRIGGER source_update AFTER UPDATE ON source\n"
+				                     "BEGIN\n"
+				                     "  DELETE FROM audit WHERE source_id = OLD.id;\n"
+				                     "  INSERT INTO audit(source_id, value) VALUES (NEW.id, NEW.value);\n"
+				                     "END;\n"
+				                     "UPDATE source SET value = 'updated' WHERE id = 1;\n"
+				                     "SELECT value FROM audit WHERE source_id = 1;\n"
+				                     "]], function(_, columns, row, names)\n"
+				                     "  assert(columns == 1 and names[1] == 'value')\n"
+				                     "  observed[#observed + 1] = row[1]\n"
+				                     "  return 0\n"
+				                     "end)\n"
+				                     "assert(rc == sqlite3.OK)\n"
+				                     "assert(db:close())\n"
+				                     "return table.concat(observed, ',')"));
+				QVERIFY2(result.ok, qPrintable(result.error));
+				QCOMPARE(result.value, QStringLiteral("updated"));
+			}
+
+			/**
+			 * @brief Verifies execute drains rows, reports deferred errors, and skips later statements.
+			 */
+			void sqliteExecuteStopsAfterDeferredRowErrors()
+			{
+				LuaStateOwner state = makeCompatLuaState();
+				QVERIFY(state);
+
+				QString sqliteError;
+				QVERIFY2(openSqliteModule(state.get(), sqliteError), qPrintable(sqliteError));
+
+				const auto result = evaluateLuaToString(
+				    state.get(),
+				    QByteArrayLiteral(
+				        "local db = assert(sqlite3.open_memory())\n"
+				        "assert(db:execute([[\n"
+				        "CREATE TABLE values_to_drain(value INTEGER);\n"
+				        "INSERT INTO values_to_drain(value) VALUES (1), (-9223372036854775808);\n"
+				        "CREATE TABLE marker(kind TEXT);\n"
+				        "]]) == sqlite3.OK)\n"
+				        "local rc, message = db:execute([[\n"
+				        "SELECT abs(value) FROM values_to_drain ORDER BY rowid;\n"
+				        "INSERT INTO marker(kind) VALUES ('without callback');\n"
+				        "]])\n"
+				        "assert(rc == sqlite3.ERROR and type(message) == 'string')\n"
+				        "local callback_rows = 0\n"
+				        "rc, message = db:execute([[\n"
+				        "SELECT abs(value) FROM values_to_drain ORDER BY rowid;\n"
+				        "INSERT INTO marker(kind) VALUES ('with callback');\n"
+				        "]], function()\n"
+				        "  callback_rows = callback_rows + 1\n"
+				        "  return 0\n"
+				        "end)\n"
+				        "assert(rc == sqlite3.ERROR and type(message) == 'string')\n"
+				        "assert(callback_rows == 1)\n"
+				        "local marker_count = -1\n"
+				        "for row in db:nrows('SELECT count(*) AS count FROM marker') do\n"
+				        "  marker_count = row.count\n"
+				        "end\n"
+				        "assert(marker_count == 0)\n"
+				        "assert(db:close())\n"
+				        "return 'ok'"));
+				QVERIFY2(result.ok, qPrintable(result.error));
+				QCOMPARE(result.value, QStringLiteral("ok"));
+			}
+
 			void sqliteExecuteCallbackRuntimeErrorDoesNotAbortOrCorruptLuaState()
 			{
 				LuaStateOwner state = makeCompatLuaState();
