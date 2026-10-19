@@ -98,6 +98,7 @@
 #include <QSet>
 #include <QStringDecoder>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
 #include <QTimeZone>
@@ -472,6 +473,7 @@ template <typename Func>
 static bool enqueueRuntimeThreadDeferredMutationNoResult(const LuaCallbackEngine *engine,
                                                          WorldRuntime *runtime, Func &&func,
                                                          bool requiresCausalOrdering = true);
+template <typename Func> static bool enqueueOnMainThread(Func &&func);
 template <typename Func, typename OkFunc>
 static int enqueueRuntimeThreadAsyncStatusResult(lua_State *L, const LuaCallbackEngine *engine,
                                                  WorldRuntime *runtime, const QString &apiName,
@@ -813,6 +815,36 @@ namespace
 			std::unique_ptr<Transaction> transaction;
 	};
 
+	/**
+	 * @brief One asynchronous result retained by a coalesced notepad append.
+	 */
+	struct PendingNotepadAppendResult
+	{
+			LuaPluginAsyncResultRequest request;        ///< Original asynchronous request identity.
+			int                         failureCode{0}; ///< API-specific failure status.
+	};
+
+	/**
+	 * @brief Adjacent callback-scope appends waiting to enter the ordered mutation journal.
+	 */
+	struct PendingNotepadAppendBatch
+	{
+			QPointer<WorldRuntime>              runtime;  ///< Runtime that owns the target notepad.
+			QString                             worldId;  ///< Stable owner id used for coalescing.
+			QString                             title;    ///< First caller's target title spelling.
+			QString                             contents; ///< Combined adjacent append fragments.
+			QVector<PendingNotepadAppendResult> results;  ///< Results retained in request order.
+
+			/**
+			 * @brief Tests whether this batch contains at least one requested append.
+			 * @return `true` when the batch must be sealed or discarded.
+			 */
+			[[nodiscard]] bool                  isValid() const noexcept
+			{
+				return !results.isEmpty();
+			}
+	};
+
 	struct LuaCallbackExecutionContext
 	{
 			bool                                                originatedFromCallback{false};
@@ -1065,6 +1097,7 @@ namespace
 			std::shared_ptr<CallbackOutputStreamState>          callbackOutputStreamState;
 			QPointer<WorldRuntime>                              deferredRuntimeTarget;
 			QVector<std::function<void()>>                      deferredRuntimeMutations;
+			PendingNotepadAppendBatch                           pendingNotepadAppend;
 			std::shared_ptr<LuaCallbackMutationDependencyState> mutationDependencies;
 			bool                                                hasPendingDeferredRuntimeMutations{false};
 			// Per-journal state consumed by the next flush. Presentation work may follow an earlier semantic
@@ -1121,9 +1154,16 @@ namespace
 	    const LuaCallbackEngine *engine, const WorldRuntime *runtime, LuaCallbackExecutionContext *context,
 	    const LuaCallbackSnapshot *refreshedRuntimeSnapshot = nullptr);
 
+	/**
+	 * @brief Moves a staged notepad append into the ordered deferred-mutation journal.
+	 * @param context Callback context that owns the staged append and journal.
+	 */
+	void sealPendingNotepadAppend(LuaCallbackExecutionContext &context);
+
 	void updateDeferredMutationPendingState(LuaCallbackExecutionContext &context)
 	{
 		const bool hasPending = !context.deferredRuntimeMutations.isEmpty() ||
+		                        context.pendingNotepadAppend.isValid() ||
 		                        !context.dirtyMiniWindowCommitChangesById.isEmpty() ||
 		                        !context.removedMiniWindowCommitIds.isEmpty() ||
 		                        !context.deferredMiniWindowPostCommitMutations.isEmpty();
@@ -1758,6 +1798,7 @@ namespace
 	{
 		static_cast<void>(closeDeferredMiniWindowBatchNonBlocking(context));
 		context.deferredRuntimeMutations.clear();
+		context.pendingNotepadAppend = {};
 		context.mutationDependencies.reset();
 		context.dirtyMiniWindowCommitChangesById.clear();
 		context.removedMiniWindowCommitIds.clear();
@@ -4695,18 +4736,20 @@ namespace
 		else
 		{
 			const LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot.at(index);
-			if (notepad.hasEditor && notepad.hasText)
+			if (notepad.hasEditor && (notepad.hasTextLength || notepad.hasText))
 			{
-				cacheCallbackNotepadLength(engine, key, true, sizeToInt(notepad.text.length()));
-				cacheCallbackNotepadText(engine, key, true, notepad.text);
+				const int length = notepad.hasTextLength
+				                       ? notepad.textLength
+				                       : sizeToInt(notepad.text.length() + notepad.pendingAppend.length());
+				cacheCallbackNotepadLength(engine, key, true, length);
 			}
 			else
 			{
 				context->notepadLengthByKey.remove(key);
 				context->missingNotepadLengthKeys.remove(key);
-				context->notepadTextByKey.remove(key);
-				context->missingNotepadTextKeys.remove(key);
 			}
+			context->notepadTextByKey.remove(key);
+			context->missingNotepadTextKeys.remove(key);
 			const QString positionKey = makeCallbackNotepadWindowPositionKey(title, worldId, runtime);
 			if (notepad.hasGeometry)
 			{
@@ -4814,24 +4857,38 @@ namespace
 				LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot[index];
 				if (replace || !notepad.hasEditor)
 				{
-					notepad.text    = contents;
-					notepad.hasText = true;
+					notepad.text = contents;
+					notepad.pendingAppend.clear();
+					notepad.textLength    = sizeToInt(contents.length());
+					notepad.hasText       = true;
+					notepad.hasTextLength = true;
 				}
-				else if (notepad.hasText)
+				else
 				{
-					notepad.text += contents;
+					notepad.pendingAppend += contents;
+					if (notepad.hasTextLength)
+						notepad.textLength =
+						    sizeToInt(static_cast<qsizetype>(notepad.textLength) + contents.length());
+					else if (notepad.hasText)
+					{
+						notepad.textLength =
+						    sizeToInt(notepad.text.length() + notepad.pendingAppend.length());
+						notepad.hasTextLength = true;
+					}
 				}
 				notepad.hasEditor = true;
 			}
 			else
 			{
 				LuaCallbackNotepadSnapshot notepad;
-				notepad.runtime   = runtime;
-				notepad.worldId   = worldId;
-				notepad.title     = title;
-				notepad.text      = contents;
-				notepad.hasEditor = true;
-				notepad.hasText   = true;
+				notepad.runtime       = runtime;
+				notepad.worldId       = worldId;
+				notepad.title         = title;
+				notepad.text          = contents;
+				notepad.textLength    = sizeToInt(contents.length());
+				notepad.hasEditor     = true;
+				notepad.hasText       = true;
+				notepad.hasTextLength = true;
 				context->notepadPresentationSnapshot.push_back(std::move(notepad));
 			}
 			synchronizeCallbackNotepadDocumentCaches(engine, runtime, title, worldId);
@@ -4866,12 +4923,14 @@ namespace
 		auto *context                       = activeCallbackContext(engine);
 		context->notepadPresentationChanged = true;
 		LuaCallbackNotepadSnapshot notepad;
-		notepad.runtime   = runtime;
-		notepad.worldId   = worldId;
-		notepad.title     = title;
-		notepad.text      = contents;
-		notepad.hasEditor = true;
-		notepad.hasText   = true;
+		notepad.runtime       = runtime;
+		notepad.worldId       = worldId;
+		notepad.title         = title;
+		notepad.text          = contents;
+		notepad.textLength    = sizeToInt(contents.length());
+		notepad.hasEditor     = true;
+		notepad.hasText       = true;
+		notepad.hasTextLength = true;
 		context->notepadPresentationSnapshot.push_back(std::move(notepad));
 		synchronizeCallbackNotepadDocumentCaches(engine, runtime, title, worldId);
 	}
@@ -4946,14 +5005,49 @@ namespace
 			return;
 		LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot[index];
 		notepad.text                        = contents;
-		notepad.hasEditor                   = true;
-		notepad.hasText                     = true;
+		notepad.pendingAppend.clear();
+		notepad.textLength    = sizeToInt(contents.length());
+		notepad.hasEditor     = true;
+		notepad.hasText       = true;
+		notepad.hasTextLength = true;
 		if (geometry.isValid())
 		{
 			notepad.geometry    = geometry;
 			notepad.hasGeometry = true;
 		}
 		synchronizeCallbackNotepadDocumentCaches(engine, runtime, title, worldId);
+	}
+
+	/**
+	 * @brief Stores an authoritative notepad length fetched without copying its document text.
+	 * @param engine Callback engine that owns the active presentation overlay.
+	 * @param runtime Runtime that owns the notepad.
+	 * @param title Case-insensitive notepad title.
+	 * @param worldId Stable owner id used when the runtime pointer is unavailable.
+	 * @param found Whether the notepad and its editor still exist.
+	 * @param length Current plain-text length when found.
+	 */
+	void cacheCallbackNotepadLengthFetched(const LuaCallbackEngine *engine, const WorldRuntime *runtime,
+	                                       const QString &title, const QString &worldId, const bool found,
+	                                       const int length)
+	{
+		if (!found)
+		{
+			cacheCallbackNotepadDocumentFetched(engine, runtime, title, worldId, false, QString(), QRect());
+			return;
+		}
+		if (!engine || !runtime || title.isEmpty() || !ensureCallbackNotepadPresentationSnapshot(engine))
+			return;
+		auto           *context = activeCallbackContext(engine);
+		const qsizetype index   = findCallbackNotepadPresentationIndex(*context, title, runtime, worldId);
+		if (index < 0)
+			return;
+		LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot[index];
+		notepad.textLength                  = length;
+		notepad.hasEditor                   = true;
+		notepad.hasTextLength               = true;
+		cacheCallbackNotepadLength(engine, makeCallbackNotepadDocumentKey(title, worldId, runtime), true,
+		                           length);
 	}
 
 	void cacheCallbackNotepadDocumentRenamed(const LuaCallbackEngine *engine, const WorldRuntime *runtime,
@@ -5160,8 +5254,11 @@ namespace
 			return false;
 		const LuaCallbackNotepadSnapshot *notepad =
 		    findCallbackNotepadSnapshot(*snapshot, title, runtime, worldId);
-		const bool found = notepad && notepad->hasEditor && notepad->hasText;
-		length           = found ? sizeToInt(notepad->text.length()) : 0;
+		const bool found = notepad && notepad->hasEditor && (notepad->hasTextLength || notepad->hasText);
+		length           = !found ? 0
+		                   : notepad->hasTextLength
+		                       ? notepad->textLength
+		                       : sizeToInt(notepad->text.length() + notepad->pendingAppend.length());
 		cacheCallbackNotepadLength(engine, key, found, length);
 		return true;
 	}
@@ -5177,7 +5274,7 @@ namespace
 		const LuaCallbackNotepadSnapshot *notepad =
 		    findCallbackNotepadSnapshot(*snapshot, title, runtime, worldId);
 		const bool found = notepad && notepad->hasEditor && notepad->hasText;
-		contents         = found ? notepad->text : QString();
+		contents         = found ? notepad->text + notepad->pendingAppend : QString();
 		cacheCallbackNotepadText(engine, key, found, contents);
 		return true;
 	}
@@ -10856,7 +10953,7 @@ namespace
 		// callback-lifetime identity and ownership state are deliberately carried across the boundary.
 		LuaCallbackExecutionContext previous = std::move(*context);
 		Q_ASSERT_X(
-		    previous.deferredRuntimeMutations.isEmpty() &&
+		    previous.deferredRuntimeMutations.isEmpty() && !previous.pendingNotepadAppend.isValid() &&
 		        previous.dirtyMiniWindowCommitChangesById.isEmpty() &&
 		        previous.presentationChangedMiniWindowCommitIds.isEmpty() &&
 		        previous.removedMiniWindowCommitIds.isEmpty() &&
@@ -11146,6 +11243,7 @@ namespace
 		if (!targetRuntime)
 		{
 			context.deferredRuntimeMutations.clear();
+			context.pendingNotepadAppend = {};
 			context.mutationDependencies.reset();
 			context.dirtyMiniWindowCommitChangesById.clear();
 			context.presentationChangedMiniWindowCommitIds.clear();
@@ -11176,6 +11274,7 @@ namespace
 		}
 
 		context.flushingDeferredRuntimeMutations = true;
+		sealPendingNotepadAppend(context);
 		QVector<std::function<void()>> pendingMutations;
 		pendingMutations.swap(context.deferredRuntimeMutations);
 		const auto mutationDependencies = context.mutationDependencies;
@@ -11310,6 +11409,7 @@ namespace
 			attachPendingMiniWindowCommitDependency(*context, windowKey, baseWindow);
 		}
 		context->deferredRuntimeTarget = runtime;
+		sealPendingNotepadAppend(*context);
 		context->removedMiniWindowCommitIds.remove(windowName);
 		if (replaced)
 			changes = luaCallbackAllMiniWindowSnapshotChanges();
@@ -11458,6 +11558,7 @@ namespace
 			attachPendingMiniWindowCommitDependency(*context, windowKey, baseWindow);
 		}
 		context->deferredRuntimeTarget = runtime;
+		sealPendingNotepadAppend(*context);
 		context->dirtyMiniWindowCommitChangesById.remove(windowName);
 		context->presentationChangedMiniWindowCommitIds.remove(windowName);
 		context->replacedMiniWindowCommitIds.remove(windowName);
@@ -13775,6 +13876,68 @@ static int yieldCallbackNotepadDocument(lua_State *L, const LuaCallbackEngine *e
 	return lua_yieldk(L, 0, continuationContext, luaNotepadPresentationContinuation<Function>);
 }
 
+/**
+ * @brief Yields a callback only when a notepad's text length has not been resolved.
+ * @tparam Function Lua API function resumed after the length is cached.
+ * @param L Lua state executing the API call.
+ * @param engine Callback engine that owns the active presentation overlay.
+ * @param runtime Runtime that owns the notepad.
+ * @param title Case-insensitive notepad title.
+ * @param worldId Stable owner id used when the runtime pointer is unavailable.
+ * @return Lua yield result, or @ref kLuaLinePageYieldUnavailable when no yield is required.
+ */
+template <int (*Function)(lua_State *)>
+static int yieldCallbackNotepadLength(lua_State *L, const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                      const QString &title, const QString &worldId)
+{
+	if (!engine || !runtime || title.isEmpty() || !canYieldModalResult(L))
+		return kLuaLinePageYieldUnavailable;
+	const auto *context = activeCallbackContextConst(engine);
+	if (!context || !context->hasNotepadPresentationSnapshot)
+		return kLuaLinePageYieldUnavailable;
+	const qsizetype index = findCallbackNotepadPresentationIndex(*context, title, runtime, worldId);
+	if (index < 0)
+		return kLuaLinePageYieldUnavailable;
+	const LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot.at(index);
+	if (!notepad.hasEditor || notepad.hasTextLength || notepad.hasText)
+		return kLuaLinePageYieldUnavailable;
+
+	struct LengthPage
+	{
+			QPointer<WorldRuntime> runtime;
+			int                    length{0};
+			bool                   found{false};
+	};
+	auto page     = std::make_shared<LengthPage>();
+	page->runtime = runtime;
+	LuaPendingModalStringRequest request;
+	request.guiCallable = [page, title, worldId]() -> QString
+	{
+		WorldRuntime *targetRuntime = page->runtime.data();
+		if (!targetRuntime)
+			return {};
+		TextChildWindow *text = findNotepadWindow(title, targetRuntime, worldId);
+		if (!text || !text->editor() || !text->editor()->document())
+			return {};
+		page->length = std::max(0, text->editor()->document()->characterCount() - 1);
+		page->found  = true;
+		return {};
+	};
+	request.beforeResumeCallback = [engine, page, title, worldId](const QString &)
+	{
+		if (WorldRuntime *targetRuntime = page->runtime.data())
+		{
+			cacheCallbackNotepadLengthFetched(engine, targetRuntime, title, worldId, page->found,
+			                                  page->length);
+		}
+	};
+	setLuaModalResumeCallback(request, engine->callbackDispatchRuntime(), engine->pluginId());
+	const auto continuationContext = static_cast<lua_KContext>(lua_gettop(L));
+	if (!beginModalStringYield(L, engine, std::move(request)))
+		return kLuaLinePageYieldUnavailable;
+	return lua_yieldk(L, 0, continuationContext, luaNotepadPresentationContinuation<Function>);
+}
+
 template <int (*Function)(lua_State *)>
 static int yieldDirtyCallbackNotepadGeometry(lua_State *L, const LuaCallbackEngine *engine,
                                              WorldRuntime *runtime, const QString &title,
@@ -14043,6 +14206,113 @@ template <typename Func> static bool enqueueOnMainThread(Func &&func)
 		    (*callback)();
 	    },
 	    Qt::QueuedConnection);
+}
+
+/**
+ * @brief Queues one coalesced notepad append on the GUI thread.
+ * @param runtime Runtime that owns the target notepad.
+ * @param title Case-insensitive target notepad title.
+ * @param contents Combined adjacent append payload.
+ * @param results Ordered asynchronous results for the original API calls.
+ */
+static void dispatchNotepadAppendBatch(WorldRuntime &runtime, const QString &title, const QString &contents,
+                                       const QVector<PendingNotepadAppendResult> &results)
+{
+	const QPointer<WorldRuntime> runtimeGuard(&runtime);
+	const bool                   queued = enqueueOnMainThread(
+	    [runtimeGuard, title, contents, results]
+	    {
+		    WorldRuntime *targetRuntime = runtimeGuard.data();
+		    if (!targetRuntime)
+			    return;
+		    bool ok = false;
+		    if (MainWindow *frame = resolveMainWindow())
+			    ok = frame->appendToNotepad(title, contents, false, targetRuntime);
+		    for (const PendingNotepadAppendResult &result : results)
+		    {
+			    emitPluginAsyncResult(*targetRuntime, result.request, QStringLiteral("AppendToNotepad"), ok,
+			                          ok ? eOK : result.failureCode);
+		    }
+	    });
+	if (queued)
+		return;
+	for (const PendingNotepadAppendResult &result : results)
+	{
+		emitPluginAsyncResult(runtime, result.request, QStringLiteral("AppendToNotepad"), false,
+		                      result.failureCode);
+	}
+}
+
+namespace
+{
+	void sealPendingNotepadAppend(LuaCallbackExecutionContext &context)
+	{
+		if (!context.pendingNotepadAppend.isValid())
+			return;
+		PendingNotepadAppendBatch batch = std::move(context.pendingNotepadAppend);
+		context.pendingNotepadAppend    = {};
+		context.deferredRuntimeMutations.push_back(
+		    [runtimeGuard = batch.runtime, title = std::move(batch.title),
+		     contents = std::move(batch.contents), results = std::move(batch.results)]
+		    {
+			    if (WorldRuntime *runtime = runtimeGuard.data())
+				    dispatchNotepadAppendBatch(*runtime, title, contents, results);
+		    });
+	}
+} // namespace
+
+/**
+ * @brief Stages one callback-scope append and coalesces it with an adjacent append to the same notepad.
+ * @param engine Callback engine that owns the active execution context.
+ * @param runtime Runtime that owns the target notepad.
+ * @param worldId Stable owner id used by the callback-local presentation overlay.
+ * @param title Case-insensitive target notepad title.
+ * @param contents Text fragment to append.
+ * @param request Asynchronous result identity for this API call.
+ * @param failureCode Error code reported if the GUI append cannot be queued or applied.
+ * @return `true` when the append was accepted for ordered delivery.
+ */
+static bool enqueueCallbackNotepadAppend(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                         const QString &worldId, const QString &title,
+                                         const QString &contents, const LuaPluginAsyncResultRequest &request,
+                                         const int failureCode)
+{
+	if (!runtime)
+		return false;
+	auto *context = activeCallbackContext(engine);
+	if (!context || context->flushingDeferredRuntimeMutations)
+	{
+		return enqueueRuntimeThreadDeferredMutationNoResult(
+		    engine, runtime,
+		    [title, contents,
+		     result = PendingNotepadAppendResult{request, failureCode}](WorldRuntime &targetRuntime)
+		    { dispatchNotepadAppendBatch(targetRuntime, title, contents, {result}); });
+	}
+	if (context->deferredRuntimeTarget && context->deferredRuntimeTarget.data() != runtime)
+	{
+		if (!flushDeferredRuntimeMutations(engine, runtime))
+			return false;
+		invalidateCallbackRuntimeSnapshots(engine);
+	}
+
+	context->deferredRuntimeTarget = runtime;
+	appendPendingMiniWindowCommitMutations(*context, context->deferredRuntimeMutations);
+	const bool canCoalesce = context->pendingNotepadAppend.isValid() &&
+	                         context->pendingNotepadAppend.runtime == runtime &&
+	                         context->pendingNotepadAppend.title.compare(title, Qt::CaseInsensitive) == 0 &&
+	                         context->pendingNotepadAppend.worldId.compare(worldId, Qt::CaseInsensitive) == 0;
+	if (!canCoalesce)
+	{
+		sealPendingNotepadAppend(*context);
+		context->pendingNotepadAppend.runtime = runtime;
+		context->pendingNotepadAppend.worldId = worldId;
+		context->pendingNotepadAppend.title   = title;
+	}
+	context->pendingNotepadAppend.contents += contents;
+	context->pendingNotepadAppend.results.push_back({request, failureCode});
+	markPendingSemanticMutation(*context);
+	updateDeferredMutationPendingState(*context);
+	return true;
 }
 
 template <typename Func>
@@ -17833,6 +18103,7 @@ static int runOnRuntimeThreadDeferredMutation(const LuaCallbackEngine *engine, W
 	}
 
 	context->deferredRuntimeTarget = runtime;
+	sealPendingNotepadAppend(*context);
 	appendPendingMiniWindowCommitMutations(*context, context->deferredRuntimeMutations);
 	auto resultState   = std::make_shared<DeferredRuntimeMutationResult>();
 	resultState->value = fallbackValue;
@@ -17972,6 +18243,7 @@ static bool enqueueRuntimeThreadDeferredMutationNoResult(const LuaCallbackEngine
 	}
 
 	context->deferredRuntimeTarget = runtime;
+	sealPendingNotepadAppend(*context);
 	appendPendingMiniWindowCommitMutations(*context, context->deferredRuntimeMutations);
 	const QPointer<WorldRuntime> runtimeGuard(runtime);
 	context->deferredRuntimeMutations.push_back(
@@ -18009,6 +18281,7 @@ enqueueRuntimeThreadDeferredMiniWindowPostCommitNoResult(const LuaCallbackEngine
 	}
 
 	context->deferredRuntimeTarget = runtime;
+	sealPendingNotepadAppend(*context);
 	const QPointer<WorldRuntime> runtimeGuard(runtime);
 	context->deferredMiniWindowPostCommitMutations.push_back(
 	    [runtimeGuard, fn = DecayedFunc(std::forward<Func>(func))]() mutable
@@ -19792,7 +20065,8 @@ static bool resolveNotepadLengthForApi(const LuaCallbackEngine *engine, WorldRun
 	length = 0;
 	if (!engine || !runtime || title.isEmpty())
 		return false;
-	const QString key = makeCallbackNotepadDocumentKey(title, worldId, runtime);
+	const QString key                    = makeCallbackNotepadDocumentKey(title, worldId, runtime);
+	bool          unresolvedPresentation = false;
 	if (const auto *context = activeCallbackContextConst(engine);
 	    context && context->hasNotepadPresentationSnapshot)
 	{
@@ -19802,13 +20076,21 @@ static bool resolveNotepadLengthForApi(const LuaCallbackEngine *engine, WorldRun
 			length = 0;
 			return true;
 		}
-		if (!context->notepadPresentationSnapshot.at(index).hasText)
-			return false;
-		length = sizeToInt(context->notepadPresentationSnapshot.at(index).text.length());
-		return true;
+		const LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot.at(index);
+		if (!notepad.hasTextLength && !notepad.hasText)
+		{
+			unresolvedPresentation = true;
+		}
+		else
+		{
+			length = notepad.hasTextLength
+			             ? notepad.textLength
+			             : sizeToInt(notepad.text.length() + notepad.pendingAppend.length());
+			return true;
+		}
 	}
 	bool cacheHit{false};
-	if (tryResolveCallbackNotepadLengthFromCache(engine, key, length, cacheHit))
+	if (!unresolvedPresentation && tryResolveCallbackNotepadLengthFromCache(engine, key, length, cacheHit))
 		return true;
 	if (cacheHit)
 		return true;
@@ -19818,7 +20100,7 @@ static bool resolveNotepadLengthForApi(const LuaCallbackEngine *engine, WorldRun
 	{
 		return false;
 	}
-	if (inCallback &&
+	if (!unresolvedPresentation && inCallback &&
 	    tryResolveCallbackNotepadLengthFromDispatchSnapshot(engine, runtime, title, worldId, key, length))
 	{
 		return true;
@@ -19829,13 +20111,16 @@ static bool resolveNotepadLengthForApi(const LuaCallbackEngine *engine, WorldRun
 	    [&](MainWindow *) -> bool
 	    {
 		    TextChildWindow *text = findNotepadWindow(title, runtime, worldId);
-		    if (!text || !text->editor())
+		    if (!text || !text->editor() || !text->editor()->document())
 			    return false;
-		    length = sizeToInt(text->editor()->toPlainText().length());
+		    length = std::max(0, text->editor()->document()->characterCount() - 1);
 		    return true;
 	    },
 	    false);
-	cacheCallbackNotepadLength(engine, key, found, length);
+	if (unresolvedPresentation)
+		cacheCallbackNotepadLengthFetched(engine, runtime, title, worldId, found, length);
+	else
+		cacheCallbackNotepadLength(engine, key, found, length);
 	return true;
 }
 
@@ -19921,19 +20206,24 @@ static bool resolveNotepadTextForApi(const LuaCallbackEngine *engine, WorldRunti
 	contents.clear();
 	if (!engine || !runtime || title.isEmpty())
 		return false;
-	const QString key = makeCallbackNotepadDocumentKey(title, worldId, runtime);
+	const QString key                    = makeCallbackNotepadDocumentKey(title, worldId, runtime);
+	bool          unresolvedPresentation = false;
 	if (const auto *context = activeCallbackContextConst(engine);
 	    context && context->hasNotepadPresentationSnapshot)
 	{
 		const qsizetype index = findCallbackNotepadPresentationIndex(*context, title, runtime, worldId);
-		if (index < 0 || !context->notepadPresentationSnapshot.at(index).hasEditor ||
-		    !context->notepadPresentationSnapshot.at(index).hasText)
+		if (index < 0 || !context->notepadPresentationSnapshot.at(index).hasEditor)
 			return false;
-		contents = context->notepadPresentationSnapshot.at(index).text;
-		return true;
+		const LuaCallbackNotepadSnapshot &notepad = context->notepadPresentationSnapshot.at(index);
+		if (notepad.hasText)
+		{
+			contents = notepad.text + notepad.pendingAppend;
+			return true;
+		}
+		unresolvedPresentation = true;
 	}
 	bool cacheHit{false};
-	if (tryResolveCallbackNotepadTextFromCache(engine, key, contents, cacheHit))
+	if (!unresolvedPresentation && tryResolveCallbackNotepadTextFromCache(engine, key, contents, cacheHit))
 		return true;
 	if (cacheHit)
 		return false;
@@ -19943,7 +20233,7 @@ static bool resolveNotepadTextForApi(const LuaCallbackEngine *engine, WorldRunti
 	{
 		return false;
 	}
-	if (inCallback &&
+	if (!unresolvedPresentation && inCallback &&
 	    tryResolveCallbackNotepadTextFromDispatchSnapshot(engine, runtime, title, worldId, key, contents))
 	{
 		bool snapshotCacheHit{false};
@@ -19961,7 +20251,10 @@ static bool resolveNotepadTextForApi(const LuaCallbackEngine *engine, WorldRunti
 		    return true;
 	    },
 	    false);
-	cacheCallbackNotepadText(engine, key, found, contents);
+	if (unresolvedPresentation)
+		cacheCallbackNotepadDocumentFetched(engine, runtime, title, worldId, found, contents, QRect());
+	else
+		cacheCallbackNotepadText(engine, key, found, contents);
 	return found;
 }
 
@@ -22596,7 +22889,7 @@ static int luaGetNotepadLength(lua_State *L)
 	    yieldResult != kLuaLinePageYieldUnavailable)
 		return yieldResult;
 	if (const int yieldResult =
-	        yieldCallbackNotepadDocument<luaGetNotepadLength>(L, engine, runtime, title, worldId);
+	        yieldCallbackNotepadLength<luaGetNotepadLength>(L, engine, runtime, title, worldId);
 	    yieldResult != kLuaLinePageYieldUnavailable)
 		return yieldResult;
 	int length = 0;
@@ -28886,37 +29179,11 @@ static int luaAppendToNotepad(lua_State *L)
 		lua_pushboolean(L, false);
 		return 1;
 	}
-	if (const int yieldResult =
-	        yieldCallbackNotepadDocument<luaAppendToNotepad>(L, engine, runtime, title, worldId);
-	    yieldResult != kLuaLinePageYieldUnavailable)
-		return yieldResult;
 	if (engine && runtime && activeCallbackContextConst(engine) && callbackScopeSyncBridgeForbidden())
 	{
-		const QString                     callbackPluginId = engine->pluginId();
-		const LuaPluginAsyncResultRequest requestId        = nextPluginAsyncResultRequest(engine);
-		const bool                        accepted         = enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime,
-		    [title, contents, callbackPluginId, requestId](WorldRuntime &targetRuntime)
-		    {
-			    const QPointer<WorldRuntime> runtimeGuard(&targetRuntime);
-			    const bool                   queued = enqueueOnMainThread(
-			        [runtimeGuard, title, contents, callbackPluginId, requestId]()
-			        {
-				        WorldRuntime *targetRuntimeOnMain = runtimeGuard.data();
-				        if (!targetRuntimeOnMain)
-					        return;
-				        bool ok = false;
-				        if (MainWindow *mw = resolveMainWindow())
-					        ok = mw->appendToNotepad(title, contents, false, targetRuntimeOnMain);
-				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-				                              QStringLiteral("AppendToNotepad"), ok, 0);
-			        });
-			    if (!queued)
-			    {
-				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("AppendToNotepad"), false,
-				                          0);
-			    }
-		    });
+		const LuaPluginAsyncResultRequest requestId = nextPluginAsyncResultRequest(engine);
+		const bool                        accepted =
+		    enqueueCallbackNotepadAppend(engine, runtime, worldId, title, contents, requestId, 0);
 		if (accepted)
 			cacheCallbackNotepadDocumentTextAfterWrite(engine, runtime, title, worldId, contents, false);
 		lua_pushboolean(L, accepted);
@@ -33649,40 +33916,35 @@ static int luaUtilsAppendToNotepad(lua_State *L)
 		lua_pushboolean(L, false);
 		return 1;
 	}
-	if (!replace)
-	{
-		if (const int yieldResult =
-		        yieldCallbackNotepadDocument<luaUtilsAppendToNotepad>(L, engine, runtime, title, worldId);
-		    yieldResult != kLuaLinePageYieldUnavailable)
-			return yieldResult;
-	}
 	if (engine && runtime && activeCallbackContextConst(engine) && callbackScopeSyncBridgeForbidden())
 	{
-		const QString                     callbackPluginId = engine->pluginId();
-		const LuaPluginAsyncResultRequest requestId        = nextPluginAsyncResultRequest(engine);
-		const bool                        accepted         = enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime,
-		    [title, contents, replace, callbackPluginId, requestId](WorldRuntime &targetRuntime)
-		    {
-			    const QPointer<WorldRuntime> runtimeGuard(&targetRuntime);
-			    const bool                   queued = enqueueOnMainThread(
-			        [runtimeGuard, title, contents, replace, callbackPluginId, requestId]()
-			        {
-				        WorldRuntime *targetRuntimeOnMain = runtimeGuard.data();
-				        if (!targetRuntimeOnMain)
-					        return;
-				        bool ok = false;
-				        if (MainWindow *mw = resolveMainWindow())
-					        ok = mw->appendToNotepad(title, contents, replace, targetRuntimeOnMain);
-				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-				                              QStringLiteral("AppendToNotepad"), ok, ok ? eOK : -1);
-			        });
-			    if (!queued)
-			    {
-				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("AppendToNotepad"), false,
-				                          -1);
-			    }
-		    });
+		const LuaPluginAsyncResultRequest requestId = nextPluginAsyncResultRequest(engine);
+		const bool                        accepted =
+		    replace
+		        ? enqueueRuntimeThreadDeferredMutationNoResult(
+		              engine, runtime,
+		              [title, contents, requestId](WorldRuntime &targetRuntime)
+		              {
+			              const QPointer<WorldRuntime> runtimeGuard(&targetRuntime);
+			              const bool                   queued = enqueueOnMainThread(
+			                  [runtimeGuard, title, contents, requestId]
+			                  {
+				                  WorldRuntime *targetRuntimeOnMain = runtimeGuard.data();
+				                  if (!targetRuntimeOnMain)
+					                  return;
+				                  bool ok = false;
+				                  if (MainWindow *frame = resolveMainWindow())
+					                  ok = frame->appendToNotepad(title, contents, true, targetRuntimeOnMain);
+				                  emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
+				                                        QStringLiteral("AppendToNotepad"), ok, ok ? eOK : -1);
+			                  });
+			              if (!queued)
+			              {
+				              emitPluginAsyncResult(targetRuntime, requestId,
+				                                    QStringLiteral("AppendToNotepad"), false, -1);
+			              }
+		              })
+		        : enqueueCallbackNotepadAppend(engine, runtime, worldId, title, contents, requestId, -1);
 		if (accepted)
 			cacheCallbackNotepadDocumentTextAfterWrite(engine, runtime, title, worldId, contents, replace);
 		lua_pushboolean(L, accepted);

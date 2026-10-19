@@ -59,6 +59,7 @@
 #include <QTcpSocket>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QTextDocument>
 #include <QThread>
 #include <QTimeZone>
 #include <QUdpSocket>
@@ -755,6 +756,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerVanishedRuntimeDoesNotPublishEmptyLinePage();
 		void notepadMutationReplayKeepsCreateClaimsAttachedAcrossErase();
 		void freshNotepadSnapshotDoesNotReplayFlushedClose();
+		/** @brief Verifies callback notepad appends stay lazy, coalesce, and preserve mutation ordering. */
+		void workerNotepadAppendsAreLazyAndCoalesced();
 		void workerNotepadCachesPreserveGlobalAndOwnerLists();
 		void workerUnavailableNotepadRefreshDoesNotExportStaleCaches();
 		void workerUnavailableNotepadRefreshSurvivesNestedMutationBoundary();
@@ -29684,6 +29687,22 @@ void tst_LuaCallbackEngine::notepadMutationReplayKeepsCreateClaimsAttachedAcross
 	QCOMPARE(presentation.at(1).text, QStringLiteral("second"));
 	QVERIFY(presentation.at(0).hasText);
 	QVERIFY(presentation.at(1).hasText);
+	QVERIFY(presentation.at(0).hasTextLength);
+	QVERIFY(presentation.at(1).hasTextLength);
+	QCOMPARE(presentation.at(0).textLength, 5);
+	QCOMPARE(presentation.at(1).textLength, 6);
+
+	QVector<LuaCallbackNotepadSnapshot> unresolvedPresentation{makeNotepad(QStringLiteral("Existing"))};
+	QVector<Mutation>                   unresolvedMutations{
+	    {Mutation::Kind::Write, &runtime, QStringLiteral("world-id"), QStringLiteral("Existing"),
+	     QStringLiteral("+tail"), false},
+	};
+	QMudLuaCallbackNotepadPresentation::applyMutations(unresolvedPresentation, unresolvedMutations);
+	QVERIFY(unresolvedMutations.isEmpty());
+	QCOMPARE(unresolvedPresentation.size(), 1);
+	QVERIFY(!unresolvedPresentation.constFirst().hasText);
+	QVERIFY(!unresolvedPresentation.constFirst().hasTextLength);
+	QCOMPARE(unresolvedPresentation.constFirst().pendingAppend, QStringLiteral("+tail"));
 }
 
 void tst_LuaCallbackEngine::freshNotepadSnapshotDoesNotReplayFlushedClose()
@@ -29712,6 +29731,151 @@ void tst_LuaCallbackEngine::freshNotepadSnapshotDoesNotReplayFlushedClose()
 	QVERIFY(mutations.isEmpty());
 	QCOMPARE(presentation.size(), 1);
 	QCOMPARE(presentation.constFirst().title, QStringLiteral("DUPLICATE"));
+}
+
+void tst_LuaCallbackEngine::workerNotepadAppendsAreLazyAndCoalesced()
+{
+	MainWindow frame;
+	frame.resize(900, 700);
+	frame.show();
+
+	WorldRuntime runtime(&frame);
+	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("world-id"));
+	runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("World"));
+	auto *worldWindow = new WorldChildWindow(QStringLiteral("World"));
+	worldWindow->setRuntime(&runtime);
+	frame.addMdiSubWindow(worldWindow, true);
+	worldWindow->show();
+	QVERIFY(frame.appendToNotepad(QStringLiteral("Batch Target"), QStringLiteral("base"), false, &runtime));
+	QVERIFY(frame.appendToNotepad(QStringLiteral("Barrier Target"), QStringLiteral("base"), false, &runtime));
+	QVERIFY(frame.appendToNotepad(QStringLiteral("Length Target"), QStringLiteral("base"), false, &runtime));
+	QCoreApplication::processEvents();
+
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+notepad_append_result = ""
+function append_only_cb(name, line, wildcards)
+  local first, first_id = AppendToNotepad("Batch Target", "+one")
+  local second, second_id = utils.appendtonotepad("batch target", "+two", false)
+  notepad_append_result = table.concat({tostring(first), tostring(first_id ~= nil),
+                                        tostring(second), tostring(second_id ~= nil)}, "|")
+end
+function append_barriers_cb(name, line, wildcards)
+  AppendToNotepad("Barrier Target", "+before")
+  ReplaceNotepad("Barrier Target", "middle")
+  AppendToNotepad("Barrier Target", "+after")
+end
+function append_length_cb(name, line, wildcards)
+  local accepted = AppendToNotepad("Length Target", "+tail")
+  notepad_append_result = tostring(accepted) .. "|" .. tostring(GetNotepadLength("Length Target"))
+end
+function empty_append_cb(name, line, wildcards)
+  AppendToNotepad("Empty Target", "")
+end
+function append_status(value)
+  return notepad_append_result
+end
+)lua"),
+	                            &runtime))
+		QFAIL("Worker engine initialization failed");
+
+	auto findNotepad = [&frame](const QString &title) -> TextChildWindow *
+	{
+		for (TextChildWindow *notepad : frame.notepadWindows())
+		{
+			if (notepad && notepad->windowTitle().compare(title, Qt::CaseInsensitive) == 0)
+				return notepad;
+		}
+		return nullptr;
+	};
+	auto mutationCount = [](const LuaBatchDispatchResult &result)
+	{
+		qsizetype count = 0;
+		for (const LuaDeferredRuntimeMutationBatch &batch : result.deferredRuntimeMutationBatches)
+			count += batch.mutations.size();
+		return count;
+	};
+	auto dispatch = [&](const QString &functionName)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+		request.functionName        = functionName;
+		request.stringListArg       = {QStringLiteral("notepad_alias"), QStringLiteral("ignored")};
+		request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+		LuaBatchDispatchResult result;
+		if (!dispatchWorkerAndWait(executor, request, result))
+			QTest::qFail("Worker callback dispatch failed", __FILE__, __LINE__);
+		return result;
+	};
+	auto readStatus = [&]()
+	{
+		LuaBatchDispatchRequest request;
+		request.engines      = {engine};
+		request.kind         = LuaBatchDispatchKind::StringInOut;
+		request.functionName = QStringLiteral("append_status");
+		request.stringArg    = QStringLiteral("ignored");
+		LuaBatchDispatchResult result;
+		if (!dispatchWorkerAndWait(executor, request, result))
+			QTest::qFail("Worker status dispatch failed", __FILE__, __LINE__);
+		return result.stringResult;
+	};
+
+	TextChildWindow *batchTarget = findNotepad(QStringLiteral("Batch Target"));
+	QVERIFY(batchTarget);
+	QVERIFY(batchTarget->editor());
+	QVERIFY(batchTarget->editor()->document());
+	QSignalSpy             batchChangeSpy(batchTarget->editor()->document(), &QTextDocument::contentsChange);
+	LuaBatchDispatchResult appendOnlyResult = dispatch(QStringLiteral("append_only_cb"));
+	QVERIFY(!appendOnlyResult.suspended);
+	QCOMPARE(mutationCount(appendOnlyResult), qsizetype{1});
+	QCOMPARE(readStatus(), QStringLiteral("true|true|true|true"));
+	executeDeferredMutations(appendOnlyResult);
+	QCoreApplication::processEvents();
+	QCOMPARE(batchTarget->editor()->toPlainText(), QStringLiteral("base+one+two"));
+	QCOMPARE(batchChangeSpy.count(), 1);
+
+	LuaBatchDispatchResult barrierResult = dispatch(QStringLiteral("append_barriers_cb"));
+	QVERIFY(!barrierResult.suspended);
+	QCOMPARE(mutationCount(barrierResult), qsizetype{3});
+	executeDeferredMutations(barrierResult);
+	QCoreApplication::processEvents();
+	TextChildWindow *barrierTarget = findNotepad(QStringLiteral("Barrier Target"));
+	QVERIFY(barrierTarget);
+	QVERIFY(barrierTarget->editor());
+	QCOMPARE(barrierTarget->editor()->toPlainText(), QStringLiteral("middle+after"));
+
+	LuaBatchDispatchResult lengthResult = dispatch(QStringLiteral("append_length_cb"));
+	QVERIFY(lengthResult.suspended);
+	int lengthResumeCount = 0;
+	QVERIFY(completeWorkerSuspensions(executor, engine, runtime, lengthResult, lengthResumeCount));
+	QCOMPARE(lengthResumeCount, 1);
+	QCOMPARE(readStatus(), QStringLiteral("true|9.0"));
+	TextChildWindow *lengthTarget = findNotepad(QStringLiteral("Length Target"));
+	QVERIFY(lengthTarget);
+	QVERIFY(lengthTarget->editor());
+	QCOMPARE(lengthTarget->editor()->toPlainText(), QStringLiteral("base+tail"));
+
+	LuaBatchDispatchResult emptyResult = dispatch(QStringLiteral("empty_append_cb"));
+	QVERIFY(!emptyResult.suspended);
+	QCOMPARE(mutationCount(emptyResult), qsizetype{1});
+	executeDeferredMutations(emptyResult);
+	QCoreApplication::processEvents();
+	TextChildWindow *emptyTarget = findNotepad(QStringLiteral("Empty Target"));
+	QVERIFY(emptyTarget);
+	QVERIFY(emptyTarget->editor());
+	QVERIFY(emptyTarget->editor()->toPlainText().isEmpty());
+
+	QVERIFY(teardownWorkerEngine(executor, engine));
+	for (TextChildWindow *notepad : frame.notepadWindows())
+	{
+		if (notepad)
+			notepad->setQuerySaveOnClose(false);
+	}
+	worldWindow->setRuntime(nullptr);
 }
 
 void tst_LuaCallbackEngine::workerNotepadCachesPreserveGlobalAndOwnerLists()
@@ -29988,7 +30152,7 @@ end
 	int lazyDocumentResumeCount = 0;
 	QVERIFY(completeWorkerSuspensions(executor, engine, primaryRuntime, lazyDocumentResult,
 	                                  lazyDocumentResumeCount));
-	QCOMPARE(lazyDocumentResumeCount, 1);
+	QCOMPARE(lazyDocumentResumeCount, 2);
 	QVERIFY(dispatchWorkerAndWait(executor, status, statusResult));
 	QCOMPARE(statusResult.stringResult, QStringLiteral("9.0|primary b"));
 

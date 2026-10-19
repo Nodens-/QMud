@@ -1738,9 +1738,12 @@ struct LuaCallbackNotepadSnapshot
 		QString                title;
 		QRect                  geometry;
 		QString                text;
+		QString                pendingAppend; ///< Appended text retained until the base document is resolved.
+		int                    textLength{0}; ///< Known logical document length including pending appends.
 		bool                   hasEditor{false};
 		bool                   hasGeometry{false};
 		bool                   hasText{false};
+		bool                   hasTextLength{false}; ///< Whether @ref textLength is authoritative.
 };
 
 /**
