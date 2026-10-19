@@ -29,10 +29,9 @@ class SoundEngineTestAccess final
 				CacheState firstStep;
 				CacheState secondStep;
 		};
-		/** @brief Source-free playback backend readiness observed on the worker thread. */
+		/** @brief Source-free media-player readiness observed on the worker thread. */
 		struct PlaybackInitializationState
 		{
-				bool effectReady{false};
 				bool mediaPlayerReady{false};
 		};
 		/** @brief Sound-file catalog state observed on the worker thread. */
@@ -217,14 +216,14 @@ class SoundEngineTestAccess final
 		/**
 		 * @brief Reads startup playback backend readiness from the sound worker.
 		 * @param engine Sound engine whose initialized playback objects are inspected.
-		 * @return Availability of the source-free effect and media-player backends.
+		 * @return Availability of the source-free media-player backend.
 		 */
 		[[nodiscard]] static PlaybackInitializationState
 		playbackInitializationState(const SoundEngine &engine)
 		{
 			const SoundEngine::PlaybackInitializationStateForTest state =
 			    engine.playbackInitializationStateForTest();
-			return {state.effectReady, state.mediaPlayerReady};
+			return {state.mediaPlayerReady};
 		}
 
 		/**

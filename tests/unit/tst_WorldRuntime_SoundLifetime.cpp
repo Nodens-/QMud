@@ -9,6 +9,7 @@
 #include "NativePluginRegistry.h"
 #include "SoundEngine.h"
 #include "SoundEngineTestAccess.h"
+#include "TestSoundData.h"
 #include "WorldDocument.h"
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
@@ -139,15 +140,14 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
-			/** @brief Verifies both real playback implementations are initialized before the first request. */
-			void playbackBackendsInitializeDuringApplicationStartup()
+			/** @brief Verifies the media-player backend is initialized before the first request. */
+			void playbackBackendInitializesDuringApplicationStartup()
 			{
 				SoundEngine engine;
 				QSignalSpy  initializedSpy(&engine, &SoundEngine::playbackInitializationFinished);
 				engine.initializePlayback();
 				const SoundEngineTestAccess::PlaybackInitializationState state =
 				    SoundEngineTestAccess::playbackInitializationState(engine);
-				QVERIFY(state.effectReady);
 				QVERIFY(state.mediaPlayerReady);
 				QTRY_COMPARE(initializedSpy.count(), 1);
 				QCOMPARE(initializedSpy.first().first().toBool(), true);
@@ -1376,6 +1376,118 @@ namespace
 				QCOMPARE(session->stop(selectedBuffer), eOK);
 			}
 
+			/**
+			 * @brief Verifies explicit plugin sounds use direct-directory watches and audio-only invalidation.
+			 */
+			void pluginBundledSoundsRemainExactAndTrackOnlyTheirImmediateDirectories()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("plugin-sound-routing-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds")));
+				const QString pluginsRoot = QDir(root.path()).filePath(QStringLiteral("custom/plugins"));
+				const QString pluginDirectory =
+				    QDir(pluginsRoot).filePath(QStringLiteral("PromptHelper/audio"));
+				const QString nestedDirectory = QDir(pluginDirectory).filePath(QStringLiteral("nested"));
+				QVERIFY(QDir().mkpath(nestedDirectory));
+				const QString pluginSound = QDir(pluginDirectory).filePath(QStringLiteral("Prompt.WaV"));
+				const QString nestedSound = QDir(nestedDirectory).filePath(QStringLiteral("Nested.WaV"));
+				QVERIFY(QFile::copy(testSoundFileName(), pluginSound));
+				QVERIFY(QFile::copy(testSoundFileName(), nestedSound));
+				const QString replacementPluginsRoot =
+				    QDir(root.path()).filePath(QStringLiteral("replacement/plugins"));
+				const QString replacementDirectory =
+				    QDir(replacementPluginsRoot).filePath(QStringLiteral("PromptHelper/audio"));
+				QVERIFY(QDir().mkpath(replacementDirectory));
+				const QString replacementSound =
+				    QDir(replacementDirectory).filePath(QStringLiteral("Prompt.WaV"));
+				QVERIFY(QFile::copy(testSoundFileName(), replacementSound));
+				QFile nonAudio(QDir(pluginDirectory).filePath(QStringLiteral("settings.xml")));
+				QVERIFY(nonAudio.open(QIODevice::WriteOnly));
+				QCOMPARE(nonAudio.write("initial"), 7);
+				nonAudio.close();
+
+				SoundEngine engine;
+				engine.initializePlayback();
+				engine.configureSoundDirectory(root.path());
+				engine.configurePluginDirectory(pluginsRoot);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				const qsizetype baselineWatches =
+				    SoundEngineTestAccess::fileCatalogState(engine).watchedDirectoryCount;
+				const auto session = engine.registerSession({});
+				QVERIFY(session);
+
+				int selectedBuffer = 0;
+				QCOMPARE(session->playFile(0, pluginSound, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, selectedBuffer),
+				         pluginSound);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).watchedDirectoryCount,
+				             baselineWatches + 1);
+
+				const QString portableRequest =
+				    QStringLiteral(R"(CUSTOM\PLUGINS\prompthelper\AUDIO\prompt.wav)");
+				QCOMPARE(session->playFile(0, portableRequest, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, selectedBuffer),
+				         pluginSound);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+				const quint64 cachedResolutionCount = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				QCOMPARE(session->playFile(0, portableRequest, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), cachedResolutionCount);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+				QCOMPARE(session->playFile(0, QStringLiteral("prompt.wav"), false, 0.0, 0.0), eFileNotFound);
+				QVERIFY(session->submitNativeSound(nativeSoundRequest(portableRequest)));
+				QCOMPARE(session->stop(0), eOK);
+				QVERIFY(!SoundEngineTestAccess::nativePlaybackState(
+				             engine, session, QMudNativeSoundProtocol::Msp, QMudNativeSoundMedia::Sound)
+				             .current);
+				const quint64 postMissResolutionCount =
+				    SoundEngineTestAccess::slowFileResolutionCount(engine);
+
+				QVERIFY(nonAudio.open(QIODevice::Append));
+				QCOMPARE(nonAudio.write("changed"), 7);
+				nonAudio.close();
+				SoundEngineTestAccess::reconcileCatalogDirectory(engine, pluginDirectory);
+				QCOMPARE(session->playFile(0, portableRequest, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), postMissResolutionCount);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+
+				QFile changedSound(pluginSound);
+				QVERIFY(changedSound.open(QIODevice::Append));
+				QCOMPARE(changedSound.write("x"), 1);
+				changedSound.close();
+				SoundEngineTestAccess::reconcileCatalogDirectory(engine, pluginDirectory);
+				QCOMPARE(session->playFile(0, portableRequest, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), postMissResolutionCount + 1);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+
+				const QString nestedRequest =
+				    QStringLiteral("custom/plugins/PromptHelper/audio/nested/Nested.WaV");
+				QCOMPARE(session->playFile(0, nestedRequest, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, selectedBuffer),
+				         nestedSound);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).watchedDirectoryCount,
+				             baselineWatches + 2);
+
+				QVERIFY(QFile::remove(nestedSound));
+				QVERIFY(QDir().rmdir(nestedDirectory));
+				SoundEngineTestAccess::reconcileCatalogDirectory(engine, nestedDirectory);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).watchedDirectoryCount,
+				             baselineWatches + 1);
+				QCOMPARE(session->playFile(0, nestedRequest, false, 0.0, 0.0), eFileNotFound);
+
+				engine.configurePluginDirectory(replacementPluginsRoot);
+				QCOMPARE(session->playFile(0, portableRequest, false, 0.0, 0.0), eFileNotFound);
+				const QString replacementRequest =
+				    QStringLiteral(R"(REPLACEMENT\PLUGINS\prompthelper\AUDIO\prompt.wav)");
+				QCOMPARE(session->playFile(0, replacementRequest, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, selectedBuffer),
+				         replacementSound);
+				QCOMPARE(session->stop(selectedBuffer), eOK);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).watchedDirectoryCount,
+				             baselineWatches + 1);
+			}
+
 			/** @brief Verifies loading a world applies its persisted sound directory to an attached session. */
 			void persistedWorldSoundDirectoryAppliesDuringDocumentLoad()
 			{
@@ -1488,6 +1600,63 @@ namespace
 				QCOMPARE(session->stop(0), eOK);
 				QCoreApplication::processEvents();
 				QCOMPARE(errors, QStringList{committedError});
+			}
+
+			/**
+			 * @brief Verifies completed backends are reused before idle cache entries or new allocations.
+			 */
+			void completedBackendIsReusedAcrossPreparedAndDirectPlayback()
+			{
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				const auto session = registerTestSession(engine);
+				QVERIFY(session);
+
+				int firstBuffer = 0;
+				QCOMPARE(session->playFile(0, testSoundFileName(), false, 0.0, 0.0, 0, &firstBuffer), eOK);
+				QVERIFY(firstBuffer > 0);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+				QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, firstBuffer));
+				QCOMPARE(session->status(firstBuffer), 0);
+
+				const quint64 canceledToken = session->prepareFile(testSoundFileName());
+				QVERIFY(canceledToken != 0);
+				session->cancelPrepared(canceledToken);
+				const quint64 committedToken = session->prepareFile(testSoundFileName());
+				QVERIFY(committedToken != 0);
+				QCOMPARE(session->commitPrepared(committedToken, 0, false, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+
+				int preparedBuffer = 0;
+				for (int buffer = 1; buffer <= SoundEngineSession::kChannelCount; ++buffer)
+				{
+					if (session->status(buffer) == 1)
+					{
+						preparedBuffer = buffer;
+						break;
+					}
+				}
+				QVERIFY(preparedBuffer > 0);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, preparedBuffer),
+				         QFileInfo(testSoundFileName()).canonicalFilePath());
+				QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, preparedBuffer));
+
+				int directBuffer = 0;
+				QCOMPARE(session->playFile(0, testSoundFileName(), false, 0.0, 0.0, 0, &directBuffer), eOK);
+				QVERIFY(directBuffer > 0);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, directBuffer),
+				         QFileInfo(testSoundFileName()).canonicalFilePath());
+
+				for (int repetition = 0; repetition < 12; ++repetition)
+				{
+					QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, directBuffer));
+					int nextBuffer = 0;
+					QCOMPARE(session->playFile(0, testSoundFileName(), false, 0.0, 0.0, 0, &nextBuffer), eOK);
+					QVERIFY(nextBuffer > 0);
+					QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+					directBuffer = nextBuffer;
+				}
 			}
 
 			/**
@@ -1633,6 +1802,33 @@ namespace
 			{
 				SoundEngine engine;
 				QVERIFY(!SoundEngineTestAccess::canceledMemoryResourceIsIndexed(engine));
+			}
+
+			/** @brief Verifies in-memory PCM plays to completion and reuses its materialized backend. */
+			void memorySoundCompletesAndReusesItsBackend()
+			{
+				SoundEngine engine;
+				engine.initializePlayback();
+				QStringList                   errors;
+				SoundEngine::SessionCallbacks callbacks;
+				callbacks.playbackError   = [&errors](const QString &message) { errors.push_back(message); };
+				const auto session        = registerTestSession(engine, std::move(callbacks));
+				const auto sound          = QMudTestSoundData::silentPcmWave(250);
+				int        selectedBuffer = 0;
+
+				QCOMPARE(session->playMemory(0, sound, false, 0.0, 0.0, 0, &selectedBuffer), eOK);
+				QVERIFY(selectedBuffer > 0);
+				QCOMPARE(session->status(selectedBuffer), 1);
+				QTRY_COMPARE(session->status(selectedBuffer), 0);
+				QVERIFY(errors.isEmpty());
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+
+				int reusedBuffer = 0;
+				QCOMPARE(session->playMemory(0, sound, false, 0.0, 0.0, 0, &reusedBuffer), eOK);
+				QVERIFY(reusedBuffer > 0);
+				QTRY_COMPARE(session->status(reusedBuffer), 0);
+				QVERIFY(errors.isEmpty());
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
 			}
 
 			/**

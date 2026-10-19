@@ -59,7 +59,6 @@
 #include <QFileSystemWatcher>
 #include <QMediaDevices>
 #include <QMediaPlayer>
-#include <QSoundEffect>
 #include <QTimer>
 #include <QUrl>
 #endif
@@ -115,6 +114,7 @@ namespace
 		RegisterSession,
 		InitializePlayback,
 		ConfigureSoundDirectory,
+		ConfigurePluginDirectory,
 		UpdateWorldSoundDirectory,
 		PlayFile,
 		PlayMemory,
@@ -126,6 +126,7 @@ namespace
 		CatalogDirectoryBatch,
 		CatalogDirectoryScanned,
 		CatalogFileAdded,
+		PluginDirectoryChanged,
 		CatalogCleared,
 		CatalogReady,
 		CatalogWatchState,
@@ -237,21 +238,14 @@ struct SoundEngineSession::State
 #if QMUD_ENABLE_SOUND
 namespace
 {
-	enum class SoundBackendKind : quint8
-	{
-		Effect,
-		MediaPlayer
-	};
-
 	struct SoundSourceKey
 	{
-			QString          identity;
-			qint64           size{0};
-			qint64           modifiedMsecs{0};
-			SoundBackendKind backend{SoundBackendKind::Effect};
-			QByteArray       deviceId;
+			QString       identity;
+			qint64        size{0};
+			qint64        modifiedMsecs{0};
+			QByteArray    deviceId;
 
-			bool             operator==(const SoundSourceKey &) const = default;
+			bool          operator==(const SoundSourceKey &) const = default;
 
 			/**
 			 * @brief Hashes one loaded-source identity for process-wide cache accounting.
@@ -259,10 +253,9 @@ namespace
 			 * @param seed Caller-provided hash seed.
 			 * @return Hash value for the source identity.
 			 */
-			friend size_t    qHash(const SoundSourceKey &key, const size_t seed = 0) noexcept
+			friend size_t qHash(const SoundSourceKey &key, const size_t seed = 0) noexcept
 			{
-				return qHashMulti(seed, key.identity, key.size, key.modifiedMsecs,
-				                  static_cast<quint8>(key.backend), key.deviceId);
+				return qHashMulti(seed, key.identity, key.size, key.modifiedMsecs, key.deviceId);
 			}
 	};
 
@@ -285,7 +278,6 @@ namespace
 			SoundSourceKey                       key;
 			quint64                              backendId{0};
 			std::shared_ptr<SoundMemoryResource> memoryResource;
-			std::unique_ptr<QSoundEffect>        effect;
 			std::unique_ptr<QMediaPlayer>        player;
 			QAudioOutput                        *audioOutput{nullptr};
 			quint64                              sessionId{0};
@@ -303,6 +295,7 @@ namespace
 	{
 			SoundBackend *backend{nullptr};
 			QString       failureMessage;
+			qint64        retainedAtMsecs{0};
 	};
 
 	struct SoundChannel
@@ -327,7 +320,6 @@ namespace
 			bool               nativeMusic{false};
 			bool               nativeResolutionPending{false};
 			bool               luaAudioOwnershipConfirmed{false};
-			qint64             completedAtMsecs{0};
 			double             volume{1.0};
 			double             pan{0.0};
 	};
@@ -355,6 +347,12 @@ namespace
 			QString                               parent;
 			QHash<QString, SoundCatalogFileState> files;
 			QSet<QString>                         children;
+	};
+
+	/** @brief One directly watched plugin directory and its supported audio files. */
+	struct PluginSoundDirectoryState
+	{
+			QHash<QString, QPair<QString, SoundCatalogFileState>> files;
 	};
 
 	/** @brief Playback-side membership for one indexed directory. */
@@ -393,6 +391,7 @@ namespace
 			SoundBackend *backend{nullptr};
 			int           result{eOK};
 			QString       failureMessage;
+			qint64        retainedAtMsecs{0};
 	};
 
 	struct WorkerSession
@@ -437,10 +436,9 @@ namespace
 			SoundWorkerCacheState secondStep;
 	};
 
-	/** @brief Source-free playback backends initialized before the first sound request. */
+	/** @brief Source-free media-player readiness before the first sound request. */
 	struct SoundWorkerPlaybackInitializationState
 	{
-			bool effectReady{false};
 			bool mediaPlayerReady{false};
 	};
 
@@ -503,10 +501,14 @@ namespace
 			{
 			}
 
-			/** @brief Initializes event-loop-owned watcher state on the I/O thread. */
+			/** @brief Initializes codec filters and event-loop-owned watcher state on the I/O thread. */
 			void initialize()
 			{
 				Q_ASSERT(QThread::currentThread() == thread());
+				const QSet<QString> &suffixes = soundPlaybackSupportedFileSuffixes();
+				m_soundNameFilters.reserve(suffixes.size());
+				for (const QString &suffix : suffixes)
+					m_soundNameFilters.push_back(QStringLiteral("*.%1").arg(suffix));
 				m_fileWatcher = std::make_unique<QFileSystemWatcher>();
 				connect(m_fileWatcher.get(), &QFileSystemWatcher::directoryChanged, this,
 				        [this](const QString &path) { handleWatchedDirectoryChanged(path); });
@@ -516,14 +518,17 @@ namespace
 			 * @brief Configures a new QMud home, loads its cache, and begins background reconciliation.
 			 * @param qmudHomeDirectory Existing QMud home directory.
 			 * @param generation Playback-worker configuration generation.
+			 * @param pluginGeneration Plugin-root configuration generation.
 			 */
-			void configure(const QString &qmudHomeDirectory, const quint64 generation)
+			void configureSoundDirectory(const QString &qmudHomeDirectory, const quint64 generation,
+			                             const quint64 pluginGeneration)
 			{
 				Q_ASSERT(QThread::currentThread() == thread());
 				cancelDownloads();
 				clearCatalogState();
-				m_generation = generation;
-				m_qmudHome   = QMudPluginPathUtils::normalizeSeparators(
+				m_generation       = generation;
+				m_pluginGeneration = pluginGeneration;
+				m_qmudHome         = QMudPluginPathUtils::normalizeSeparators(
 				    QFileInfo(qmudHomeDirectory).canonicalFilePath());
 				if (m_qmudHome.isEmpty())
 				{
@@ -531,7 +536,6 @@ namespace
 					return;
 				}
 				static_cast<void>(watchDirectory(m_qmudHome));
-
 				m_soundsPath = QMudPluginPathUtils::normalizeSeparators(
 				    QDir(m_qmudHome).filePath(QStringLiteral("sounds")));
 				if (!QDir().mkpath(m_soundsPath) || soundPathContainsSymlink(m_qmudHome, m_soundsPath))
@@ -553,6 +557,32 @@ namespace
 				publishWatchState();
 			}
 
+			/**
+			 * @brief Replaces the configured plugin-sound root without disturbing sounds-tree work.
+			 * @param pluginsDirectory Validated canonical directory, or an empty string to disable plugin sounds.
+			 * @param generation Plugin-root generation owning later tracking requests and results.
+			 */
+			void configurePluginDirectory(const QString &pluginsDirectory, const quint64 generation)
+			{
+				if (m_shuttingDown)
+					return;
+				clearPluginDirectoryState();
+				m_pluginGeneration = generation;
+				if (pluginsDirectory.isEmpty() || m_qmudHome.isEmpty())
+					return;
+
+				const QString   normalized = QMudPluginPathUtils::normalizeSeparators(pluginsDirectory);
+				const QFileInfo info(normalized);
+				const QString canonical = QMudPluginPathUtils::normalizeSeparators(info.canonicalFilePath());
+				if (!info.isDir() || info.isSymLink() || canonical.isEmpty() ||
+				    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonical, m_qmudHome) ||
+				    soundPathContainsSymlink(m_qmudHome, normalized))
+				{
+					return;
+				}
+				m_pluginsRoot = canonical;
+			}
+
 			/** @brief Cancels I/O and releases all event-loop-owned state before thread shutdown. */
 			void shutdown()
 			{
@@ -566,7 +596,7 @@ namespace
 
 			/**
 			 * @brief Starts or joins one native sound download.
-			 * @param generation Configuration generation owning the request.
+			 * @param generation Plugin-root generation owning the request.
 			 * @param destination Contained final file path.
 			 * @param requestUrl Valid HTTP(S) URL.
 			 */
@@ -771,6 +801,29 @@ namespace
 			}
 
 			/**
+			 * @brief Starts tracking one immediate plugin resource directory after an explicit sound request.
+			 * @param generation Configuration generation owning the request.
+			 * @param directory Existing plugin directory containing the requested sound.
+			 */
+			void trackPluginDirectory(const quint64 generation, const QString &directory)
+			{
+				if (m_shuttingDown || generation != m_pluginGeneration || m_pluginsRoot.isEmpty())
+					return;
+				const QString   normalized = QMudPluginPathUtils::normalizeSeparators(directory);
+				const QFileInfo info(normalized);
+				const QString canonical = QMudPluginPathUtils::normalizeSeparators(info.canonicalFilePath());
+				if (!info.isDir() || info.isSymLink() || canonical.isEmpty() ||
+				    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonical, m_pluginsRoot) ||
+				    soundPathContainsSymlink(m_pluginsRoot, canonical))
+				{
+					publishPluginDirectoryChange(normalized, {}, {}, {}, false, false);
+					return;
+				}
+				m_pluginDirectories.tryEmplace(canonical);
+				reconcilePluginDirectory(canonical);
+			}
+
+			/**
 			 * @brief Creates, watches, and reconciles a directory explicitly selected in world preferences.
 			 * @param directory Validated absolute directory beneath the configured sounds root.
 			 */
@@ -802,6 +855,12 @@ namespace
 				if (m_failedWatches.isEmpty())
 					return;
 				const QString directory = *m_failedWatches.cbegin();
+				if (m_pluginDirectories.contains(directory))
+				{
+					if (watchPluginDirectory(directory))
+						reconcilePluginDirectory(directory);
+					return;
+				}
 				if (!watchDirectory(directory))
 					return;
 				if (sameSoundFilesystemPath(directory, m_qmudHome))
@@ -1127,11 +1186,21 @@ namespace
 					m_directories.erase(record);
 				}
 				scan.previousFileCount = scan.previousFiles.size();
-				scan.iterator = std::make_unique<QDirIterator>(canonical,
-				                                               QDir::Dirs | QDir::Files | QDir::Readable |
-				                                                   QDir::NoSymLinks | QDir::NoDotAndDotDot,
-				                                               QDirIterator::NoIteratorFlags);
-				m_activeScan  = std::move(scan);
+				if (m_soundNameFilters.isEmpty())
+				{
+					scan.iterator = std::make_unique<QDirIterator>(
+					    canonical, QDir::Dirs | QDir::Readable | QDir::NoSymLinks | QDir::NoDotAndDotDot,
+					    QDirIterator::NoIteratorFlags);
+				}
+				else
+				{
+					scan.iterator =
+					    std::make_unique<QDirIterator>(canonical, m_soundNameFilters,
+					                                   QDir::AllDirs | QDir::Files | QDir::Readable |
+					                                       QDir::NoSymLinks | QDir::NoDotAndDotDot,
+					                                   QDirIterator::NoIteratorFlags);
+				}
+				m_activeScan = std::move(scan);
 				return true;
 			}
 
@@ -1388,6 +1457,144 @@ namespace
 			}
 
 			/**
+			 * @brief Publishes changes from one directly tracked plugin resource directory.
+			 * @param directory Canonical immediate directory.
+			 * @param added Newly present supported audio files.
+			 * @param changed Supported audio files whose metadata changed.
+			 * @param removed Supported audio files no longer present.
+			 * @param watched Whether the directory watcher is active.
+			 * @param valid Whether the immediate directory still exists within the plugin root.
+			 */
+			void publishPluginDirectoryChange(const QString &directory, QStringList added,
+			                                  QStringList changed, QStringList removed, const bool watched,
+			                                  const bool valid) const
+			{
+				SoundCommand result;
+				result.kind             = SoundCommandKind::PluginDirectoryChanged;
+				result.token            = m_pluginGeneration;
+				result.text             = directory;
+				result.files            = std::move(added);
+				result.changedFiles     = std::move(changed);
+				result.removedFiles     = std::move(removed);
+				result.directoryWatched = watched;
+				result.success          = valid;
+				m_publish(std::move(result));
+			}
+
+			/**
+			 * @brief Registers one explicitly used plugin resource directory without watching its hierarchy.
+			 * @param directory Existing canonical immediate directory beneath the plugin root.
+			 * @return `true` when the direct directory is watched.
+			 */
+			[[nodiscard]] bool watchPluginDirectory(const QString &directory)
+			{
+				const QString normalized = QMudPluginPathUtils::normalizeSeparators(directory);
+				if (!m_fileWatcher || normalized.isEmpty() || m_pluginsRoot.isEmpty() ||
+				    !m_pluginDirectories.contains(normalized) ||
+				    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(normalized, m_pluginsRoot) ||
+				    soundPathContainsSymlink(m_pluginsRoot, normalized))
+				{
+					if (m_failedWatches.remove(normalized) > 0)
+						publishWatchState();
+					return false;
+				}
+				if (m_watchedDirectories.contains(normalized))
+					return true;
+				if (!m_fileWatcher->addPath(normalized))
+				{
+					m_failedWatches.insert(normalized);
+					publishWatchState();
+					return false;
+				}
+				m_failedWatches.remove(normalized);
+				m_watchedDirectories.insert(normalized);
+				publishWatchState();
+				return true;
+			}
+
+			/**
+			 * @brief Reconciles supported direct audio files in one explicitly used plugin directory.
+			 * @param directory Canonical immediate directory beneath the plugin root.
+			 */
+			void reconcilePluginDirectory(const QString &directory)
+			{
+				auto state = m_pluginDirectories.find(directory);
+				if (state == m_pluginDirectories.end())
+					return;
+
+				QStringList                                           added;
+				QStringList                                           changed;
+				QStringList                                           removed;
+				QHash<QString, QPair<QString, SoundCatalogFileState>> currentFiles;
+				const QFileInfo                                       directoryInfo(directory);
+				const QString                                         currentDirectory =
+				    QMudPluginPathUtils::normalizeSeparators(directoryInfo.canonicalFilePath());
+				const bool directoryValid =
+				    directoryInfo.isDir() && !directoryInfo.isSymLink() && !currentDirectory.isEmpty() &&
+				    sameSoundFilesystemPath(currentDirectory, directory) &&
+				    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(currentDirectory, m_pluginsRoot) &&
+				    !soundPathContainsSymlink(m_pluginsRoot, currentDirectory);
+				if (directoryValid)
+				{
+					const QFileInfoList entries =
+					    m_soundNameFilters.isEmpty()
+					        ? QFileInfoList()
+					        : QDir(currentDirectory)
+					              .entryInfoList(m_soundNameFilters,
+					                             QDir::Files | QDir::Readable | QDir::Hidden | QDir::System |
+					                                 QDir::NoSymLinks,
+					                             QDir::Name | QDir::IgnoreCase);
+					for (const QFileInfo &entry : entries)
+					{
+						const QString canonical =
+						    QMudPluginPathUtils::normalizeSeparators(entry.canonicalFilePath());
+						if (canonical.isEmpty() || entry.isSymLink() ||
+						    !sameSoundFilesystemPath(
+						        QMudPluginPathUtils::normalizeSeparators(QFileInfo(canonical).absolutePath()),
+						        currentDirectory) ||
+						    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonical, m_pluginsRoot))
+						{
+							continue;
+						}
+						const QString               key = soundCatalogComparisonKey(canonical);
+						const SoundCatalogFileState metadata{entry.size(),
+						                                     entry.lastModified().toMSecsSinceEpoch()};
+						currentFiles.insert(key, qMakePair(canonical, metadata));
+						const auto previous = state->files.constFind(key);
+						if (previous == state->files.cend())
+							added.push_back(canonical);
+						else if (previous->first != canonical)
+						{
+							removed.push_back(previous->first);
+							added.push_back(canonical);
+						}
+						else if (previous->second != metadata)
+							changed.push_back(canonical);
+					}
+				}
+
+				for (auto previous = state->files.cbegin(); previous != state->files.cend(); ++previous)
+				{
+					if (!currentFiles.contains(previous.key()))
+						removed.push_back(previous->first);
+				}
+				state->files       = std::move(currentFiles);
+				const bool watched = directoryValid && watchPluginDirectory(currentDirectory);
+				if (!watched)
+				{
+					const bool watchRemoved = m_watchedDirectories.remove(directory) > 0;
+					if (m_fileWatcher)
+						m_fileWatcher->removePath(directory);
+					if (watchRemoved)
+						publishWatchState();
+				}
+				publishPluginDirectoryChange(directory, std::move(added), std::move(changed),
+				                             std::move(removed), watched, directoryValid);
+				if (!directoryValid)
+					m_pluginDirectories.erase(state);
+			}
+
+			/**
 			 * @brief Registers a directory watcher.
 			 * @param directory Existing directory.
 			 * @return `true` when watched.
@@ -1429,6 +1636,11 @@ namespace
 				if (m_shuttingDown || m_qmudHome.isEmpty())
 					return;
 				const QString normalized = QMudPluginPathUtils::normalizeSeparators(directory);
+				if (m_pluginDirectories.contains(normalized))
+				{
+					reconcilePluginDirectory(normalized);
+					return;
+				}
 				if (sameSoundFilesystemPath(normalized, m_qmudHome))
 				{
 					const QString currentRoot =
@@ -1471,7 +1683,8 @@ namespace
 					QStringList watched = m_fileWatcher->directories();
 					for (qsizetype index = watched.size(); index > 0; --index)
 					{
-						if (sameSoundFilesystemPath(watched.at(index - 1), m_qmudHome))
+						if (sameSoundFilesystemPath(watched.at(index - 1), m_qmudHome) ||
+						    m_pluginDirectories.contains(watched.at(index - 1)))
 							watched.removeAt(index - 1);
 					}
 					if (!watched.isEmpty())
@@ -1484,16 +1697,53 @@ namespace
 				m_activeScan.reset();
 				m_directoryPublication.reset();
 				m_unreconciledIndexDirectories.clear();
-				m_watchedDirectories.clear();
-				if (!m_qmudHome.isEmpty())
-					m_watchedDirectories.insert(m_qmudHome);
-				m_failedWatches.clear();
+				for (auto watched = m_watchedDirectories.begin(); watched != m_watchedDirectories.end();)
+				{
+					if (sameSoundFilesystemPath(*watched, m_qmudHome) ||
+					    m_pluginDirectories.contains(*watched))
+						++watched;
+					else
+						watched = m_watchedDirectories.erase(watched);
+				}
+				for (auto failed = m_failedWatches.begin(); failed != m_failedWatches.end();)
+				{
+					if (m_pluginDirectories.contains(*failed))
+						++failed;
+					else
+						failed = m_failedWatches.erase(failed);
+				}
 				m_catalogStepPending    = false;
 				m_catalogReadyPublished = false;
 				m_indexDirty            = true;
 				m_indexWriteFailed      = false;
 				++m_catalogRevision;
 				publishWatchState();
+			}
+
+			/** @brief Removes plugin directory state and watches while retaining sounds-tree ownership. */
+			void clearPluginDirectoryState()
+			{
+				bool watchStateChanged{false};
+				for (auto directory = m_pluginDirectories.cbegin(); directory != m_pluginDirectories.cend();
+				     ++directory)
+				{
+					const bool catalogOwnsWatch =
+					    sameSoundFilesystemPath(directory.key(), m_qmudHome) ||
+					    (!m_soundsRoot.isEmpty() &&
+					     QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(directory.key(), m_soundsRoot));
+					if (!catalogOwnsWatch)
+					{
+						if (m_fileWatcher)
+							m_fileWatcher->removePath(directory.key());
+						watchStateChanged =
+						    m_watchedDirectories.remove(directory.key()) > 0 || watchStateChanged;
+						watchStateChanged = m_failedWatches.remove(directory.key()) > 0 || watchStateChanged;
+					}
+				}
+				m_pluginDirectories.clear();
+				m_pluginsRoot.clear();
+				if (watchStateChanged)
+					publishWatchState();
 			}
 
 			/** @brief Loads the persistent-index header and schedules bounded entry ingestion. */
@@ -2186,6 +2436,7 @@ namespace
 				m_activeScan.reset();
 				m_directoryPublication.reset();
 				m_unreconciledIndexDirectories.clear();
+				m_pluginDirectories.clear();
 				m_watchedDirectories.clear();
 				m_failedWatches.clear();
 				m_catalogStepPending            = false;
@@ -2194,10 +2445,13 @@ namespace
 				m_indexWriteFailed              = false;
 				m_catalogRevision               = 0;
 				m_maximumReconciliationStepSize = 0;
+				m_pluginsRoot.clear();
+				m_pluginGeneration = 0;
 			}
 
 			Publish                                               m_publish;
 			CatalogDirectories                                    m_directories;
+			QHash<QString, PluginSoundDirectoryState>             m_pluginDirectories;
 			QHash<QString, std::shared_ptr<PendingSoundDownload>> m_downloads;
 			QSet<QString>                                         m_queuedDirectories;
 			QSet<QString>                                         m_watchedDirectories;
@@ -2209,11 +2463,14 @@ namespace
 			std::optional<PersistentIndexWrite>                   m_indexWrite;
 			std::unique_ptr<QFileSystemWatcher>                   m_fileWatcher;
 			std::unique_ptr<QNetworkAccessManager>                m_networkManager;
+			QStringList                                           m_soundNameFilters;
 			QString                                               m_qmudHome;
 			QString                                               m_soundsPath;
 			QString                                               m_soundsRoot;
+			QString                                               m_pluginsRoot;
 			QSet<QString>                                         m_unreconciledIndexDirectories;
 			quint64                                               m_generation{0};
+			quint64                                               m_pluginGeneration{0};
 			quint64                                               m_catalogRevision{0};
 			qsizetype                                             m_catalogFileCount{0};
 			qsizetype                                             m_maximumReconciliationStepSize{0};
@@ -2308,7 +2565,6 @@ namespace
 					m_memoryPreparationPool->waitForDone();
 				clearBackends();
 				m_memoryResources.clear();
-				m_preinitializedEffectBackend.reset();
 				m_preinitializedMediaBackend.reset();
 				if (m_ioWorker && m_ioThread.isRunning())
 				{
@@ -2326,6 +2582,10 @@ namespace
 				m_catalogFilesByStem.clear();
 				m_catalogDirectories.clear();
 				m_watchedCatalogDirectories.clear();
+				m_pluginFileByRelativePath.clear();
+				m_watchedPluginDirectories.clear();
+				m_trackedPluginDirectories.clear();
+				m_pendingPluginDirectories.clear();
 				m_maintenanceTimer.reset();
 				m_memoryPreparationPool.reset();
 				m_mediaDevices.reset();
@@ -2407,7 +2667,6 @@ namespace
 				}
 				key.size                = info.size();
 				key.modifiedMsecs       = info.lastModified().toMSecsSinceEpoch();
-				key.backend             = SoundBackendKind::Effect;
 				key.deviceId            = m_deviceId;
 				auto backend            = std::make_unique<SoundBackend>();
 				backend->key            = key;
@@ -2543,10 +2802,7 @@ namespace
 				SoundChannel &channel = sessionIt->channels[static_cast<std::size_t>(buffer - 1)];
 				if (!channel.backend || !channel.playing)
 					return false;
-				std::unique_ptr<QSignalBlocker> effectBlocker;
 				std::unique_ptr<QSignalBlocker> playerBlocker;
-				if (channel.backend->effect)
-					effectBlocker = std::make_unique<QSignalBlocker>(channel.backend->effect.get());
 				if (channel.backend->player)
 					playerBlocker = std::make_unique<QSignalBlocker>(channel.backend->player.get());
 				stopBackend(*channel.backend);
@@ -2641,7 +2897,7 @@ namespace
 			[[nodiscard]] SoundWorkerPlaybackInitializationState playbackInitializationStateForTest() const
 			{
 				Q_ASSERT(QThread::currentThread() == thread());
-				return {m_preinitializedEffectBackend != nullptr, m_preinitializedMediaBackend != nullptr};
+				return {m_preinitializedMediaBackend != nullptr};
 			}
 
 			/**
@@ -2784,6 +3040,7 @@ namespace
 			{
 				Q_ASSERT(QThread::currentThread() == thread());
 				m_releaseCompletedPending = true;
+				m_failedWatchRetryPending = true;
 				performMaintenance();
 			}
 
@@ -2828,7 +3085,8 @@ namespace
 					if (!m_shuttingDown)
 						performMaintenance();
 					m_maintenancePending = false;
-					if (!m_shuttingDown && cacheNeedsEviction(currentTimeMsecs()))
+					if (!m_shuttingDown &&
+					    (m_releaseCompletedPending || cacheNeedsEviction(currentTimeMsecs())))
 						scheduleMaintenance(false);
 					return true;
 				}
@@ -2864,7 +3122,6 @@ namespace
 					if (!m_playbackInitialized())
 					{
 						m_playbackInitializationAbandoned = true;
-						m_preinitializedEffectBackend.reset();
 						m_preinitializedMediaBackend.reset();
 						m_mediaDevices.reset();
 						m_deviceId.clear();
@@ -2873,6 +3130,10 @@ namespace
 					break;
 				case SoundCommandKind::ConfigureSoundDirectory:
 					configureSoundDirectory(command.text);
+					result = eOK;
+					break;
+				case SoundCommandKind::ConfigurePluginDirectory:
+					configurePluginDirectory(command.text);
 					result = eOK;
 					break;
 				case SoundCommandKind::RegisterSession:
@@ -2944,6 +3205,10 @@ namespace
 							static_cast<void>(indexCatalogPathAfterCacheInvalidation(file));
 						}
 					}
+					result = eOK;
+					break;
+				case SoundCommandKind::PluginDirectoryChanged:
+					handlePluginDirectoryChanged(command);
 					result = eOK;
 					break;
 				case SoundCommandKind::CatalogCleared:
@@ -3096,6 +3361,83 @@ namespace
 			}
 
 			/**
+			 * @brief Recognizes an explicit plugin-bundled sound path without widening ordinary sound lookup.
+			 * @param fileName Portable, native, or legacy path supplied by a compatibility API.
+			 * @return Path relative to the configured plugins directory, or an empty string otherwise.
+			 */
+			[[nodiscard]] QString pluginSoundRequestRelativePath(const QString &fileName) const
+			{
+				if (m_pluginsRoot.isEmpty() || !soundPlaybackSupportsFile(fileName))
+					return {};
+				QString       portable;
+				const QString normalized = QMudPluginPathUtils::normalizeSeparators(fileName);
+				QString       error;
+				if (QMudPluginPathUtils::resolveInsideDirectory(m_qmudHome, normalized, nullptr, &error))
+					portable = QMudPluginPathUtils::normalizeSeparators(QDir::cleanPath(normalized));
+				else
+				{
+					QString resolved;
+					if (!QMudPluginPathUtils::resolveInsideQmudHome(m_qmudHome, normalized, &resolved,
+					                                                &error))
+						return {};
+					portable = QMudPluginPathUtils::qmudHomeRelativePath(m_qmudHome, resolved, false);
+				}
+
+				const QString configuredRelative =
+				    QMudPluginPathUtils::qmudHomeRelativePath(m_qmudHome, m_pluginsRoot, false);
+				QStringList configuredParts =
+				    configuredRelative == QLatin1String(".")
+				        ? QStringList()
+				        : configuredRelative.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+				const QStringList requestedParts = portable.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+				if (requestedParts.size() <= configuredParts.size())
+					return {};
+				for (qsizetype index = 0; index < configuredParts.size(); ++index)
+				{
+					if (requestedParts.at(index).compare(configuredParts.at(index), Qt::CaseInsensitive) != 0)
+						return {};
+				}
+				return requestedParts.mid(configuredParts.size()).join(QLatin1Char('/'));
+			}
+
+			/**
+			 * @brief Adds one validated plugin sound to exact-path lookup only.
+			 * @param absolutePath Canonical supported audio file beneath the configured plugins directory.
+			 */
+			void indexPluginSoundFile(const QString &absolutePath)
+			{
+				const QString normalized = QMudPluginPathUtils::normalizeSeparators(absolutePath);
+				if (m_pluginsRoot.isEmpty() || !soundPlaybackSupportsFile(normalized) ||
+				    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(normalized, m_pluginsRoot))
+				{
+					return;
+				}
+				const QString relative = QMudPluginPathUtils::normalizeSeparators(
+				    QDir(m_pluginsRoot).relativeFilePath(normalized));
+				m_pluginFileByRelativePath.insert(soundCatalogComparisonKey(relative), normalized);
+			}
+
+			/**
+			 * @brief Queues lazy tracking for one explicit plugin sound's immediate directory.
+			 * @param directory Canonical direct parent beneath the configured plugins directory.
+			 * @param reconcileKnownDirectory Whether a newly discovered file requires refreshing existing metadata.
+			 */
+			void requestPluginDirectoryTracking(const QString &directory, const bool reconcileKnownDirectory)
+			{
+				const QString normalized = QMudPluginPathUtils::normalizeSeparators(directory);
+				if (!m_ioWorker || normalized.isEmpty() || m_pendingPluginDirectories.contains(normalized) ||
+				    (!reconcileKnownDirectory && m_trackedPluginDirectories.contains(normalized)))
+				{
+					return;
+				}
+				m_pendingPluginDirectories.insert(normalized);
+				QMetaObject::invokeMethod(
+				    m_ioWorker,
+				    [worker = m_ioWorker, generation = m_pluginDirectoryGeneration, directory = normalized]
+				    { worker->trackPluginDirectory(generation, directory); }, Qt::QueuedConnection);
+			}
+
+			/**
 			 * @brief Resolves one request through the in-memory sound catalog without filesystem access.
 			 * @param session Session supplying world-first lookup precedence.
 			 * @param fileName Relative sound-tree path or an absolute indexed sound path.
@@ -3146,7 +3488,18 @@ namespace
 					removeCachedFileRequest(session, fileName);
 				}
 
-				const QString catalogFile = resolveCatalogFile(session, fileName);
+				QString catalogFile = resolveCatalogFile(session, fileName);
+				if (catalogFile.isEmpty())
+				{
+					const QString pluginRelative = pluginSoundRequestRelativePath(fileName);
+					if (!pluginRelative.isEmpty())
+					{
+						const auto pluginFile =
+						    m_pluginFileByRelativePath.constFind(soundCatalogComparisonKey(pluginRelative));
+						if (pluginFile != m_pluginFileByRelativePath.cend())
+							catalogFile = *pluginFile;
+					}
+				}
 				if (!catalogFile.isEmpty())
 				{
 					const QString cacheKey = soundCatalogComparisonKey(catalogFile);
@@ -3170,11 +3523,44 @@ namespace
 			 * @param session Session providing the QMud-home root.
 			 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
 			 * @param resolved Destination receiving the contained absolute file path.
+			 * @param allowPluginSounds Whether explicit paths beneath the configured plugins directory are accepted.
 			 * @return Existing regular-file metadata, or no value when resolution fails.
 			 */
 			std::optional<QFileInfo> resolveFileInfo(const WorkerSession &session, const QString &fileName,
-			                                         QString &resolved) const
+			                                         QString &resolved, const bool allowPluginSounds)
 			{
+				const QString pluginRelative =
+				    allowPluginSounds ? pluginSoundRequestRelativePath(fileName) : QString();
+				if (!pluginRelative.isEmpty())
+				{
+					QString candidate = pluginRelative;
+					bool    indexedFile{false};
+					if (const auto indexed =
+					        m_pluginFileByRelativePath.constFind(soundCatalogComparisonKey(pluginRelative));
+					    indexed != m_pluginFileByRelativePath.cend())
+					{
+						indexedFile = true;
+						candidate   = QMudPluginPathUtils::normalizeSeparators(
+						    QDir(m_pluginsRoot).relativeFilePath(*indexed));
+					}
+					if (!resolveSoundFileCaseInsensitively(m_pluginsRoot, candidate, &resolved))
+					{
+						if (indexedFile)
+						{
+							requestPluginDirectoryTracking(
+							    QMudPluginPathUtils::normalizeSeparators(
+							        QFileInfo(QDir(m_pluginsRoot).filePath(candidate)).absolutePath()),
+							    true);
+						}
+						return std::nullopt;
+					}
+					indexPluginSoundFile(resolved);
+					requestPluginDirectoryTracking(
+					    QMudPluginPathUtils::normalizeSeparators(QFileInfo(resolved).absolutePath()),
+					    !indexedFile);
+					return QFileInfo(resolved);
+				}
+
 				auto resolveCandidate = [this,
 				                         &resolved](const QString &candidate) -> std::optional<QFileInfo>
 				{
@@ -3216,57 +3602,11 @@ namespace
 					return resolveCandidate(QDir(m_soundsRoot).relativeFilePath(*catalogFile));
 				};
 				auto resolveCaseInsensitiveCandidate =
-				    [this, &resolveCandidate](const QString &candidate) -> std::optional<QFileInfo>
+				    [this, &resolved](const QString &candidate) -> std::optional<QFileInfo>
 				{
-					QString normalized;
-					QString error;
-					if (m_soundsRoot.isEmpty() || !QMudPluginPathUtils::resolveInsideDirectory(
-					                                  m_soundsRoot, candidate, &normalized, &error))
-					{
-						return std::nullopt;
-					}
-					const QString root = m_soundsRoot;
-					if (root.isEmpty())
-						return std::nullopt;
-					const QString relative =
-					    QMudPluginPathUtils::normalizeSeparators(QDir(root).relativeFilePath(normalized));
-					const QStringList parts = relative.split(QLatin1Char('/'), Qt::SkipEmptyParts);
-					if (parts.isEmpty() || std::ranges::any_of(parts, [](const QString &part)
-					                                           { return part == QLatin1String(".."); }))
-					{
-						return std::nullopt;
-					}
-
-					QString current = root;
-					for (qsizetype partIndex = 0; partIndex < parts.size(); ++partIndex)
-					{
-						const QString      &part    = parts.at(partIndex);
-						const QFileInfoList entries = QDir(current).entryInfoList(
-						    QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
-						    QDir::Name | QDir::IgnoreCase);
-						std::optional<QFileInfo> selected;
-						for (const QFileInfo &entry : entries)
-						{
-							if (entry.fileName() == part)
-							{
-								selected = entry;
-								break;
-							}
-							if (!selected && entry.fileName().compare(part, Qt::CaseInsensitive) == 0)
-								selected = entry;
-						}
-						if (!selected || (partIndex + 1 < parts.size() && !selected->isDir()))
-							return std::nullopt;
-						if (selected->isSymLink())
-							return std::nullopt;
-						current = QMudPluginPathUtils::normalizeSeparators(selected->canonicalFilePath());
-						if (current.isEmpty() ||
-						    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(current, root))
-						{
-							return std::nullopt;
-						}
-					}
-					return resolveCandidate(QDir(root).relativeFilePath(current));
+					return resolveSoundFileCaseInsensitively(m_soundsRoot, candidate, &resolved)
+					           ? std::optional<QFileInfo>(QFileInfo(resolved))
+					           : std::nullopt;
 				};
 				auto resolveWithCatalogFallback =
 				    [this, &resolveCandidate, &resolveCatalogCandidate,
@@ -3314,23 +3654,25 @@ namespace
 				if (auto cached = cachedFileSourceKey(session, fileName, resolved))
 					return cached;
 				++m_slowFileResolutionCount;
-				const auto info = resolveFileInfo(session, fileName, resolved);
+				const auto info = resolveFileInfo(session, fileName, resolved, true);
 				if (!info)
 					return std::nullopt;
 				SoundSourceKey key;
 				key.identity      = resolved;
 				key.size          = info->size();
 				key.modifiedMsecs = info->lastModified().toMSecsSinceEpoch();
-				key.backend =
-				    soundFilePlaybackBackendForFile(resolved) == SoundFilePlaybackBackend::QMediaPlayer
-				        ? SoundBackendKind::MediaPlayer
-				        : SoundBackendKind::Effect;
-				key.deviceId = m_deviceId;
+				key.deviceId      = m_deviceId;
 				const QString sourceDirectory =
 				    QMudPluginPathUtils::normalizeSeparators(QFileInfo(resolved).path());
-				if (m_catalogConfigured &&
+				const bool watchedSoundDirectory =
+				    m_catalogConfigured &&
 				    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(sourceDirectory, m_soundsRoot) &&
-				    m_watchedCatalogDirectories.contains(sourceDirectory))
+				    m_watchedCatalogDirectories.contains(sourceDirectory);
+				const bool watchedPluginDirectory =
+				    !m_pluginsRoot.isEmpty() &&
+				    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(sourceDirectory, m_pluginsRoot) &&
+				    m_watchedPluginDirectories.contains(sourceDirectory);
+				if (watchedSoundDirectory || watchedPluginDirectory)
 				{
 					const QString sourceCacheKey = soundCatalogComparisonKey(resolved);
 					m_cachedFileSourceKeys.insert(sourceCacheKey, key);
@@ -3369,7 +3711,7 @@ namespace
 				}
 
 				QString    resolved;
-				const auto info = resolveFileInfo(session, requested, resolved);
+				const auto info = resolveFileInfo(session, requested, resolved, false);
 				if (!info)
 					return std::nullopt;
 				const QString indexed = indexCatalogFile(*info);
@@ -3699,6 +4041,53 @@ namespace
 			}
 
 			/**
+			 * @brief Applies exact-file changes from one directly watched plugin resource directory.
+			 * @param command I/O result containing supported direct audio-file changes only.
+			 */
+			void handlePluginDirectoryChanged(const SoundCommand &command)
+			{
+				if (command.token != m_pluginDirectoryGeneration || command.text.isEmpty() ||
+				    m_pluginsRoot.isEmpty())
+					return;
+				const QString directory = QMudPluginPathUtils::normalizeSeparators(command.text);
+				m_pendingPluginDirectories.remove(directory);
+				if (command.success)
+					m_trackedPluginDirectories.insert(directory);
+				else
+					m_trackedPluginDirectories.remove(directory);
+				if (command.directoryWatched)
+					m_watchedPluginDirectories.insert(directory);
+				else
+					m_watchedPluginDirectories.remove(directory);
+
+				auto removeFile = [this](const QString &file)
+				{
+					invalidateCachedFileSource(file);
+					const QString relative =
+					    QMudPluginPathUtils::normalizeSeparators(QDir(m_pluginsRoot).relativeFilePath(file));
+					const QString key     = soundCatalogComparisonKey(relative);
+					const auto    indexed = m_pluginFileByRelativePath.constFind(key);
+					if (indexed != m_pluginFileByRelativePath.cend() &&
+					    sameSoundFilesystemPath(*indexed, file))
+					{
+						m_pluginFileByRelativePath.remove(key);
+					}
+				};
+				for (const QString &file : command.removedFiles)
+					removeFile(file);
+				for (const QString &file : command.changedFiles)
+				{
+					removeFile(file);
+					indexPluginSoundFile(file);
+				}
+				for (const QString &file : command.files)
+				{
+					invalidateCachedFileSource(file);
+					indexPluginSoundFile(file);
+				}
+			}
+
+			/**
 			 * @brief Clears playback lookup state after the I/O worker loses the sounds root.
 			 * @param command Reset result carrying readiness state.
 			 */
@@ -3736,6 +4125,7 @@ namespace
 				++m_catalogGeneration;
 				if (m_catalogGeneration == 0)
 					++m_catalogGeneration;
+				advancePluginDirectoryGeneration();
 				m_catalogFiles.clear();
 				m_catalogFileByRelativePath.clear();
 				invalidateCachedFileSources();
@@ -3743,9 +4133,14 @@ namespace
 				m_catalogFilesByStem.clear();
 				m_catalogDirectories.clear();
 				m_watchedCatalogDirectories.clear();
+				m_pluginFileByRelativePath.clear();
+				m_watchedPluginDirectories.clear();
+				m_trackedPluginDirectories.clear();
+				m_pendingPluginDirectories.clear();
 				m_qmudHome = canonicalHome;
 				m_soundsPath.clear();
 				m_soundsRoot.clear();
+				m_pluginsRoot.clear();
 				m_catalogConfigured             = true;
 				m_catalogAvailable              = false;
 				m_catalogReady                  = false;
@@ -3761,8 +4156,11 @@ namespace
 					if (!m_ioWorker)
 						return;
 					QMetaObject::invokeMethod(
-					    m_ioWorker, [worker = m_ioWorker, home = m_qmudHome, generation = m_catalogGeneration]
-					    { worker->configure(home, generation); }, Qt::QueuedConnection);
+					    m_ioWorker,
+					    [worker = m_ioWorker, home = m_qmudHome, generation = m_catalogGeneration,
+					     pluginGeneration = m_pluginDirectoryGeneration]
+					    { worker->configureSoundDirectory(home, generation, pluginGeneration); },
+					    Qt::QueuedConnection);
 				};
 
 				QString soundsPath;
@@ -3787,6 +4185,63 @@ namespace
 				}
 				refreshWorldSoundDirectories();
 				configureIo();
+			}
+
+			/** @brief Advances the independent plugin-root generation without permitting zero. */
+			void advancePluginDirectoryGeneration()
+			{
+				++m_pluginDirectoryGeneration;
+				if (m_pluginDirectoryGeneration == 0)
+					++m_pluginDirectoryGeneration;
+			}
+
+			/**
+			 * @brief Applies a configured global plugins directory without restarting sounds-tree work.
+			 * @param pluginsDirectory Directory selected by global preferences.
+			 */
+			void configurePluginDirectory(const QString &pluginsDirectory)
+			{
+				QString canonicalPlugins;
+				if (!m_qmudHome.isEmpty() && !pluginsDirectory.trimmed().isEmpty() &&
+				    !QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(m_qmudHome,
+				                                                                   pluginsDirectory))
+				{
+					QString resolved;
+					QString error;
+					if (QMudPluginPathUtils::resolveInsideQmudHome(m_qmudHome, pluginsDirectory, &resolved,
+					                                               &error))
+					{
+						const QFileInfo info(resolved);
+						const QString   canonical =
+						    QMudPluginPathUtils::normalizeSeparators(info.canonicalFilePath());
+						if (info.isDir() && !info.isSymLink() && !canonical.isEmpty() &&
+						    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonical, m_qmudHome) &&
+						    !soundPathContainsSymlink(m_qmudHome, resolved))
+						{
+							canonicalPlugins = canonical;
+						}
+					}
+				}
+				if (sameSoundFilesystemPath(canonicalPlugins, m_pluginsRoot))
+					return;
+
+				for (const QString &file : std::as_const(m_pluginFileByRelativePath))
+					invalidateCachedFileSource(file);
+				m_pluginFileByRelativePath.clear();
+				m_watchedPluginDirectories.clear();
+				m_trackedPluginDirectories.clear();
+				m_pendingPluginDirectories.clear();
+				m_pluginsRoot = canonicalPlugins;
+				advancePluginDirectoryGeneration();
+				if (m_ioWorker)
+				{
+					QMetaObject::invokeMethod(
+					    m_ioWorker,
+					    [worker = m_ioWorker, directory = m_pluginsRoot,
+					     generation = m_pluginDirectoryGeneration]
+					    { worker->configurePluginDirectory(directory, generation); },
+					    Qt::QueuedConnection);
+				}
 			}
 
 			/**
@@ -3921,8 +4376,14 @@ namespace
 				if (m_ioWorker)
 				{
 					QMetaObject::invokeMethod(
-					    m_ioWorker, [worker = m_ioWorker, home = m_qmudHome, generation = m_catalogGeneration]
-					    { worker->configure(home, generation); }, Qt::QueuedConnection);
+					    m_ioWorker,
+					    [worker = m_ioWorker, home = m_qmudHome, generation = m_catalogGeneration,
+					     pluginsRoot = m_pluginsRoot, pluginGeneration = m_pluginDirectoryGeneration]
+					    {
+						    worker->configureSoundDirectory(home, generation, pluginGeneration);
+						    worker->configurePluginDirectory(pluginsRoot, pluginGeneration);
+					    },
+					    Qt::QueuedConnection);
 				}
 				return true;
 			}
@@ -4602,7 +5063,6 @@ namespace
 				SoundSourceKey key;
 				key.identity            = memoryResourceKey(digest, resource->size);
 				key.size                = resource->size;
-				key.backend             = SoundBackendKind::Effect;
 				key.deviceId            = m_deviceId;
 				SoundBackendLease lease = leaseMemoryBackend(key, resource);
 				if (!lease.backend)
@@ -4639,7 +5099,7 @@ namespace
 					return eCannotPlaySound;
 				WorkerSession &session = sessionIt.value();
 				QString        resolved;
-				if (!resolveFileInfo(session, command.text, resolved))
+				if (!resolveFileInfo(session, command.text, resolved, true))
 					return eFileNotFound;
 				for (int channelIndex = 0; channelIndex < SoundEngineSession::kChannelCount; ++channelIndex)
 				{
@@ -4741,7 +5201,7 @@ namespace
 				}
 				lease.backend->sessionId        = command.sessionId;
 				lease.backend->preparationToken = command.token;
-				session.prepared.insert(command.token, {lease.backend, eOK, {}});
+				session.prepared.insert(command.token, {lease.backend, eOK, {}, lease.retainedAtMsecs});
 			}
 
 			int commitPrepared(const SoundCommand &command)
@@ -4763,7 +5223,7 @@ namespace
 				const int channelIndex = selectChannel(session, command.buffer);
 				if (channelIndex < 0)
 				{
-					releaseBackend(*prepared.backend);
+					releaseUncommittedBackend(*prepared.backend, prepared.retainedAtMsecs);
 					return command.buffer < 0 || command.buffer > SoundEngineSession::kChannelCount
 					           ? eBadParameter
 					           : eCannotPlaySound;
@@ -4782,12 +5242,13 @@ namespace
 				auto preparedIt = sessionIt->prepared.find(token);
 				if (preparedIt == sessionIt->prepared.end())
 					return;
-				SoundBackend *backend = preparedIt->backend;
+				SoundBackend *backend         = preparedIt->backend;
+				const qint64  retainedAtMsecs = preparedIt->retainedAtMsecs;
 				sessionIt->prepared.erase(preparedIt);
 				if (backend)
 				{
 					backend->preparationToken = 0;
-					releaseBackend(*backend);
+					releaseUncommittedBackend(*backend, retainedAtMsecs);
 				}
 			}
 
@@ -4836,7 +5297,7 @@ namespace
 					if (prepared.backend)
 					{
 						prepared.backend->preparationToken = 0;
-						releaseBackend(*prepared.backend);
+						releaseUncommittedBackend(*prepared.backend, prepared.retainedAtMsecs);
 					}
 				}
 				session.prepared.clear();
@@ -4857,28 +5318,33 @@ namespace
 			{
 				backend.initializationInProgress = false;
 				if (!backend.failed)
-					return {&backend, {}};
+					return {&backend, {}, 0};
 				QString              failureMessage = std::move(backend.failureMessage);
 				const SoundSourceKey key            = backend.key;
 				const quint64        backendId      = backend.backendId;
 				removeBackend(key, backendId);
-				return {nullptr, std::move(failureMessage)};
+				return {nullptr, std::move(failureMessage), 0};
 			}
 
 			/**
 			 * @brief Leases a file-backed multimedia object and preserves synchronous initialization errors.
-			 * @param key Resolved source identity and backend kind.
+			 * @param key Resolved source identity.
 			 * @return Backend lease and any initialization diagnostic.
 			 */
 			SoundBackendLease leaseBackend(const SoundSourceKey &key)
 			{
 				const qint64 now = currentTimeMsecs();
+				if (const SoundCache::RetainedResult retained = m_cache.takeRetained(key, now);
+				    retained.backend)
+				{
+					return {retained.backend, {}, retained.completedAtMsecs};
+				}
 				if (SoundBackend *candidate = m_cache.takeIdle(key, now))
-					return {candidate, {}};
+					return {candidate, {}, 0};
 
-				auto backend = takePreinitializedBackend(key.backend);
+				auto backend = takePreinitializedBackend();
 				if (!backend)
-					return {nullptr, QStringLiteral("No audio output device is available.")};
+					return {nullptr, QStringLiteral("No audio output device is available."), 0};
 				backend->backendId                = m_nextBackendId++;
 				backend->key                      = key;
 				backend->initializationInProgress = true;
@@ -4887,32 +5353,11 @@ namespace
 				SoundBackend *result = inserted.backend;
 				if (!result)
 					return {};
-				if (key.backend == SoundBackendKind::MediaPlayer)
-				{
-					Q_ASSERT(result->player);
-					Q_ASSERT(result->audioOutput);
-					connect(result->player.get(), &QMediaPlayer::errorOccurred, this,
-					        [this, raw = result](const QMediaPlayer::Error error, const QString &text)
-					        { handlePlayerError(*raw, error, text); });
-					connect(result->player.get(), &QMediaPlayer::playbackStateChanged, this,
-					        [this, raw = result](const QMediaPlayer::PlaybackState state)
-					        { handlePlayerState(*raw, state); });
-					result->player->setSource(QUrl::fromLocalFile(key.identity));
-				}
-				else
-				{
-					Q_ASSERT(result->effect);
-					connect(result->effect.get(), &QSoundEffect::statusChanged, this,
-					        [this, raw = result] { handleEffectStatus(*raw); });
-					connect(result->effect.get(), &QSoundEffect::playingChanged, this,
-					        [this, raw = result] { handleEffectPlaying(*raw); });
-					result->effect->setSource(QUrl::fromLocalFile(key.identity));
-				}
-				return finishBackendInitialization(*result);
+				return initializeBackendSource(*result, key.identity);
 			}
 
 			/**
-			 * @brief Leases a memory-backed sound effect and preserves synchronous initialization errors.
+			 * @brief Leases a memory-backed media player and preserves synchronous initialization errors.
 			 * @param key Content-addressed source identity.
 			 * @param resource Materialized sound bytes retained by the backend.
 			 * @return Backend lease and any initialization diagnostic.
@@ -4921,19 +5366,26 @@ namespace
 			                                     const std::shared_ptr<SoundMemoryResource> &resource)
 			{
 				const qint64 now = currentTimeMsecs();
+				if (const SoundCache::RetainedResult retained = m_cache.takeRetained(key, now);
+				    retained.backend)
+				{
+					if (retained.backend->memoryResource)
+						m_memoryResources.insert(key.identity, retained.backend->memoryResource);
+					return {retained.backend, {}, retained.completedAtMsecs};
+				}
 				if (SoundBackend *candidate = m_cache.takeIdle(key, now))
 				{
 					if (candidate->memoryResource)
 						m_memoryResources.insert(key.identity, candidate->memoryResource);
-					return {candidate, {}};
+					return {candidate, {}, 0};
 				}
 
 				if (!resource)
 					return {};
 
-				auto backend = takePreinitializedBackend(SoundBackendKind::Effect);
+				auto backend = takePreinitializedBackend();
 				if (!backend)
-					return {nullptr, QStringLiteral("No audio output device is available.")};
+					return {nullptr, QStringLiteral("No audio output device is available."), 0};
 				backend->backendId                = m_nextBackendId++;
 				backend->key                      = key;
 				backend->memoryResource           = resource;
@@ -4943,18 +5395,32 @@ namespace
 				SoundBackend *result = inserted.backend;
 				if (!result)
 					return {};
-				Q_ASSERT(result->effect);
-				connect(result->effect.get(), &QSoundEffect::statusChanged, this,
-				        [this, raw = result] { handleEffectStatus(*raw); });
-				connect(result->effect.get(), &QSoundEffect::playingChanged, this,
-				        [this, raw = result] { handleEffectPlaying(*raw); });
-				result->effect->setSource(QUrl::fromLocalFile(resource->fileName));
-				SoundBackendLease lease = finishBackendInitialization(*result);
+				SoundBackendLease lease = initializeBackendSource(*result, resource->fileName);
 				if (!lease.backend)
 					return lease;
 				if (result->memoryResource)
 					m_memoryResources.insert(key.identity, result->memoryResource);
 				return lease;
+			}
+
+			/**
+			 * @brief Connects a fresh backend to worker lifecycle handling and assigns its local source.
+			 * @param backend Fresh cache-owned media-player backend.
+			 * @param fileName Absolute local file supplied to the media player.
+			 * @return Backend lease and any synchronous initialization diagnostic.
+			 */
+			SoundBackendLease initializeBackendSource(SoundBackend &backend, const QString &fileName)
+			{
+				Q_ASSERT(backend.player);
+				Q_ASSERT(backend.audioOutput);
+				connect(backend.player.get(), &QMediaPlayer::errorOccurred, this,
+				        [this, raw = &backend](const QMediaPlayer::Error error, const QString &text)
+				        { handlePlayerError(*raw, error, text); });
+				connect(backend.player.get(), &QMediaPlayer::playbackStateChanged, this,
+				        [this, raw = &backend](const QMediaPlayer::PlaybackState state)
+				        { handlePlayerState(*raw, state); });
+				backend.player->setSource(QUrl::fromLocalFile(fileName));
+				return finishBackendInitialization(backend);
 			}
 
 			/**
@@ -5028,20 +5494,13 @@ namespace
 				backend.started              = false;
 				m_cache.noteUse(backend.key, currentTimeMsecs());
 				applyBackendParameters(backend, channel);
-				if (backend.effect)
-					backend.effect->play();
-				else if (backend.player)
+				if (backend.player)
 					backend.player->play();
 				publishSnapshotIfChanged(session);
 			}
 
 			static void applyBackendParameters(const SoundBackend &backend, const SoundChannel &channel)
 			{
-				if (backend.effect)
-				{
-					backend.effect->setLoopCount(channel.backendLooping ? QSoundEffect::Infinite : 1);
-					backend.effect->setVolume(static_cast<float>(channel.volume));
-				}
 				if (backend.player)
 					backend.player->setLoops(channel.backendLooping ? QMediaPlayer::Infinite
 					                                                : QMediaPlayer::Once);
@@ -5051,8 +5510,6 @@ namespace
 
 			static void stopBackend(SoundBackend &backend)
 			{
-				if (backend.effect)
-					backend.effect->stop();
 				if (backend.player)
 					backend.player->stop();
 				backend.started = false;
@@ -5061,7 +5518,8 @@ namespace
 			void releaseChannel(WorkerSession &session, const int channelIndex,
 			                    const bool reportLuaAudioCompletion = true)
 			{
-				SoundChannel &channel = session.channels[static_cast<std::size_t>(channelIndex)];
+				SoundChannel &channel      = session.channels[static_cast<std::size_t>(channelIndex)];
+				const bool    stopPlayback = channel.playing;
 				if (channel.pendingMemoryOperationId != 0)
 					cancelPendingMemoryPlay(channel.pendingMemoryOperationId);
 				if (reportLuaAudioCompletion && channel.ownershipKind == SoundOwnershipKind::LuaAudio)
@@ -5074,7 +5532,8 @@ namespace
 					backend->sessionId            = 0;
 					backend->channel              = -1;
 					backend->assignmentGeneration = 0;
-					stopBackend(*backend);
+					if (stopPlayback)
+						stopBackend(*backend);
 					releaseBackend(*backend);
 				}
 			}
@@ -5110,12 +5569,32 @@ namespace
 				m_cache.markIdle(backend.key, backend.backendId, releasedAt);
 			}
 
-			void handleEffectStatus(SoundBackend &backend)
+			/**
+			 * @brief Retains one naturally completed backend for immediate source-matched reuse.
+			 * @param backend Completed backend becoming detached from playback.
+			 * @param completedAtMsecs Positive monotonic completion timestamp.
+			 */
+			void retainCompletedBackend(SoundBackend &backend, const qint64 completedAtMsecs)
 			{
-				if (!backend.effect || backend.effect->status() != QSoundEffect::Error)
-					return;
-				handleBackendError(
-				    backend, QStringLiteral("QMud sound playback failed for %1").arg(backend.key.identity));
+				backend.sessionId            = 0;
+				backend.channel              = -1;
+				backend.assignmentGeneration = 0;
+				backend.preparationToken     = 0;
+				backend.started              = false;
+				m_cache.markRetained(backend.key, backend.backendId, completedAtMsecs);
+			}
+
+			/**
+			 * @brief Returns an uncommitted lease to its retained grace state or the idle cache.
+			 * @param backend Backend whose preparation was canceled or could not be committed.
+			 * @param retainedAtMsecs Original completion timestamp, or zero for an idle/new lease.
+			 */
+			void releaseUncommittedBackend(SoundBackend &backend, const qint64 retainedAtMsecs)
+			{
+				if (retainedAtMsecs > 0)
+					retainCompletedBackend(backend, retainedAtMsecs);
+				else
+					releaseBackend(backend);
 			}
 
 			/**
@@ -5139,8 +5618,8 @@ namespace
 				completedBackend->sessionId            = 0;
 				completedBackend->channel              = -1;
 				completedBackend->assignmentGeneration = 0;
-				stopBackend(*completedBackend);
-				releaseBackend(*completedBackend);
+				const qint64 completedAtMsecs          = currentTimeMsecs();
+				retainCompletedBackend(*completedBackend, completedAtMsecs);
 
 				const qsizetype start = QRandomGenerator::global()->bounded(channel.playbackFiles.size());
 				QString         failureMessage;
@@ -5164,7 +5643,6 @@ namespace
 					channel.backend                     = lease.backend;
 					channel.assignmentGeneration        = session.nextAssignmentGeneration++;
 					channel.playing                     = true;
-					channel.completedAtMsecs            = 0;
 					lease.backend->sessionId            = session.sessionId;
 					lease.backend->channel              = channelIndex;
 					lease.backend->assignmentGeneration = channel.assignmentGeneration;
@@ -5172,9 +5650,7 @@ namespace
 					lease.backend->started              = false;
 					m_cache.noteUse(lease.backend->key, currentTimeMsecs());
 					applyBackendParameters(*lease.backend, channel);
-					if (lease.backend->effect)
-						lease.backend->effect->play();
-					else if (lease.backend->player)
+					if (lease.backend->player)
 						lease.backend->player->play();
 					return true;
 				}
@@ -5200,10 +5676,11 @@ namespace
 					publishSnapshotIfChanged(session);
 					return;
 				}
-				channel.playing          = false;
-				channel.completedAtMsecs = currentTimeMsecs();
-				if (channel.backend)
-					m_cache.noteUse(channel.backend->key, channel.completedAtMsecs);
+				channel.playing                = false;
+				SoundBackend *completedBackend = std::exchange(channel.backend, nullptr);
+				const qint64  completedAtMsecs = currentTimeMsecs();
+				m_cache.noteUse(completedBackend->key, completedAtMsecs);
+				retainCompletedBackend(*completedBackend, completedAtMsecs);
 				const quint64 ownershipGeneration = std::exchange(channel.ownershipGeneration, 0);
 				const bool    ownershipConfirmed  = std::exchange(channel.luaAudioOwnershipConfirmed, false);
 				const SoundOwnershipKind ownershipKind =
@@ -5211,30 +5688,6 @@ namespace
 				publishSnapshotIfChanged(session);
 				if (ownershipKind == SoundOwnershipKind::LuaAudio)
 					finishLuaAudioOwnership(session, channelIndex, ownershipGeneration, ownershipConfirmed);
-			}
-
-			void handleEffectPlaying(SoundBackend &backend)
-			{
-				if (!backend.effect || backend.channel < 0 || backend.sessionId == 0)
-					return;
-				auto sessionIt = m_sessions.find(backend.sessionId);
-				if (sessionIt == m_sessions.end())
-					return;
-				SoundChannel &channel = sessionIt->channels[static_cast<std::size_t>(backend.channel)];
-				if (channel.backend != &backend ||
-				    channel.assignmentGeneration != backend.assignmentGeneration)
-					return;
-				if (backend.effect->isPlaying())
-				{
-					backend.started         = true;
-					channel.playbackStarted = true;
-					channel.playing         = true;
-					publishSnapshotIfChanged(sessionIt.value());
-					return;
-				}
-				if (!channel.playbackStarted || channel.backendLooping || !channel.playing)
-					return;
-				completeChannelPlayback(sessionIt.value(), backend.channel);
 			}
 
 			void handlePlayerState(SoundBackend &backend, const QMediaPlayer::PlaybackState state)
@@ -5421,40 +5874,30 @@ namespace
 				clearBackends();
 				m_memoryResources.clear();
 				m_pendingMemoryMaterializations.clear();
-				m_preinitializedEffectBackend.reset();
 				m_preinitializedMediaBackend.reset();
 				static_cast<void>(initializePlaybackBackends());
 			}
 
 			/**
 			 * @brief Constructs one source-free backend against a validated output device.
-			 * @param kind Playback implementation to initialize.
 			 * @param device Non-null output device used by the backend.
 			 * @return Initialized backend without cache or channel ownership.
 			 */
 			[[nodiscard]] static std::unique_ptr<SoundBackend>
-			createPlaybackBackend(const SoundBackendKind kind, const QAudioDevice &device)
+			createPlaybackBackend(const QAudioDevice &device)
 			{
 				Q_ASSERT(!device.isNull());
-				auto backend = std::make_unique<SoundBackend>();
-				if (kind == SoundBackendKind::MediaPlayer)
-				{
-					backend->player      = std::make_unique<QMediaPlayer>();
-					backend->audioOutput = new QAudioOutput(backend->player.get());
-					backend->audioOutput->setDevice(device);
-					backend->player->setAudioOutput(backend->audioOutput);
-				}
-				else
-				{
-					backend->effect = std::make_unique<QSoundEffect>();
-					backend->effect->setAudioDevice(device);
-				}
+				auto backend         = std::make_unique<SoundBackend>();
+				backend->player      = std::make_unique<QMediaPlayer>();
+				backend->audioOutput = new QAudioOutput(backend->player.get());
+				backend->audioOutput->setDevice(device);
+				backend->player->setAudioOutput(backend->audioOutput);
 				return backend;
 			}
 
 			/**
-			 * @brief Initializes both playback implementations against one usable default output.
-			 * @return `true` when a non-null output device and both source-free backends are available.
+			 * @brief Initializes playback against one usable default output.
+			 * @return `true` when a non-null output device and source-free backend are available.
 			 */
 			[[nodiscard]] bool initializePlaybackBackends()
 			{
@@ -5462,30 +5905,23 @@ namespace
 				const QAudioDevice device = QMediaDevices::defaultAudioOutput();
 				if (m_forceNoAudioOutputForTest || device.isNull())
 					return false;
-				if (!m_preinitializedEffectBackend)
-					m_preinitializedEffectBackend = createPlaybackBackend(SoundBackendKind::Effect, device);
 				if (!m_preinitializedMediaBackend)
-					m_preinitializedMediaBackend =
-					    createPlaybackBackend(SoundBackendKind::MediaPlayer, device);
-				return m_preinitializedEffectBackend && m_preinitializedMediaBackend;
+					m_preinitializedMediaBackend = createPlaybackBackend(device);
+				return m_preinitializedMediaBackend != nullptr;
 			}
 
 			/**
-			 * @brief Takes the startup-initialized backend for a playback implementation or creates another one.
-			 * @param kind Playback implementation required by the resolved source.
+			 * @brief Takes the startup-initialized backend or creates another one.
 			 * @return Source-free backend ready to receive cache identity and source assignment.
 			 */
-			[[nodiscard]] std::unique_ptr<SoundBackend> takePreinitializedBackend(const SoundBackendKind kind)
+			[[nodiscard]] std::unique_ptr<SoundBackend> takePreinitializedBackend()
 			{
-				std::unique_ptr<SoundBackend> &prepared = kind == SoundBackendKind::MediaPlayer
-				                                              ? m_preinitializedMediaBackend
-				                                              : m_preinitializedEffectBackend;
-				if (prepared)
-					return std::exchange(prepared, nullptr);
+				if (m_preinitializedMediaBackend)
+					return std::exchange(m_preinitializedMediaBackend, nullptr);
 				const QAudioDevice device = QMediaDevices::defaultAudioOutput();
 				if (device.isNull())
 					return {};
-				return createPlaybackBackend(kind, device);
+				return createPlaybackBackend(device);
 			}
 
 			void ensureMediaDevices()
@@ -5528,39 +5964,34 @@ namespace
 
 			/**
 			 * @brief Queues one coalesced cache-maintenance step at the lowest event priority.
-			 * @param releaseCompletedChannels Whether this maintenance cycle must inspect completed channels.
+			 * @param beginPeriodicPass Whether to begin the work scheduled by the once-per-minute timer.
 			 */
-			void scheduleMaintenance(const bool releaseCompletedChannels)
+			void scheduleMaintenance(const bool beginPeriodicPass)
 			{
-				m_releaseCompletedPending = m_releaseCompletedPending || releaseCompletedChannels;
+				if (beginPeriodicPass)
+				{
+					m_releaseCompletedPending = true;
+					m_failedWatchRetryPending = true;
+				}
 				if (m_maintenancePending || m_shuttingDown)
 					return;
 				m_maintenancePending = true;
 				QCoreApplication::postEvent(this, new QEvent(maintenanceEventType()), Qt::LowEventPriority);
 			}
 
-			/** @brief Detaches naturally completed backends after the fixed channel reuse grace period. */
-			void releaseCompletedChannels()
+			/**
+			 * @brief Releases one bounded batch of naturally completed backends after the retention grace.
+			 * @return `true` when another expired backend requires a continuation event.
+			 */
+			[[nodiscard]] bool releaseCompletedBackends()
 			{
 				const qint64     now = currentTimeMsecs();
 				constexpr qint64 graceMsecs =
 				    static_cast<qint64>(SoundEngine::CachePolicy::kCompletedChannelGraceSeconds) * 1000;
-				for (auto sessionIt = m_sessions.begin(); sessionIt != m_sessions.end(); ++sessionIt)
-				{
-					WorkerSession &session = sessionIt.value();
-					for (SoundChannel &channel : session.channels)
-					{
-						if (!channel.backend || channel.playing || channel.looping ||
-						    !SoundCache::elapsedAtLeast(now, channel.completedAtMsecs, graceMsecs))
-							continue;
-						SoundBackend *backend         = channel.backend;
-						channel.backend               = nullptr;
-						backend->sessionId            = 0;
-						backend->channel              = -1;
-						backend->assignmentGeneration = 0;
-						releaseBackend(*backend, channel.completedAtMsecs);
-					}
-				}
+				return m_cache
+				    .releaseExpiredRetained(
+				        now, graceMsecs, SoundEngine::CachePolicy::kMaximumRetainedTransitionsPerMaintenance)
+				    .expiredRemain;
 			}
 
 			/**
@@ -5592,8 +6023,9 @@ namespace
 			void performMaintenance()
 			{
 				if (std::exchange(m_releaseCompletedPending, false))
+					m_releaseCompletedPending = releaseCompletedBackends();
+				if (std::exchange(m_failedWatchRetryPending, false))
 				{
-					releaseCompletedChannels();
 					if (m_ioWorker)
 					{
 						QMetaObject::invokeMethod(
@@ -5676,8 +6108,11 @@ namespace
 			QMultiHash<QString, QString>                       m_catalogFilesByStem;
 			QHash<QString, SoundPlaybackCatalogDirectory>      m_catalogDirectories;
 			QSet<QString>                                      m_watchedCatalogDirectories;
+			QHash<QString, QString>                            m_pluginFileByRelativePath;
+			QSet<QString>                                      m_watchedPluginDirectories;
+			QSet<QString>                                      m_trackedPluginDirectories;
+			QSet<QString>                                      m_pendingPluginDirectories;
 			std::unique_ptr<QMediaDevices>                     m_mediaDevices;
-			std::unique_ptr<SoundBackend>                      m_preinitializedEffectBackend;
 			std::unique_ptr<SoundBackend>                      m_preinitializedMediaBackend;
 			std::unique_ptr<QTimer>                            m_maintenanceTimer;
 			std::unique_ptr<QThreadPool>                       m_memoryPreparationPool;
@@ -5694,17 +6129,20 @@ namespace
 			QString                                            m_qmudHome;
 			QString                                            m_soundsPath;
 			QString                                            m_soundsRoot;
+			QString                                            m_pluginsRoot;
 			SoundEngine::CachePolicy                           m_cachePolicy;
 			quint64                                            m_nextBackendId{1};
 			quint64                                            m_nextMemoryOperationId{1};
 			quint64                                            m_slowFileResolutionCount{0};
 			quint64                                            m_catalogGeneration{0};
+			quint64                                            m_pluginDirectoryGeneration{0};
 			quint64                                            m_publishedCatalogRevision{0};
 			bool                                               m_maintenancePending{false};
 			bool                                               m_catalogConfigured{false};
 			bool                                               m_catalogAvailable{false};
 			bool                                               m_catalogReady{false};
 			bool                                               m_releaseCompletedPending{false};
+			bool                                               m_failedWatchRetryPending{false};
 			bool                                               m_playbackInitializationAbandoned{false};
 			bool                                               m_forceNoAudioOutputForTest{false};
 			bool                                               m_shuttingDown{false};
@@ -6098,6 +6536,14 @@ void SoundEngine::configureSoundDirectory(const QString &qmudHomeDirectory) cons
 	static_cast<void>(m_private->submit(std::move(command), false));
 }
 
+void SoundEngine::configurePluginDirectory(const QString &pluginsDirectory) const
+{
+	SoundCommand command;
+	command.kind = SoundCommandKind::ConfigurePluginDirectory;
+	command.text = pluginsDirectory;
+	static_cast<void>(m_private->submit(std::move(command), false));
+}
+
 std::shared_ptr<SoundEngineSession> SoundEngine::registerSession(SessionCallbacks callbacks,
                                                                  const QString   &worldSoundDirectory) const
 {
@@ -6373,7 +6819,7 @@ SoundEngine::PlaybackInitializationStateForTest SoundEngine::playbackInitializat
 	    {
 		    const SoundWorkerPlaybackInitializationState workerState =
 		        worker->playbackInitializationStateForTest();
-		    state = {workerState.effectReady, workerState.mediaPlayerReady};
+		    state = {workerState.mediaPlayerReady};
 	    },
 	    Qt::BlockingQueuedConnection);
 	return state;

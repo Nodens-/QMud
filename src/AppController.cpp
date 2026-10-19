@@ -7805,6 +7805,8 @@ void AppController::applyPluginPreferences()
 {
 	m_pluginsDirectory               = getGlobalOption(QStringLiteral("PluginsDirectory")).toString();
 	const QString absolutePluginsDir = makeAbsolutePath(m_pluginsDirectory);
+	if (m_soundEngine)
+		m_soundEngine->configurePluginDirectory(absolutePluginsDir);
 	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
 	{
 		runtime->setPluginsDirectory(absolutePluginsDir);

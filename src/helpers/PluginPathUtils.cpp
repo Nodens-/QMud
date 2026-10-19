@@ -305,6 +305,39 @@ bool QMudPluginPathUtils::resolveInsideDirectory(const QString &rootDirectory, c
 	return true;
 }
 
+bool QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(const QString &qmudHome,
+                                                                   const QString &pluginsDirectory)
+{
+	if (pluginsDirectory.trimmed().isEmpty())
+		return false;
+
+	QString resolvedPlugins;
+	if (!resolveInsideQmudHome(qmudHome, pluginsDirectory, &resolvedPlugins))
+		return false;
+
+	const QString canonicalHome = normalizeSeparators(QFileInfo(qmudHome).canonicalFilePath());
+	if (canonicalHome.isEmpty())
+		return false;
+
+	const QFileInfo pluginsInfo(resolvedPlugins);
+	const QString   canonicalPlugins = pluginsInfo.exists()
+	                                       ? normalizeSeparators(pluginsInfo.canonicalFilePath())
+	                                       : normalizeSeparators(QDir::cleanPath(resolvedPlugins));
+	if (canonicalPlugins.isEmpty())
+		return false;
+
+	const bool isQmudHome = canonicalPathIsWithinOrEqualTo(canonicalPlugins, canonicalHome) &&
+	                        canonicalPathIsWithinOrEqualTo(canonicalHome, canonicalPlugins);
+	if (isQmudHome)
+		return true;
+
+	const QString   soundsPath = normalizeSeparators(QDir(canonicalHome).filePath(QStringLiteral("sounds")));
+	const QFileInfo soundsInfo(soundsPath);
+	const QString canonicalSounds = soundsInfo.exists() ? normalizeSeparators(soundsInfo.canonicalFilePath())
+	                                                    : normalizeSeparators(QDir::cleanPath(soundsPath));
+	return !canonicalSounds.isEmpty() && canonicalPathIsWithinOrEqualTo(canonicalPlugins, canonicalSounds);
+}
+
 QString QMudPluginPathUtils::qmudHomeRelativePath(const QString &qmudHome, const QString &path,
                                                   const bool trailingSlash)
 {

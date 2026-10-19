@@ -64,14 +64,15 @@ class SoundEngine final : public QObject
 		 */
 		struct CachePolicy
 		{
-				static constexpr int             kMinimumRamCacheSizeMiB       = 64;
-				static constexpr int             kDefaultRamCacheSizeMiB       = 128;
-				static constexpr int             kMaximumRamCacheSizeMiB       = 1024;
-				static constexpr int             kMinimumIdleEvictionSeconds   = 1800;
-				static constexpr int             kDefaultIdleEvictionSeconds   = 7200;
-				static constexpr int             kMaximumIdleEvictionSeconds   = 86400;
-				static constexpr int             kCompletedChannelGraceSeconds = 300;
-				static constexpr int             kMaintenanceIntervalSeconds   = 60;
+				static constexpr int             kMinimumRamCacheSizeMiB                   = 64;
+				static constexpr int             kDefaultRamCacheSizeMiB                   = 128;
+				static constexpr int             kMaximumRamCacheSizeMiB                   = 1024;
+				static constexpr int             kMinimumIdleEvictionSeconds               = 1800;
+				static constexpr int             kDefaultIdleEvictionSeconds               = 7200;
+				static constexpr int             kMaximumIdleEvictionSeconds               = 86400;
+				static constexpr int             kCompletedChannelGraceSeconds             = 300;
+				static constexpr int             kMaintenanceIntervalSeconds               = 60;
+				static constexpr qsizetype       kMaximumRetainedTransitionsPerMaintenance = 128;
 
 				int                              ramCacheSizeMiB{kDefaultRamCacheSizeMiB};
 				int                              idleEvictionSeconds{kDefaultIdleEvictionSeconds};
@@ -118,6 +119,11 @@ class SoundEngine final : public QObject
 		 * @param qmudHomeDirectory Resolved QMud home directory.
 		 */
 		void         configureSoundDirectory(const QString &qmudHomeDirectory) const;
+		/**
+		 * @brief Configures the global plugins directory accepted for explicit plugin-bundled sounds.
+		 * @param pluginsDirectory Resolved plugins directory contained beneath QMud home.
+		 */
+		void         configurePluginDirectory(const QString &pluginsDirectory) const;
 
 		/**
 		 * @brief Creates a sound session rooted at the process-wide configured sounds tree.
@@ -146,7 +152,7 @@ class SoundEngine final : public QObject
 	signals:
 		/**
 		 * @brief Reports completion of startup playback initialization.
-		 * @param available Whether both playback implementations initialized before the watchdog expired.
+		 * @param available Whether playback initialized before the watchdog expired.
 		 */
 		void playbackInitializationFinished(bool available);
 
@@ -166,10 +172,9 @@ class SoundEngine final : public QObject
 				CacheStateForTest firstStep;
 				CacheStateForTest secondStep;
 		};
-		/** @brief Test-only source-free playback backend readiness. */
+		/** @brief Test-only source-free media-player readiness. */
 		struct PlaybackInitializationStateForTest
 		{
-				bool effectReady{false};
 				bool mediaPlayerReady{false};
 		};
 		/** @brief Test-only view of the worker-owned sound-file catalog. */
@@ -274,7 +279,7 @@ class SoundEngine final : public QObject
 		[[nodiscard]] CacheStateForTest                  cacheStateForTest() const;
 		/**
 		 * @brief Reads startup playback backend readiness on the worker thread.
-		 * @return Availability of the source-free effect and media-player backends.
+		 * @return Availability of the source-free media-player backend.
 		 */
 		[[nodiscard]] PlaybackInitializationStateForTest playbackInitializationStateForTest() const;
 		/**

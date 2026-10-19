@@ -18,6 +18,7 @@
 #include "WorldRuntime.h"
 #include "WorldView.h"
 #include "helpers/DialogSizingUtils.h"
+#include "helpers/PluginPathUtils.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -214,7 +215,8 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	m_tabs->addTab(buildDefaultsPage(), QStringLiteral("Defaults"));
 	m_tabs->addTab(buildNotepadPage(), QStringLiteral("Notepad"));
 	m_tabs->addTab(buildTrayPage(), QStringLiteral("Tray/Taskbar"));
-	m_tabs->addTab(buildPluginsPage(), QStringLiteral("Plugins"));
+	m_pluginsPage = buildPluginsPage();
+	m_tabs->addTab(m_pluginsPage, QStringLiteral("Plugins"));
 	m_tabs->addTab(buildLuaPage(), QStringLiteral("Lua"));
 	m_tabs->addTab(buildUpdatesPage(), QStringLiteral("Updates"));
 	QWidget::setTabOrder(m_tabsStyle, m_splitViewDividerWidth);
@@ -2118,21 +2120,29 @@ QWidget *GlobalPreferencesDialog::buildPluginsPage()
 		                 }
 		                 updatePluginButtons();
 	                 });
-	QObject::connect(pluginsDirButton, &QPushButton::clicked, page,
-	                 [this]()
-	                 {
-		                 AppController *app = AppController::instance();
-		                 if (app)
-			                 app->changeToFileBrowsingDirectory();
-		                 const QString startDir =
-		                     m_pluginsDefaultDir ? m_pluginsDefaultDir->text() : QString();
-		                 const QString dir = QFileDialog::getExistingDirectory(
-		                     this, QStringLiteral("Select Plugins Directory"), startDir);
-		                 if (app)
-			                 app->changeToStartupDirectory();
-		                 if (!dir.isEmpty())
-			                 m_pluginsDefaultDir->setText(runtimePath(dir));
-	                 });
+	QObject::connect(
+	    pluginsDirButton, &QPushButton::clicked, page,
+	    [this]()
+	    {
+		    AppController *app = AppController::instance();
+		    if (app)
+			    app->changeToFileBrowsingDirectory();
+		    const QString startDir = m_pluginsDefaultDir ? m_pluginsDefaultDir->text() : QString();
+		    const QString dir =
+		        QFileDialog::getExistingDirectory(this, QStringLiteral("Select Plugins Directory"), startDir);
+		    if (app)
+			    app->changeToStartupDirectory();
+		    if (dir.isEmpty())
+			    return;
+		    if (QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(qmudHomeDirectory(app), dir))
+		    {
+			    QMessageBox::warning(
+			        this, QStringLiteral("Global Preferences"),
+			        QStringLiteral("Plugins Directory cannot be QMud home or reside under ./sounds/."));
+			    return;
+		    }
+		    m_pluginsDefaultDir->setText(runtimePath(dir));
+	    });
 	QObject::connect(m_pluginsList, &QListWidget::currentRowChanged, page,
 	                 [updatePluginButtons](int) { updatePluginButtons(); });
 	updatePluginButtons();
@@ -2595,6 +2605,17 @@ bool GlobalPreferencesDialog::applyPreferences()
 			m_localeEdit->setFocus();
 			return false;
 		}
+	}
+
+	if (m_pluginsDefaultDir && QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(
+	                               qmudHomeDirectory(app), m_pluginsDefaultDir->text()))
+	{
+		QMessageBox::warning(
+		    this, QStringLiteral("Global Preferences"),
+		    QStringLiteral("Plugins Directory cannot be QMud home or reside under ./sounds/."));
+		if (m_tabs && m_pluginsPage)
+			m_tabs->setCurrentWidget(m_pluginsPage);
+		return false;
 	}
 
 	if (!validateShortcutOverrides())
