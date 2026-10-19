@@ -15117,6 +15117,69 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QCOMPARE(result.stringResult, QStringLiteral("2|25|100"));
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
+	QString bundledLuaPattern = QDir::fromNativeSeparators(
+	    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("../lua/?.lua")));
+	bundledLuaPattern.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+	bundledLuaPattern.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+	auto ppiEngine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, ppiEngine,
+	                            QStringLiteral(R"lua(
+	package.path = package.path .. ";%1"
+	local audio_id = "aedf0cb0be5bf045860d54b7"
+	local PPI = require "ppi"
+	local audio = assert(PPI.Load(audio_id))
+	function OnPluginEnable()
+	  local id = audio.play("coin.wav", nil, 4, 70)
+	  local initial_volume = audio.getVolume(id)
+	  audio.setVol(35, id)
+	  local volume = audio.getVolume(id)
+	  local playing = audio.isPlaying(id)
+	  local variables = GetPluginVariableList(audio_id)
+	  local malformed_code = CallPlugin(audio_id, "PPI_play_PPI_", "not a serialized table")
+	  lua_audio_ppi_info = table.concat({
+	    tostring(PluginSupports(audio_id, "PPI_play_PPI_")),
+	    tostring(id), string.format("%.0f", initial_volume), string.format("%.0f", volume), tostring(playing),
+	    tostring(variables["PPI__returns__PPI_"] ~= nil),
+	    tostring(GetPluginVariable(audio_id, "ppi__returns__ppi_") ~= nil),
+	    string.format("%.0f", GetPluginInfo(audio_id, 12)),
+	    string.format("%.0f", malformed_code)
+	  }, "|")
+	end
+	function lua_audio_ppi_status(value)
+	  return lua_audio_ppi_info
+	end
+	)lua")
+	                                .arg(bundledLuaPattern),
+	                            &runtime))
+		QFAIL("Worker engine initialization failed");
+	auto ppiSnapshot = captureMutableDispatchSnapshotForTest(runtime);
+	QVERIFY(ppiSnapshot);
+	ppiSnapshot->soundStatusByBuffer.insert(1, -2);
+	ppiSnapshot->soundStatusByBuffer.insert(2, -2);
+	request.engines             = {ppiEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = ppiSnapshot;
+	QVERIFY(dispatchWorkerAndWait(executor, request));
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("lua_audio_ppi_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("0.0|1|70|35|true|true|true|2|%1").arg(eErrorCallingPluginRoutine));
+	QMudNativePluginRegistry::LuaAudioRuntimeBufferState sparsePpiState;
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, sparsePpiState));
+	QCOMPARE(sparsePpiState.loop, false);
+	QCOMPARE(sparsePpiState.pan, 4.0);
+	QCOMPARE(sparsePpiState.volume, 35.0);
+	QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, QMudNativePluginRegistry::luaAudioPluginId(),
+	                                               QStringLiteral("stop"), {1}, audioContext)
+	             .errorCode,
+	         eOK);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+	QVERIFY(teardownWorkerEngine(executor, ppiEngine));
+
 	auto preStartEngine = QSharedPointer<LuaCallbackEngine>::create();
 	if (!initializeWorkerEngine(executor, preStartEngine, QStringLiteral(R"lua(
 	function OnPluginEnable()

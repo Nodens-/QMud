@@ -60,6 +60,7 @@
 #include "helpers/PluginPathUtils.h"
 #include "helpers/SoundFileRoutingUtils.h"
 #include "helpers/TimerSchedulingUtils.h"
+#include "helpers/VariableMapUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QApplication>
@@ -6783,7 +6784,7 @@ namespace
 		plugin.directory        = metadata.directory;
 		plugin.enabled          = true;
 		plugin.global           = markGlobal;
-		plugin.saveState        = false;
+		plugin.saveState        = metadata.saveState;
 		plugin.installPending   = false;
 		plugin.nativeShim       = true;
 		plugin.nativeShimMarker = QMudNativePluginRegistry::nativeShimMarkerText();
@@ -6833,6 +6834,21 @@ namespace
 		if (const int shadowIndex = nativeShimShadowPluginIndex(plugins, shimId); shadowIndex >= 0)
 			return plugins.at(shadowIndex).enabled;
 		return nativeShimAvailableWithoutShadowPlugin(shimId);
+	}
+
+	/**
+	 * @brief Checks whether a plugin identifier resolves to the native LuaAudio plugin.
+	 * @param pluginIdOrName Plugin id or native shim name.
+	 * @return `true` when the identifier denotes LuaAudio.
+	 */
+	bool isLuaAudioPluginIdentifier(const QString &pluginIdOrName)
+	{
+		const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
+		if (pluginIdOrName.compare(audioId, Qt::CaseInsensitive) == 0)
+			return true;
+		if (pluginIdOrName.size() == audioId.size())
+			return false;
+		return QMudNativePluginRegistry::resolveShimIdOrName(pluginIdOrName) == audioId;
 	}
 
 	QVariant nativeShimPluginInfoForRuntime(const QList<WorldRuntime::Plugin> &plugins, const QString &shimId,
@@ -7679,13 +7695,15 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 			        emit disconnected();
 	        });
 	QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
+	replaceLuaAudioVariables({});
 }
 
 WorldRuntime::~WorldRuntime()
 {
 	beginRuntimeDestruction();
 
-	QStringList closingPluginIds;
+	const QString luaAudioId = QMudNativePluginRegistry::luaAudioPluginId();
+	QStringList   closingPluginIds;
 	closingPluginIds.reserve(m_plugins.size());
 	QVector<QSharedPointer<LuaCallbackEngine>> initiallyLoadedEngines;
 	initiallyLoadedEngines.reserve((m_luaCallbacks ? 1 : 0) + m_plugins.size());
@@ -7713,8 +7731,10 @@ WorldRuntime::~WorldRuntime()
 			dispatchSingleEngineNoArgPluginCallback(
 			    engine, LuaCallbackEvent::Close,
 			    WorldRuntime::PluginCallbackCompletionPolicy::CompletionRequired);
-		savePluginStateForPlugin(pluginId, false, nullptr);
+		if (pluginId != luaAudioId)
+			savePluginStateForPlugin(pluginId, false, nullptr);
 	}
+	savePluginStateForPlugin(luaAudioId, false, nullptr);
 	m_pluginCallbackDispatchShuttingDown = true;
 
 	if (m_viewDestroyedConnection)
@@ -16133,6 +16153,18 @@ void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
 		const QString pluginId = scope->pluginId;
 		if (pluginId.isEmpty())
 			return;
+		if (isLuaAudioPluginIdentifier(pluginId))
+		{
+			const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
+			snapshot.unavailablePluginVariableSnapshotIds.remove(audioId);
+			snapshot.pluginVariablesSnapshotById.insert(audioId, m_luaAudioVariables);
+			if (auto pluginInfoIt = snapshot.pluginInfoValuesById.find(audioId);
+			    pluginInfoIt != snapshot.pluginInfoValuesById.end())
+			{
+				pluginInfoIt->insert(12, m_luaAudioVariables.size());
+			}
+			return;
+		}
 		const Plugin *plugin = findPluginByCanonicalId(m_plugins, pluginId);
 		if (!plugin)
 		{
@@ -16162,6 +16194,17 @@ void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
 		    pluginInfoIt != snapshot.pluginInfoValuesById.end())
 		{
 			pluginInfoIt->insert(12, plugin.variables.size());
+		}
+	}
+	if (nativeShimVisibleForPluginApi(m_plugins, QMudNativePluginRegistry::luaAudioPluginId()))
+	{
+		const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
+		snapshot.pluginVariablesSnapshotById.insert(audioId, m_luaAudioVariables);
+		snapshot.unavailablePluginVariableSnapshotIds.remove(audioId);
+		if (auto pluginInfoIt = snapshot.pluginInfoValuesById.find(audioId);
+		    pluginInfoIt != snapshot.pluginInfoValuesById.end())
+		{
+			pluginInfoIt->insert(12, m_luaAudioVariables.size());
 		}
 	}
 }
@@ -16528,6 +16571,11 @@ void WorldRuntime::populateLuaCallbackPluginSnapshots(LuaCallbackSnapshot &snaps
 		{
 			pluginInfo.insert(
 			    infoType, nativeShimPluginInfoForRuntime(m_plugins, shimId, infoType, visibleIndex, enabled));
+		}
+		if (shimId == QMudNativePluginRegistry::luaAudioPluginId())
+		{
+			pluginInfo.insert(12, m_luaAudioVariables.size());
+			pluginInfo.insert(15, true);
 		}
 	}
 
@@ -28013,6 +28061,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	}
 	dispatchTeardownLuaEngines(pluginEnginesToTeardown, false);
 	QMudNativePluginRegistry::luaAudioResetRuntime(this);
+	m_luaAudioVariables.clear();
 	resetNativeProtocolSoundState();
 	m_plugins.clear();
 	resetObservedPluginCallbackTracking(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
@@ -28072,6 +28121,15 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			                         requestedEnabled ? QStringLiteral("1") : QStringLiteral("0"));
 			if (findPluginIndex(m_plugins, metadata.id) < 0)
 				m_plugins.push_back(std::move(shadow));
+			if (pluginId == QMudNativePluginRegistry::luaAudioPluginId())
+			{
+				for (const auto &variable : p.variables)
+				{
+					const QString name = variable.attributes.value(QStringLiteral("name"));
+					if (!name.isEmpty())
+						QMudVariableMapUtils::insertOrAssign(m_luaAudioVariables, name, variable.content);
+				}
+			}
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
 				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, requestedEnabled);
 			continue;
@@ -28174,6 +28232,13 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			rp.disableAfterInstall = true;
 		}
 		m_plugins.push_back(rp);
+	}
+	{
+		QMap<QString, QString> luaAudioVariables = m_luaAudioVariables;
+		QString                stateError;
+		if (!loadLuaAudioStateVariables(luaAudioVariables, &stateError))
+			qWarning() << "Plugin state load failed:" << stateError;
+		replaceLuaAudioVariables(std::move(luaAudioVariables));
 	}
 	if (!pluginLuaInitRequests.isEmpty())
 	{
@@ -30987,6 +31052,18 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		QMudNativePluginRegistry::NativePluginMetadata metadata;
 		if (!QMudNativePluginRegistry::metadataForShim(pluginId, metadata))
 			return true;
+		QMap<QString, QString> luaAudioVariables;
+		if (pluginId == QMudNativePluginRegistry::luaAudioPluginId())
+		{
+			for (const auto &variable : p.variables)
+			{
+				const QString name = variable.attributes.value(QStringLiteral("name"));
+				if (!name.isEmpty())
+					QMudVariableMapUtils::insertOrAssign(luaAudioVariables, name, variable.content);
+			}
+			if (!loadLuaAudioStateVariables(luaAudioVariables, error))
+				return false;
+		}
 		if (existingIndex >= 0)
 		{
 			const Plugin            &existing                 = m_plugins.at(existingIndex);
@@ -31005,6 +31082,8 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
 				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, true);
 		}
+		if (pluginId == QMudNativePluginRegistry::luaAudioPluginId())
+			replaceLuaAudioVariables(std::move(luaAudioVariables));
 		sortPluginsBySequence();
 		m_pluginCount = safeQSizeToInt(m_plugins.size());
 		notePluginStructureMutation();
@@ -33806,6 +33885,13 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 				break;
 			}
 		}
+		if (shimId == QMudNativePluginRegistry::luaAudioPluginId())
+		{
+			if (infoType == 12)
+				return m_luaAudioVariables.size();
+			if (infoType == 15)
+				return true;
+		}
 		return nativeShimPluginInfoForRuntime(m_plugins, shimId, infoType, visibleIndex, enabled);
 	}
 	const int index = findPluginIndex(m_plugins, pluginId);
@@ -33913,6 +33999,29 @@ QString WorldRuntime::pluginVariableValue(const QString &pluginId, const QString
 	return {};
 }
 
+const QMap<QString, QString> *WorldRuntime::pluginVariableStore(const QString &pluginId,
+                                                                QString       *resolvedPluginId) const
+{
+	if (isLuaAudioPluginIdentifier(pluginId))
+	{
+		if (resolvedPluginId)
+			*resolvedPluginId = QMudNativePluginRegistry::luaAudioPluginId();
+		return &m_luaAudioVariables;
+	}
+	const int index = findPluginIndex(m_plugins, pluginId);
+	if (index < 0)
+		return nullptr;
+	if (resolvedPluginId)
+		*resolvedPluginId = m_plugins.at(index).attributes.value(QStringLiteral("id"));
+	return &m_plugins.at(index).variables;
+}
+
+QMap<QString, QString> *WorldRuntime::pluginVariableStore(const QString &pluginId, QString *resolvedPluginId)
+{
+	return const_cast<QMap<QString, QString> *>(
+	    std::as_const(*this).pluginVariableStore(pluginId, resolvedPluginId));
+}
+
 bool WorldRuntime::findPluginVariable(const QString &pluginId, const QString &name, QString &value) const
 {
 	if (QThread::currentThread() != thread())
@@ -33931,19 +34040,8 @@ bool WorldRuntime::findPluginVariable(const QString &pluginId, const QString &na
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::findPluginVariable");
-	const int index = findPluginIndex(m_plugins, pluginId);
-	if (index < 0)
-		return false;
-	const Plugin &plugin = m_plugins.at(index);
-	for (auto it = plugin.variables.constBegin(); it != plugin.variables.constEnd(); ++it)
-	{
-		if (it.key().compare(name, Qt::CaseInsensitive) == 0)
-		{
-			value = it.value();
-			return true;
-		}
-	}
-	return false;
+	const QMap<QString, QString> *variables = pluginVariableStore(pluginId);
+	return variables && QMudVariableMapUtils::findValue(*variables, name, value);
 }
 
 void WorldRuntime::setPluginVariableValue(const QString &pluginId, const QString &name, const QString &value)
@@ -33956,21 +34054,14 @@ void WorldRuntime::setPluginVariableValue(const QString &pluginId, const QString
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setPluginVariableValue");
-	const int index = findPluginIndex(m_plugins, pluginId);
-	if (index < 0 || name.isEmpty())
+	if (name.isEmpty())
 		return;
-	Plugin &plugin = m_plugins[index];
-	for (auto it = plugin.variables.begin(); it != plugin.variables.end(); ++it)
-	{
-		if (it.key().compare(name, Qt::CaseInsensitive) == 0)
-		{
-			it.value() = value;
-			patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, pluginId);
-			return;
-		}
-	}
-	plugin.variables.insert(name, value);
-	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, pluginId);
+	QString                 resolvedPluginId;
+	QMap<QString, QString> *variables = pluginVariableStore(pluginId, &resolvedPluginId);
+	if (!variables)
+		return;
+	QMudVariableMapUtils::insertOrAssign(*variables, name, value);
+	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, resolvedPluginId);
 }
 
 int WorldRuntime::deletePluginVariable(const QString &pluginId, const QString &name)
@@ -33982,19 +34073,14 @@ int WorldRuntime::deletePluginVariable(const QString &pluginId, const QString &n
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deletePluginVariable");
-	const int index = findPluginIndex(m_plugins, pluginId);
-	if (index < 0 || name.isEmpty())
+	if (name.isEmpty())
 		return eVariableNotFound;
-	Plugin &plugin = m_plugins[index];
-	for (auto it = plugin.variables.begin(); it != plugin.variables.end(); ++it)
-	{
-		if (it.key().compare(name, Qt::CaseInsensitive) != 0)
-			continue;
-		plugin.variables.erase(it);
-		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, pluginId);
-		return eOK;
-	}
-	return eVariableNotFound;
+	QString                 resolvedPluginId;
+	QMap<QString, QString> *variables = pluginVariableStore(pluginId, &resolvedPluginId);
+	if (!variables || !QMudVariableMapUtils::remove(*variables, name))
+		return eVariableNotFound;
+	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, resolvedPluginId);
+	return eOK;
 }
 
 QStringList WorldRuntime::pluginVariableList(const QString &pluginId) const
@@ -34004,11 +34090,8 @@ QStringList WorldRuntime::pluginVariableList(const QString &pluginId) const
 		                          [this, pluginId] { return pluginVariableList(pluginId); });
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::pluginVariableList");
-	const int index = findPluginIndex(m_plugins, pluginId);
-	if (index < 0)
-		return {};
-	const Plugin &plugin = m_plugins.at(index);
-	return plugin.variables.keys();
+	const QMap<QString, QString> *variables = pluginVariableStore(pluginId);
+	return variables ? variables->keys() : QStringList{};
 }
 
 bool WorldRuntime::pluginVariableSnapshot(const QString &pluginId, QMap<QString, QString> &values) const
@@ -34030,10 +34113,10 @@ bool WorldRuntime::pluginVariableSnapshot(const QString &pluginId, QMap<QString,
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::pluginVariableSnapshot");
-	const int index = findPluginIndex(m_plugins, pluginId);
-	if (index < 0)
+	const QMap<QString, QString> *variables = pluginVariableStore(pluginId);
+	if (!variables)
 		return false;
-	values = m_plugins.at(index).variables;
+	values = *variables;
 	return true;
 }
 
@@ -34304,6 +34387,52 @@ const WorldRuntime::Plugin *WorldRuntime::pluginForId(const QString &pluginId) c
 	return findPluginByCanonicalId(m_plugins, pluginId);
 }
 
+bool WorldRuntime::loadLuaAudioStateVariables(QMap<QString, QString> &variables, QString *error) const
+{
+	const QString worldId = m_worldAttributes.value(QStringLiteral("id")).trimmed();
+	if (worldId.isEmpty() || m_stateFilesDirectory.isEmpty())
+		return true;
+	QString base = m_stateFilesDirectory;
+	if (!base.endsWith('/') && !base.endsWith('\\'))
+		base += '/';
+	const QString stateFile =
+	    base + worldId + "-" + QMudNativePluginRegistry::luaAudioPluginId() + "-state.xml";
+	const QFileInfo stateInfo(stateFile);
+	if (!stateInfo.exists() || stateInfo.size() <= 0)
+		return true;
+
+	WorldDocument stateDoc;
+	stateDoc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS);
+	if (!stateDoc.loadFromFile(stateInfo.absoluteFilePath()))
+	{
+		if (error)
+			*error = stateDoc.errorString();
+		return false;
+	}
+	for (const auto &variable : stateDoc.variables())
+	{
+		const QString name = variable.attributes.value(QStringLiteral("name"));
+		if (!name.isEmpty())
+			QMudVariableMapUtils::insertOrAssign(variables, name, variable.content);
+	}
+	return true;
+}
+
+void WorldRuntime::replaceLuaAudioVariables(QMap<QString, QString> variables)
+{
+	QString volumeText;
+	if (!QMudVariableMapUtils::findValue(variables, QStringLiteral("vol"), volumeText))
+	{
+		QMudVariableMapUtils::insertOrAssign(variables, QStringLiteral("vol"), QStringLiteral("100"));
+		volumeText = QStringLiteral("100");
+	}
+	m_luaAudioVariables = std::move(variables);
+	bool         ok     = false;
+	const double volume = volumeText.toDouble(&ok);
+	if (ok)
+		QMudNativePluginRegistry::luaAudioRestorePersistentVolume(this, volume);
+}
+
 int WorldRuntime::savePluginState(const QString &pluginId, bool scripted, QString *error)
 {
 	if (QThread::currentThread() != thread())
@@ -34325,6 +34454,8 @@ int WorldRuntime::savePluginState(const QString &pluginId, bool scripted, QStrin
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::savePluginState");
 	if (pluginId.isEmpty())
 		return eNotAPlugin;
+	if (isLuaAudioPluginIdentifier(pluginId))
+		return savePluginStateForPlugin(QMudNativePluginRegistry::luaAudioPluginId(), scripted, error);
 	const int index = findPluginIndex(m_plugins, pluginId);
 	if (index < 0)
 		return eNoSuchPlugin;
@@ -34353,6 +34484,12 @@ void WorldRuntime::savePluginStateAsync(const QString &pluginId, const bool scri
 	{
 		if (completion)
 			completion(eNotAPlugin);
+		return;
+	}
+	if (isLuaAudioPluginIdentifier(pluginId))
+	{
+		savePluginStateForPluginContinuable(QMudNativePluginRegistry::luaAudioPluginId(), scripted,
+		                                    std::move(completion));
 		return;
 	}
 	const int index = findPluginIndex(m_plugins, pluginId);
@@ -34386,8 +34523,11 @@ std::optional<int> WorldRuntime::preparePluginStateSave(const QString &pluginId,
                                                         QString                           &resolvedPluginId,
                                                         QSharedPointer<LuaCallbackEngine> &callbackEngine)
 {
-	const int initialIndex = findPluginIndex(m_plugins, pluginId);
-	if (initialIndex < 0)
+	const int  initialIndex = findPluginIndex(m_plugins, pluginId);
+	const bool nativeLuaAudio =
+	    isLuaAudioPluginIdentifier(pluginId) &&
+	    nativeShimVisibleForPluginApi(m_plugins, QMudNativePluginRegistry::luaAudioPluginId());
+	if (initialIndex < 0 && !nativeLuaAudio)
 		return scripted ? eNoSuchPlugin : eOK;
 	const QString worldId = m_worldAttributes.value(QStringLiteral("id")).trimmed();
 	if (worldId.isEmpty())
@@ -34401,6 +34541,13 @@ std::optional<int> WorldRuntime::preparePluginStateSave(const QString &pluginId,
 	if (!baseDir.exists())
 		return scripted ? ePluginCouldNotSaveState : eOK;
 
+	if (nativeLuaAudio)
+	{
+		resolvedPluginId = QMudNativePluginRegistry::luaAudioPluginId();
+		callbackEngine.clear();
+		return std::nullopt;
+	}
+	else
 	{
 		Plugin &plugin = m_plugins[initialIndex];
 		if (!scripted && !plugin.saveState)
@@ -34469,15 +34616,28 @@ int WorldRuntime::finishPluginStateSave(const QString &resolvedPluginId, const b
 	if (!QDir(base).exists())
 		return scripted ? ePluginCouldNotSaveState : eOK;
 
+	const bool nativeLuaAudio =
+	    isLuaAudioPluginIdentifier(resolvedPluginId) &&
+	    nativeShimVisibleForPluginApi(m_plugins, QMudNativePluginRegistry::luaAudioPluginId());
 	const int currentIndex = findPluginIndex(m_plugins, resolvedPluginId);
-	if (currentIndex < 0)
+	if (currentIndex < 0 && !nativeLuaAudio)
 		return scripted ? ePluginCouldNotSaveState : eOK;
-	Plugin &currentPlugin                  = m_plugins[currentIndex];
-	currentPlugin.savingStateNow           = false;
-	const QMap<QString, QString> variables = currentPlugin.variables;
+	QMap<QString, QString> variables;
+	if (nativeLuaAudio)
+	{
+		variables = m_luaAudioVariables;
+		if (currentIndex >= 0)
+			m_plugins[currentIndex].savingStateNow = false;
+	}
+	else
+	{
+		Plugin &currentPlugin        = m_plugins[currentIndex];
+		currentPlugin.savingStateNow = false;
+		variables                    = currentPlugin.variables;
+	}
 
-	const QString                stateFile = base + worldId + "-" + resolvedPluginId + "-state.xml";
-	QSaveFile                    file(stateFile);
+	const QString stateFile = base + worldId + "-" + resolvedPluginId + "-state.xml";
+	QSaveFile     file(stateFile);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
 		if (error)

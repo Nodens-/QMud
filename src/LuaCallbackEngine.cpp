@@ -46,6 +46,7 @@
 #include "helpers/OutputWrapUtils.h"
 #include "helpers/PluginPathUtils.h"
 #include "helpers/TimerSchedulingUtils.h"
+#include "helpers/VariableMapUtils.h"
 #include "helpers/WorldCommandProcessorUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -3542,18 +3543,10 @@ namespace
 		auto snapshotIt = context->pluginVariablesSnapshotById.find(pluginKey);
 		if (snapshotIt == context->pluginVariablesSnapshotById.end())
 			return;
-		const QString existingKey = findCaseInsensitiveVariableSnapshotKey(*snapshotIt, name);
 		if (removeValue)
-		{
-			if (!existingKey.isEmpty())
-				snapshotIt->remove(existingKey);
-		}
+			static_cast<void>(QMudVariableMapUtils::remove(*snapshotIt, name));
 		else
-		{
-			if (!existingKey.isEmpty())
-				snapshotIt->remove(existingKey);
-			snapshotIt->insert(name, value);
-		}
+			QMudVariableMapUtils::insertOrAssign(*snapshotIt, name, value);
 		const QString countKey = makeCallbackPluginInfoKey(pluginId, 12);
 		context->missingPluginInfoValueKeys.remove(countKey);
 		context->pluginInfoValuesByKey.insert(countKey, snapshotIt->size());
@@ -3561,26 +3554,13 @@ namespace
 
 	QString findCaseInsensitiveVariableSnapshotKey(const QMap<QString, QString> &values, const QString &name)
 	{
-		for (auto it = values.constBegin(); it != values.constEnd(); ++it)
-		{
-			if (it.key().compare(name, Qt::CaseInsensitive) == 0)
-				return it.key();
-		}
-		return {};
+		return QMudVariableMapUtils::matchingKey(values, name).value_or(QString());
 	}
 
 	bool resolveCaseInsensitiveVariableSnapshotValue(const QMap<QString, QString> &values,
 	                                                 const QString &name, QString &value)
 	{
-		if (name.isEmpty())
-			return false;
-		if (const QString resolvedKey = findCaseInsensitiveVariableSnapshotKey(values, name);
-		    !resolvedKey.isEmpty())
-		{
-			value = values.value(resolvedKey);
-			return true;
-		}
-		return false;
+		return !name.isEmpty() && QMudVariableMapUtils::findValue(values, name, value);
 	}
 
 	const LuaCallbackArrayWorkingCopy *callbackArraySnapshotFromCache(const LuaCallbackEngine *engine,
@@ -25913,7 +25893,7 @@ static QMudNativePluginRegistry::NativeCallResult queueNativeCallPluginRuntimeTh
 	}
 	if (!enqueueRuntimeThreadDeferredMutationNoResult(
 	        engine, runtime,
-	        [shimId, routine, arguments](const WorldRuntime &targetRuntime)
+	        [shimId, routine, arguments](WorldRuntime &targetRuntime)
 	        {
 		        const QMudNativePluginRegistry::NativeCallContext runtimeContext =
 		            targetRuntime.nativePluginCallContext(shimId);
@@ -26109,6 +26089,214 @@ static std::optional<int> tryHandleLuaAudioCallPluginInCallback(lua_State *L, Lu
 	pushLuaUtf8String(L, QStringLiteral("No function '%1' in native shim 'LuaAudio' (%2)")
 	                         .arg(routine, QMudNativePluginRegistry::luaAudioPluginId()));
 	return 2;
+}
+
+/**
+ * @brief Pushes one native CallPlugin value onto a Lua stack.
+ * @param L Destination Lua state.
+ * @param value Value to push.
+ */
+static void pushLuaCallPluginVariant(lua_State *L, const QVariant &value)
+{
+	if (!value.isValid() || value.isNull())
+	{
+		lua_pushnil(L);
+		return;
+	}
+	switch (value.typeId())
+	{
+	case QMetaType::Bool:
+		lua_pushboolean(L, value.toBool());
+		break;
+	case QMetaType::Char:
+	case QMetaType::SChar:
+	case QMetaType::Short:
+	case QMetaType::Int:
+	case QMetaType::Long:
+	case QMetaType::LongLong:
+	case QMetaType::UChar:
+	case QMetaType::UShort:
+	case QMetaType::UInt:
+	case QMetaType::ULong:
+	case QMetaType::ULongLong:
+		lua_pushinteger(L, static_cast<lua_Integer>(value.toLongLong()));
+		break;
+	case QMetaType::Float:
+	case QMetaType::Double:
+		lua_pushnumber(L, value.toDouble());
+		break;
+	default:
+		pushLuaUtf8String(L, value.toString());
+		break;
+	}
+}
+
+/**
+ * @brief Converts one primitive Lua CallPlugin return value to QVariant form.
+ * @param L Source Lua state.
+ * @param index Stack index to convert.
+ * @param value Output converted value.
+ * @return `true` when the Lua value is supported by the PPI transport.
+ */
+static bool luaCallPluginReturnValueToVariant(lua_State *L, const int index, QVariant &value)
+{
+	switch (lua_type(L, index))
+	{
+	case LUA_TSTRING:
+	{
+		size_t      length = 0;
+		const char *text   = lua_tolstring(L, index, &length);
+		value              = QString::fromUtf8(text, static_cast<qsizetype>(length));
+		return true;
+	}
+	case LUA_TNUMBER:
+		if (lua_isinteger(L, index))
+			value = QVariant::fromValue<qlonglong>(lua_tointeger(L, index));
+		else
+			value = lua_tonumber(L, index);
+		return true;
+	case LUA_TBOOLEAN:
+		value = lua_toboolean(L, index) != 0;
+		return true;
+	case LUA_TNIL:
+		value = QVariant();
+		return true;
+	default:
+		return false;
+	}
+}
+
+/**
+ * @brief Adapts a stock LuaAudio PPI endpoint to its existing direct native handler.
+ * @param L Calling Lua state containing the serialized PPI argument table.
+ * @param engine Calling Lua engine.
+ * @param runtime Owning world runtime.
+ * @param routine Requested CallPlugin routine.
+ * @return Lua result count when the routine is a LuaAudio PPI endpoint, otherwise no value.
+ */
+static std::optional<int> tryHandleLuaAudioPpiCall(lua_State *L, LuaCallbackEngine *engine,
+                                                   WorldRuntime *runtime, const QString &routine)
+{
+	const QString targetRoutine = QMudNativePluginRegistry::luaAudioPpiTargetRoutine(routine);
+	if (targetRoutine.isEmpty())
+		return std::nullopt;
+	if (!engine || !runtime || lua_gettop(L) < 1)
+	{
+		lua_settop(L, 0);
+		lua_pushnumber(L, eErrorCallingPluginRoutine);
+		pushLuaUtf8String(L, QStringLiteral("Missing serialized PPI arguments"));
+		return 2;
+	}
+
+	QVector<QVariant> arguments;
+	QString           decodeError;
+	const qsizetype   argumentCount = QMudNativePluginRegistry::luaAudioPpiArgumentCount(routine);
+	if (!QMudLuaSupport::decodePpiArguments(L, luaCallPluginArgumentString(L, 1), argumentCount, arguments,
+	                                        decodeError))
+	{
+		lua_settop(L, 0);
+		lua_pushnumber(L, eErrorCallingPluginRoutine);
+		pushLuaUtf8String(L, decodeError);
+		return 2;
+	}
+	lua_settop(L, 0);
+	if (lua_checkstack(L, static_cast<int>(argumentCount)) == 0)
+	{
+		lua_pushnumber(L, eErrorCallingPluginRoutine);
+		pushLuaUtf8String(L, QStringLiteral("Unable to reserve Lua stack space for PPI arguments"));
+		return 2;
+	}
+	for (const QVariant &argument : std::as_const(arguments))
+		pushLuaCallPluginVariant(L, argument);
+
+	int resultCount = 0;
+	if (const std::optional<int> handled =
+	        tryHandleLuaAudioCallPluginInCallback(L, engine, runtime, targetRoutine);
+	    handled.has_value())
+	{
+		resultCount = *handled;
+	}
+	else
+	{
+		resultCount = runtime->callPluginLua(QMudNativePluginRegistry::luaAudioPluginId(), targetRoutine, L,
+		                                     1, engine->pluginId());
+	}
+	const int resultStart = lua_gettop(L) - resultCount + 1;
+	if (resultCount < 1 || resultStart < 1 || !lua_isnumber(L, resultStart))
+	{
+		lua_settop(L, 0);
+		lua_pushnumber(L, eErrorCallingPluginRoutine);
+		pushLuaUtf8String(L, QStringLiteral("LuaAudio PPI target returned an invalid CallPlugin result"));
+		return 2;
+	}
+
+	const int status = static_cast<int>(lua_tonumber(L, resultStart));
+	if (status != eOK)
+	{
+		QString errorText;
+		if (resultCount > 1 && lua_isstring(L, resultStart + 1))
+			errorText = QString::fromUtf8(lua_tostring(L, resultStart + 1));
+		lua_settop(L, 0);
+		lua_pushnumber(L, status);
+		if (!errorText.isEmpty())
+		{
+			pushLuaUtf8String(L, errorText);
+			return 2;
+		}
+		return 1;
+	}
+
+	QVector<QVariant> returnValues;
+	returnValues.reserve(qMax(0, resultCount - 1));
+	for (int index = resultStart + 1; index < resultStart + resultCount; ++index)
+	{
+		QVariant value;
+		if (!luaCallPluginReturnValueToVariant(L, index, value))
+		{
+			lua_settop(L, 0);
+			lua_pushnumber(L, eErrorCallingPluginRoutine);
+			pushLuaUtf8String(L, QStringLiteral("LuaAudio PPI target returned an unsupported value"));
+			return 2;
+		}
+		returnValues.push_back(std::move(value));
+	}
+	const QString audioId           = QMudNativePluginRegistry::luaAudioPluginId();
+	const QString variableName      = QMudNativePluginRegistry::luaAudioPpiReturnVariableName();
+	const QString serializedReturns = QMudLuaSupport::serializePpiReturnValues(returnValues);
+	if (activeCallbackContextConst(engine))
+	{
+		if (!enqueueRuntimeThreadDeferredMutationNoResult(
+		        engine, runtime, [audioId, variableName, serializedReturns](WorldRuntime &targetRuntime)
+		        { targetRuntime.setPluginVariableValue(audioId, variableName, serializedReturns); }))
+		{
+			lua_settop(L, 0);
+			lua_pushnumber(L, eErrorCallingPluginRoutine);
+			pushLuaUtf8String(L, QStringLiteral("Unable to publish LuaAudio PPI return values"));
+			return 2;
+		}
+		updateCallbackVariableSnapshotValue(engine, audioId, variableName, serializedReturns, false);
+	}
+	else
+	{
+		const int publishResult = runOnRuntimeThreadDeferredMutation(
+		    engine, runtime,
+		    [runtime, audioId, variableName, serializedReturns]() -> int
+		    {
+			    runtime->setPluginVariableValue(audioId, variableName, serializedReturns);
+			    return eOK;
+		    },
+		    eErrorCallingPluginRoutine);
+		if (publishResult != eOK)
+		{
+			lua_settop(L, 0);
+			lua_pushnumber(L, publishResult);
+			pushLuaUtf8String(L, QStringLiteral("Unable to publish LuaAudio PPI return values"));
+			return 2;
+		}
+	}
+	lua_settop(L, 0);
+	pushLuaCallPluginSuccess(L);
+	return 1;
 }
 
 static void registerAudioLibrary(lua_State *L, LuaCallbackEngine *engine)
@@ -46754,6 +46942,12 @@ static int luaCallPlugin(lua_State *L)
 				if (shimId == QMudNativePluginRegistry::luaAudioPluginId())
 				{
 					if (const std::optional<int> handled =
+					        tryHandleLuaAudioPpiCall(L, engine, runtime, routine);
+					    handled.has_value())
+					{
+						return *handled;
+					}
+					if (const std::optional<int> handled =
 					        tryHandleLuaAudioCallPluginInCallback(L, engine, runtime, routine);
 					    handled.has_value())
 					{
@@ -46781,6 +46975,11 @@ static int luaCallPlugin(lua_State *L)
 					return pushCodeAndMessage(
 					    ePluginDisabled,
 					    QStringLiteral("Plugin '%1' (%2) disabled").arg(QStringLiteral("LuaAudio"), shimId));
+				}
+				if (const std::optional<int> handled = tryHandleLuaAudioPpiCall(L, engine, runtime, routine);
+				    handled.has_value())
+				{
+					return *handled;
 				}
 				if (const std::optional<int> handled =
 				        tryHandleLuaAudioCallPluginInCallback(L, engine, runtime, routine);

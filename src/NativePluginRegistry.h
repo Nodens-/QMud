@@ -44,6 +44,7 @@ namespace QMudNativePluginRegistry
 			double    requiredVersion{0.0};
 			int       sequence{QMudPluginSequence::kDefault};
 			bool      availableWithoutShadow{false};
+			bool      saveState{false};
 			QDateTime dateWritten;
 			QDateTime dateModified;
 	};
@@ -120,68 +121,85 @@ namespace QMudNativePluginRegistry
 	 * @brief Returns the exact UI marker used for native shim shadow rows.
 	 * @return Native compatibility marker text.
 	 */
-	[[nodiscard]] QString nativeShimMarkerText();
+	[[nodiscard]] QString   nativeShimMarkerText();
 	/**
 	 * @brief Returns the MushReader legacy plugin id implemented natively.
 	 * @return Lower-case plugin id.
 	 */
-	[[nodiscard]] QString mushReaderPluginId();
+	[[nodiscard]] QString   mushReaderPluginId();
 	/**
 	 * @brief Returns the LuaAudio legacy plugin id implemented natively.
 	 * @return Lower-case plugin id.
 	 */
-	[[nodiscard]] QString luaAudioPluginId();
+	[[nodiscard]] QString   luaAudioPluginId();
+	/**
+	 * @brief Resolves a LuaAudio PPI endpoint to the direct native routine it exposes.
+	 * @param routine Candidate legacy routine name.
+	 * @return Direct LuaAudio routine name, or an empty string when the routine is not a PPI endpoint.
+	 */
+	[[nodiscard]] QString   luaAudioPpiTargetRoutine(const QString &routine);
+	/**
+	 * @brief Returns the declared Lua parameter count for a LuaAudio PPI endpoint.
+	 * @param routine Candidate legacy routine name.
+	 * @return Nonnegative parameter count, or `-1` when the routine is not a PPI endpoint.
+	 */
+	[[nodiscard]] qsizetype luaAudioPpiArgumentCount(const QString &routine);
+	/**
+	 * @brief Returns the plugin-variable name used by the stock PPI transport for return values.
+	 * @return Legacy PPI return-variable name.
+	 */
+	[[nodiscard]] QString   luaAudioPpiReturnVariableName();
 	/**
 	 * @brief Checks whether a plugin id is implemented as a native shim.
 	 * @param pluginId Plugin id to check.
 	 * @return `true` when the id maps to a native shim.
 	 */
-	[[nodiscard]] bool    isShimId(const QString &pluginId);
+	[[nodiscard]] bool      isShimId(const QString &pluginId);
 	/**
 	 * @brief Checks whether a plugin id is centrally denied without a shim.
 	 * @param pluginId Plugin id to check.
 	 * @return `true` when loading should be ignored.
 	 */
-	[[nodiscard]] bool    isBlacklistedId(const QString &pluginId);
+	[[nodiscard]] bool      isBlacklistedId(const QString &pluginId);
 	/**
 	 * @brief Checks whether a plugin id is protected by either shim or blacklist policy.
 	 * @param pluginId Plugin id to check.
 	 * @return `true` when the normal XML plugin loader must not execute it.
 	 */
-	[[nodiscard]] bool    isProtectedId(const QString &pluginId);
+	[[nodiscard]] bool      isProtectedId(const QString &pluginId);
 	/**
 	 * @brief Resolves a plugin id or native shim name to a canonical shim id.
 	 * @param pluginIdOrName Plugin id or display name.
 	 * @return Canonical shim id, or empty when not a shim.
 	 */
-	[[nodiscard]] QString resolveShimIdOrName(const QString &pluginIdOrName);
+	[[nodiscard]] QString   resolveShimIdOrName(const QString &pluginIdOrName);
 	/**
 	 * @brief Returns native shim metadata.
 	 * @param pluginId Shim id.
 	 * @param metadata Output metadata.
 	 * @return `true` when metadata exists.
 	 */
-	[[nodiscard]] bool    metadataForShim(const QString &pluginId, NativePluginMetadata &metadata);
+	[[nodiscard]] bool      metadataForShim(const QString &pluginId, NativePluginMetadata &metadata);
 	/**
 	 * @brief Returns native shim metadata by virtual `qmud:native` include name.
 	 * @param nativeName Name after the virtual native include prefix.
 	 * @param metadata Output metadata.
 	 * @return `true` when metadata exists.
 	 */
-	[[nodiscard]] bool    metadataForNativeName(const QString &nativeName, NativePluginMetadata &metadata);
+	[[nodiscard]] bool      metadataForNativeName(const QString &nativeName, NativePluginMetadata &metadata);
 	/**
 	 * @brief Normalizes a virtual native plugin source token without resolving filesystem paths.
 	 * @param source Source/include token to normalize.
 	 * @return Canonical `qmud:native/<Name>` source, or empty when the token is not virtual-native syntax.
 	 */
-	[[nodiscard]] QString normalizeNativeSource(const QString &source);
+	[[nodiscard]] QString   normalizeNativeSource(const QString &source);
 	/**
 	 * @brief Returns native shim metadata by virtual source token.
 	 * @param source Source/include token such as `qmud:native/MushReader`.
 	 * @param metadata Output metadata.
 	 * @return `true` when the source names a registered native shim.
 	 */
-	[[nodiscard]] bool    metadataForNativeSource(const QString &source, NativePluginMetadata &metadata);
+	[[nodiscard]] bool      metadataForNativeSource(const QString &source, NativePluginMetadata &metadata);
 	/**
 	 * @brief Lists native routines exposed by a shim.
 	 * @param pluginId Shim id.
@@ -200,6 +218,12 @@ namespace QMudNativePluginRegistry
 	 * @param volume Legacy LuaAudio volume value.
 	 */
 	void                  luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, double volume);
+	/**
+	 * @brief Restores LuaAudio's persisted command and master volume.
+	 * @param runtime Owning runtime.
+	 * @param volume Persisted legacy LuaAudio volume value.
+	 */
+	void                  luaAudioRestorePersistentVolume(const WorldRuntime *runtime, double volume);
 	/**
 	 * @brief Updates LuaAudio master pan for a runtime.
 	 * @param runtime Owning runtime.
@@ -356,7 +380,7 @@ namespace QMudNativePluginRegistry
 	 * @return Legacy status plus optional return values.
 	 */
 	NativeCallResult
-	callRoutine(const WorldRuntime *runtime, const QString &pluginId, const QString &routine,
+	callRoutine(WorldRuntime *runtime, const QString &pluginId, const QString &routine,
 	            const QVector<QVariant> &arguments, const NativeCallContext &context,
 	            NativeCallExecutionMode executionMode = NativeCallExecutionMode::ExecuteSideEffects);
 	/**

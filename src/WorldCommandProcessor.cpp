@@ -27,6 +27,7 @@
 #include "helpers/ColorUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/OutputWrapUtils.h"
+#include "helpers/VariableMapUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QClipboard>
@@ -5068,15 +5069,7 @@ bool WorldCommandProcessor::findVariable(const QString &name, QString &value, co
 		const WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
 		if (!plugin)
 			return false;
-		for (auto it = plugin->variables.constBegin(); it != plugin->variables.constEnd(); ++it)
-		{
-			if (it.key().compare(name, Qt::CaseInsensitive) == 0)
-			{
-				value = it.value();
-				return true;
-			}
-		}
-		return false;
+		return QMudVariableMapUtils::findValue(plugin->variables, name, value);
 	}
 	return m_runtime && m_runtime->findVariable(name, value);
 }

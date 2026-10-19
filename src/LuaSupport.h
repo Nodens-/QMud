@@ -11,7 +11,11 @@
 
 #include "LuaHeaders.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QString>
+#include <QVariant>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QVector>
 
 /**
  * @brief RAII wrapper for a raw Lua state pointer.
@@ -151,25 +155,52 @@ namespace QMudLuaSupport
 	bool       callLuaNamedProcedureWithString(lua_State *L, const QString &functionName, const QString &arg,
 	                                           bool *hasFunction = nullptr, QString *luaError = nullptr);
 	/**
+	 * @brief Decodes the sequential primitive arguments emitted by `ppi.lua` through `serialize.save_simple`.
+	 * @param L Lua state used to parse the serialized table without exposing its globals.
+	 * @param serializedArguments Serialized Lua table constructor.
+	 * @param argumentCount Declared target-function arity to decode.
+	 * @param arguments Output arguments in their sequential order.
+	 * @param errorText Output parse or type error text.
+	 * @return `true` when the declared argument positions contain only CallPlugin-compatible values.
+	 */
+	bool       decodePpiArguments(lua_State *L, const QString &serializedArguments, qsizetype argumentCount,
+	                              QVector<QVariant> &arguments, QString &errorText);
+	/**
+	 * @brief Decodes PPI arguments with a reusable parser state owned by the calling thread.
+	 * @param serializedArguments Serialized Lua table constructor.
+	 * @param argumentCount Declared target-function arity to decode.
+	 * @param arguments Output arguments in their sequential order.
+	 * @param errorText Output parse or type error text.
+	 * @return `true` when the declared argument positions contain only CallPlugin-compatible values.
+	 */
+	bool       decodePpiArguments(const QString &serializedArguments, qsizetype argumentCount,
+	                              QVector<QVariant> &arguments, QString &errorText);
+	/**
+	 * @brief Serializes primitive native return values for `ppi.lua`.
+	 * @param values Ordered native return values.
+	 * @return Lua table constructor accepted by `serialize.save_simple` consumers.
+	 */
+	[[nodiscard]] QString serializePpiReturnValues(const QVector<QVariant> &values);
+	/**
 	 * @brief Reads optional boolean argument with default fallback.
 	 * @param L Lua state pointer.
 	 * @param argIndex Lua argument index.
 	 * @param defaultValue Fallback value when argument is absent/nil.
 	 * @return Parsed boolean value.
 	 */
-	bool       optBoolean(lua_State *L, int argIndex, bool defaultValue);
+	bool                  optBoolean(lua_State *L, int argIndex, bool defaultValue);
 	/**
 	 * @brief Computes the edit distance for two Lua string arguments.
 	 * @param L Lua state pointer.
 	 * @return Number of Lua results pushed.
 	 */
-	int        luaUtilsEditDistance(lua_State *L);
+	int                   luaUtilsEditDistance(lua_State *L);
 	/**
 	 * @brief Computes Double Metaphone keys for a Lua string argument.
 	 * @param L Lua state pointer.
 	 * @return Number of Lua results pushed.
 	 */
-	int        luaUtilsMetaphone(lua_State *L);
+	int                   luaUtilsMetaphone(lua_State *L);
 	/**
 	 * @brief Raises a standardized Lua runtime error.
 	 * @param L Lua state pointer.
@@ -178,8 +209,8 @@ namespace QMudLuaSupport
 	 * @param strType Type/category text.
 	 * @param strReason Detailed reason text.
 	 */
-	void       luaError(lua_State *L, const char *strEvent = "Run-time error", const char *strProcedure = "",
-	                    const char *strType = "", const char *strReason = "");
+	void luaError(lua_State *L, const char *strEvent = "Run-time error", const char *strProcedure = "",
+	              const char *strType = "", const char *strReason = "");
 } // namespace QMudLuaSupport
 
 /**

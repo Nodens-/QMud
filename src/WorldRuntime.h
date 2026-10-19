@@ -8141,6 +8141,35 @@ class WorldRuntime : public QObject
 		int  savePluginStateForPlugin(const QString &pluginId, bool scripted, QString *error);
 		void savePluginStateForPluginContinuable(const QString &pluginId, bool scripted,
 		                                         std::function<void(int)> completion);
+		/**
+		 * @brief Resolves the authoritative variable map for a plugin or native shim.
+		 * @param pluginId Plugin identifier or supported native shim name.
+		 * @param resolvedPluginId Optional output canonical plugin identifier.
+		 * @return Variable map, or `nullptr` when the plugin is unavailable.
+		 */
+		[[nodiscard]] const QMap<QString, QString> *
+		pluginVariableStore(const QString &pluginId, QString *resolvedPluginId = nullptr) const;
+		/**
+		 * @brief Resolves the mutable authoritative variable map for a plugin or native shim.
+		 * @param pluginId Plugin identifier or supported native shim name.
+		 * @param resolvedPluginId Optional output canonical plugin identifier.
+		 * @return Variable map, or `nullptr` when the plugin is unavailable.
+		 */
+		[[nodiscard]] QMap<QString, QString> *pluginVariableStore(const QString &pluginId,
+		                                                          QString       *resolvedPluginId = nullptr);
+		/**
+		 * @brief Merges LuaAudio's persisted plugin variables into a variable map.
+		 * @param variables Variable map receiving persisted values.
+		 * @param error Optional output parse error.
+		 * @return `true` when no state file exists or its variables were loaded successfully.
+		 */
+		[[nodiscard]] bool                    loadLuaAudioStateVariables(QMap<QString, QString> &variables,
+		                                                                 QString                *error = nullptr) const;
+		/**
+		 * @brief Replaces LuaAudio's authoritative variables and restores variable-backed runtime settings.
+		 * @param variables Replacement variables.
+		 */
+		void                                  replaceLuaAudioVariables(QMap<QString, QString> variables);
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
 		                            QSharedPointer<LuaCallbackEngine> &callbackEngine);
@@ -8405,6 +8434,7 @@ class WorldRuntime : public QObject
 		QDateTime                                                  m_lastChatMessageTime;
 		QDateTime                                                  m_lastChatGroupMessageTime;
 		QList<Plugin>                                              m_plugins;
+		QMap<QString, QString>                                     m_luaAudioVariables;
 		QSet<QString>                                              m_observedPluginCallbacks;
 		QHash<QString, quint64>                                    m_observedPluginCallbackQueryGeneration;
 		quint64                                                    m_observedPluginCallbackGeneration{1};
