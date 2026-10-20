@@ -569,7 +569,7 @@ class TelnetProcessor
 		enum class NegotiationDisposition
 		{
 			Proceed,
-			SettleAndSuppress,
+			AwaitSettlement,
 			Suppress
 		};
 
@@ -754,8 +754,9 @@ class TelnetProcessor
 		/**
 		 * @brief Applies the configured response and state changes for IAC WILL.
 		 * @param option Telnet option code.
+		 * @return `true` when QMud accepts the remote option as enabled.
 		 */
-		void                   handleWill(unsigned char option);
+		bool                   handleWill(unsigned char option);
 		/**
 		 * @brief Applies the response and state changes for IAC WONT.
 		 * @param option Telnet option code.
@@ -764,8 +765,9 @@ class TelnetProcessor
 		/**
 		 * @brief Applies the configured response and state changes for IAC DO.
 		 * @param option Telnet option code.
+		 * @return `true` when QMud accepts the local option as enabled.
 		 */
-		void                   handleDo(unsigned char option);
+		bool                   handleDo(unsigned char option);
 		/**
 		 * @brief Applies the response and state changes for IAC DONT.
 		 * @param option Telnet option code.
@@ -780,8 +782,32 @@ class TelnetProcessor
 		 */
 		NegotiationDisposition recordNegotiationAttempt(NegotiationDirection direction, unsigned char option,
 		                                                qint64 nowMilliseconds);
+		/**
+		 * @brief Completes a normally processed negotiation and starts suppression after a storm settles.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 * @param positiveVerb Whether the received verb was WILL or DO.
+		 * @param enabled Whether the processed exchange left that option direction enabled.
+		 * @param nowMilliseconds Monotonic session timestamp.
+		 */
+		void finishNegotiationAttempt(NegotiationDirection direction, unsigned char option, bool positiveVerb,
+		                              bool enabled, qint64 nowMilliseconds);
+		/**
+		 * @brief Clears limiter state for one option and negotiation direction.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 */
+		void resetRenegotiationLoopProtection(NegotiationDirection direction, unsigned char option);
+		/**
+		 * @brief Maps an option and negotiation direction to its limiter state slot.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 * @return Index into the per-option, per-direction limiter arrays.
+		 */
+		[[nodiscard]] static size_t negotiationBucketIndex(NegotiationDirection direction,
+		                                                   unsigned char        option) noexcept;
 		/** @brief Clears rolling negotiation histories and active suppression intervals. */
-		void                   resetRenegotiationLoopProtection();
+		void                        resetRenegotiationLoopProtection();
 		/**
 		 * @brief Records a telnet stream event at the current output position.
 		 * @param type Stream event type.
@@ -948,6 +974,10 @@ class TelnetProcessor
 		bool                           m_automaticRenegotiationLoopProtection{false};
 		std::array<QList<qint64>, 512> m_negotiationAttemptTimes;
 		std::array<qint64, 512>        m_negotiationSuppressionUntil{};
+		std::array<bool, 512>          m_negotiationAwaitingSettlement{};
+		std::array<bool, 512>          m_negotiationDesiredEnabled{};
+		std::array<bool, 512>          m_negotiationDesiredKnown{};
+		std::array<qint64, 512>        m_negotiationDesiredRecordedAt{};
 		qint64                         m_lastNegotiationAttemptTime{-1};
 		QElapsedTimer                  m_negotiationClock;
 
