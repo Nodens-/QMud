@@ -7,6 +7,7 @@
  */
 
 #include "WorldOptionDefaults.h"
+#include "WorldOptions.h"
 
 #include <QMap>
 #include <QtTest/QTest>
@@ -58,6 +59,8 @@ namespace
 				         QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("partial_save_character_threshold")),
 				         QStringLiteral("10"));
+				QCOMPARE(attrs.value(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+				         QString::number(QMudSplitView::kDefaultLivePaneRatio));
 				QCOMPARE(attrs.value(QStringLiteral("regexp_match_empty")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
 				         QStringLiteral("y"));

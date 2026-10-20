@@ -11,6 +11,7 @@
 #define QMUD_WORLDVIEW_H
 
 #include "AccessibleTextUtils.h"
+#include "WorldOptions.h"
 #include "WorldOutputRenderModel.h"
 #include "WorldRuntime.h"
 #include "WorldViewGlobalSettings.h"
@@ -1254,11 +1255,16 @@ class WorldView : public QWidget
 		 */
 		void replayPendingDrawOutputWindowNotification();
 		/**
-		 * @brief Applies runtime settings with policy-driven rebuild selection.
+		 * @brief Applies runtime settings with policy-driven rebuild and split-ratio selection.
 		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
 		 */
 		void applyRuntimeSettingsWithPolicy(bool allowRebuild);
-		void applyRuntimeSettingsImpl(bool rebuildOutput);
+		/**
+		 * @brief Applies runtime settings selected by the current refresh policy.
+		 * @param rebuildOutput Whether existing buffered output must be rebuilt.
+		 * @param refreshSplitRatio Whether to replace the current split ratio from committed world state.
+		 */
+		void applyRuntimeSettingsImpl(bool rebuildOutput, bool refreshSplitRatio);
 		/**
 		 * @brief Applies the command-history limit and invalidates positions when entries are trimmed.
 		 * @param limit Maximum retained history entries, or zero to disable additions without trimming.
@@ -2691,6 +2697,18 @@ class WorldView : public QWidget
 		 */
 		void setScrollbackSplitActive(bool active);
 		/**
+		 * @brief Applies the stored live-pane ratio to the active output split.
+		 */
+		void applyScrollbackSplitRatio();
+		/**
+		 * @brief Captures a user-selected live-pane ratio from the current splitter geometry.
+		 */
+		void captureScrollbackSplitRatio();
+		/**
+		 * @brief Persists a user-selected live-pane ratio to the attached world.
+		 */
+		void persistScrollbackSplitRatio();
+		/**
 		 * @brief Scrolls target output view to end.
 		 * @param view Target output view.
 		 */
@@ -3277,27 +3295,29 @@ class WorldView : public QWidget
 		bool                                       m_defaultInputHeightApplied{false};
 		bool                                       m_scrollbackSplitActive{false};
 		int                                        m_splitViewDividerWidth{kDefaultSplitViewDividerWidth};
-		int                                        m_lastLiveSplitSize{0};
-		int                                        m_wrapColumn{0};
-		int                                        m_historyLimit{0};
-		bool                                       m_useCustomLinkColour{false};
-		bool                                       m_underlineHyperlinks{true};
-		QColor                                     m_hyperlinkColour;
-		QColor                                     m_outputBackground;
-		QColor                                     m_outputTextColour;
-		TimestampRenderSettings                    m_outputTimestampRenderSettings;
-		TimestampRenderSettings                    m_inputTimestampRenderSettings;
-		TimestampRenderSettings                    m_notesTimestampRenderSettings;
-		int                                        m_historyIndex{-1};
-		int                                        m_partialIndex{-1};
-		QString                                    m_partialCommand;
-		QString                                    m_lastCommand;
-		QVector<QString>                           m_history;
-		QVector<PendingOutput>                     m_pendingOutput;
-		bool                                       m_flushingPending{false};
-		bool                                       m_hasPartialOutput{false};
-		int                                        m_partialOutputStart{0};
-		int                                        m_partialOutputLength{0};
+		int                     m_splitViewLivePaneRatio{QMudSplitView::kDefaultLivePaneRatio};
+		bool                    m_splitViewLivePaneRatioDirty{false};
+		bool                    m_applyingScrollbackSplitRatio{false};
+		int                     m_wrapColumn{0};
+		int                     m_historyLimit{0};
+		bool                    m_useCustomLinkColour{false};
+		bool                    m_underlineHyperlinks{true};
+		QColor                  m_hyperlinkColour;
+		QColor                  m_outputBackground;
+		QColor                  m_outputTextColour;
+		TimestampRenderSettings m_outputTimestampRenderSettings;
+		TimestampRenderSettings m_inputTimestampRenderSettings;
+		TimestampRenderSettings m_notesTimestampRenderSettings;
+		int                     m_historyIndex{-1};
+		int                     m_partialIndex{-1};
+		QString                 m_partialCommand;
+		QString                 m_lastCommand;
+		QVector<QString>        m_history;
+		QVector<PendingOutput>  m_pendingOutput;
+		bool                    m_flushingPending{false};
+		bool                    m_hasPartialOutput{false};
+		int                     m_partialOutputStart{0};
+		int                     m_partialOutputLength{0};
 		struct OutputFindState;
 		QScopedPointer<OutputFindState>         m_outputFind;
 		QScopedPointer<CommandHistoryFindState> m_commandHistoryFind;

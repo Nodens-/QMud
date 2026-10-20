@@ -13822,7 +13822,12 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		bool            ok     = false;
 		const long long number = value.toLongLong(&ok);
 		if (ok)
-			saveXmlNumber(out, nl, opt.name, number);
+		{
+			if (number == 0 && opt.defaultValue != 0)
+				out << "   " << opt.name << "=\"0\"" << nl;
+			else
+				saveXmlNumber(out, nl, opt.name, number);
+		}
 	}
 
 	out << "   > <!-- end of general world attributes -->" << nl;

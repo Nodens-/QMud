@@ -7612,7 +7612,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void scrollbackSplitKeepsLivePaneSizeOnResize()
+		void scrollbackSplitKeepsLivePaneRatioOnResize()
 		{
 			resetTestState();
 			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
@@ -7643,8 +7643,11 @@ class tst_WorldView_Basic : public QObject
 
 			QList<int> beforeSizes = outputSplitter->sizes();
 			QVERIFY(beforeSizes.size() >= 2);
-			const int beforeLive = beforeSizes.at(1);
-			QVERIFY(beforeLive > 0);
+			const int beforeTotal = beforeSizes.at(0) + beforeSizes.at(1);
+			QVERIFY(beforeTotal > 0);
+			const int beforeRatio = static_cast<int>(
+			    (static_cast<qint64>(beforeSizes.at(1)) * QMudSplitView::kRatioScale + beforeTotal / 2) /
+			    beforeTotal);
 
 			view.resize(900, 620);
 			QCoreApplication::processEvents();
@@ -7652,9 +7655,159 @@ class tst_WorldView_Basic : public QObject
 
 			const QList<int> afterSizes = outputSplitter->sizes();
 			QVERIFY(afterSizes.size() >= 2);
-			const int afterLive = afterSizes.at(1);
-			QVERIFY(afterLive > 0);
-			QVERIFY(qAbs(afterLive - beforeLive) <= qMax(80, beforeLive / 2));
+			const int afterTotal = afterSizes.at(0) + afterSizes.at(1);
+			QVERIFY(afterTotal > 0);
+			const int afterRatio = static_cast<int>(
+			    (static_cast<qint64>(afterSizes.at(1)) * QMudSplitView::kRatioScale + afterTotal / 2) /
+			    afterTotal);
+			QVERIFY(qAbs(afterRatio - beforeRatio) <= 25);
+
+			resetTestState();
+		}
+
+		void scrollbackSplitRatioPersistsInWorldAcrossEntryPaths()
+		{
+			resetTestState();
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->setWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			runtime->setWorldAttribute(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName),
+			                           QStringLiteral("4000"));
+
+			WorldView view;
+			view.resize(760, 520);
+			view.show();
+			setTestRuntime(view, runtime);
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 260; ++i)
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-ratio-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *const input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			QTest::keyClick(input, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			QSplitter *const splitter = findOutputSplitter(view);
+			QVERIFY(splitter);
+			auto livePaneRatio = [splitter]
+			{
+				const QList<int> sizes = splitter->sizes();
+				if (sizes.size() < 2)
+					return 0;
+				const int total = sizes.at(0) + sizes.at(1);
+				if (total <= 0)
+					return 0;
+				return static_cast<int>(
+				    (static_cast<qint64>(sizes.at(1)) * QMudSplitView::kRatioScale + total / 2) / total);
+			};
+			QTRY_VERIFY(qAbs(livePaneRatio() - 4000) <= 25);
+
+			view.resize(900, 700);
+			QCoreApplication::processEvents();
+			view.setScrollbackSplitActive(false);
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("4000"));
+
+			QTextBrowser *const output = findVisibleOutputBrowser(view);
+			QVERIFY(output);
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			const QPointF localPos(output->viewport()->rect().center());
+			const QPointF globalPos(output->viewport()->mapToGlobal(localPos.toPoint()));
+			QWheelEvent   wheelUp(localPos, globalPos, QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+			                      Qt::NoScrollPhase, false);
+			QCoreApplication::sendEvent(output->viewport(), &wheelUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QTRY_VERIFY(qAbs(livePaneRatio() - 4000) <= 25);
+
+			splitter->setOpaqueResize(true);
+			QSplitterHandle *const handle = splitter->handle(1);
+			QVERIFY(handle);
+			const QPoint pressPosition = handle->rect().center();
+			QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, pressPosition);
+			const QPoint dragPosition = pressPosition + QPoint(0, 70);
+			const QPoint dragGlobal   = handle->mapToGlobal(dragPosition);
+			QMouseEvent  dragEvent(QEvent::MouseMove, QPointF(dragPosition), QPointF(dragPosition),
+			                       QPointF(dragGlobal), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &dragEvent);
+			QCoreApplication::processEvents();
+			const int draggedRatio = livePaneRatio();
+			QVERIFY(qAbs(draggedRatio - 4000) > 100);
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("4000"));
+
+			runtime->setBackgroundColour(qRgb(17, 29, 43));
+			QCoreApplication::processEvents();
+			QVERIFY(qAbs(livePaneRatio() - draggedRatio) <= 25);
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("4000"));
+
+			const QPoint releasePosition = handle->mapFromGlobal(dragGlobal);
+			QMouseEvent  releaseEvent(QEvent::MouseButtonRelease, QPointF(releasePosition),
+			                          QPointF(releasePosition), QPointF(dragGlobal), Qt::LeftButton,
+			                          Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &releaseEvent);
+			QCoreApplication::processEvents();
+			bool      persistedOk = false;
+			const int persistedRatio =
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName))
+			        .toInt(&persistedOk);
+			QVERIFY(persistedOk);
+			QVERIFY(qAbs(persistedRatio - draggedRatio) <= 25);
+
+			view.setScrollbackSplitActive(false);
+			view.setScrollbackSplitActive(true);
+			QTRY_VERIFY(qAbs(livePaneRatio() - persistedRatio) <= 25);
+
+			QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+			const QPoint overrideDragPosition = handle->rect().center() - QPoint(0, 45);
+			const QPoint overrideDragGlobal   = handle->mapToGlobal(overrideDragPosition);
+			QMouseEvent  overrideDragEvent(QEvent::MouseMove, QPointF(overrideDragPosition),
+			                               QPointF(overrideDragPosition), QPointF(overrideDragGlobal),
+			                               Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &overrideDragEvent);
+			QCoreApplication::processEvents();
+			QVERIFY(qAbs(livePaneRatio() - persistedRatio) > 100);
+
+			const WorldNumericOption *const ratioOption = QMudWorldOptions::findWorldNumericOption(
+			    QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName));
+			QVERIFY(ratioOption);
+			QCOMPARE(runtime->setOptionItem(*ratioOption, 3000), eOK);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(qAbs(livePaneRatio() - 3000) <= 25);
+			QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+			QCoreApplication::processEvents();
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("3000"));
+
+			view.resize(760, 480);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(qAbs(livePaneRatio() - 3000) <= 25);
+
+			splitter->setSizes(QList<int>() << 1 << 0);
+			emit splitter->splitterMoved(splitter->height(), 1);
+			QCoreApplication::processEvents();
+			QCOMPARE(livePaneRatio(), 0);
+			QMouseEvent collapsedReleaseEvent(QEvent::MouseButtonRelease, QPointF(), QPointF(), QPointF(),
+			                                  Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &collapsedReleaseEvent);
+			QCoreApplication::processEvents();
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("0"));
+
+			view.setScrollbackSplitActive(false);
+			view.setScrollbackSplitActive(true);
+			QTRY_COMPARE(livePaneRatio(), 0);
 
 			resetTestState();
 		}
