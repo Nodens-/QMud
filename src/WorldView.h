@@ -1427,6 +1427,10 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] const QMudAccessibleTextUtils::LineOffsetMap &accessibleNativeOutputTextMap() const;
 		/**
+		 * @brief Clears accessibility state tied to the current native render-model identity.
+		 */
+		void                     resetAccessibleOutputStateForRenderModelChange() const;
+		/**
 		 * @brief Counts accessible native output text without materializing an offset map.
 		 * @param lines Native render lines to count.
 		 * @return UTF-16 code-unit count including inserted newline separators.
@@ -1984,9 +1988,9 @@ class WorldView : public QWidget
 		 */
 		struct NativeLayoutSlot
 		{
-				int     visualRows{-1};
 				quint64 runtimeLineKey{0};
 				quint64 lineContentHash{0};
+				int     visualRows{-1};
 				uchar   rowsExact{0};
 		};
 		/**

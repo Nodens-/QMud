@@ -2347,6 +2347,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	resetDrawOutputWindowNotificationState();
 	resetNativeOutputPresentationRequestState();
 	m_nativeRenderModel = runtime ? runtime->m_outputRenderModel : std::make_shared<WorldOutputRenderModel>();
+	resetAccessibleOutputStateForRenderModelChange();
 	m_nativeConsumedRenderRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	m_nativeLayoutCacheValid       = false;
 	m_nativeExactLayoutCache.clear();
@@ -2460,6 +2461,7 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	resetDrawOutputWindowNotificationState();
 	resetNativeOutputPresentationRequestState();
 	m_nativeRenderModel = runtime ? runtime->m_outputRenderModel : std::make_shared<WorldOutputRenderModel>();
+	resetAccessibleOutputStateForRenderModelChange();
 	m_nativeConsumedRenderRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	m_nativeLayoutCacheValid       = false;
 	m_nativeExactLayoutCache.clear();
@@ -3947,6 +3949,30 @@ const QMudAccessibleTextUtils::LineOffsetMap &WorldView::accessibleNativeOutputT
 	return m_accessibleOutputTextMapCache;
 }
 
+void WorldView::resetAccessibleOutputStateForRenderModelChange() const
+{
+	m_accessibleOutputCharacterCount                 = -1;
+	m_accessibleOutputRevision                       = 0;
+	m_accessibleOutputText                           = QString();
+	m_accessibleOutputPendingTailAppend              = false;
+	m_accessibleOutputLastAnnouncedPartialText       = QString();
+	m_accessibleOutputLiveEventsSuppressed           = false;
+	m_accessibleOutputBaselineLineCount              = -1;
+	m_accessibleOutputBaselineTailText               = QString();
+	m_accessibleOutputBaselineLineLengths            = QVector<int>();
+	m_accessibleOutputReviewActive                   = false;
+	m_accessibleOutputReviewTargetKind               = AccessibleOutputReviewTargetKind::None;
+	m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+	m_accessibleOutputReviewLastNotifiedScrollValue  = -1;
+	m_accessibleOutputLineStartCache                 = QVector<int>();
+	m_accessibleOutputLineStartCacheRevision         = 0;
+	m_accessibleOutputLineStartCacheNextOffset       = 0;
+	m_accessibleOutputLineStartCacheCharacterCount   = -1;
+	m_accessibleOutputTextMapCache                   = QMudAccessibleTextUtils::LineOffsetMap();
+	m_accessibleOutputTextMapCacheRevision           = 0;
+	m_accessibleOutputTextMapCacheValid              = false;
+}
+
 int WorldView::accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines)
 {
 	int       characterCount = 0;
@@ -4176,15 +4202,18 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 
 	if (!QAccessible::isActive())
 	{
-		m_accessibleOutputCharacterCount = -1;
-		m_accessibleOutputRevision       = 0;
-		m_accessibleOutputText.clear();
-		m_accessibleOutputPendingTailAppend = false;
-		m_accessibleOutputLastAnnouncedPartialText.clear();
-		m_accessibleOutputLiveEventsSuppressed = false;
-		m_accessibleOutputBaselineLineCount    = -1;
-		m_accessibleOutputBaselineTailText.clear();
-		m_accessibleOutputBaselineLineLengths.clear();
+		m_accessibleOutputCharacterCount           = -1;
+		m_accessibleOutputRevision                 = 0;
+		m_accessibleOutputText                     = QString();
+		m_accessibleOutputPendingTailAppend        = false;
+		m_accessibleOutputLastAnnouncedPartialText = QString();
+		m_accessibleOutputLiveEventsSuppressed     = false;
+		m_accessibleOutputBaselineLineCount        = -1;
+		m_accessibleOutputBaselineTailText         = QString();
+		m_accessibleOutputBaselineLineLengths      = QVector<int>();
+		m_accessibleOutputTextMapCache             = QMudAccessibleTextUtils::LineOffsetMap();
+		m_accessibleOutputTextMapCacheRevision     = 0;
+		m_accessibleOutputTextMapCacheValid        = false;
 		clearTransientReview();
 		return;
 	}
@@ -8123,11 +8152,12 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 		QString                          displayText(entry.text);
 		QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
-		const int renderStart  = sizeToInt(currentLineText.size());
-		const int prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
-		const int textLength   = sizeToInt(displayText.size()) - prefixLength;
+		const int  renderStart  = sizeToInt(currentLineText.size());
+		const int  prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
+		const int  textLength   = sizeToInt(displayText.size()) - prefixLength;
+		const bool firstSource  = !currentLogicalLineHasSource;
 
-		if (!currentLogicalLineHasSource)
+		if (firstSource)
 		{
 			currentFirstRuntimeLine     = entry.lineNumber;
 			currentLastRuntimeLine      = entry.lineNumber;
@@ -8154,7 +8184,10 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 			currentLastRuntimeLine  = qMax(currentLastRuntimeLine, entry.lineNumber);
 		}
 
-		currentLineText += displayText;
+		if (firstSource)
+			currentLineText = std::move(displayText);
+		else
+			currentLineText += displayText;
 		currentLineFadeTimestamp = entry.time;
 		appendPositiveStyleSpans(currentLineSpans, displaySpans);
 
@@ -8654,11 +8687,12 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			QString                          displayText(entry.text);
 			QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 			buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
-			const int renderStart  = sizeToInt(rebuiltText.size());
-			const int prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
-			const int textLength   = sizeToInt(displayText.size()) - prefixLength;
+			const int  renderStart  = sizeToInt(rebuiltText.size());
+			const int  prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
+			const int  textLength   = sizeToInt(displayText.size()) - prefixLength;
+			const bool firstSource  = !hasSource;
 
-			if (!hasSource)
+			if (firstSource)
 			{
 				rebuiltFirstRuntime       = entry.lineNumber;
 				rebuiltLastRuntime        = entry.lineNumber;
@@ -8686,7 +8720,10 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			}
 			rebuiltSourceRuntimeLines.push_back(entry.lineNumber);
 
-			rebuiltText += displayText;
+			if (firstSource)
+				rebuiltText = std::move(displayText);
+			else
+				rebuiltText += displayText;
 			rebuiltFadeTimestamp = entry.time;
 			appendPositiveStyleSpans(rebuiltSpans, displaySpans);
 

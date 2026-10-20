@@ -4347,6 +4347,86 @@ class tst_WorldView_Basic : public QObject
 			         WorldView::AccessibleOutputReviewTargetKind::None);
 		}
 
+		/**
+		 * @brief Verifies inactive Qt accessibility releases full-text caches without dropping native review state.
+		 */
+		void inactiveQtAccessibilityReleasesFullTextStateButKeepsNativeReviewState()
+		{
+			resetTestState();
+			const ScopedTestStateReset        resetState;
+			const ScopedAccessibleActiveState accessibleActive(false);
+
+			WorldView                         view;
+			view.m_accessibleOutputText             = QString(4096, QLatin1Char('x'));
+			view.m_accessibleOutputBaselineTailText = QString(4096, QLatin1Char('y'));
+			view.m_accessibleOutputBaselineLineLengths.reserve(1024);
+			view.m_accessibleOutputBaselineLineLengths.push_back(4096);
+			view.m_accessibleOutputTextMapCache =
+			    QMudAccessibleTextUtils::LineOffsetMap({QString(4096, QLatin1Char('z'))});
+			view.m_accessibleOutputTextMapCacheRevision = 42;
+			view.m_accessibleOutputTextMapCacheValid    = true;
+			view.m_accessibleOutputReviewActive         = true;
+			view.m_accessibleOutputReviewTargetKind =
+			    WorldView::AccessibleOutputReviewTargetKind::SplitTopPane;
+			view.m_accessibleOutputLineStartCache         = {0, 5};
+			view.m_accessibleOutputLineStartCacheRevision = 42;
+
+			view.notifyAccessibleOutputPresented({});
+
+			QVERIFY(view.m_accessibleOutputText.isNull());
+			QVERIFY(view.m_accessibleOutputBaselineTailText.isNull());
+			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.capacity(), qsizetype{0});
+			QVERIFY(view.m_accessibleOutputTextMapCache.isEmpty());
+			QVERIFY(!view.m_accessibleOutputTextMapCacheValid);
+			QCOMPARE(view.m_accessibleOutputTextMapCacheRevision, quint64{0});
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::SplitTopPane);
+			QCOMPARE(view.m_accessibleOutputLineStartCache, QVector<int>({0, 5}));
+			QCOMPARE(view.m_accessibleOutputLineStartCacheRevision, quint64{42});
+		}
+
+		/**
+		 * @brief Verifies switching equal-revision render models cannot reuse another world's accessibility state.
+		 */
+		void switchingRuntimeObserverClearsAccessibilityStateForEqualRevisionModel()
+		{
+			resetTestState();
+			const ScopedTestStateReset resetState;
+
+			WorldRuntime *const        firstRuntime  = runtimeForTest(1);
+			WorldRuntime *const        secondRuntime = runtimeForTest(2);
+			firstRuntime->addLine(QStringLiteral("first-world-output"), WorldRuntime::LineOutput, true);
+			secondRuntime->addLine(QStringLiteral("second-world-output"), WorldRuntime::LineOutput, true);
+
+			WorldView view;
+			setTestRuntimeObserver(view, firstRuntime);
+			const WorldView::NativeOutputRenderLines &firstLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(firstLines.size()), 1);
+			const auto &firstMap = view.accessibleNativeOutputTextMap();
+			QCOMPARE(firstMap.text(0, firstMap.characterCount()), QStringLiteral("first-world-output"));
+			const quint64 firstRevision = view.m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+
+			view.m_accessibleOutputReviewActive = true;
+			view.m_accessibleOutputReviewTargetKind =
+			    WorldView::AccessibleOutputReviewTargetKind::SplitTopPane;
+			view.m_accessibleOutputLineStartCache         = {0};
+			view.m_accessibleOutputLineStartCacheRevision = firstRevision;
+
+			setTestRuntimeObserver(view, secondRuntime);
+			const WorldView::NativeOutputRenderLines &secondLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(secondLines.size()), 1);
+			QCOMPARE(view.m_nativeRenderModel->m_nativeRenderLineCacheRevision, firstRevision);
+			QVERIFY(!view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::None);
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(!view.m_accessibleOutputTextMapCacheValid);
+
+			const auto &secondMap = view.accessibleNativeOutputTextMap();
+			QCOMPARE(secondMap.text(0, secondMap.characterCount()), QStringLiteral("second-world-output"));
+		}
+
 		void worldOutputAccessibleScrollToSubstringUsesTopPaneAfterAutoPauseScroll()
 		{
 			resetTestState();
@@ -11758,6 +11838,9 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
 			QTRY_COMPARE(view.outputLines().value(0), QStringLiteral("merge-b"));
 			QTRY_COMPARE(view.outputLines().value(1), QStringLiteral("merge-c"));
+			const WorldView::NativeOutputRenderLines &renderLines = view.nativeOutputRenderLines();
+			QVERIFY(renderLines.constFirst().text.constData() ==
+			        runtimeForTest()->lines().constFirst().text.constData());
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
 			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_incremental_updates").toInt() >
 			            updatesBefore);
@@ -17131,6 +17214,35 @@ end
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("lazy-000")));
 
 			resetTestState();
+		}
+
+		/**
+		 * @brief Verifies full rebuilds share one-source text while retaining copy-on-write isolation.
+		 */
+		void nativeFullRebuildSharesSingleSourceTextAndPreservesCopyOnWrite()
+		{
+			resetTestState();
+			const ScopedTestStateReset resetState;
+
+			WorldRuntime *const        runtime = runtimeForTest();
+			WorldView                  view;
+			setTestRuntimeObserver(view, runtime);
+
+			WorldRuntime::LineEntry entry;
+			entry.text       = QString(256, QLatin1Char('s')) + QStringLiteral("-shared-source");
+			entry.flags      = WorldRuntime::LineOutput;
+			entry.hardReturn = true;
+			entry.lineNumber = 1;
+			runtime->replaceOutputLines({entry});
+
+			const WorldView::NativeOutputRenderLines &renderLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(renderLines.size()), 1);
+			QCOMPARE(renderLines.constFirst().text, entry.text);
+			QVERIFY(renderLines.constFirst().text.constData() ==
+			        runtime->lines().constFirst().text.constData());
+
+			entry.text[0] = QLatin1Char('m');
+			QCOMPARE(renderLines.constFirst().text.at(0), QLatin1Char('s'));
 		}
 
 		void applyRuntimeSettingsRebuildPreservesEndAnchorForRestoredBuffer()
