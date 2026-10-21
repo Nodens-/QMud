@@ -160,6 +160,20 @@ class SoundEngineTestAccess final
 		}
 
 		/**
+		 * @brief Expires one active assignment through the production playback-progress watchdog.
+		 * @param engine Sound engine whose worker owns the session.
+		 * @param session Session containing the active channel.
+		 * @param buffer One-based active channel to expire.
+		 * @return `true` when the watchdog removed the active assignment.
+		 */
+		[[nodiscard]] static bool
+		expireActivePlaybackWatchdog(const SoundEngine                         &engine,
+		                             const std::shared_ptr<SoundEngineSession> &session, const int buffer)
+		{
+			return engine.expireActivePlaybackWatchdogForTest(session, buffer);
+		}
+
+		/**
 		 * @brief Reads the resolved file identity assigned to one active channel.
 		 * @param engine Sound engine whose worker owns the session.
 		 * @param session Session owning the channel.

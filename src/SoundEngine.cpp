@@ -66,6 +66,7 @@
 namespace
 {
 	constexpr qsizetype kCatalogEntriesPerStep                 = 128;
+	constexpr int       kPlaybackNoProgressTimeoutMilliseconds = 5'000;
 	constexpr int       kSoundDownloadStallTimeoutMilliseconds = 60'000;
 	constexpr quint32   kSoundCatalogIndexMagic                = 0x514D5349U;
 	constexpr quint32   kSoundCatalogIndexVersion              = 1U;
@@ -320,6 +321,8 @@ namespace
 			bool               nativeMusic{false};
 			bool               nativeResolutionPending{false};
 			bool               luaAudioOwnershipConfirmed{false};
+			qint64             lastPlaybackProgressMsecs{0};
+			qint64             lastPlaybackPosition{-1};
 			double             volume{1.0};
 			double             pan{0.0};
 	};
@@ -2529,6 +2532,11 @@ namespace
 				connect(m_maintenanceTimer.get(), &QTimer::timeout, this,
 				        [this] { scheduleMaintenance(true); });
 				m_maintenanceTimer->start();
+				m_playbackWatchdogTimer = std::make_unique<QTimer>();
+				m_playbackWatchdogTimer->setSingleShot(true);
+				m_playbackWatchdogTimer->setTimerType(Qt::PreciseTimer);
+				connect(m_playbackWatchdogTimer.get(), &QTimer::timeout, this,
+				        [this] { expireStalledPlaybacks(currentTimeMsecs()); });
 				ensureMemoryPreparationPool();
 			}
 
@@ -2586,6 +2594,7 @@ namespace
 				m_watchedPluginDirectories.clear();
 				m_trackedPluginDirectories.clear();
 				m_pendingPluginDirectories.clear();
+				m_playbackWatchdogTimer.reset();
 				m_maintenanceTimer.reset();
 				m_memoryPreparationPool.reset();
 				m_mediaDevices.reset();
@@ -2809,6 +2818,27 @@ namespace
 				channel.playbackStarted = true;
 				completeChannelPlayback(sessionIt.value(), buffer - 1);
 				return true;
+			}
+
+			/**
+			 * @brief Expires one active channel through the production playback-progress watchdog.
+			 * @param sessionId Session owning the active assignment.
+			 * @param buffer One-based active channel to expire.
+			 * @return `true` when the watchdog removed the active assignment.
+			 */
+			[[nodiscard]] bool expireActivePlaybackWatchdogForTest(const quint64 sessionId, const int buffer)
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				auto sessionIt = m_sessions.find(sessionId);
+				if (sessionIt == m_sessions.end() || buffer < 1 || buffer > SoundEngineSession::kChannelCount)
+					return false;
+				SoundChannel &channel = sessionIt->channels[static_cast<std::size_t>(buffer - 1)];
+				if (!channel.backend || !channel.playing || channel.lastPlaybackProgressMsecs <= 0)
+					return false;
+				const qint64 expiration =
+				    channel.lastPlaybackProgressMsecs + kPlaybackNoProgressTimeoutMilliseconds;
+				expireStalledPlaybacks(expiration);
+				return !channel.backend && !channel.allocated;
 			}
 
 			/**
@@ -5419,6 +5449,9 @@ namespace
 				connect(backend.player.get(), &QMediaPlayer::playbackStateChanged, this,
 				        [this, raw = &backend](const QMediaPlayer::PlaybackState state)
 				        { handlePlayerState(*raw, state); });
+				connect(backend.player.get(), &QMediaPlayer::positionChanged, this,
+				        [this, raw = &backend](const qint64 position)
+				        { handlePlayerPosition(*raw, position); });
 				backend.player->setSource(QUrl::fromLocalFile(fileName));
 				return finishBackendInitialization(backend);
 			}
@@ -5492,11 +5525,30 @@ namespace
 				backend.assignmentGeneration = channel.assignmentGeneration;
 				backend.preparationToken     = 0;
 				backend.started              = false;
-				m_cache.noteUse(backend.key, currentTimeMsecs());
+				startAssignedBackend(channel, backend);
+				publishSnapshotIfChanged(session);
+			}
+
+			/**
+			 * @brief Starts one assigned backend from its beginning and arms playback progress supervision.
+			 * @param channel Logical channel already assigned to the backend.
+			 * @param backend Cache-owned backend already assigned to the channel.
+			 */
+			void startAssignedBackend(SoundChannel &channel, SoundBackend &backend)
+			{
+				const qint64 now                  = currentTimeMsecs();
+				channel.lastPlaybackProgressMsecs = now;
+				channel.lastPlaybackPosition      = -1;
+				backend.started                   = false;
+				m_cache.noteUse(backend.key, now);
 				applyBackendParameters(backend, channel);
 				if (backend.player)
+				{
+					backend.player->setPosition(0);
+					channel.lastPlaybackPosition = backend.player->position();
 					backend.player->play();
-				publishSnapshotIfChanged(session);
+				}
+				ensurePlaybackWatchdog();
 			}
 
 			static void applyBackendParameters(const SoundBackend &backend, const SoundChannel &channel)
@@ -5648,10 +5700,7 @@ namespace
 					lease.backend->assignmentGeneration = channel.assignmentGeneration;
 					lease.backend->preparationToken     = 0;
 					lease.backend->started              = false;
-					m_cache.noteUse(lease.backend->key, currentTimeMsecs());
-					applyBackendParameters(*lease.backend, channel);
-					if (lease.backend->player)
-						lease.backend->player->play();
+					startAssignedBackend(channel, *lease.backend);
 					return true;
 				}
 				if (!failureMessage.isEmpty())
@@ -5715,6 +5764,29 @@ namespace
 				completeChannelPlayback(sessionIt.value(), backend.channel);
 			}
 
+			/**
+			 * @brief Records forward or backward media-position progress for the current assignment.
+			 * @param backend Backend reporting its media position.
+			 * @param position Current media position in milliseconds.
+			 */
+			void handlePlayerPosition(const SoundBackend &backend, const qint64 position)
+			{
+				if (backend.channel < 0 || backend.sessionId == 0)
+					return;
+				auto sessionIt = m_sessions.find(backend.sessionId);
+				if (sessionIt == m_sessions.end())
+					return;
+				SoundChannel &channel = sessionIt->channels[static_cast<std::size_t>(backend.channel)];
+				if (channel.backend != &backend ||
+				    channel.assignmentGeneration != backend.assignmentGeneration ||
+				    channel.lastPlaybackPosition == position)
+				{
+					return;
+				}
+				channel.lastPlaybackPosition      = position;
+				channel.lastPlaybackProgressMsecs = currentTimeMsecs();
+			}
+
 			void handlePlayerError(SoundBackend &backend, const QMediaPlayer::Error error,
 			                       const QString &errorText)
 			{
@@ -5759,28 +5831,107 @@ namespace
 					retireBackend(backend);
 					return;
 				}
+				static_cast<void>(failActiveBackend(backend, message));
+			}
+
+			/**
+			 * @brief Fails one current assignment and retires its exact backend.
+			 * @param backend Backend whose assignment failed.
+			 * @param message Diagnostic reported for the failed playback.
+			 * @return `true` when the backend still owned the assignment and was failed.
+			 */
+			[[nodiscard]] bool failActiveBackend(SoundBackend &backend, const QString &message)
+			{
 				const quint64 sessionId = backend.sessionId;
 				auto          sessionIt = m_sessions.find(sessionId);
-				if (sessionIt == m_sessions.end())
+				if (sessionIt == m_sessions.end() || backend.channel < 0)
 				{
 					retireBackend(backend);
-					return;
+					return false;
 				}
 				const int     channelIndex = backend.channel;
 				SoundChannel &channel      = sessionIt->channels[static_cast<std::size_t>(channelIndex)];
 				if (channel.backend != &backend ||
 				    channel.assignmentGeneration != backend.assignmentGeneration)
-					return;
+				{
+					return false;
+				}
 				const quint64            ownershipGeneration = channel.ownershipGeneration;
 				const bool               ownershipConfirmed  = channel.luaAudioOwnershipConfirmed;
 				const SoundOwnershipKind ownershipKind       = channel.ownershipKind;
 				channel                                      = {};
+				backend.sessionId                            = 0;
+				backend.channel                              = -1;
+				backend.assignmentGeneration                 = 0;
+				std::unique_ptr<QSignalBlocker> playerBlocker;
+				if (backend.player)
+					playerBlocker = std::make_unique<QSignalBlocker>(backend.player.get());
+				stopBackend(backend);
 				publishSnapshotIfChanged(sessionIt.value());
 				if (ownershipKind == SoundOwnershipKind::LuaAudio)
 					finishLuaAudioOwnership(sessionIt.value(), channelIndex, ownershipGeneration,
 					                        ownershipConfirmed);
 				reportPlaybackError(sessionId, message);
 				retireBackend(backend);
+				return true;
+			}
+
+			/** @brief Starts the single playback-progress timer when active work is not already supervised. */
+			void ensurePlaybackWatchdog() const
+			{
+				if (!m_shuttingDown && m_playbackWatchdogTimer && !m_playbackWatchdogTimer->isActive())
+					m_playbackWatchdogTimer->start(kPlaybackNoProgressTimeoutMilliseconds);
+			}
+
+			/**
+			 * @brief Expires assignments without position progress and schedules the next exact deadline.
+			 * @param nowMsecs Current or test-supplied worker-relative monotonic time.
+			 */
+			void expireStalledPlaybacks(const qint64 nowMsecs)
+			{
+				for (WorkerSession &session : m_sessions)
+				{
+					for (SoundChannel &channel : session.channels)
+					{
+						SoundBackend *backend = channel.backend;
+						if (!backend || !channel.playing ||
+						    !SoundCache::elapsedAtLeast(nowMsecs, channel.lastPlaybackProgressMsecs,
+						                                kPlaybackNoProgressTimeoutMilliseconds))
+						{
+							continue;
+						}
+						static_cast<void>(failActiveBackend(
+						    *backend,
+						    QStringLiteral(
+						        "QMud sound playback stopped after %1 seconds without progress (file: %2)")
+						        .arg(kPlaybackNoProgressTimeoutMilliseconds / 1000)
+						        .arg(backend->key.identity)));
+					}
+				}
+
+				if (!m_playbackWatchdogTimer || m_shuttingDown)
+					return;
+				qint64 nextDeadline = 0;
+				for (const WorkerSession &session : std::as_const(m_sessions))
+				{
+					for (const SoundChannel &channel : session.channels)
+					{
+						if (!channel.backend || !channel.playing || channel.lastPlaybackProgressMsecs <= 0)
+							continue;
+						const qint64 deadline =
+						    channel.lastPlaybackProgressMsecs + kPlaybackNoProgressTimeoutMilliseconds;
+						if (nextDeadline == 0 || deadline < nextDeadline)
+							nextDeadline = deadline;
+					}
+				}
+				if (nextDeadline == 0)
+				{
+					m_playbackWatchdogTimer->stop();
+					return;
+				}
+				const qint64 interval = qBound(qint64{1}, nextDeadline - nowMsecs,
+				                               static_cast<qint64>(kPlaybackNoProgressTimeoutMilliseconds));
+				m_playbackWatchdogTimer->start(static_cast<int>(interval));
 			}
 
 			/**
@@ -6115,6 +6266,7 @@ namespace
 			std::unique_ptr<QMediaDevices>                     m_mediaDevices;
 			std::unique_ptr<SoundBackend>                      m_preinitializedMediaBackend;
 			std::unique_ptr<QTimer>                            m_maintenanceTimer;
+			std::unique_ptr<QTimer>                            m_playbackWatchdogTimer;
 			std::unique_ptr<QThreadPool>                       m_memoryPreparationPool;
 			QElapsedTimer                                      m_clock;
 			QThread                                            m_ioThread;
@@ -6734,6 +6886,29 @@ bool SoundEngine::completeActiveChannelForTest(const std::shared_ptr<SoundEngine
 	    { completed = worker->completeActiveChannelForTest(sessionId, buffer); },
 	    Qt::BlockingQueuedConnection);
 	return completed;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(buffer);
+	return false;
+#endif
+}
+
+bool SoundEngine::expireActivePlaybackWatchdogForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                                      const int                                  buffer) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire) || buffer < 1 ||
+	    buffer > SoundEngineSession::kChannelCount)
+	{
+		return false;
+	}
+	bool expired = false;
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, sessionId = session->id(), buffer, &expired]
+	    { expired = worker->expireActivePlaybackWatchdogForTest(sessionId, buffer); },
+	    Qt::BlockingQueuedConnection);
+	return expired;
 #else
 	Q_UNUSED(session);
 	Q_UNUSED(buffer);

@@ -255,6 +255,15 @@ class SoundEngine final : public QObject
 		[[nodiscard]] bool completeActiveChannelForTest(const std::shared_ptr<SoundEngineSession> &session,
 		                                                int buffer) const;
 		/**
+		 * @brief Expires one active assignment through the production playback-progress watchdog.
+		 * @param session Session owning the active channel.
+		 * @param buffer One-based active channel to expire.
+		 * @return `true` when the watchdog removed the active assignment.
+		 */
+		[[nodiscard]] bool
+		expireActivePlaybackWatchdogForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                    int                                        buffer) const;
+		/**
 		 * @brief Reads the resolved file identity assigned to one active channel.
 		 * @param session Session owning the channel.
 		 * @param buffer One-based channel to inspect.

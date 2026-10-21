@@ -1603,6 +1603,49 @@ namespace
 			}
 
 			/**
+			 * @brief Verifies playback without progress is failed, retired, and cannot enter a native repeat.
+			 */
+			void playbackNoProgressWatchdogRetiresBackendAndStopsNativeRepeat()
+			{
+				QStringList                   errors;
+				SoundEngine                   engine;
+				SoundEngine::SessionCallbacks callbacks;
+				callbacks.playbackError = [&errors](const QString &message) { errors.push_back(message); };
+				configureTestSoundCatalog(engine);
+				const auto session = registerTestSession(engine, std::move(callbacks));
+				QVERIFY(session);
+
+				QMudNativeSoundRequest request = nativeSoundRequest(QStringLiteral("QMud/beep.wav"));
+				request.repeatCount            = 2;
+				QVERIFY(session->submitNativeSound(request));
+				const int buffer =
+				    SoundEngineTestAccess::nativePlaybackState(engine, session, QMudNativeSoundProtocol::Msp,
+				                                               QMudNativeSoundMedia::Sound)
+				        .buffer;
+				QVERIFY(buffer > 0);
+				QCOMPARE(session->status(buffer), 1);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+
+				QVERIFY(SoundEngineTestAccess::expireActivePlaybackWatchdog(engine, session, buffer));
+				QCOMPARE(session->status(buffer), -2);
+				QVERIFY(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer).isEmpty());
+				QVERIFY(!SoundEngineTestAccess::nativePlaybackState(
+				             engine, session, QMudNativeSoundProtocol::Msp, QMudNativeSoundMedia::Sound)
+				             .current);
+				QTRY_COMPARE(errors.size(), 1);
+				QVERIFY(errors.constFirst().contains(QStringLiteral("5 seconds without progress")));
+				QTRY_COMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 0);
+
+				int replacementBuffer = 0;
+				QCOMPARE(session->playFile(0, testSoundFileName(), false, 0.0, 0.0, 0, &replacementBuffer),
+				         eOK);
+				QVERIFY(replacementBuffer > 0);
+				QCOMPARE(session->status(replacementBuffer), 1);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+				QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, replacementBuffer));
+			}
+
+			/**
 			 * @brief Verifies completed backends are reused before idle cache entries or new allocations.
 			 */
 			void completedBackendIsReusedAcrossPreparedAndDirectPlayback()
