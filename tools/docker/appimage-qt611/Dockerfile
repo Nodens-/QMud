@@ -76,11 +76,10 @@ RUN mkdir -p /etc/aqt && \
 
 ENV AQT_CONFIG=/etc/aqt/settings.ini
 
-ARG QT_SERIES=6.11
+ARG QT_VERSION=6.11.2
 ARG QT_ARCH=linux_gcc_64
 
 RUN set -eux; \
-    QT_VERSION="$(aqt list-qt linux desktop --spec "${QT_SERIES}" --latest-version)"; \
     aqt install-qt -O /opt/Qt linux desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qttasktree; \
     ln -sfn "/opt/Qt/${QT_VERSION}" /opt/Qt/latest
 
