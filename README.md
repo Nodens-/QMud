@@ -243,9 +243,9 @@ cmake --build cmake-build-release --target QMud -j"$(sysctl -n hw.ncpu)"
 Build the cross-build images first:
 
 ```bash
-docker build -t qmud-appimage-builder:qt6.11 -f tools/docker/appimage-qt611/Dockerfile tools/docker/appimage-qt611
-docker build -t qmud-macos-builder:qt6.11 -f tools/docker/macos-qt611/Dockerfile tools/docker/macos-qt611
-docker build -t qmud-windows-builder:qt6.11 -f tools/docker/windows-qt611/Dockerfile tools/docker/windows-qt611
+docker build -t qmud-appimage-builder:qt6.11 -f tools/docker/appimage-qt611/Dockerfile .
+docker build -t qmud-macos-builder:qt6.11 -f tools/docker/macos-qt611/Dockerfile tools/docker/macos-qt611 .
+docker build -t qmud-windows-builder:qt6.11 -f tools/docker/windows-qt611/Dockerfile tools/docker/windows-qt611 .
 ```
 
 Configure once (Docker targets are Linux-host only):

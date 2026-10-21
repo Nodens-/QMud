@@ -103,7 +103,7 @@ RUN set -eux; \
 ENV QMUD_APPIMAGE_QT_PREFIX=/opt/Qt/latest/gcc_64
 ENV PATH=/opt/Qt/latest/gcc_64/bin:${PATH}
 
-COPY start-test-audio.sh /usr/local/bin/qmud-start-test-audio
+COPY tools/scripts/start-test-audio.sh /usr/local/bin/qmud-start-test-audio
 RUN chmod 0755 /usr/local/bin/qmud-start-test-audio
 
 WORKDIR /work

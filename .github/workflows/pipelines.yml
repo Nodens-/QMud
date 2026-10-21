@@ -435,7 +435,7 @@ jobs:
             --label "org.opencontainers.image.version=${GHCR_IMAGE##*:}" \
             --file tools/docker/appimage-qt611/Dockerfile \
             --tag "$LOCAL_IMAGE" \
-            tools/docker/appimage-qt611
+            .
           if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
             echo "needs_push=false" >> "$GITHUB_OUTPUT"
           else
@@ -663,7 +663,7 @@ jobs:
             appimage)
               IMAGE=qmud-appimage-builder:qt6.11
               DOCKERFILE=tools/docker/appimage-qt611/Dockerfile
-              CONTEXT=tools/docker/appimage-qt611 ;;
+              CONTEXT=. ;;
             macos)
               IMAGE=qmud-macos-builder:qt6.11
               DOCKERFILE=tools/docker/macos-qt611/Dockerfile
