@@ -25,6 +25,8 @@
 #include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/NoteColourUtils.h"
+#include "helpers/PluginPathUtils.h"
+#include "helpers/SoundFileRoutingUtils.h"
 #include "helpers/TimerSchedulingUtils.h"
 #include "helpers/WorldCommandProcessorUtils.h"
 #include "scripting/ScriptingErrors.h"
@@ -2387,6 +2389,9 @@ std::optional<WorldPreferencesDialog::Page> WorldPreferencesDialog::pageForWorld
 		     "save_world_automatically", "autosave_minutes", "proxy_type", "proxy_server", "proxy_port",
 		     "proxy_username", "proxy_password"});
 		add(PageOutput, {"beep_sound",
+		                 "default_world_sound_directory",
+		                 "disable_msp_playback",
+		                 "enable_embedded_msp",
 		                 "new_activity_sound",
 		                 "play_sounds_in_background",
 		                 "wrap_column",
@@ -2930,6 +2935,15 @@ WorldPreferencesDialog::OptionValues WorldPreferencesDialog::collectWorldOptionV
 		values.attributes.insert(QStringLiteral("beep_sound"), m_beepSound->text());
 	if (m_newActivitySound)
 		values.attributes.insert(QStringLiteral("new_activity_sound"), m_newActivitySound->text());
+	if (m_defaultWorldSoundDirectory)
+		values.attributes.insert(QStringLiteral("default_world_sound_directory"),
+		                         m_defaultWorldSoundDirectory->text().trimmed());
+	if (m_enableEmbeddedMsp)
+		values.attributes.insert(QStringLiteral("enable_embedded_msp"),
+		                         boolAttributeValue(m_enableEmbeddedMsp->isChecked()));
+	if (m_disableMspPlayback)
+		values.attributes.insert(QStringLiteral("disable_msp_playback"),
+		                         boolAttributeValue(m_disableMspPlayback->isChecked()));
 	if (m_playSoundsInBackground)
 		values.attributes.insert(QStringLiteral("play_sounds_in_background"),
 		                         boolAttributeValue(m_playSoundsInBackground->isChecked()));
@@ -3655,6 +3669,27 @@ void WorldPreferencesDialog::accept()
 
 	if (m_runtime)
 	{
+		if (m_defaultWorldSoundDirectory &&
+		    pendingAttributes.contains(QStringLiteral("default_world_sound_directory")))
+		{
+			WorldSoundDirectoryPaths paths;
+			QString                  error;
+			if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(),
+			                                m_defaultWorldSoundDirectory->text(), &paths, &error))
+			{
+				QMessageBox::warning(this, QStringLiteral("Default world sound directory"), error);
+				return;
+			}
+			const QString key = QStringLiteral("default_world_sound_directory");
+			if (m_runtime->worldAttributes().value(key, QString::fromLatin1(kDefaultWorldSoundDirectory)) ==
+			    paths.storedPath)
+			{
+				pendingAttributes.remove(key);
+			}
+			else
+				pendingAttributes.insert(key, paths.storedPath);
+			m_defaultWorldSoundDirectory->setText(paths.storedPath);
+		}
 		const QSet<QString> generalValidationKeys = {QStringLiteral("name"), QStringLiteral("site"),
 		                                             QStringLiteral("port")};
 		const bool          incompleteNewWorld =
@@ -3883,6 +3918,8 @@ void WorldPreferencesDialog::accept()
 
 		for (auto it = pendingAttributes.cbegin(); it != pendingAttributes.cend(); ++it)
 			m_runtime->setWorldAttribute(it.key(), it.value());
+		if (pendingAttributes.contains(QStringLiteral("default_world_sound_directory")))
+			m_runtime->updateWorldSoundDirectory();
 		for (auto it = pendingMultilineAttributes.cbegin(); it != pendingMultilineAttributes.cend(); ++it)
 			m_runtime->setWorldMultilineAttribute(it.key(), it.value());
 		if (pendingAttributes.contains(QStringLiteral("note_text_colour")))
@@ -6941,6 +6978,69 @@ void WorldPreferencesDialog::buildUi()
 	activityLayout->addWidget(m_noActivitySound, 1, 3);
 	activityLayout->addWidget(m_playSoundsInBackground, 2, 0, 1, 4);
 	outputLeft->addWidget(activityGroup);
+
+	auto *worldSoundDirectoryGroup =
+	    new QGroupBox(QStringLiteral("Default world sound directory"), outputPage);
+	auto *worldSoundDirectoryLayout = new QGridLayout(worldSoundDirectoryGroup);
+	m_defaultWorldSoundDirectory    = new QLineEdit(worldSoundDirectoryGroup);
+	m_defaultWorldSoundDirectory->setObjectName(QStringLiteral("defaultWorldSoundDirectoryEdit"));
+	m_browseDefaultWorldSoundDirectory =
+	    new QPushButton(QStringLiteral("&Browse..."), worldSoundDirectoryGroup);
+	m_enableEmbeddedMsp = new QCheckBox(QStringLiteral("Enable embedded MSP"), worldSoundDirectoryGroup);
+	m_enableEmbeddedMsp->setObjectName(QStringLiteral("enableEmbeddedMspCheckBox"));
+	m_disableMspPlayback = new QCheckBox(QStringLiteral("Disable MSP playback"), worldSoundDirectoryGroup);
+	m_disableMspPlayback->setObjectName(QStringLiteral("disableMspPlaybackCheckBox"));
+	worldSoundDirectoryLayout->addWidget(m_defaultWorldSoundDirectory, 0, 0);
+	worldSoundDirectoryLayout->addWidget(m_browseDefaultWorldSoundDirectory, 0, 1);
+	worldSoundDirectoryLayout->addWidget(m_enableEmbeddedMsp, 1, 0, 1, 2);
+	worldSoundDirectoryLayout->addWidget(m_disableMspPlayback, 2, 0, 1, 2);
+	outputLeft->addWidget(worldSoundDirectoryGroup);
+	connect(
+	    m_browseDefaultWorldSoundDirectory, &QPushButton::clicked, this,
+	    [this]
+	    {
+		    if (!m_runtime || !m_defaultWorldSoundDirectory)
+			    return;
+		    WorldSoundDirectoryPaths soundsRoot;
+		    if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(),
+		                                    QString::fromLatin1(kDefaultWorldSoundDirectory), &soundsRoot))
+		    {
+			    return;
+		    }
+		    WorldSoundDirectoryPaths current;
+		    if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(),
+		                                    m_defaultWorldSoundDirectory->text(), &current))
+		    {
+			    static_cast<void>(resolveWorldSoundDirectory(m_runtime->startupDirectory(),
+			                                                 QString::fromLatin1(kDefaultWorldSoundDirectory),
+			                                                 &current));
+		    }
+		    const QString selected = QFileDialog::getExistingDirectory(
+		        this, QStringLiteral("Select Default World Sound Directory"), current.absolutePath,
+		        QFileDialog::ShowDirsOnly);
+		    if (selected.isEmpty())
+			    return;
+		    const QString canonicalSelection =
+		        QMudPluginPathUtils::normalizeSeparators(QFileInfo(selected).canonicalFilePath());
+		    const QString canonicalSounds = QMudPluginPathUtils::normalizeSeparators(
+		        QFileInfo(soundsRoot.absolutePath).canonicalFilePath());
+		    if (!QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonicalSelection, canonicalSounds))
+		    {
+			    QMessageBox::warning(this, QStringLiteral("Default world sound directory"),
+			                         QStringLiteral("The directory must be beneath ./sounds/."));
+			    return;
+		    }
+		    const QString relative = QMudPluginPathUtils::qmudHomeRelativePath(m_runtime->startupDirectory(),
+		                                                                       canonicalSelection, true);
+		    WorldSoundDirectoryPaths chosen;
+		    QString                  error;
+		    if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(), relative, &chosen, &error))
+		    {
+			    QMessageBox::warning(this, QStringLiteral("Default world sound directory"), error);
+			    return;
+		    }
+		    m_defaultWorldSoundDirectory->setText(chosen.storedPath);
+	    });
 	if (m_browseBeepSound && m_beepSound)
 		connect(m_browseBeepSound, &QPushButton::clicked, this,
 		        [this] { browseSoundFile(m_runtime, this, m_beepSound); });
@@ -10937,6 +11037,15 @@ void WorldPreferencesDialog::populateSound() const
 		m_beepSound->setText(attrs.value(QStringLiteral("beep_sound")));
 	if (m_newActivitySound)
 		m_newActivitySound->setText(attrs.value(QStringLiteral("new_activity_sound")));
+	if (m_defaultWorldSoundDirectory)
+		m_defaultWorldSoundDirectory->setText(attrs.value(QStringLiteral("default_world_sound_directory"),
+		                                                  QString::fromLatin1(kDefaultWorldSoundDirectory)));
+	if (m_enableEmbeddedMsp)
+		m_enableEmbeddedMsp->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_embedded_msp"))));
+	if (m_disableMspPlayback)
+		m_disableMspPlayback->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("disable_msp_playback"))));
 	if (m_playSoundsInBackground)
 		m_playSoundsInBackground->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("play_sounds_in_background"))));

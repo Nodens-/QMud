@@ -20,6 +20,34 @@
 class SoundEngineSession;
 class SoundEngineTestAccess;
 
+/** @brief Native protocol that originated a sound-engine request. */
+enum class QMudNativeSoundProtocol : quint8
+{
+	Msp,
+	Mxp
+};
+
+/** @brief Native protocol media class with independent playback semantics. */
+enum class QMudNativeSoundMedia : quint8
+{
+	Sound,
+	Music
+};
+
+/** @brief Parsed protocol-independent request submitted to the sound worker. */
+struct QMudNativeSoundRequest
+{
+		QMudNativeSoundProtocol protocol{QMudNativeSoundProtocol::Msp};
+		QMudNativeSoundMedia    media{QMudNativeSoundMedia::Sound};
+		QString                 filePattern;
+		QString                 downloadUrl;
+		int                     volume{100};
+		int                     repeatCount{1};
+		int                     priority{50};
+		bool                    continuePlayback{false};
+		bool                    stop{false};
+};
+
 /**
  * @brief Owns the process-wide sound worker and creates isolated per-world sound sessions.
  *
@@ -36,14 +64,15 @@ class SoundEngine final : public QObject
 		 */
 		struct CachePolicy
 		{
-				static constexpr int             kMinimumRamCacheSizeMiB       = 64;
-				static constexpr int             kDefaultRamCacheSizeMiB       = 128;
-				static constexpr int             kMaximumRamCacheSizeMiB       = 1024;
-				static constexpr int             kMinimumIdleEvictionSeconds   = 1800;
-				static constexpr int             kDefaultIdleEvictionSeconds   = 7200;
-				static constexpr int             kMaximumIdleEvictionSeconds   = 86400;
-				static constexpr int             kCompletedChannelGraceSeconds = 300;
-				static constexpr int             kMaintenanceIntervalSeconds   = 60;
+				static constexpr int             kMinimumRamCacheSizeMiB                   = 64;
+				static constexpr int             kDefaultRamCacheSizeMiB                   = 128;
+				static constexpr int             kMaximumRamCacheSizeMiB                   = 1024;
+				static constexpr int             kMinimumIdleEvictionSeconds               = 1800;
+				static constexpr int             kDefaultIdleEvictionSeconds               = 7200;
+				static constexpr int             kMaximumIdleEvictionSeconds               = 86400;
+				static constexpr int             kCompletedChannelGraceSeconds             = 300;
+				static constexpr int             kMaintenanceIntervalSeconds               = 60;
+				static constexpr qsizetype       kMaximumRetainedTransitionsPerMaintenance = 128;
 
 				int                              ramCacheSizeMiB{kDefaultRamCacheSizeMiB};
 				int                              idleEvictionSeconds{kDefaultIdleEvictionSeconds};
@@ -80,30 +109,40 @@ class SoundEngine final : public QObject
 		/** @brief Stops a responsive worker or retires initialization that is still blocked during destruction. */
 		~SoundEngine() override;
 
-		SoundEngine(const SoundEngine &)                                                 = delete;
-		SoundEngine                                      &operator=(const SoundEngine &) = delete;
+		SoundEngine(const SoundEngine &)            = delete;
+		SoundEngine &operator=(const SoundEngine &) = delete;
 
 		/** @brief Queues process-wide device and playback-backend initialization during application startup. */
-		void                                              initializePlayback();
+		void         initializePlayback();
+		/**
+		 * @brief Configures the QMud home whose sounds tree is indexed lazily by the sound worker.
+		 * @param qmudHomeDirectory Resolved QMud home directory.
+		 */
+		void         configureSoundDirectory(const QString &qmudHomeDirectory) const;
+		/**
+		 * @brief Configures the global plugins directory accepted for explicit plugin-bundled sounds.
+		 * @param pluginsDirectory Resolved plugins directory contained beneath QMud home.
+		 */
+		void         configurePluginDirectory(const QString &pluginsDirectory) const;
 
 		/**
-		 * @brief Creates a sound session rooted at one world's startup directory.
-		 * @param startupDirectory Captured QMud home used for legacy sound-path resolution.
+		 * @brief Creates a sound session rooted at the process-wide configured sounds tree.
 		 * @param callbacks Runtime notifications with the thread contracts documented by SessionCallbacks.
+		 * @param worldSoundDirectory Persisted per-world directory searched before the shared sounds tree.
 		 * @return Thread-safe session handle, or an empty pointer when the worker is unavailable.
 		 */
-		[[nodiscard]] std::shared_ptr<SoundEngineSession> registerSession(const QString   &startupDirectory,
-		                                                                  SessionCallbacks callbacks) const;
+		[[nodiscard]] std::shared_ptr<SoundEngineSession>
+		     registerSession(SessionCallbacks callbacks, const QString &worldSoundDirectory = {}) const;
 		/**
 		 * @brief Removes notification routing for a closing session and closes its worker state.
 		 * @param session Session being closed.
 		 */
-		void                      unregisterSession(const std::shared_ptr<SoundEngineSession> &session) const;
+		void unregisterSession(const std::shared_ptr<SoundEngineSession> &session) const;
 		/**
 		 * @brief Applies cache limits used by the next periodic maintenance pass.
 		 * @param policy Requested process-wide cache policy.
 		 */
-		void                      configureCache(CachePolicy policy) const;
+		void configureCache(CachePolicy policy) const;
 		/**
 		 * @brief Returns the normalized process-wide cache policy.
 		 * @return Current cache policy.
@@ -113,7 +152,7 @@ class SoundEngine final : public QObject
 	signals:
 		/**
 		 * @brief Reports completion of startup playback initialization.
-		 * @param available Whether both playback implementations initialized before the watchdog expired.
+		 * @param available Whether playback initialized before the watchdog expired.
 		 */
 		void playbackInitializationFinished(bool available);
 
@@ -133,11 +172,32 @@ class SoundEngine final : public QObject
 				CacheStateForTest firstStep;
 				CacheStateForTest secondStep;
 		};
-		/** @brief Test-only source-free playback backend readiness. */
+		/** @brief Test-only source-free media-player readiness. */
 		struct PlaybackInitializationStateForTest
 		{
-				bool effectReady{false};
 				bool mediaPlayerReady{false};
+		};
+		/** @brief Test-only view of the worker-owned sound-file catalog. */
+		struct FileCatalogStateForTest
+		{
+				qsizetype fileCount{0};
+				qsizetype directoryCount{0};
+				qsizetype watchedDirectoryCount{0};
+				qsizetype failedWatchCount{0};
+				qsizetype maximumIndexBatchSize{0};
+				qsizetype maximumDirectoryBatchSize{0};
+				qsizetype maximumReconciliationStepSize{0};
+				qsizetype watchStatePathEntryCount{0};
+				quint64   revision{0};
+				bool      ready{false};
+		};
+		/** @brief Test-only view of one worker-owned native protocol playback. */
+		struct NativePlaybackStateForTest
+		{
+				int     buffer{0};
+				QString filePattern;
+				int     priority{0};
+				bool    current{false};
 		};
 
 		/**
@@ -147,8 +207,25 @@ class SoundEngine final : public QObject
 		 * @param idle Whether the source is fully idle and eviction-eligible.
 		 * @param usedAtMsecs Positive last-use timestamp used for LRU ordering.
 		 */
-		void addCacheSourceForTest(const QString &identity, qint64 sourceBytes, bool idle,
-		                           qint64 usedAtMsecs) const;
+		void               addCacheSourceForTest(const QString &identity, qint64 sourceBytes, bool idle,
+		                                         qint64 usedAtMsecs) const;
+		/**
+		 * @brief Seeds one real file request into the production cache indexes without multimedia objects.
+		 * @param session Session owning the request.
+		 * @param request Request text used as the session cache key.
+		 * @param absolutePath Existing catalog file identity.
+		 * @return `true` when the cache identity was installed.
+		 */
+		[[nodiscard]] bool cacheFileRequestForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                           const QString &request, const QString &absolutePath) const;
+		/**
+		 * @brief Reports whether one request retains a reusable exact-file cache association.
+		 * @param session Session owning the request.
+		 * @param request Request text used as the session cache key.
+		 * @return `true` when the request remains cached.
+		 */
+		[[nodiscard]] bool fileRequestIsCachedForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                              const QString &request) const;
 		/**
 		 * @brief Applies a policy, simulates one timer tick, and delivers its incremental maintenance events.
 		 * @param policy Cache policy to apply.
@@ -170,6 +247,31 @@ class SoundEngine final : public QObject
 		[[nodiscard]] bool completeReservedChannelForTest(const std::shared_ptr<SoundEngineSession> &session,
 		                                                  int buffer) const;
 		/**
+		 * @brief Completes one active channel through the worker's production completion transition.
+		 * @param session Session owning the active channel.
+		 * @param buffer One-based active channel to complete.
+		 * @return `true` when the active assignment was completed.
+		 */
+		[[nodiscard]] bool completeActiveChannelForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                int buffer) const;
+		/**
+		 * @brief Expires one active assignment through the production playback-progress watchdog.
+		 * @param session Session owning the active channel.
+		 * @param buffer One-based active channel to expire.
+		 * @return `true` when the watchdog removed the active assignment.
+		 */
+		[[nodiscard]] bool
+		expireActivePlaybackWatchdogForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                    int                                        buffer) const;
+		/**
+		 * @brief Reads the resolved file identity assigned to one active channel.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel to inspect.
+		 * @return Absolute file identity, or an empty string when no file backend is assigned.
+		 */
+		[[nodiscard]] QString activeFileIdentityForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                int buffer) const;
+		/**
 		 * @brief Creates a prepared occurrence and fails it through the production backend-error transition.
 		 * @param session Session receiving the prepared occurrence.
 		 * @param message Diagnostic supplied to the backend-error transition.
@@ -186,14 +288,77 @@ class SoundEngine final : public QObject
 		[[nodiscard]] CacheStateForTest                  cacheStateForTest() const;
 		/**
 		 * @brief Reads startup playback backend readiness on the worker thread.
-		 * @return Availability of the source-free effect and media-player backends.
+		 * @return Availability of the source-free media-player backend.
 		 */
 		[[nodiscard]] PlaybackInitializationStateForTest playbackInitializationStateForTest() const;
+		/**
+		 * @brief Reads the worker-owned sound-file catalog state.
+		 * @return Current catalog size and initial-scan state.
+		 */
+		[[nodiscard]] FileCatalogStateForTest            fileCatalogStateForTest() const;
+		/**
+		 * @brief Pauses or resumes low-priority catalog events for deterministic tests.
+		 * @param paused Whether later catalog events should remain suspended.
+		 */
+		void                                             setCatalogPausedForTest(bool paused) const;
+		/**
+		 * @brief Pauses or resumes persistent-index ingestion for deterministic tests.
+		 * @param paused Whether index batches must remain suspended.
+		 */
+		void                                             setIndexReadPausedForTest(bool paused) const;
+		/**
+		 * @brief Publishes synthetic catalog paths through the production bounded directory handoff.
+		 * @param fileCount Number of paths to publish.
+		 * @return `true` when the quiescent I/O worker accepted the publication.
+		 */
+		[[nodiscard]] bool    publishSyntheticCatalogDirectoryForTest(qsizetype fileCount) const;
+		/**
+		 * @brief Reads how many file requests used full filesystem resolution on the sound worker.
+		 * @return Number of slow file-resolution attempts.
+		 */
+		[[nodiscard]] quint64 slowFileResolutionCountForTest() const;
+		/**
+		 * @brief Reads one worker-owned native protocol playback.
+		 * @param session Session owning the logical playback.
+		 * @param protocol Protocol playback namespace.
+		 * @param media Media-class playback namespace.
+		 * @return Current logical playback state.
+		 */
+		[[nodiscard]] NativePlaybackStateForTest
+		nativePlaybackStateForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                           QMudNativeSoundProtocol protocol, QMudNativeSoundMedia media) const;
+		/**
+		 * @brief Attempts one catalog watch through the production registration path.
+		 * @param directory Directory to register.
+		 * @return `true` when registration succeeded.
+		 */
+		[[nodiscard]] bool       attemptCatalogWatchForTest(const QString &directory) const;
+		/** @brief Reconciles the configured sounds root through the production watcher transition. */
+		void                     reconcileSoundRootForTest() const;
+		/**
+		 * @brief Reconciles one catalog directory through the production watcher transition.
+		 * @param directory Changed catalog directory.
+		 */
+		void                     reconcileCatalogDirectoryForTest(const QString &directory) const;
+		/** @brief Runs one production periodic maintenance pass on the worker. */
+		void                     runPeriodicMaintenanceForTest() const;
+		/**
+		 * @brief Replaces the native-download inactivity timeout for deterministic tests.
+		 * @param milliseconds Positive no-progress interval applied to later requests.
+		 */
+		void                     setDownloadStallTimeoutForTest(int milliseconds) const;
+		/**
+		 * @brief Processes an existing file through native download completion for deterministic tests.
+		 * @param destination Existing sound file beneath the configured sounds root.
+		 */
+		void                     processExistingDownloadForTest(const QString &destination) const;
 		/**
 		 * @brief Installs a one-shot barrier at the entered startup-initialization boundary.
 		 * @param barrier Barrier invoked on the sound worker before multimedia construction.
 		 */
 		void                     setPlaybackInitializationBarrierForTest(std::function<void()> barrier) const;
+		/** @brief Forces startup discovery to reject its output device for deterministic tests. */
+		void                     forceNoAudioOutputForTest() const;
 		/** @brief Expires the startup initialization watchdog through its production transition. */
 		void                     expirePlaybackInitializationWatchdogForTest() const;
 		/**
@@ -235,15 +400,15 @@ class SoundEngineSession final
 		};
 
 		/**
-		 * @brief Updates the world root used by later sound path resolution.
-		 * @param startupDirectory New captured QMud home for the session.
+		 * @brief Updates the preferred directory used by later sound requests.
+		 * @param worldSoundDirectory Persisted per-world directory beneath the sounds tree.
 		 */
-		void              updateStartupDirectory(const QString &startupDirectory) const;
+		void              updateWorldSoundDirectory(const QString &worldSoundDirectory) const;
 
 		/**
 		 * @brief Plays or updates a file-backed sound without plugin interception.
 		 * @param buffer Fixed channel, or zero for automatic selection.
-		 * @param fileName Legacy QMud-home-relative or absolute-safe sound path.
+		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
 		 * @param loop Whether playback repeats indefinitely.
 		 * @param volume MUSHclient volume in the range -100 through 0.
 		 * @param pan Compatibility pan value retained for callers.
@@ -270,7 +435,7 @@ class SoundEngineSession final
 		                             quint64 luaAudioGeneration = 0, int *selectedBuffer = nullptr) const;
 		/**
 		 * @brief Validates a delayed LuaAudio file and reserves the first reusable channel.
-		 * @param fileName Legacy QMud-home-relative or absolute-safe sound path.
+		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
 		 * @param luaAudioGeneration Ownership generation attached to the reservation.
 		 * @return Selected one-based channel, or zero when none is reusable.
 		 */
@@ -290,6 +455,12 @@ class SoundEngineSession final
 		 */
 		[[nodiscard]] int     stopLuaAudioChannel(int buffer, quint64 luaAudioGeneration) const;
 		/**
+		 * @brief Queues one parsed native protocol sound request without waiting for worker execution.
+		 * @param request Validated protocol-independent playback request.
+		 * @return `true` when the worker queue accepted the request.
+		 */
+		[[nodiscard]] bool    submitNativeSound(QMudNativeSoundRequest request) const;
+		/**
 		 * @brief Stops one logical channel or all channels immediately.
 		 * @param buffer Fixed channel, or zero for all channels.
 		 * @return MUSHclient-compatible status code.
@@ -297,7 +468,7 @@ class SoundEngineSession final
 		[[nodiscard]] int     stop(int buffer) const;
 		/**
 		 * @brief Begins loading an interceptable sound without making it audible.
-		 * @param fileName Legacy QMud-home-relative or absolute-safe sound path.
+		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
 		 * @return Nonzero preparation token, or zero when the request cannot be accepted.
 		 */
 		[[nodiscard]] quint64 prepareFile(const QString &fileName) const;

@@ -67,8 +67,16 @@ namespace
 		return path.mid(root.size() + 1);
 	}
 
-	bool resolveExistingCanonicalParentInsideHome(const QString &absolutePath, const QString &canonicalHome,
-	                                              QString *error)
+	/**
+	 * @brief Checks the nearest existing parent against a canonical containment root.
+	 * @param absolutePath Candidate path whose target does not yet exist.
+	 * @param canonicalRoot Canonical directory that must contain the existing parent.
+	 * @param rootDescription Diagnostic name for the containment root.
+	 * @param error Optional destination receiving a diagnostic.
+	 * @return `true` when the nearest existing parent remains inside the root.
+	 */
+	bool resolveExistingCanonicalParentInsideRoot(const QString &absolutePath, const QString &canonicalRoot,
+	                                              const QString &rootDescription, QString *error)
 	{
 		QFileInfo parentInfo(QFileInfo(absolutePath).absolutePath());
 		while (!parentInfo.exists())
@@ -81,16 +89,16 @@ namespace
 
 		const QString canonicalParent =
 		    QMudPluginPathUtils::normalizeSeparators(parentInfo.canonicalFilePath());
-		if (canonicalParent.isEmpty())
+		if (canonicalParent.isEmpty() || !parentInfo.isDir())
 		{
 			if (error)
-				*error = QStringLiteral("No existing parent directory inside QMud home directory");
+				*error = QStringLiteral("No existing parent directory inside %1").arg(rootDescription);
 			return false;
 		}
-		if (!QMudPluginPathUtils::pathIsWithinOrEqualTo(canonicalParent, canonicalHome))
+		if (!QMudPluginPathUtils::pathIsWithinOrEqualTo(canonicalParent, canonicalRoot))
 		{
 			if (error)
-				*error = QStringLiteral("Path parent resolves outside QMud home directory");
+				*error = QStringLiteral("Path parent resolves outside %1").arg(rootDescription);
 			return false;
 		}
 		return true;
@@ -235,7 +243,8 @@ bool QMudPluginPathUtils::resolveInsideQmudHome(const QString &qmudHome, const Q
 			return false;
 		}
 	}
-	else if (!resolveExistingCanonicalParentInsideHome(absolutePath, canonicalHome, error))
+	else if (!resolveExistingCanonicalParentInsideRoot(absolutePath, canonicalHome,
+	                                                   QStringLiteral("QMud home directory"), error))
 	{
 		return false;
 	}
@@ -243,6 +252,90 @@ bool QMudPluginPathUtils::resolveInsideQmudHome(const QString &qmudHome, const Q
 	if (resolvedPath)
 		*resolvedPath = absolutePath;
 	return true;
+}
+
+bool QMudPluginPathUtils::resolveInsideDirectory(const QString &rootDirectory, const QString &relativePath,
+                                                 QString *resolvedPath, QString *error)
+{
+	const QString canonicalRoot = normalizeSeparators(QFileInfo(rootDirectory).canonicalFilePath());
+	if (canonicalRoot.isEmpty() || !QFileInfo(canonicalRoot).isDir())
+	{
+		if (error)
+			*error = QStringLiteral("Root directory does not resolve to an existing directory");
+		return false;
+	}
+
+	const QString normalizedRelative = normalizeSeparators(relativePath);
+	if (normalizedRelative.isEmpty() || isAbsolutePathLike(normalizedRelative) ||
+	    containsParentTraversal(normalizedRelative))
+	{
+		if (error)
+			*error = QStringLiteral("Path is not a contained relative path");
+		return false;
+	}
+
+	const QString absolutePath =
+	    normalizeSeparators(QDir::cleanPath(QDir(canonicalRoot).filePath(normalizedRelative)));
+	if (!pathIsWithinOrEqualTo(absolutePath, canonicalRoot))
+	{
+		if (error)
+			*error = QStringLiteral("Path resolves outside root directory");
+		return false;
+	}
+
+	const QFileInfo targetInfo(absolutePath);
+	if (targetInfo.exists() || targetInfo.isSymLink())
+	{
+		const QString canonicalTarget = normalizeSeparators(targetInfo.canonicalFilePath());
+		if (canonicalTarget.isEmpty() || !pathIsWithinOrEqualTo(canonicalTarget, canonicalRoot))
+		{
+			if (error)
+				*error = QStringLiteral("Path target resolves outside root directory");
+			return false;
+		}
+	}
+	else if (!resolveExistingCanonicalParentInsideRoot(absolutePath, canonicalRoot,
+	                                                   QStringLiteral("root directory"), error))
+	{
+		return false;
+	}
+
+	if (resolvedPath)
+		*resolvedPath = absolutePath;
+	return true;
+}
+
+bool QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(const QString &qmudHome,
+                                                                   const QString &pluginsDirectory)
+{
+	if (pluginsDirectory.trimmed().isEmpty())
+		return false;
+
+	QString resolvedPlugins;
+	if (!resolveInsideQmudHome(qmudHome, pluginsDirectory, &resolvedPlugins))
+		return false;
+
+	const QString canonicalHome = normalizeSeparators(QFileInfo(qmudHome).canonicalFilePath());
+	if (canonicalHome.isEmpty())
+		return false;
+
+	const QFileInfo pluginsInfo(resolvedPlugins);
+	const QString   canonicalPlugins = pluginsInfo.exists()
+	                                       ? normalizeSeparators(pluginsInfo.canonicalFilePath())
+	                                       : normalizeSeparators(QDir::cleanPath(resolvedPlugins));
+	if (canonicalPlugins.isEmpty())
+		return false;
+
+	const bool isQmudHome = canonicalPathIsWithinOrEqualTo(canonicalPlugins, canonicalHome) &&
+	                        canonicalPathIsWithinOrEqualTo(canonicalHome, canonicalPlugins);
+	if (isQmudHome)
+		return true;
+
+	const QString   soundsPath = normalizeSeparators(QDir(canonicalHome).filePath(QStringLiteral("sounds")));
+	const QFileInfo soundsInfo(soundsPath);
+	const QString canonicalSounds = soundsInfo.exists() ? normalizeSeparators(soundsInfo.canonicalFilePath())
+	                                                    : normalizeSeparators(QDir::cleanPath(soundsPath));
+	return !canonicalSounds.isEmpty() && canonicalPathIsWithinOrEqualTo(canonicalPlugins, canonicalSounds);
 }
 
 QString QMudPluginPathUtils::qmudHomeRelativePath(const QString &qmudHome, const QString &path,

@@ -308,267 +308,6 @@ namespace
 		return names;
 	}
 
-	QStringList splitSqlStatements(const QString &sqlText)
-	{
-		enum class ParseMode
-		{
-			Normal,
-			SingleQuote,
-			DoubleQuote,
-			BracketIdentifier,
-			BacktickIdentifier,
-			LineComment,
-			BlockComment
-		};
-
-		QStringList     statements;
-		QString         current;
-		auto            mode = ParseMode::Normal;
-		const qsizetype len  = sqlText.size();
-
-		for (qsizetype i = 0; i < len; ++i)
-		{
-			const QChar ch   = sqlText.at(i);
-			const QChar next = i + 1 < len ? sqlText.at(i + 1) : QChar();
-
-			switch (mode)
-			{
-			case ParseMode::Normal:
-				if (ch == QLatin1Char('\''))
-				{
-					mode = ParseMode::SingleQuote;
-					current += ch;
-				}
-				else if (ch == QLatin1Char('"'))
-				{
-					mode = ParseMode::DoubleQuote;
-					current += ch;
-				}
-				else if (ch == QLatin1Char('['))
-				{
-					mode = ParseMode::BracketIdentifier;
-					current += ch;
-				}
-				else if (ch == QLatin1Char('`'))
-				{
-					mode = ParseMode::BacktickIdentifier;
-					current += ch;
-				}
-				else if (ch == QLatin1Char('-') && next == QLatin1Char('-'))
-				{
-					mode = ParseMode::LineComment;
-					++i;
-				}
-				else if (ch == QLatin1Char('/') && next == QLatin1Char('*'))
-				{
-					mode = ParseMode::BlockComment;
-					++i;
-				}
-				else if (ch == QLatin1Char(';'))
-				{
-					if (const QString trimmed = current.trimmed(); !trimmed.isEmpty())
-						statements << trimmed;
-					current.clear();
-				}
-				else
-				{
-					current += ch;
-				}
-				break;
-
-			case ParseMode::SingleQuote:
-				current += ch;
-				if (ch == QLatin1Char('\''))
-				{
-					if (next == QLatin1Char('\''))
-					{
-						current += next;
-						++i;
-					}
-					else
-					{
-						mode = ParseMode::Normal;
-					}
-				}
-				break;
-
-			case ParseMode::DoubleQuote:
-				current += ch;
-				if (ch == QLatin1Char('"'))
-				{
-					if (next == QLatin1Char('"'))
-					{
-						current += next;
-						++i;
-					}
-					else
-					{
-						mode = ParseMode::Normal;
-					}
-				}
-				break;
-
-			case ParseMode::BracketIdentifier:
-				current += ch;
-				if (ch == QLatin1Char(']'))
-					mode = ParseMode::Normal;
-				break;
-
-			case ParseMode::BacktickIdentifier:
-				current += ch;
-				if (ch == QLatin1Char('`'))
-				{
-					if (next == QLatin1Char('`'))
-					{
-						current += next;
-						++i;
-					}
-					else
-					{
-						mode = ParseMode::Normal;
-					}
-				}
-				break;
-
-			case ParseMode::LineComment:
-				if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
-					mode = ParseMode::Normal;
-				break;
-
-			case ParseMode::BlockComment:
-				if (ch == QLatin1Char('*') && next == QLatin1Char('/'))
-				{
-					++i;
-					mode = ParseMode::Normal;
-				}
-				break;
-			}
-		}
-
-		if (const QString trailing = current.trimmed(); !trailing.isEmpty())
-			statements << trailing;
-
-		return statements;
-	}
-
-	bool isSqlComplete(const QString &sqlText)
-	{
-		enum class ParseMode
-		{
-			Normal,
-			SingleQuote,
-			DoubleQuote,
-			BracketIdentifier,
-			BacktickIdentifier,
-			LineComment,
-			BlockComment
-		};
-
-		auto            mode                    = ParseMode::Normal;
-		bool            sawTerminatingSemicolon = false;
-		const qsizetype len                     = sqlText.size();
-
-		for (qsizetype i = 0; i < len; ++i)
-		{
-			const QChar ch   = sqlText.at(i);
-			const QChar next = i + 1 < len ? sqlText.at(i + 1) : QChar();
-
-			switch (mode)
-			{
-			case ParseMode::Normal:
-				if (ch == QLatin1Char('\''))
-				{
-					mode                    = ParseMode::SingleQuote;
-					sawTerminatingSemicolon = false;
-				}
-				else if (ch == QLatin1Char('"'))
-				{
-					mode                    = ParseMode::DoubleQuote;
-					sawTerminatingSemicolon = false;
-				}
-				else if (ch == QLatin1Char('['))
-				{
-					mode                    = ParseMode::BracketIdentifier;
-					sawTerminatingSemicolon = false;
-				}
-				else if (ch == QLatin1Char('`'))
-				{
-					mode                    = ParseMode::BacktickIdentifier;
-					sawTerminatingSemicolon = false;
-				}
-				else if (ch == QLatin1Char('-') && next == QLatin1Char('-'))
-				{
-					mode = ParseMode::LineComment;
-					++i;
-				}
-				else if (ch == QLatin1Char('/') && next == QLatin1Char('*'))
-				{
-					mode = ParseMode::BlockComment;
-					++i;
-				}
-				else if (ch == QLatin1Char(';'))
-				{
-					sawTerminatingSemicolon = true;
-				}
-				else if (!ch.isSpace())
-				{
-					sawTerminatingSemicolon = false;
-				}
-				break;
-
-			case ParseMode::SingleQuote:
-				if (ch == QLatin1Char('\''))
-				{
-					if (next == QLatin1Char('\''))
-						++i;
-					else
-						mode = ParseMode::Normal;
-				}
-				break;
-
-			case ParseMode::DoubleQuote:
-				if (ch == QLatin1Char('"'))
-				{
-					if (next == QLatin1Char('"'))
-						++i;
-					else
-						mode = ParseMode::Normal;
-				}
-				break;
-
-			case ParseMode::BracketIdentifier:
-				if (ch == QLatin1Char(']'))
-					mode = ParseMode::Normal;
-				break;
-
-			case ParseMode::BacktickIdentifier:
-				if (ch == QLatin1Char('`'))
-				{
-					if (next == QLatin1Char('`'))
-						++i;
-					else
-						mode = ParseMode::Normal;
-				}
-				break;
-
-			case ParseMode::LineComment:
-				if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
-					mode = ParseMode::Normal;
-				break;
-
-			case ParseMode::BlockComment:
-				if (ch == QLatin1Char('*') && next == QLatin1Char('/'))
-				{
-					++i;
-					mode = ParseMode::Normal;
-				}
-				break;
-			}
-		}
-
-		return mode == ParseMode::Normal && sawTerminatingSemicolon;
-	}
-
 	QString sqliteDriverVersion()
 	{
 		static std::once_flag initFlag;
@@ -1461,25 +1200,28 @@ namespace
 			return luaL_error(L, "attempt to use closed sqlite database");
 		}
 
-		QSqlQuery         query(db->db);
-		const QString     sqlText    = QString::fromUtf8(sql);
-		const QStringList statements = splitSqlStatements(sqlText);
-		if (!lua_isnoneornil(L, 3))
-		{
+		const bool hasCallback = !lua_isnoneornil(L, 3);
+		if (hasCallback)
 			luaL_checktype(L, 3, LUA_TFUNCTION);
-			for (const QString &stmt : statements)
+
+		QSqlQuery              query(db->db);
+		const QString          sqlText = QString::fromUtf8(sql);
+		SqliteStatementScanner scanner(sqlText);
+		QStringView            statement;
+		while (scanner.next(statement))
+		{
+			if (!query.exec(statement.toString()))
 			{
-				if (stmt.isEmpty())
-					continue;
-				if (!query.exec(stmt))
-				{
-					setDbStatusFromError(db, query.lastError());
-					lua_pushnumber(L, db->lastErrCode);
-					const QByteArray msg = db->lastErrMsg.toUtf8();
-					lua_pushlstring(L, msg.constData(), msg.size());
-					return 2;
-				}
-				while (query.next())
+				setDbStatusFromError(db, query.lastError());
+				lua_pushnumber(L, db->lastErrCode);
+				const QByteArray msg = db->lastErrMsg.toUtf8();
+				lua_pushlstring(L, msg.constData(), msg.size());
+				return 2;
+			}
+
+			while (query.next())
+			{
+				if (hasCallback)
 				{
 					const QSqlRecord record  = query.record();
 					const int        columns = record.count();
@@ -1519,16 +1261,7 @@ namespace
 				}
 			}
 
-			setDbStatus(db, SQLITE_OK, QString());
-			lua_pushnumber(L, SQLITE_OK);
-			return 1;
-		}
-
-		for (const QString &stmt : statements)
-		{
-			if (stmt.isEmpty())
-				continue;
-			if (!query.exec(stmt))
+			if (query.lastError().isValid())
 			{
 				setDbStatusFromError(db, query.lastError());
 				lua_pushnumber(L, db->lastErrCode);
@@ -1720,8 +1453,9 @@ namespace
 
 	int luaSqliteComplete(lua_State *L)
 	{
-		const char *sql = luaL_checkstring(L, 1);
-		lua_pushboolean(L, isSqlComplete(QString::fromUtf8(sql)));
+		const char   *sql     = luaL_checkstring(L, 1);
+		const QString sqlText = QString::fromUtf8(sql);
+		lua_pushboolean(L, sqliteStatementIsComplete(sqlText));
 		return 1;
 	}
 

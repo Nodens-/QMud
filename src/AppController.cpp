@@ -286,10 +286,25 @@ namespace
 			{
 			}
 
+			/**
+			 * @brief Adopts a preserved descriptor into the wrapped runtime.
+			 * @param descriptor Native socket descriptor.
+			 * @param nawsNegotiated Whether NAWS was active on the preserved connection.
+			 * @param mspNegotiated Whether MSP was active on the preserved connection.
+			 * @param mspDefaultSoundUrl MSP default sound URL associated with the preserved connection.
+			 * @param mxpDefaultSoundUrl MXP default sound URL associated with the preserved connection.
+			 * @param errorMessage Optional output error text.
+			 * @return `true` when descriptor adoption succeeds.
+			 */
 			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
-			                                                  QString *errorMessage) override
+			                                                  const bool     mspNegotiated,
+			                                                  const QString &mspDefaultSoundUrl,
+			                                                  const QString &mxpDefaultSoundUrl,
+			                                                  QString       *errorMessage) override
 			{
-				return m_runtime.adoptConnectedSocketDescriptor(descriptor, nawsNegotiated, errorMessage);
+				return m_runtime.adoptConnectedSocketDescriptor(descriptor, nawsNegotiated, mspNegotiated,
+				                                                mspDefaultSoundUrl, mxpDefaultSoundUrl,
+				                                                errorMessage);
 			}
 
 			void markReloadReattachConnectActionsSuppressed() override
@@ -2369,7 +2384,8 @@ namespace
 AppController *AppController::s_instance = nullptr;
 
 AppController::AppController(const bool disableAutoConnectForExecution, QObject *parent)
-    : QObject(parent), m_disableAutoConnectForExecution(disableAutoConnectForExecution)
+    : QObject(parent), m_disableAutoConnectForExecution(disableAutoConnectForExecution),
+      m_soundAvailableForExecution(QMUD_ENABLE_SOUND != 0)
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
@@ -2379,7 +2395,14 @@ AppController::AppController(const bool disableAutoConnectForExecution, QObject 
 	        {
 		        if (!available)
 			        qWarning() << "Sound engine initialization timed out; sound is disabled.";
+		        m_soundAvailableForExecution  = available;
 		        m_soundInitializationResolved = true;
+		        if (MainWindowHost *host = resolveMainWindowHost(m_mainWindow))
+		        {
+			        for (const WorldWindowDescriptor &world : host->worldRuntimeDescriptors())
+				        if (world.runtime)
+					        world.runtime->setSoundAvailable(available);
+		        }
 		        finalizeStartupIfReady();
 	        });
 	refreshWorldViewGlobalSettings();
@@ -3748,6 +3771,8 @@ bool AppController::initialize()
 
 	m_workingDir = startupDir;
 	QDir::setCurrent(m_workingDir);
+	if (m_soundEngine)
+		m_soundEngine->configureSoundDirectory(m_workingDir);
 
 	// make sure directory name ends in a slash
 	if (!m_workingDir.endsWith('/'))
@@ -5016,9 +5041,9 @@ bool AppController::openWorldDocument(const QString &path, const InitialAutoConn
 		}
 
 		auto *runtime = new WorldRuntime(m_mainWindow);
+		runtime->setSoundAvailable(m_soundAvailableForExecution);
 		runtime->setClientStartTime(m_whenClientStarted);
 		runtime->setStartupDirectory(m_workingDir);
-		runtime->attachSoundEngine(m_soundEngine.get());
 		runtime->setDefaultWorldDirectory(
 		    makeAbsolutePath(getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString()));
 		runtime->setDefaultLogDirectory(
@@ -5047,6 +5072,7 @@ bool AppController::openWorldDocument(const QString &path, const InitialAutoConn
 		m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
 		runtime->setPluginInstallDeferred(true);
 		runtime->applyFromDocument(doc);
+		runtime->attachSoundEngine(m_soundEngine.get());
 		runtime->setWorldFilePath(normalized);
 		const auto regexpMatchEmpty = getGlobalOption(QStringLiteral("RegexpMatchEmpty")).toInt();
 		runtime->setWorldAttribute(QStringLiteral("regexp_match_empty"), QString::number(regexpMatchEmpty));
@@ -5229,6 +5255,7 @@ void AppController::initializeWorldRuntime(WorldRuntime *runtime) const
 		return;
 
 	runtime->applyDefaultWorldOptions();
+	runtime->setSoundAvailable(m_soundAvailableForExecution);
 	runtime->setClientStartTime(m_whenClientStarted);
 	runtime->setStartupDirectory(m_workingDir);
 	runtime->attachSoundEngine(m_soundEngine.get());
@@ -7778,6 +7805,8 @@ void AppController::applyPluginPreferences()
 {
 	m_pluginsDirectory               = getGlobalOption(QStringLiteral("PluginsDirectory")).toString();
 	const QString absolutePluginsDir = makeAbsolutePath(m_pluginsDirectory);
+	if (m_soundEngine)
+		m_soundEngine->configurePluginDirectory(absolutePluginsDir);
 	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
 	{
 		runtime->setPluginsDirectory(absolutePluginsDir);
@@ -15091,6 +15120,9 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 		const bool connectingNow = ctx.runtime->isConnecting();
 		world.socketDescriptor   = ctx.runtime->nativeSocketDescriptor();
 		world.nawsNegotiated     = connectedNow && ctx.runtime->isNawsNegotiated();
+		world.mspNegotiated      = connectedNow && ctx.runtime->isMspNegotiated();
+		world.mspDefaultSoundUrl = connectedNow ? ctx.runtime->mspDefaultSoundUrl() : QString();
+		world.mxpDefaultSoundUrl = connectedNow ? ctx.runtime->mxpDefaultSoundUrl() : QString();
 		const bool tlsEnabled =
 		    isEnabledFlag(ctx.runtime->worldAttributes().value(QStringLiteral("tls_encryption")));
 		if (!world.mccpDisableAttempted)

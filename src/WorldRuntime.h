@@ -60,6 +60,7 @@ class WorldDocument;
 class WorldSocketService;
 class SoundEngine;
 class SoundEngineSession;
+struct QMudNativeSoundRequest;
 class QFileSystemWatcher;
 class LuaCallbackEngine;
 class LuaCallbackRuntimeMutationAccess;
@@ -69,6 +70,10 @@ class WorldCommandProcessorMutationAccess;
 struct LuaDeferredRuntimeMutationPlayback;
 struct LuaDeferredRuntimeMutationBatchSequence;
 struct CausalOutboundGroup;
+namespace QMudMspProtocol
+{
+	struct Command;
+}
 
 /**
  * @brief Restores one captured runtime caller context around deferred work.
@@ -920,6 +925,7 @@ class WorldRuntime : public QObject
 		struct TestSoundBackend
 		{
 				std::function<int(int, const QString &, bool, double, double)> play;
+				std::function<void(const QMudNativeSoundRequest &)>            nativeSound;
 				std::function<int()>                                           automaticBuffer;
 				std::function<int(int)>                                        stop;
 				std::function<int(int)>                                        status;
@@ -3190,11 +3196,17 @@ class WorldRuntime : public QObject
 		 * @brief Adopts an already-connected descriptor into this runtime.
 		 * @param descriptor Native descriptor to adopt.
 		 * @param nawsNegotiated Whether the preserved connection had active NAWS negotiation.
+		 * @param mspNegotiated Whether the preserved connection had active MSP negotiation.
+		 * @param mspDefaultSoundUrl MSP default sound URL associated with the preserved connection.
+		 * @param mxpDefaultSoundUrl MXP default sound URL associated with the preserved connection.
 		 * @param errorMessage Optional output error text.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
 		[[nodiscard]] bool adoptConnectedSocketDescriptor(int descriptor, bool nawsNegotiated,
-		                                                  QString *errorMessage = nullptr);
+		                                                  bool           mspNegotiated,
+		                                                  const QString &mspDefaultSoundUrl,
+		                                                  const QString &mxpDefaultSoundUrl,
+		                                                  QString       *errorMessage = nullptr);
 		/**
 		 * @brief Closes active/adopted socket immediately for reload reconnect flow.
 		 */
@@ -3573,6 +3585,21 @@ class WorldRuntime : public QObject
 		 * @return `true` when NAWS negotiation is active.
 		 */
 		[[nodiscard]] bool                   isNawsNegotiated() const;
+		/**
+		 * @brief Returns whether MSP is currently negotiated with the server.
+		 * @return `true` when native MSP command handling is active.
+		 */
+		[[nodiscard]] bool                   isMspNegotiated() const;
+		/**
+		 * @brief Returns the connection-scoped MSP default sound URL.
+		 * @return Current MSP default URL, or an empty string when unset.
+		 */
+		[[nodiscard]] const QString         &mspDefaultSoundUrl() const;
+		/**
+		 * @brief Returns the connection-scoped MXP default sound URL.
+		 * @return Current MXP default URL, or an empty string when unset.
+		 */
+		[[nodiscard]] const QString         &mxpDefaultSoundUrl() const;
 		/**
 		 * @brief Returns the currently calculated output wrap columns.
 		 *
@@ -4134,6 +4161,10 @@ class WorldRuntime : public QObject
 		 * @return Startup directory path.
 		 */
 		[[nodiscard]] QString startupDirectory() const;
+		/**
+		 * @brief Returns the fixed QMud home captured before scripts can change the working directory.
+		 * @return QMud home directory path.
+		 */
 		/**
 		 * @brief Returns default world-files directory.
 		 * @return Default world directory path.
@@ -5408,10 +5439,12 @@ class WorldRuntime : public QObject
 		 */
 		void                  setStartupDirectory(const QString &path);
 		/**
-		 * @brief Immediately orders a sound-session root update before later direct sound commands.
-		 * @param path New startup directory path.
+		 * @brief Configures native MSP availability and withdraws negotiated MSP when sound becomes unavailable.
+		 * @param available Whether application sound support is available for this execution.
 		 */
-		void                  updateSoundStartupDirectory(const QString &path) const;
+		void                  setSoundAvailable(bool available);
+		/** @brief Applies an accepted world-preference sound-directory change to the active sound session. */
+		void                  updateWorldSoundDirectory() const;
 		/**
 		 * @brief Registers this world with the process-wide sound engine.
 		 * @param engine Application-owned sound engine that outlives this runtime.
@@ -8108,6 +8141,35 @@ class WorldRuntime : public QObject
 		int  savePluginStateForPlugin(const QString &pluginId, bool scripted, QString *error);
 		void savePluginStateForPluginContinuable(const QString &pluginId, bool scripted,
 		                                         std::function<void(int)> completion);
+		/**
+		 * @brief Resolves the authoritative variable map for a plugin or native shim.
+		 * @param pluginId Plugin identifier or supported native shim name.
+		 * @param resolvedPluginId Optional output canonical plugin identifier.
+		 * @return Variable map, or `nullptr` when the plugin is unavailable.
+		 */
+		[[nodiscard]] const QMap<QString, QString> *
+		pluginVariableStore(const QString &pluginId, QString *resolvedPluginId = nullptr) const;
+		/**
+		 * @brief Resolves the mutable authoritative variable map for a plugin or native shim.
+		 * @param pluginId Plugin identifier or supported native shim name.
+		 * @param resolvedPluginId Optional output canonical plugin identifier.
+		 * @return Variable map, or `nullptr` when the plugin is unavailable.
+		 */
+		[[nodiscard]] QMap<QString, QString> *pluginVariableStore(const QString &pluginId,
+		                                                          QString       *resolvedPluginId = nullptr);
+		/**
+		 * @brief Merges LuaAudio's persisted plugin variables into a variable map.
+		 * @param variables Variable map receiving persisted values.
+		 * @param error Optional output parse error.
+		 * @return `true` when no state file exists or its variables were loaded successfully.
+		 */
+		[[nodiscard]] bool                    loadLuaAudioStateVariables(QMap<QString, QString> &variables,
+		                                                                 QString                *error = nullptr) const;
+		/**
+		 * @brief Replaces LuaAudio's authoritative variables and restores variable-backed runtime settings.
+		 * @param variables Replacement variables.
+		 */
+		void                                  replaceLuaAudioVariables(QMap<QString, QString> variables);
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
 		                            QSharedPointer<LuaCallbackEngine> &callbackEngine);
@@ -8235,6 +8297,26 @@ class WorldRuntime : public QObject
 				bool       openedSecure{false};
 				bool       noReset{false};
 		};
+		/**
+		 * @brief Executes a parsed MSP command through the existing sound session.
+		 * @param command Validated protocol command.
+		 */
+		void executeNativeMspCommand(const QMudMspProtocol::Command &command);
+		/**
+		 * @brief Parses and executes one accepted MXP SOUND or MUSIC tag.
+		 * @param tag Lowercase MXP tag name.
+		 * @param attributes Decoded MXP attributes keyed by lowercase names and positions.
+		 */
+		void executeMxpSoundTag(const QByteArray &tag, const QMap<QString, QString> &attributes);
+		/**
+		 * @brief Executes one protocol-independent native sound request.
+		 * @param request Validated sound request from its owning protocol parser.
+		 */
+		void executeNativeSoundRequest(const QMudNativeSoundRequest &request) const;
+		/** @brief Stops active MSP sound and music without changing Telnet negotiation state. */
+		void stopNativeMspPlayback() const;
+		/** @brief Stops native protocol playback and clears connection-scoped download defaults. */
+		void resetNativeProtocolSoundState();
 		struct ResolvedOutputColourCache
 		{
 				bool            valid{false};
@@ -8352,6 +8434,7 @@ class WorldRuntime : public QObject
 		QDateTime                                                  m_lastChatMessageTime;
 		QDateTime                                                  m_lastChatGroupMessageTime;
 		QList<Plugin>                                              m_plugins;
+		QMap<QString, QString>                                     m_luaAudioVariables;
 		QSet<QString>                                              m_observedPluginCallbacks;
 		QHash<QString, quint64>                                    m_observedPluginCallbackQueryGeneration;
 		quint64                                                    m_observedPluginCallbackGeneration{1};
@@ -8974,6 +9057,8 @@ class WorldRuntime : public QObject
 		QPointer<SoundEngine>                   m_soundEngine;
 		QMudAtomicSharedPtr<SoundEngineSession> m_soundSession{std::shared_ptr<SoundEngineSession>{}};
 		std::atomic<quint64>                    m_nextTestSoundPreparationToken{1};
+		QString                                 m_mspDefaultSoundUrl;
+		QString                                 m_mxpDefaultSoundUrl;
 		int                                     m_outputFontHeight{0};
 		int                                     m_outputFontWidth{0};
 		int                                     m_inputFontHeight{0};

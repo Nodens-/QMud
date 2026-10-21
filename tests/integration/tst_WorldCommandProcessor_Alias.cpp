@@ -188,8 +188,8 @@ end
 				const QRegularExpression regex(pattern);
 				QVERIFY(regex.isValid());
 
-				const QMudAliasMatch::MatchResult result =
-				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("buy sword from merchant"), true);
+				const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchValidRegexWithCaptures(
+				    regex, QStringLiteral("buy sword from merchant"), true);
 				QVERIFY(result.matched);
 				QCOMPARE(result.matchCount, 3);
 				QCOMPARE(result.wildcards.size(), 3);
@@ -202,8 +202,8 @@ end
 				const QRegularExpression regex(QStringLiteral("^give (?<what>\\w+) to (?<who>\\w+)$"));
 				QVERIFY(regex.isValid());
 
-				const QMudAliasMatch::MatchResult result =
-				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("give coin to guard"), true);
+				const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchValidRegexWithCaptures(
+				    regex, QStringLiteral("give coin to guard"), true);
 				QVERIFY(result.matched);
 				QCOMPARE(result.matchCount, 3);
 				QCOMPARE(result.namedWildcards.value(QStringLiteral("what")), QStringLiteral("coin"));
@@ -216,8 +216,8 @@ end
 				    QStringLiteral("^mapper[ ]+(sp|signpost)(|[ ]+(?<id>[0-9A-F]+))$"));
 				QVERIFY(regex.isValid());
 
-				const QMudAliasMatch::MatchResult result =
-				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("mapper signpost"), true);
+				const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchValidRegexWithCaptures(
+				    regex, QStringLiteral("mapper signpost"), true);
 				QVERIFY(result.matched);
 				QCOMPARE(result.matchCount, 3);
 				QCOMPARE(result.wildcards.size(), regex.captureCount() + 1);
@@ -236,7 +236,7 @@ end
 				QVERIFY(regex.isValid());
 
 				const QMudAliasMatch::MatchResult firstResult =
-				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("first"), true);
+				    QMudAliasMatch::matchValidRegexWithCaptures(regex, QStringLiteral("first"), true);
 				QVERIFY(firstResult.matched);
 				QCOMPARE(firstResult.matchCount, 2);
 				QCOMPARE(firstResult.wildcards.size(), regex.captureCount() + 1);
@@ -244,7 +244,7 @@ end
 				QCOMPARE(firstResult.namedWildcards.value(QStringLiteral("value")), QStringLiteral("first"));
 
 				const QMudAliasMatch::MatchResult secondResult =
-				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("second"), true);
+				    QMudAliasMatch::matchValidRegexWithCaptures(regex, QStringLiteral("second"), true);
 				QVERIFY(secondResult.matched);
 				QCOMPARE(secondResult.matchCount, 3);
 				QCOMPARE(secondResult.wildcards.size(), regex.captureCount() + 1);
@@ -271,6 +271,10 @@ end
 				MessageBoxObserver observer;
 
 				QCOMPARE(processor.executeCommand(QStringLiteral("subject")), eOK);
+				QCOMPARE(observer.messageCount(), 1);
+				QCOMPARE(runtime.aliases().constFirst().matchAttempts, 0);
+				QCOMPARE(runtime.aliases().constFirst().executionTimeNs, qint64{0});
+				QCOMPARE(processor.executeCommand(QStringLiteral("subject-again")), eOK);
 				QCOMPARE(observer.messageCount(), 1);
 				QCOMPARE(runtime.aliases().constFirst().matchAttempts, 0);
 				QCOMPARE(runtime.aliases().constFirst().executionTimeNs, qint64{0});
@@ -415,12 +419,14 @@ end
 				    QMudCommandPattern::convertToRegularExpression(QStringLiteral("Cast *"), true, true);
 
 				const QRegularExpression sensitiveRegex(pattern);
-				QVERIFY(!QMudAliasMatch::matchWithCaptures(sensitiveRegex, QStringLiteral("cast fire"), true)
+				QVERIFY(!QMudAliasMatch::matchValidRegexWithCaptures(sensitiveRegex,
+				                                                     QStringLiteral("cast fire"), true)
 				             .matched);
 
 				const QRegularExpression insensitiveRegex(pattern, QRegularExpression::CaseInsensitiveOption);
 				const QMudAliasMatch::MatchResult insensitiveResult =
-				    QMudAliasMatch::matchWithCaptures(insensitiveRegex, QStringLiteral("cast fire"), true);
+				    QMudAliasMatch::matchValidRegexWithCaptures(insensitiveRegex, QStringLiteral("cast fire"),
+				                                                true);
 				QVERIFY(insensitiveResult.matched);
 				QCOMPARE(insensitiveResult.wildcards.at(1), QStringLiteral("fire"));
 			}
@@ -430,8 +436,8 @@ end
 				const QRegularExpression regex(QStringLiteral("^.*$"));
 				QVERIFY(regex.isValid());
 
-				QVERIFY(!QMudAliasMatch::matchWithCaptures(regex, QString(), false).matched);
-				QVERIFY(QMudAliasMatch::matchWithCaptures(regex, QString(), true).matched);
+				QVERIFY(!QMudAliasMatch::matchValidRegexWithCaptures(regex, QString(), false).matched);
+				QVERIFY(QMudAliasMatch::matchValidRegexWithCaptures(regex, QString(), true).matched);
 			}
 
 			static void recursionGuardRespectsMaxDepth()

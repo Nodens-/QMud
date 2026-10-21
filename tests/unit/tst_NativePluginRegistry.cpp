@@ -6,6 +6,7 @@
  * Role: Unit coverage for native compatibility plugin registry behavior.
  */
 
+#include "LuaSupport.h"
 #include "NativePluginRegistry.h"
 #include "WorldDocument.h"
 #include "WorldRuntime.h"
@@ -240,10 +241,31 @@ namespace
 				QCOMPARE(QMudNativePluginRegistry::pluginSupports(audioShimId, QStringLiteral("play")), eOK);
 				QCOMPARE(QMudNativePluginRegistry::pluginSupports(audioShimId, QStringLiteral("setVol")),
 				         eOK);
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+				const QStringList ppiRoutines{QStringLiteral("setPitch"),
+				                              QStringLiteral("slidePitch"),
+				                              QStringLiteral("isPlaying"),
+				                              QStringLiteral("getVolume"),
+				                              QStringLiteral("stop"),
+				                              QStringLiteral("setPan"),
+				                              QStringLiteral("play"),
+				                              QStringLiteral("playDelay"),
+				                              QStringLiteral("playDelayLooped"),
+				                              QStringLiteral("setVol"),
+				                              QStringLiteral("slideVol"),
+				                              QStringLiteral("fadeout"),
+				                              QStringLiteral("slidePan"),
+				                              QStringLiteral("playLooped")};
+				for (const QString &routine : ppiRoutines)
+				{
+					QCOMPARE(QMudNativePluginRegistry::pluginSupports(
+					             audioShimId, QStringLiteral("PPI_%1_PPI_").arg(routine)),
+					         eOK);
+				}
+#endif
 				QCOMPARE(QMudNativePluginRegistry::pluginSupports(audioShimId,
 				                                                  QStringLiteral("plugin_update_url")),
 				         eOK);
-
 				QCOMPARE(
 				    QMudNativePluginRegistry::normalizeNativeSource(QStringLiteral("qmud:native/MushReader")),
 				    QStringLiteral("qmud:native/MushReader"));
@@ -432,6 +454,70 @@ namespace
 				QCOMPARE(volume.errorCode, eOK);
 				QCOMPARE(volume.returnValues.size(), 1);
 				QCOMPARE(volume.returnValues.constFirst().toDouble(), 25.0);
+
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+				const QMudNativePluginRegistry::NativeCallResult ppiVolume =
+				    QMudNativePluginRegistry::callRoutine(&runtime, audioId,
+				                                          QStringLiteral("PPI_getVolume_PPI_"),
+				                                          {QStringLiteral("{[1]=1}")}, audioContext);
+				QCOMPARE(ppiVolume.errorCode, eOK);
+				QVERIFY(ppiVolume.returnValues.isEmpty());
+				QString serializedPpiReturns;
+				QVERIFY(runtime.findPluginVariable(audioId,
+				                                   QMudNativePluginRegistry::luaAudioPpiReturnVariableName(),
+				                                   serializedPpiReturns));
+				QVERIFY(runtime.pluginVariableList(audioId).contains(
+				    QMudNativePluginRegistry::luaAudioPpiReturnVariableName()));
+				QCOMPARE(runtime.pluginInfo(audioId, 12).toInt(), 2);
+				QVector<QVariant> decodedPpiReturns;
+				QString           decodeError;
+				QVERIFY2(QMudLuaSupport::decodePpiArguments(serializedPpiReturns, 1, decodedPpiReturns,
+				                                            decodeError),
+				         qPrintable(decodeError));
+				QCOMPARE(decodedPpiReturns.size(), 1);
+				QCOMPARE(decodedPpiReturns.constFirst().toDouble(), 25.0);
+				QCOMPARE(QMudNativePluginRegistry::callRoutine(
+				             &runtime, audioId, QStringLiteral("PPI_setVol_PPI_"),
+				             {QStringLiteral("{[1]=31,[2]=1}")}, audioContext)
+				             .errorCode,
+				         eOK);
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, bufferState));
+				QCOMPARE(bufferState.volume, 31.0);
+				QCOMPARE(QMudNativePluginRegistry::callRoutine(
+				             &runtime, audioId, QStringLiteral("PPI_setVol_PPI_"),
+				             {QStringLiteral("not a serialized table")}, audioContext)
+				             .errorCode,
+				         eErrorCallingPluginRoutine);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("PPI_stop_PPI_"),
+				                                          {QStringLiteral("{[1]=1,[2]=10}")}, audioContext)
+				        .errorCode,
+				    eOK);
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+				QCOMPARE(QMudNativePluginRegistry::callRoutine(
+				             &runtime, audioId, QStringLiteral("PPI_play_PPI_"),
+				             {QStringLiteral("{[1]=\"coin.wav\",[3]=4,[4]=70}")}, audioContext)
+				             .errorCode,
+				         eOK);
+				QVERIFY(runtime.findPluginVariable(audioId,
+				                                   QMudNativePluginRegistry::luaAudioPpiReturnVariableName(),
+				                                   serializedPpiReturns));
+				QVERIFY2(QMudLuaSupport::decodePpiArguments(serializedPpiReturns, 1, decodedPpiReturns,
+				                                            decodeError),
+				         qPrintable(decodeError));
+				QCOMPARE(decodedPpiReturns.size(), 1);
+				QCOMPARE(decodedPpiReturns.constFirst().toInt(), 1);
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, bufferState));
+				QCOMPARE(bufferState.loop, false);
+				QCOMPARE(bufferState.pan, 4.0);
+				QCOMPARE(bufferState.volume, 70.0);
+				QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, audioId,
+				                                               QStringLiteral("PPI_stop_PPI_"),
+				                                               {QStringLiteral("{[1]=1}")}, audioContext)
+				             .errorCode,
+				         eOK);
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+#endif
 
 				QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("stop"), {1},
 				                                               audioContext)
@@ -1037,9 +1123,10 @@ namespace
 
 			void blacklistAndProtectedPluginXmlClassification() const
 			{
-				const QStringList blacklistIds{QStringLiteral("bb6a05ed7534b5db1ed40511"),
-				                               QStringLiteral("b8e6dac1ee7fe8e3de931fb7"),
-				                               QStringLiteral("8238deec7c06bade8ebc3819")};
+				const QStringList blacklistIds{
+				    QStringLiteral("bb6a05ed7534b5db1ed40511"), QStringLiteral("b8e6dac1ee7fe8e3de931fb7"),
+				    QStringLiteral("8238deec7c06bade8ebc3819"), QStringLiteral("7da63d78d9f91bebb5285127"),
+				    QStringLiteral("1df4fa3b486a36ededa19433")};
 				for (const QString &id : blacklistIds)
 				{
 					QVERIFY(QMudNativePluginRegistry::isBlacklistedId(id));
@@ -1065,8 +1152,17 @@ namespace
 					const QString parsedId = doc.plugins().front().attributes.value(QStringLiteral("id"));
 					QCOMPARE(parsedId, id);
 					QVERIFY(QMudNativePluginRegistry::isProtectedId(parsedId));
+					if (QMudNativePluginRegistry::isBlacklistedId(id))
+					{
+						WorldRuntime runtime;
+						runtime.setStartupDirectory(directory);
+						QString error;
+						QVERIFY2(runtime.loadPluginFile(path, &error), qPrintable(error));
+						QVERIFY(!runtime.isPluginInstalled(id));
+					}
 				}
 			}
+
 			// NOLINTEND(readability-convert-member-functions-to-static)
 
 		private:

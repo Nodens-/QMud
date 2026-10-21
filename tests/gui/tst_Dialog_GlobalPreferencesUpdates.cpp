@@ -17,6 +17,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
@@ -28,6 +29,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QScreen>
@@ -41,6 +43,7 @@
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextEdit>
+#include <QTimer>
 #include <QWidget>
 #include <QtTest/QTest>
 
@@ -338,6 +341,35 @@ namespace
 				QCOMPARE(tabs->focusPolicy(), Qt::NoFocus);
 				QVERIFY(tabs->tabBar());
 				QCOMPARE(tabs->tabBar()->focusPolicy(), Qt::NoFocus);
+			}
+
+			/**
+			 * @brief Verifies invalid persisted plug-in storage selects the page containing the setting.
+			 */
+			void invalidPluginDirectorySelectsPluginsPage() const
+			{
+				resetPreferences();
+				m_app->setGlobalOptionString(QStringLiteral("PluginsDirectory"), QStringLiteral("./sounds/"));
+
+				GlobalPreferencesDialog dialog;
+				auto                   *tabs = dialog.findChild<QTabWidget *>();
+				QVERIFY(tabs);
+				tabs->setCurrentIndex(1);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+				QTimer::singleShot(0,
+				                   []
+				                   {
+					                   auto *message =
+					                       qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					                   if (message)
+						                   message->accept();
+				                   });
+				dialog.accept();
+
+				QCOMPARE(tabs->tabText(tabs->currentIndex()), QStringLiteral("Plugins"));
+				QVERIFY(dialog.isVisible());
 			}
 
 			/**

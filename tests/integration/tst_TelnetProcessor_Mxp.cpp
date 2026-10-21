@@ -3,17 +3,28 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: tst_TelnetProcessor_Mxp.cpp
- * Role: QTest coverage for TelnetProcessor MXP behavior.
+ * Role: QTest coverage for MXP parsing and runtime behavior.
  */
 
 #include "MxpDiagnostics.h"
+#include "SoundEngine.h"
 #include "TelnetCallbackSpy.h"
 #include "TelnetProcessor.h"
 #include "WorldOptions.h"
+#include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
+#include <QFile>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QUuid>
 #include <QtTest/QTest>
 
 #include <algorithm>
+#include <utility>
 
 namespace
 {
@@ -26,6 +37,40 @@ namespace
 	constexpr unsigned char TELOPT_MXP = 91;
 
 	using MxpMode = TelnetProcessor::MxpMode;
+
+	/** @brief Mutable sound state used to verify MXP playback behavior. */
+	struct MxpSoundState
+	{
+			QList<QMudNativeSoundRequest> requests;
+	};
+
+	/**
+	 * @brief Installs a deterministic playback recorder at the runtime sound boundary.
+	 * @param runtime Runtime receiving MXP input.
+	 * @param state Playback state populated by sound operations.
+	 */
+	void installMxpSoundBackend(WorldRuntime &runtime, MxpSoundState &state)
+	{
+		WorldRuntime::TestSoundBackend backend;
+		backend.nativeSound = [&state](const QMudNativeSoundRequest &request)
+		{ state.requests.push_back(request); };
+		runtime.setSoundBackendForTest(std::move(backend));
+	}
+
+	/**
+	 * @brief Creates a playable file below the test QMud home's sounds directory.
+	 * @param root Test QMud home.
+	 * @return `true` when the fixture was written completely.
+	 */
+	bool writeSoundFixture(const QString &root)
+	{
+		if (!QDir(root).mkpath(QStringLiteral("sounds")))
+			return false;
+		QFile soundFile(QDir(root).filePath(QStringLiteral("sounds/coin.wav")));
+		if (!soundFile.open(QIODevice::WriteOnly))
+			return false;
+		return soundFile.write("RIFF") == 4;
+	}
 
 	QByteArray bytes(std::initializer_list<unsigned char> raw)
 	{
@@ -52,7 +97,7 @@ namespace
 		QCOMPARE(spy.mxpDiagnostics.constFirst().messageNumber, messageNumber);
 	}
 	/**
-	 * @brief QTest fixture covering TelnetProcessor Mxp scenarios.
+	 * @brief QTest fixture covering MXP parsing and runtime behavior.
 	 */
 	class tst_TelnetProcessor_Mxp : public QObject
 	{
@@ -60,6 +105,119 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			/** @brief Creates the test's persistent artifact directory below the build tree. */
+			void initTestCase()
+			{
+				m_artifactRoot = QDir(QCoreApplication::applicationDirPath())
+				                     .filePath(QStringLiteral("test-artifacts/tst_TelnetProcessor_Mxp/%1")
+				                                   .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+				QVERIFY(QDir().mkpath(m_artifactRoot));
+			}
+
+			/** @brief Verifies that MXP SOUND and MUSIC tags control their playback independently. */
+			void mxpSoundAndMusicTagsControlPlayback() const
+			{
+				QVERIFY(writeSoundFixture(m_artifactRoot));
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(m_artifactRoot);
+				runtime.setWorldAttribute(QStringLiteral("use_mxp"), QString::number(eUseMXP));
+				MxpSoundState soundState;
+				installMxpSoundBackend(runtime, soundState);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<MUSIC FNAME=\"coin.wav\" V=30 L=-1>"));
+				QCOMPARE(soundState.requests.size(), 1);
+				QCOMPARE(soundState.requests.constLast().filePattern, QStringLiteral("coin.wav"));
+				QCOMPARE(soundState.requests.constLast().media, QMudNativeSoundMedia::Music);
+				QCOMPARE(soundState.requests.constLast().repeatCount, -1);
+				QCOMPARE(soundState.requests.constLast().volume, 30);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<MUSIC FNAME=\"coin.wav\" V=45 L=-1 C=1>"));
+				QCOMPARE(soundState.requests.size(), 2);
+				QVERIFY(soundState.requests.constLast().continuePlayback);
+				QCOMPARE(soundState.requests.constLast().repeatCount, -1);
+				QCOMPARE(soundState.requests.constLast().volume, 45);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND FNAME=\"coin.wav\" V=60 P=80>"));
+				QCOMPARE(soundState.requests.size(), 3);
+				QCOMPARE(soundState.requests.constLast().media, QMudNativeSoundMedia::Sound);
+				QCOMPARE(soundState.requests.constLast().priority, 80);
+				QCOMPARE(soundState.requests.constLast().volume, 60);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND FNAME=\"coin.wav\" V=50 P=70>"));
+				QCOMPARE(soundState.requests.size(), 4);
+				QCOMPARE(soundState.requests.constLast().priority, 70);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND FNAME=\"coin.wav\" V=55 P=90>"));
+				QCOMPARE(soundState.requests.size(), 5);
+				QCOMPARE(soundState.requests.constLast().priority, 90);
+				QCOMPARE(soundState.requests.constLast().volume, 55);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<MUSIC FNAME=\"Off\">"));
+				QCOMPARE(soundState.requests.size(), 6);
+				QVERIFY(soundState.requests.constLast().stop);
+				QCOMPARE(soundState.requests.constLast().media, QMudNativeSoundMedia::Music);
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime,
+				    QByteArrayLiteral("\x1B[1z<SOUND FNAME=\"Off\" U=\"https://audio.example/mxp/\">"));
+				QCOMPARE(soundState.requests.size(), 6);
+				QCOMPARE(runtime.mxpDefaultSoundUrl(), QStringLiteral("https://audio.example/mxp/"));
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND FNAME=\"Off\">"));
+				QCOMPARE(soundState.requests.size(), 7);
+				QVERIFY(soundState.requests.constLast().stop);
+				QCOMPARE(soundState.requests.constLast().media, QMudNativeSoundMedia::Sound);
+			}
+
+			/** @brief Verifies positional MXP SOUND and MUSIC arguments follow their protocol order. */
+			void positionalMxpSoundAndMusicArgumentsControlPlayback() const
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("use_mxp"), QString::number(eUseMXP));
+				MxpSoundState soundState;
+				installMxpSoundBackend(runtime, soundState);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND effect.wav 10 -1 20 ignored "
+				                               "\"https://audio.example/positional/\" V=70 P=80>"));
+				QCOMPARE(soundState.requests.size(), 1);
+				QCOMPARE(soundState.requests.constLast().filePattern, QStringLiteral("effect.wav"));
+				QCOMPARE(soundState.requests.constLast().repeatCount, -1);
+				QCOMPARE(soundState.requests.constLast().volume, 70);
+				QCOMPARE(soundState.requests.constLast().priority, 80);
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND effect.wav 50 1 90 ignored P=10>"));
+				QCOMPARE(soundState.requests.size(), 2);
+				QCOMPARE(soundState.requests.constLast().priority, 10);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<MUSIC theme.ogg 45 -1 0 ignored "
+				                               "\"https://audio.example/music/\">"));
+				QCOMPARE(soundState.requests.size(), 3);
+				QCOMPARE(soundState.requests.constLast().filePattern, QStringLiteral("theme.ogg"));
+				QCOMPARE(soundState.requests.constLast().repeatCount, -1);
+				QCOMPARE(soundState.requests.constLast().volume, 45);
+				QVERIFY(!soundState.requests.constLast().continuePlayback);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<MUSIC theme.ogg 60 1 0 ignored>"));
+				QCOMPARE(soundState.requests.size(), 4);
+				QCOMPARE(soundState.requests.constLast().filePattern, QStringLiteral("theme.ogg"));
+				QCOMPARE(soundState.requests.constLast().repeatCount, 1);
+				QCOMPARE(soundState.requests.constLast().volume, 60);
+				QVERIFY(!soundState.requests.constLast().continuePlayback);
+
+				WorldRuntimeTestAccess::processRawDataPayload(
+				    runtime, QByteArrayLiteral("\x1B[1z<SOUND Off 100 1 50 ignored "
+				                               "\"https://audio.example/default/\">"));
+				QCOMPARE(runtime.mxpDefaultSoundUrl(), QStringLiteral("https://audio.example/default/"));
+			}
+
 			void parseStartAndEndTags()
 			{
 				TelnetProcessor processor;
@@ -90,6 +248,26 @@ namespace
 				const QByteArray output = processor.processBytes(QByteArrayLiteral("&foo;"));
 				QCOMPARE(output, QByteArrayLiteral("BAR"));
 				QCOMPARE(processor.mxpEntityCount(), 1);
+			}
+
+			/** @brief Verifies decoded MXP entity text cannot be reinterpreted as an MSP command. */
+			void customEntityExpansionDoesNotEnterMspParsing()
+			{
+				TelnetProcessor                 processor;
+				QList<QMudMspProtocol::Command> commands;
+				TelnetProcessor::Callbacks      callbacks;
+				callbacks.onMspCommand = [&commands](const QMudMspProtocol::Command &command)
+				{ commands.push_back(command); };
+				processor.setCallbacks(callbacks);
+				processor.setUseMxp(eUseMXP);
+				processor.setMspAvailable(true);
+				processor.restoreMspNegotiatedState(true);
+				processor.setCustomEntity(QByteArrayLiteral("soundCommand"),
+				                          QByteArrayLiteral("!!SOUND(entity.wav)"));
+
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("&soundCommand;\r\n")),
+				         QByteArrayLiteral("!!SOUND(entity.wav)\r\n"));
+				QVERIFY(commands.isEmpty());
 			}
 
 			void onCommandModeStartsFromSubnegotiation()
@@ -614,10 +792,13 @@ namespace
 			}
 
 			// NOLINTEND(readability-convert-member-functions-to-static)
+
+		private:
+			QString m_artifactRoot;
 	};
 
 } // namespace
 
-QTEST_APPLESS_MAIN(tst_TelnetProcessor_Mxp)
+QTEST_MAIN(tst_TelnetProcessor_Mxp)
 
 #include "tst_TelnetProcessor_Mxp.moc"

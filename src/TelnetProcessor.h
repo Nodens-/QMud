@@ -13,6 +13,7 @@
 #ifndef QMUD_TELNETPROCESSOR_H
 #define QMUD_TELNETPROCESSOR_H
 
+#include "MspProtocol.h"
 #include "WorldOptions.h"
 
 #include <QByteArray>
@@ -75,6 +76,8 @@ class TelnetProcessor
 		 */
 		struct Callbacks
 		{
+				/** @brief Parsed negotiated MSP command callback. */
+				std::function<void(const QMudMspProtocol::Command &)>         onMspCommand;
 				/** @brief Telnet negotiation request callback. */
 				std::function<bool(int, const QString &)>                     onTelnetRequest;
 				/** @brief Telnet subnegotiation callback. */
@@ -146,6 +149,16 @@ class TelnetProcessor
 		 */
 		void       setNawsEnabled(bool enabled);
 		/**
+		 * @brief Configures MSP availability and queues DONT when disabling an active negotiation.
+		 * @param available Whether native sound playback is available.
+		 */
+		void       setMspAvailable(bool available);
+		/**
+		 * @brief Enables or disables MSP commands embedded within ordinary output lines.
+		 * @param enabled Allow embedded MSP commands when `true`; otherwise require a command-only line.
+		 */
+		void       setEmbeddedMspEnabled(bool enabled);
+		/**
 		 * @brief Restores the peer NAWS request state for an adopted live connection.
 		 * @param negotiated Restore an active peer NAWS request when `true`.
 		 *
@@ -154,6 +167,11 @@ class TelnetProcessor
 		 * current cached dimensions once.
 		 */
 		void       restoreNawsNegotiatedState(bool negotiated);
+		/**
+		 * @brief Restores MSP negotiation state or queues DONT when local sound support is unavailable.
+		 * @param negotiated Restore active MSP negotiation when `true`.
+		 */
+		void       restoreMspNegotiatedState(bool negotiated);
 		/**
 		 * @brief Enables/disables one-time telnet option negotiation mode.
 		 * @param enabled When `true`, repeated WILL/WONT and DO/DONT for an already
@@ -400,6 +418,11 @@ class TelnetProcessor
 		 */
 		[[nodiscard]] bool            isNawsNegotiated() const;
 		/**
+		 * @brief Returns whether MSP was negotiated with the server.
+		 * @return `true` when native MSP command handling is active.
+		 */
+		[[nodiscard]] bool            isMspNegotiated() const;
+		/**
 		 * @brief Returns current NAWS window height in rows.
 		 * @return Current NAWS height in rows.
 		 */
@@ -546,7 +569,7 @@ class TelnetProcessor
 		enum class NegotiationDisposition
 		{
 			Proceed,
-			SettleAndSuppress,
+			AwaitSettlement,
 			Suppress
 		};
 
@@ -724,10 +747,16 @@ class TelnetProcessor
 		 */
 		void                   setNawsState(bool enabled, bool wanted);
 		/**
+		 * @brief Updates the MSP negotiation state used by streaming command consumption.
+		 * @param negotiated Whether server-side MSP is active.
+		 */
+		void                   setMspNegotiatedState(bool negotiated);
+		/**
 		 * @brief Applies the configured response and state changes for IAC WILL.
 		 * @param option Telnet option code.
+		 * @return `true` when QMud accepts the remote option as enabled.
 		 */
-		void                   handleWill(unsigned char option);
+		bool                   handleWill(unsigned char option);
 		/**
 		 * @brief Applies the response and state changes for IAC WONT.
 		 * @param option Telnet option code.
@@ -736,8 +765,9 @@ class TelnetProcessor
 		/**
 		 * @brief Applies the configured response and state changes for IAC DO.
 		 * @param option Telnet option code.
+		 * @return `true` when QMud accepts the local option as enabled.
 		 */
-		void                   handleDo(unsigned char option);
+		bool                   handleDo(unsigned char option);
 		/**
 		 * @brief Applies the response and state changes for IAC DONT.
 		 * @param option Telnet option code.
@@ -752,8 +782,32 @@ class TelnetProcessor
 		 */
 		NegotiationDisposition recordNegotiationAttempt(NegotiationDirection direction, unsigned char option,
 		                                                qint64 nowMilliseconds);
+		/**
+		 * @brief Completes a normally processed negotiation and starts suppression after a storm settles.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 * @param positiveVerb Whether the received verb was WILL or DO.
+		 * @param enabled Whether the processed exchange left that option direction enabled.
+		 * @param nowMilliseconds Monotonic session timestamp.
+		 */
+		void finishNegotiationAttempt(NegotiationDirection direction, unsigned char option, bool positiveVerb,
+		                              bool enabled, qint64 nowMilliseconds);
+		/**
+		 * @brief Clears limiter state for one option and negotiation direction.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 */
+		void resetRenegotiationLoopProtection(NegotiationDirection direction, unsigned char option);
+		/**
+		 * @brief Maps an option and negotiation direction to its limiter state slot.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 * @return Index into the per-option, per-direction limiter arrays.
+		 */
+		[[nodiscard]] static size_t negotiationBucketIndex(NegotiationDirection direction,
+		                                                   unsigned char        option) noexcept;
 		/** @brief Clears rolling negotiation histories and active suppression intervals. */
-		void                   resetRenegotiationLoopProtection();
+		void                        resetRenegotiationLoopProtection();
 		/**
 		 * @brief Records a telnet stream event at the current output position.
 		 * @param type Stream event type.
@@ -859,49 +913,71 @@ class TelnetProcessor
 			HAVE_MXP_ENTITY
 		};
 
-		int                            m_mxpMode{mxpModeCode(MxpMode::Locked)};
-		int                            m_mxpDefaultMode{mxpModeCode(MxpMode::Open)};
-		int                            m_mxpPreviousMode{mxpModeCode(MxpMode::Open)};
-		bool                           m_mxpEnabled{false};
-		bool                           m_puebloActive{false};
-		MxpPhase                       m_mxpPhase{MXP_NONE};
-		QByteArray                     m_mxpString;
-		unsigned char                  m_mxpQuoteTerminator{0};
-		CustomEntityMap                m_customEntities;
-		CustomElementMap               m_customElements;
-		QList<MxpEvent>                m_mxpEvents;
-		QList<MxpModeChange>           m_mxpModeChanges;
-		QList<TelnetStreamEvent>       m_telnetStreamEvents;
-		bool                           m_recordTelnetStreamEvents{false};
-		int                            m_mxpEventSequence{0};
-		Callbacks                      m_callbacks;
+		int                      m_mxpMode{mxpModeCode(MxpMode::Locked)};
+		int                      m_mxpDefaultMode{mxpModeCode(MxpMode::Open)};
+		int                      m_mxpPreviousMode{mxpModeCode(MxpMode::Open)};
+		bool                     m_mxpEnabled{false};
+		bool                     m_puebloActive{false};
+		MxpPhase                 m_mxpPhase{MXP_NONE};
+		QByteArray               m_mxpString;
+		unsigned char            m_mxpQuoteTerminator{0};
+		CustomEntityMap          m_customEntities;
+		CustomElementMap         m_customElements;
+		QList<MxpEvent>          m_mxpEvents;
+		QList<MxpModeChange>     m_mxpModeChanges;
+		QList<TelnetStreamEvent> m_telnetStreamEvents;
+		bool                     m_recordTelnetStreamEvents{false};
+		int                      m_mxpEventSequence{0};
+		Callbacks                m_callbacks;
 
-		bool                           m_compress{false};
-		int                            m_mccpType{0};
-		bool                           m_compressInitOk{false};
-		bool                           m_supportsMccp2{false};
-		bool                           m_disableCompression{false};
-		bool                           m_startTlsEnabled{false};
-		bool                           m_startTlsActive{false};
-		bool                           m_startTlsDoSent{false};
-		bool                           m_startTlsFollowsSent{false};
-		bool                           m_startTlsUpgradeRequested{false};
-		bool                           m_startTlsUpgradeInProgress{false};
-		bool                           m_startTlsNegotiationRejected{false};
-		qint64                         m_totalCompressedBytes{0};
-		qint64                         m_totalUncompressedBytes{0};
-		qint64                         m_mxpTagCount{0};
-		qint64                         m_mxpEntityCount{0};
+		bool                     m_compress{false};
+		int                      m_mccpType{0};
+		bool                     m_compressInitOk{false};
+		bool                     m_supportsMccp2{false};
+		bool                     m_disableCompression{false};
+		bool                     m_startTlsEnabled{false};
+		bool                     m_startTlsActive{false};
+		bool                     m_startTlsDoSent{false};
+		bool                     m_startTlsFollowsSent{false};
+		bool                     m_startTlsUpgradeRequested{false};
+		bool                     m_startTlsUpgradeInProgress{false};
+		bool                     m_startTlsNegotiationRejected{false};
+		qint64                   m_totalCompressedBytes{0};
+		qint64                   m_totalUncompressedBytes{0};
+		qint64                   m_mxpTagCount{0};
+		qint64                   m_mxpEntityCount{0};
 
-		bool                           m_seenCompressWillIac{false};
-		bool                           m_requestedSga{false};
-		bool                           m_requestedEor{false};
+		bool                     m_seenCompressWillIac{false};
+		bool                     m_requestedSga{false};
+		bool                     m_requestedEor{false};
+		bool                     m_mspAvailable{false};
+		bool                     m_mspNegotiated{false};
+		enum class MspInputPhase
+		{
+			None,
+			Keyword,
+			BeforeArguments,
+			Arguments,
+			AwaitingLineEnd
+		};
+		MspInputPhase                  m_mspInputPhase{MspInputPhase::None};
+		QByteArray                     m_mspCandidate;
+		bool                           m_mspBangPending{false};
+		bool                           m_mspArgumentQuoted{false};
+		bool                           m_embeddedMspEnabled{false};
+		bool                           m_mspLineHasVisibleText{false};
+		bool                           m_mspLineHadCommand{false};
+		bool                           m_mspCarriageReturnPending{false};
 		bool                           m_negotiateOptionsOnce{false};
 		std::array<bool, 256>          m_seenWillWontOption{};
 		std::array<bool, 256>          m_seenDoDontOption{};
 		bool                           m_automaticRenegotiationLoopProtection{false};
 		std::array<QList<qint64>, 512> m_negotiationAttemptTimes;
 		std::array<qint64, 512>        m_negotiationSuppressionUntil{};
+		std::array<bool, 512>          m_negotiationAwaitingSettlement{};
+		std::array<bool, 512>          m_negotiationDesiredEnabled{};
+		std::array<bool, 512>          m_negotiationDesiredKnown{};
+		std::array<qint64, 512>        m_negotiationDesiredRecordedAt{};
 		qint64                         m_lastNegotiationAttemptTime{-1};
 		QElapsedTimer                  m_negotiationClock;
 

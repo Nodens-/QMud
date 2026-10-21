@@ -9,6 +9,9 @@
 #include "NativePluginRegistry.h"
 
 #include "AcceleratorUtils.h"
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+#include "LuaSupport.h"
+#endif
 #include "TtsEngine.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
@@ -44,6 +47,7 @@ namespace
 	constexpr auto kMushReaderPluginId = "925cdd0331023d9f0b8f05a7"; // MushReader.xml
 	constexpr auto kLuaAudioPluginId   = "aedf0cb0be5bf045860d54b7"; // LuaAudio.xml
 	constexpr auto kNativeShimMarker   = "QMud native compatibility shim - Legacy XML ignored.";
+	constexpr auto kPpiReturnVariable  = "PPI__returns__PPI_";
 
 	QString        normalizedRoutine(const QString &value)
 	{
@@ -62,7 +66,9 @@ namespace
 		static const QSet<QString> ids{
 		    QStringLiteral("bb6a05ed7534b5db1ed40511"), // Automatic_Backup.xml
 		    QStringLiteral("b8e6dac1ee7fe8e3de931fb7"), // Automatic_Backup_7Days.xml
-		    QStringLiteral("8238deec7c06bade8ebc3819")  // AutoSave.xml
+		    QStringLiteral("8238deec7c06bade8ebc3819"), // AutoSave.xml
+		    QStringLiteral("7da63d78d9f91bebb5285127"), // MSP_lua.xml
+		    QStringLiteral("1df4fa3b486a36ededa19433")  // MM/msp_lua.xml
 		};
 		return ids;
 	}
@@ -103,14 +109,15 @@ namespace
 		    QStringLiteral("MushReader is implemented natively by QMud. Legacy XML and DLL content with "
 		                   "this plugin id is intentionally shadowed and never executed. %1")
 		        .arg(QString::fromLatin1(kNativeShimMarker));
-		metadata.language        = QStringLiteral("native");
-		metadata.source          = qmudNativeSourceName(metadata.name);
-		metadata.directory       = QStringLiteral("qmud:native/");
-		metadata.version         = 1.10;
-		metadata.requiredVersion = 0.0;
-		metadata.sequence        = QMudPluginSequence::kDefault;
-		metadata.dateWritten     = QDateTime::fromString(QStringLiteral("2026-06-06T00:00:00Z"), Qt::ISODate);
-		metadata.dateModified    = metadata.dateWritten;
+		metadata.language               = QStringLiteral("native");
+		metadata.source                 = qmudNativeSourceName(metadata.name);
+		metadata.directory              = QStringLiteral("qmud:native/");
+		metadata.version                = 1.10;
+		metadata.requiredVersion        = 0.0;
+		metadata.sequence               = QMudPluginSequence::kDefault;
+		metadata.availableWithoutShadow = false;
+		metadata.dateWritten  = QDateTime::fromString(QStringLiteral("2026-06-06T00:00:00Z"), Qt::ISODate);
+		metadata.dateModified = metadata.dateWritten;
 		return metadata;
 	}
 
@@ -125,14 +132,16 @@ namespace
 		    QStringLiteral("LuaAudio is implemented natively by QMud. Legacy XML and audio.dll content "
 		                   "with this plugin id is intentionally shadowed and never executed. %1")
 		        .arg(QString::fromLatin1(kNativeShimMarker));
-		metadata.language        = QStringLiteral("native");
-		metadata.source          = qmudNativeSourceName(metadata.name);
-		metadata.directory       = QStringLiteral("qmud:native/");
-		metadata.version         = 1.0;
-		metadata.requiredVersion = 0.0;
-		metadata.sequence        = QMudPluginSequence::kDefault;
-		metadata.dateWritten     = QDateTime::fromString(QStringLiteral("2026-06-07T00:00:00Z"), Qt::ISODate);
-		metadata.dateModified    = metadata.dateWritten;
+		metadata.language               = QStringLiteral("native");
+		metadata.source                 = qmudNativeSourceName(metadata.name);
+		metadata.directory              = QStringLiteral("qmud:native/");
+		metadata.version                = 1.0;
+		metadata.requiredVersion        = 0.0;
+		metadata.sequence               = QMudPluginSequence::kDefault;
+		metadata.availableWithoutShadow = true;
+		metadata.saveState              = true;
+		metadata.dateWritten  = QDateTime::fromString(QStringLiteral("2026-06-07T00:00:00Z"), Qt::ISODate);
+		metadata.dateModified = metadata.dateWritten;
 		return metadata;
 	}
 
@@ -142,14 +151,96 @@ namespace
 		        QStringLiteral("plugin_update_url")};
 	}
 
+	/**
+	 * @brief Describes one function exposed by the original LuaAudio plugin through PPI.
+	 */
+	struct LuaAudioPpiEndpoint
+	{
+			QString   ppiRoutine;
+			QString   targetRoutine;
+			qsizetype argumentCount{0};
+	};
+
+	/**
+	 * @brief Lists the direct LuaAudio routines and declared arities exposed by the original plugin through PPI.
+	 * @return PPI endpoint definitions in original exposure order.
+	 */
+	const QList<LuaAudioPpiEndpoint> &luaAudioPpiEndpoints()
+	{
+		static const QList<LuaAudioPpiEndpoint> endpoints{
+		    {QStringLiteral("PPI_setPitch_PPI_"),        QStringLiteral("setPitch"),        2},
+		    {QStringLiteral("PPI_slidePitch_PPI_"),      QStringLiteral("slidePitch"),      3},
+		    {QStringLiteral("PPI_isPlaying_PPI_"),       QStringLiteral("isPlaying"),       1},
+		    {QStringLiteral("PPI_getVolume_PPI_"),       QStringLiteral("getVolume"),       1},
+		    {QStringLiteral("PPI_stop_PPI_"),            QStringLiteral("stop"),            1},
+		    {QStringLiteral("PPI_setPan_PPI_"),          QStringLiteral("setPan"),          2},
+		    {QStringLiteral("PPI_play_PPI_"),            QStringLiteral("play"),            4},
+		    {QStringLiteral("PPI_playDelay_PPI_"),       QStringLiteral("playDelay"),       4},
+		    {QStringLiteral("PPI_playDelayLooped_PPI_"), QStringLiteral("playDelayLooped"), 4},
+		    {QStringLiteral("PPI_setVol_PPI_"),          QStringLiteral("setVol"),          2},
+		    {QStringLiteral("PPI_slideVol_PPI_"),        QStringLiteral("slideVol"),        3},
+		    {QStringLiteral("PPI_fadeout_PPI_"),         QStringLiteral("fadeout"),         2},
+		    {QStringLiteral("PPI_slidePan_PPI_"),        QStringLiteral("slidePan"),        3},
+		    {QStringLiteral("PPI_playLooped_PPI_"),      QStringLiteral("playLooped"),      1},
+		};
+		return endpoints;
+	}
+
+	/**
+	 * @brief Resolves a legacy LuaAudio PPI routine name to its endpoint definition.
+	 * @param routine Candidate PPI routine name.
+	 * @return Endpoint definition, or `nullptr` when the name is not a PPI endpoint.
+	 */
+	const LuaAudioPpiEndpoint *findLuaAudioPpiEndpoint(const QString &routine)
+	{
+		if (!routine.startsWith(QStringLiteral("PPI_"), Qt::CaseInsensitive) &&
+		    (routine.isEmpty() || !routine.front().isSpace()))
+			return nullptr;
+		const QString normalized = normalizedRoutine(routine);
+		if (!normalized.startsWith(QStringLiteral("ppi_")))
+			return nullptr;
+		for (const LuaAudioPpiEndpoint &endpoint : luaAudioPpiEndpoints())
+		{
+			if (normalized.compare(endpoint.ppiRoutine, Qt::CaseInsensitive) == 0)
+				return &endpoint;
+		}
+		return nullptr;
+	}
+
+	/**
+	 * @brief Resolves a legacy LuaAudio PPI routine name to its direct native target.
+	 * @param routine Candidate PPI routine name.
+	 * @return Direct target name, or an empty string when the name is not a PPI endpoint.
+	 */
+	QString luaAudioPpiTargetRoutineName(const QString &routine)
+	{
+		const LuaAudioPpiEndpoint *endpoint = findLuaAudioPpiEndpoint(routine);
+		return endpoint ? endpoint->targetRoutine : QString();
+	}
+
+	/**
+	 * @brief Resolves the declared Lua parameter count for a legacy LuaAudio PPI routine.
+	 * @param routine Candidate PPI routine name.
+	 * @return Nonnegative parameter count, or `-1` when the name is not a PPI endpoint.
+	 */
+	qsizetype luaAudioPpiArgumentCountValue(const QString &routine)
+	{
+		const LuaAudioPpiEndpoint *endpoint = findLuaAudioPpiEndpoint(routine);
+		return endpoint ? endpoint->argumentCount : -1;
+	}
+
 	QStringList luaAudioRoutines()
 	{
-		return {
-		    QStringLiteral("setPitch"),  QStringLiteral("slidePitch"), QStringLiteral("isPlaying"),
-		    QStringLiteral("getVolume"), QStringLiteral("stop"),       QStringLiteral("setPan"),
-		    QStringLiteral("play"),      QStringLiteral("playDelay"),  QStringLiteral("playDelayLooped"),
-		    QStringLiteral("setVol"),    QStringLiteral("slideVol"),   QStringLiteral("fadeout"),
-		    QStringLiteral("slidePan"),  QStringLiteral("playLooped"), QStringLiteral("plugin_update_url")};
+		QStringList routines;
+		routines.reserve(luaAudioPpiEndpoints().size() * 2 + 1);
+		for (const LuaAudioPpiEndpoint &endpoint : luaAudioPpiEndpoints())
+			routines.push_back(endpoint.targetRoutine);
+		routines.push_back(QStringLiteral("plugin_update_url"));
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+		for (const LuaAudioPpiEndpoint &endpoint : luaAudioPpiEndpoints())
+			routines.push_back(endpoint.ppiRoutine);
+#endif
+		return routines;
 	}
 
 	QString luaQuote(const QString &value)
@@ -1156,11 +1247,13 @@ namespace
 		}
 		volume = qBound(0.0, volume + static_cast<double>(delta), 100.0);
 		setLuaAudioMasterVolumeAndCommandVolume(runtime, volume);
+		runtime->setPluginVariableValue(QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("vol"),
+		                                QString::number(volume));
+		static_cast<void>(runtime->savePluginState(QMudNativePluginRegistry::luaAudioPluginId(), true));
 	}
 
 	QMudNativePluginRegistry::NativeCallResult
-	callLuaAudioRoutine(const WorldRuntime *runtime, const QString &routine,
-	                    const QVector<QVariant>                                &arguments,
+	callLuaAudioRoutine(WorldRuntime *runtime, const QString &routine, const QVector<QVariant> &arguments,
 	                    const QMudNativePluginRegistry::NativeCallExecutionMode executionMode)
 	{
 		QMudNativePluginRegistry::NativeCallResult result;
@@ -1168,6 +1261,42 @@ namespace
 		const QString name = normalizedRoutine(routine);
 		const bool    executeSideEffects =
 		    executionMode == QMudNativePluginRegistry::NativeCallExecutionMode::ExecuteSideEffects;
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+		if (const QString targetRoutine = luaAudioPpiTargetRoutineName(routine); !targetRoutine.isEmpty())
+		{
+			QVector<QVariant> decodedArguments;
+			QString           decodeError;
+			const qsizetype   argumentCount = luaAudioPpiArgumentCountValue(routine);
+			if (arguments.isEmpty() ||
+			    !QMudLuaSupport::decodePpiArguments(firstArgumentString(arguments), argumentCount,
+			                                        decodedArguments, decodeError))
+			{
+				result.errorCode = eErrorCallingPluginRoutine;
+				result.errorText =
+				    decodeError.isEmpty() ? QStringLiteral("Missing serialized PPI arguments") : decodeError;
+				return result;
+			}
+			result = callLuaAudioRoutine(runtime, targetRoutine, decodedArguments, executionMode);
+			if (result.errorCode != eOK)
+				return result;
+			if (executeSideEffects)
+			{
+				if (!runtime)
+				{
+					result.errorCode = eErrorCallingPluginRoutine;
+					result.errorText = QStringLiteral("LuaAudio PPI runtime is unavailable");
+					result.returnValues.clear();
+					return result;
+				}
+				runtime->setPluginVariableValue(
+				    QMudNativePluginRegistry::luaAudioPluginId(),
+				    QMudNativePluginRegistry::luaAudioPpiReturnVariableName(),
+				    QMudLuaSupport::serializePpiReturnValues(result.returnValues));
+			}
+			result.returnValues.clear();
+			return result;
+		}
+#endif
 		if (name == QStringLiteral("plugin_update_url"))
 		{
 			result.returnValues.push_back(QStringLiteral("qmud:native/LuaAudio"));
@@ -1360,6 +1489,21 @@ namespace QMudNativePluginRegistry
 		return QString::fromLatin1(kLuaAudioPluginId);
 	}
 
+	QString luaAudioPpiTargetRoutine(const QString &routine)
+	{
+		return luaAudioPpiTargetRoutineName(routine);
+	}
+
+	qsizetype luaAudioPpiArgumentCount(const QString &routine)
+	{
+		return luaAudioPpiArgumentCountValue(routine);
+	}
+
+	QString luaAudioPpiReturnVariableName()
+	{
+		return QString::fromLatin1(kPpiReturnVariable);
+	}
+
 	bool metadataForShim(const QString &pluginId, NativePluginMetadata &metadata)
 	{
 		const QString &id = pluginId;
@@ -1441,6 +1585,13 @@ namespace QMudNativePluginRegistry
 			return;
 		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).master.volume = qBound(0.0, volume, 100.0);
+	}
+
+	void luaAudioRestorePersistentVolume(const WorldRuntime *runtime, const double volume)
+	{
+		if (!runtime)
+			return;
+		setLuaAudioMasterVolumeAndCommandVolume(runtime, volume);
 	}
 
 	void luaAudioSetRuntimeMasterPan(const WorldRuntime *runtime, const double pan)
@@ -1784,6 +1935,7 @@ namespace QMudNativePluginRegistry
 		case 14:
 			return metadata.dateModified;
 		case 15:
+			return metadata.saveState;
 		case 16:
 			return false;
 		case 17:
@@ -1809,7 +1961,7 @@ namespace QMudNativePluginRegistry
 		}
 	}
 
-	NativeCallResult callRoutine(const WorldRuntime *runtime, const QString &pluginId, const QString &routine,
+	NativeCallResult callRoutine(WorldRuntime *runtime, const QString &pluginId, const QString &routine,
 	                             const QVector<QVariant> &arguments, const NativeCallContext &context,
 	                             const NativeCallExecutionMode executionMode)
 	{
@@ -1841,7 +1993,6 @@ namespace QMudNativePluginRegistry
 		{
 			return callLuaAudioRoutine(runtime, routine, arguments, executionMode);
 		}
-
 		if (id != mushReaderPluginId())
 		{
 			result.errorCode = eNoSuchPlugin;

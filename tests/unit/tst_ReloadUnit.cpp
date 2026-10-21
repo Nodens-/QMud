@@ -85,6 +85,9 @@ namespace
 				world.mccpDisableAttempted      = true;
 				world.mccpDisableSucceeded      = false;
 				world.nawsNegotiated            = true;
+				world.mspNegotiated             = true;
+				world.mspDefaultSoundUrl        = QStringLiteral("https://msp.example/sounds/");
+				world.mxpDefaultSoundUrl        = QStringLiteral("https://mxp.example/media/");
 				world.utf8Enabled               = true;
 				world.notes                     = QStringLiteral("test");
 				snapshot.worlds.push_back(world);
@@ -113,6 +116,11 @@ namespace
 				QVERIFY(parsed.worlds.at(0).mccpDisableAttempted);
 				QVERIFY(!parsed.worlds.at(0).mccpDisableSucceeded);
 				QVERIFY(parsed.worlds.at(0).nawsNegotiated);
+				QVERIFY(parsed.worlds.at(0).mspNegotiated);
+				QCOMPARE(parsed.worlds.at(0).mspDefaultSoundUrl,
+				         QStringLiteral("https://msp.example/sounds/"));
+				QCOMPARE(parsed.worlds.at(0).mxpDefaultSoundUrl,
+				         QStringLiteral("https://mxp.example/media/"));
 
 				QFile legacyFile(path);
 				QVERIFY(legacyFile.open(QIODevice::ReadOnly));
@@ -122,6 +130,7 @@ namespace
 				QJsonArray  legacyWorlds = legacyRoot.value(QStringLiteral("worlds")).toArray();
 				QJsonObject legacyWorld  = legacyWorlds.at(0).toObject();
 				legacyWorld.remove(QStringLiteral("naws_negotiated"));
+				legacyWorld.remove(QStringLiteral("msp_negotiated"));
 				legacyWorlds.replace(0, legacyWorld);
 				legacyRoot.insert(QStringLiteral("worlds"), legacyWorlds);
 				QVERIFY(legacyFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
@@ -134,6 +143,7 @@ namespace
 				QVERIFY2(error.isEmpty(), qPrintable(error));
 				QCOMPARE(legacyParsed.schemaVersion, 1);
 				QVERIFY(!legacyParsed.worlds.at(0).nawsNegotiated);
+				QVERIFY(!legacyParsed.worlds.at(0).mspNegotiated);
 			}
 
 			void readDefaultsActiveWorldSequenceWhenFieldMissing()

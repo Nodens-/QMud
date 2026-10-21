@@ -23,6 +23,9 @@ namespace
 			bool                   connectResult{true};
 			bool                   suppressConnectActionsMarked{false};
 			bool                   adoptedNawsNegotiated{false};
+			bool                   adoptedMspNegotiated{false};
+			QString                adoptedMspDefaultSoundUrl;
+			QString                adoptedMxpDefaultSoundUrl;
 			int                    adoptedDescriptor{-1};
 			int                    connectCalls{0};
 			int                    closeCalls{0};
@@ -32,11 +35,26 @@ namespace
 			QStringList            events;
 			QMap<QString, QString> attrs;
 
+			/**
+			 * @brief Records descriptor adoption and preserved protocol state.
+			 * @param descriptor Native socket descriptor.
+			 * @param nawsNegotiated Preserved NAWS state.
+			 * @param mspNegotiated Preserved MSP state.
+			 * @param mspDefaultSoundUrl Preserved MSP download base URL.
+			 * @param mxpDefaultSoundUrl Preserved MXP download base URL.
+			 * @param errorMessage Optional output error text.
+			 * @return Configured adoption result.
+			 */
 			bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
-			                                    QString *errorMessage) override
+			                                    const bool mspNegotiated, const QString &mspDefaultSoundUrl,
+			                                    const QString &mxpDefaultSoundUrl,
+			                                    QString       *errorMessage) override
 			{
-				adoptedDescriptor     = descriptor;
-				adoptedNawsNegotiated = nawsNegotiated;
+				adoptedDescriptor         = descriptor;
+				adoptedNawsNegotiated     = nawsNegotiated;
+				adoptedMspNegotiated      = mspNegotiated;
+				adoptedMspDefaultSoundUrl = mspDefaultSoundUrl;
+				adoptedMxpDefaultSoundUrl = mxpDefaultSoundUrl;
 				if (adoptResult)
 					return true;
 				if (errorMessage)
@@ -193,15 +211,21 @@ namespace
 			{
 				FakeRecoveryRuntime runtime;
 				ReloadWorldState    state;
-				state.connectedAtReload = true;
-				state.socketDescriptor  = 42;
-				state.policy            = ReloadSocketPolicy::Reattach;
-				state.nawsNegotiated    = true;
+				state.connectedAtReload  = true;
+				state.socketDescriptor   = 42;
+				state.policy             = ReloadSocketPolicy::Reattach;
+				state.nawsNegotiated     = true;
+				state.mspNegotiated      = true;
+				state.mspDefaultSoundUrl = QStringLiteral("https://msp.example/sounds/");
+				state.mxpDefaultSoundUrl = QStringLiteral("https://mxp.example/media/");
 
 				const ReloadRecoverySocketDecision decision = applyReloadSocketRecovery(runtime, state);
 				QCOMPARE(decision.outcome, ReloadRecoverySocketOutcome::Reattached);
 				QCOMPARE(runtime.adoptedDescriptor, 42);
 				QVERIFY(runtime.adoptedNawsNegotiated);
+				QVERIFY(runtime.adoptedMspNegotiated);
+				QCOMPARE(runtime.adoptedMspDefaultSoundUrl, state.mspDefaultSoundUrl);
+				QCOMPARE(runtime.adoptedMxpDefaultSoundUrl, state.mxpDefaultSoundUrl);
 				QCOMPARE(runtime.connectCalls, 0);
 				QVERIFY(runtime.suppressConnectActionsMarked);
 				QVERIFY(runtime.events.isEmpty());

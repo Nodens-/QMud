@@ -39,6 +39,24 @@ namespace QMudPluginPathUtils
 	[[nodiscard]] bool    resolveInsideQmudHome(const QString &qmudHome, const QString &rawPath,
 	                                            QString *resolvedPath, QString *error = nullptr);
 	/**
+	 * @brief Resolves a relative path inside an existing directory and rejects canonical or symlink escapes.
+	 * @param rootDirectory Existing directory that owns the relative path.
+	 * @param relativePath Relative path using native or portable separators.
+	 * @param resolvedPath Receives the absolute normalized path on success.
+	 * @param error Receives a diagnostic on failure.
+	 * @return True when the relative path is safely contained inside the directory.
+	 */
+	[[nodiscard]] bool    resolveInsideDirectory(const QString &rootDirectory, const QString &relativePath,
+	                                             QString *resolvedPath, QString *error = nullptr);
+	/**
+	 * @brief Tests whether a plugins directory would overlap QMud home or its reserved sounds tree.
+	 * @param qmudHome Resolved QMud home directory path.
+	 * @param pluginsDirectory Configured plugins directory in native, portable, or legacy form.
+	 * @return True when the directory resolves to QMud home or anywhere beneath `QMUD_HOME/sounds`.
+	 */
+	[[nodiscard]] bool    pluginDirectoryConflictsWithSoundStorage(const QString &qmudHome,
+	                                                               const QString &pluginsDirectory);
+	/**
 	 * @brief Converts a path to a QMud-home-relative POSIX path for script metadata APIs.
 	 * @param qmudHome Resolved QMud home directory path.
 	 * @param path Path to convert.

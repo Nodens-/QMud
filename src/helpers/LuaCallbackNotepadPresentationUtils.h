@@ -14,6 +14,7 @@
 #include <QPointer>
 #include <QVector>
 
+#include <limits>
 #include <utility>
 
 /**
@@ -21,6 +22,17 @@
  */
 namespace QMudLuaCallbackNotepadPresentation
 {
+	/**
+	 * @brief Converts a Qt text length to the bounded callback API representation.
+	 * @param length Qt-sized text length.
+	 * @return Length clamped to the callback API's integer range.
+	 */
+	inline int clampedTextLength(const qsizetype length)
+	{
+		return static_cast<int>(
+		    qBound(qsizetype{0}, length, static_cast<qsizetype>(std::numeric_limits<int>::max())));
+	}
+
 	/**
 	 * @brief Tests whether a notepad snapshot belongs to a runtime identity.
 	 * @param notepad Snapshot whose owner must be matched.
@@ -167,12 +179,15 @@ namespace QMudLuaCallbackNotepadPresentation
 				}
 				if (remaining > 0 && candidates.size() >= remaining)
 				{
-					index                          = candidates.at(candidates.size() - remaining);
-					ReplayNotepad &claimed         = replayNotepads[index];
-					claimed.claimedByCreate        = true;
-					claimed.presentation.text      = mutation.contents;
-					claimed.presentation.hasEditor = true;
-					claimed.presentation.hasText   = true;
+					index                     = candidates.at(candidates.size() - remaining);
+					ReplayNotepad &claimed    = replayNotepads[index];
+					claimed.claimedByCreate   = true;
+					claimed.presentation.text = mutation.contents;
+					claimed.presentation.pendingAppend.clear();
+					claimed.presentation.textLength    = clampedTextLength(mutation.contents.length());
+					claimed.presentation.hasEditor     = true;
+					claimed.presentation.hasText       = true;
+					claimed.presentation.hasTextLength = true;
 					--remainingCreatesByKey[key];
 					continue;
 				}
@@ -182,12 +197,14 @@ namespace QMudLuaCallbackNotepadPresentation
 			if (index < 0)
 			{
 				LuaCallbackNotepadSnapshot notepad;
-				notepad.runtime   = runtime;
-				notepad.worldId   = mutation.worldId;
-				notepad.title     = mutation.title;
-				notepad.text      = mutation.contents;
-				notepad.hasEditor = true;
-				notepad.hasText   = true;
+				notepad.runtime       = runtime;
+				notepad.worldId       = mutation.worldId;
+				notepad.title         = mutation.title;
+				notepad.text          = mutation.contents;
+				notepad.textLength    = clampedTextLength(mutation.contents.length());
+				notepad.hasEditor     = true;
+				notepad.hasText       = true;
+				notepad.hasTextLength = true;
 				replayNotepads.push_back({std::move(notepad), mutation.kind == Mutation::Kind::Create});
 				continue;
 			}
@@ -195,12 +212,24 @@ namespace QMudLuaCallbackNotepadPresentation
 			LuaCallbackNotepadSnapshot &notepad = replayNotepads[index].presentation;
 			if (mutation.replace || !notepad.hasEditor)
 			{
-				notepad.text    = mutation.contents;
-				notepad.hasText = true;
+				notepad.text = mutation.contents;
+				notepad.pendingAppend.clear();
+				notepad.textLength    = clampedTextLength(mutation.contents.length());
+				notepad.hasText       = true;
+				notepad.hasTextLength = true;
 			}
-			else if (notepad.hasText)
+			else
 			{
-				notepad.text += mutation.contents;
+				notepad.pendingAppend += mutation.contents;
+				if (notepad.hasTextLength)
+					notepad.textLength = clampedTextLength(static_cast<qsizetype>(notepad.textLength) +
+					                                       mutation.contents.length());
+				else if (notepad.hasText)
+				{
+					notepad.textLength =
+					    clampedTextLength(notepad.text.length() + notepad.pendingAppend.length());
+					notepad.hasTextLength = true;
+				}
 			}
 			notepad.hasEditor = true;
 		}

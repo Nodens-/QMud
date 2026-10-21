@@ -635,6 +635,10 @@ class WorldPreferencesDialog : public QDialog
 		QPushButton                         *m_testActivitySound{nullptr};
 		QPushButton                         *m_noActivitySound{nullptr};
 		QCheckBox                           *m_playSoundsInBackground{nullptr};
+		QLineEdit                           *m_defaultWorldSoundDirectory{nullptr};
+		QPushButton                         *m_browseDefaultWorldSoundDirectory{nullptr};
+		QCheckBox                           *m_enableEmbeddedMsp{nullptr};
+		QCheckBox                           *m_disableMspPlayback{nullptr};
 
 		// Custom colors / ANSI colors
 		QVector<QLineEdit *>                 m_customColourNames;

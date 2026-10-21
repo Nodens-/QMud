@@ -4347,6 +4347,86 @@ class tst_WorldView_Basic : public QObject
 			         WorldView::AccessibleOutputReviewTargetKind::None);
 		}
 
+		/**
+		 * @brief Verifies inactive Qt accessibility releases full-text caches without dropping native review state.
+		 */
+		void inactiveQtAccessibilityReleasesFullTextStateButKeepsNativeReviewState()
+		{
+			resetTestState();
+			const ScopedTestStateReset        resetState;
+			const ScopedAccessibleActiveState accessibleActive(false);
+
+			WorldView                         view;
+			view.m_accessibleOutputText             = QString(4096, QLatin1Char('x'));
+			view.m_accessibleOutputBaselineTailText = QString(4096, QLatin1Char('y'));
+			view.m_accessibleOutputBaselineLineLengths.reserve(1024);
+			view.m_accessibleOutputBaselineLineLengths.push_back(4096);
+			view.m_accessibleOutputTextMapCache =
+			    QMudAccessibleTextUtils::LineOffsetMap({QString(4096, QLatin1Char('z'))});
+			view.m_accessibleOutputTextMapCacheRevision = 42;
+			view.m_accessibleOutputTextMapCacheValid    = true;
+			view.m_accessibleOutputReviewActive         = true;
+			view.m_accessibleOutputReviewTargetKind =
+			    WorldView::AccessibleOutputReviewTargetKind::SplitTopPane;
+			view.m_accessibleOutputLineStartCache         = {0, 5};
+			view.m_accessibleOutputLineStartCacheRevision = 42;
+
+			view.notifyAccessibleOutputPresented({});
+
+			QVERIFY(view.m_accessibleOutputText.isNull());
+			QVERIFY(view.m_accessibleOutputBaselineTailText.isNull());
+			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.capacity(), qsizetype{0});
+			QVERIFY(view.m_accessibleOutputTextMapCache.isEmpty());
+			QVERIFY(!view.m_accessibleOutputTextMapCacheValid);
+			QCOMPARE(view.m_accessibleOutputTextMapCacheRevision, quint64{0});
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::SplitTopPane);
+			QCOMPARE(view.m_accessibleOutputLineStartCache, QVector<int>({0, 5}));
+			QCOMPARE(view.m_accessibleOutputLineStartCacheRevision, quint64{42});
+		}
+
+		/**
+		 * @brief Verifies switching equal-revision render models cannot reuse another world's accessibility state.
+		 */
+		void switchingRuntimeObserverClearsAccessibilityStateForEqualRevisionModel()
+		{
+			resetTestState();
+			const ScopedTestStateReset resetState;
+
+			WorldRuntime *const        firstRuntime  = runtimeForTest(1);
+			WorldRuntime *const        secondRuntime = runtimeForTest(2);
+			firstRuntime->addLine(QStringLiteral("first-world-output"), WorldRuntime::LineOutput, true);
+			secondRuntime->addLine(QStringLiteral("second-world-output"), WorldRuntime::LineOutput, true);
+
+			WorldView view;
+			setTestRuntimeObserver(view, firstRuntime);
+			const WorldView::NativeOutputRenderLines &firstLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(firstLines.size()), 1);
+			const auto &firstMap = view.accessibleNativeOutputTextMap();
+			QCOMPARE(firstMap.text(0, firstMap.characterCount()), QStringLiteral("first-world-output"));
+			const quint64 firstRevision = view.m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+
+			view.m_accessibleOutputReviewActive = true;
+			view.m_accessibleOutputReviewTargetKind =
+			    WorldView::AccessibleOutputReviewTargetKind::SplitTopPane;
+			view.m_accessibleOutputLineStartCache         = {0};
+			view.m_accessibleOutputLineStartCacheRevision = firstRevision;
+
+			setTestRuntimeObserver(view, secondRuntime);
+			const WorldView::NativeOutputRenderLines &secondLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(secondLines.size()), 1);
+			QCOMPARE(view.m_nativeRenderModel->m_nativeRenderLineCacheRevision, firstRevision);
+			QVERIFY(!view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::None);
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(!view.m_accessibleOutputTextMapCacheValid);
+
+			const auto &secondMap = view.accessibleNativeOutputTextMap();
+			QCOMPARE(secondMap.text(0, secondMap.characterCount()), QStringLiteral("second-world-output"));
+		}
+
 		void worldOutputAccessibleScrollToSubstringUsesTopPaneAfterAutoPauseScroll()
 		{
 			resetTestState();
@@ -7612,7 +7692,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void scrollbackSplitKeepsLivePaneSizeOnResize()
+		void scrollbackSplitKeepsLivePaneRatioOnResize()
 		{
 			resetTestState();
 			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
@@ -7643,8 +7723,11 @@ class tst_WorldView_Basic : public QObject
 
 			QList<int> beforeSizes = outputSplitter->sizes();
 			QVERIFY(beforeSizes.size() >= 2);
-			const int beforeLive = beforeSizes.at(1);
-			QVERIFY(beforeLive > 0);
+			const int beforeTotal = beforeSizes.at(0) + beforeSizes.at(1);
+			QVERIFY(beforeTotal > 0);
+			const int beforeRatio = static_cast<int>(
+			    (static_cast<qint64>(beforeSizes.at(1)) * QMudSplitView::kRatioScale + beforeTotal / 2) /
+			    beforeTotal);
 
 			view.resize(900, 620);
 			QCoreApplication::processEvents();
@@ -7652,9 +7735,159 @@ class tst_WorldView_Basic : public QObject
 
 			const QList<int> afterSizes = outputSplitter->sizes();
 			QVERIFY(afterSizes.size() >= 2);
-			const int afterLive = afterSizes.at(1);
-			QVERIFY(afterLive > 0);
-			QVERIFY(qAbs(afterLive - beforeLive) <= qMax(80, beforeLive / 2));
+			const int afterTotal = afterSizes.at(0) + afterSizes.at(1);
+			QVERIFY(afterTotal > 0);
+			const int afterRatio = static_cast<int>(
+			    (static_cast<qint64>(afterSizes.at(1)) * QMudSplitView::kRatioScale + afterTotal / 2) /
+			    afterTotal);
+			QVERIFY(qAbs(afterRatio - beforeRatio) <= 25);
+
+			resetTestState();
+		}
+
+		void scrollbackSplitRatioPersistsInWorldAcrossEntryPaths()
+		{
+			resetTestState();
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->setWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			runtime->setWorldAttribute(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName),
+			                           QStringLiteral("4000"));
+
+			WorldView view;
+			view.resize(760, 520);
+			view.show();
+			setTestRuntime(view, runtime);
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 260; ++i)
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-ratio-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *const input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			QTest::keyClick(input, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			QSplitter *const splitter = findOutputSplitter(view);
+			QVERIFY(splitter);
+			auto livePaneRatio = [splitter]
+			{
+				const QList<int> sizes = splitter->sizes();
+				if (sizes.size() < 2)
+					return 0;
+				const int total = sizes.at(0) + sizes.at(1);
+				if (total <= 0)
+					return 0;
+				return static_cast<int>(
+				    (static_cast<qint64>(sizes.at(1)) * QMudSplitView::kRatioScale + total / 2) / total);
+			};
+			QTRY_VERIFY(qAbs(livePaneRatio() - 4000) <= 25);
+
+			view.resize(900, 700);
+			QCoreApplication::processEvents();
+			view.setScrollbackSplitActive(false);
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("4000"));
+
+			QTextBrowser *const output = findVisibleOutputBrowser(view);
+			QVERIFY(output);
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			const QPointF localPos(output->viewport()->rect().center());
+			const QPointF globalPos(output->viewport()->mapToGlobal(localPos.toPoint()));
+			QWheelEvent   wheelUp(localPos, globalPos, QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+			                      Qt::NoScrollPhase, false);
+			QCoreApplication::sendEvent(output->viewport(), &wheelUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QTRY_VERIFY(qAbs(livePaneRatio() - 4000) <= 25);
+
+			splitter->setOpaqueResize(true);
+			QSplitterHandle *const handle = splitter->handle(1);
+			QVERIFY(handle);
+			const QPoint pressPosition = handle->rect().center();
+			QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, pressPosition);
+			const QPoint dragPosition = pressPosition + QPoint(0, 70);
+			const QPoint dragGlobal   = handle->mapToGlobal(dragPosition);
+			QMouseEvent  dragEvent(QEvent::MouseMove, QPointF(dragPosition), QPointF(dragPosition),
+			                       QPointF(dragGlobal), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &dragEvent);
+			QCoreApplication::processEvents();
+			const int draggedRatio = livePaneRatio();
+			QVERIFY(qAbs(draggedRatio - 4000) > 100);
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("4000"));
+
+			runtime->setBackgroundColour(qRgb(17, 29, 43));
+			QCoreApplication::processEvents();
+			QVERIFY(qAbs(livePaneRatio() - draggedRatio) <= 25);
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("4000"));
+
+			const QPoint releasePosition = handle->mapFromGlobal(dragGlobal);
+			QMouseEvent  releaseEvent(QEvent::MouseButtonRelease, QPointF(releasePosition),
+			                          QPointF(releasePosition), QPointF(dragGlobal), Qt::LeftButton,
+			                          Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &releaseEvent);
+			QCoreApplication::processEvents();
+			bool      persistedOk = false;
+			const int persistedRatio =
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName))
+			        .toInt(&persistedOk);
+			QVERIFY(persistedOk);
+			QVERIFY(qAbs(persistedRatio - draggedRatio) <= 25);
+
+			view.setScrollbackSplitActive(false);
+			view.setScrollbackSplitActive(true);
+			QTRY_VERIFY(qAbs(livePaneRatio() - persistedRatio) <= 25);
+
+			QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+			const QPoint overrideDragPosition = handle->rect().center() - QPoint(0, 45);
+			const QPoint overrideDragGlobal   = handle->mapToGlobal(overrideDragPosition);
+			QMouseEvent  overrideDragEvent(QEvent::MouseMove, QPointF(overrideDragPosition),
+			                               QPointF(overrideDragPosition), QPointF(overrideDragGlobal),
+			                               Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &overrideDragEvent);
+			QCoreApplication::processEvents();
+			QVERIFY(qAbs(livePaneRatio() - persistedRatio) > 100);
+
+			const WorldNumericOption *const ratioOption = QMudWorldOptions::findWorldNumericOption(
+			    QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName));
+			QVERIFY(ratioOption);
+			QCOMPARE(runtime->setOptionItem(*ratioOption, 3000), eOK);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(qAbs(livePaneRatio() - 3000) <= 25);
+			QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+			QCoreApplication::processEvents();
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("3000"));
+
+			view.resize(760, 480);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(qAbs(livePaneRatio() - 3000) <= 25);
+
+			splitter->setSizes(QList<int>() << 1 << 0);
+			emit splitter->splitterMoved(splitter->height(), 1);
+			QCoreApplication::processEvents();
+			QCOMPARE(livePaneRatio(), 0);
+			QMouseEvent collapsedReleaseEvent(QEvent::MouseButtonRelease, QPointF(), QPointF(), QPointF(),
+			                                  Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(handle, &collapsedReleaseEvent);
+			QCoreApplication::processEvents();
+			QCOMPARE(
+			    runtime->worldAttributeValue(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+			    QStringLiteral("0"));
+
+			view.setScrollbackSplitActive(false);
+			view.setScrollbackSplitActive(true);
+			QTRY_COMPARE(livePaneRatio(), 0);
 
 			resetTestState();
 		}
@@ -11605,6 +11838,9 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
 			QTRY_COMPARE(view.outputLines().value(0), QStringLiteral("merge-b"));
 			QTRY_COMPARE(view.outputLines().value(1), QStringLiteral("merge-c"));
+			const WorldView::NativeOutputRenderLines &renderLines = view.nativeOutputRenderLines();
+			QVERIFY(renderLines.constFirst().text.constData() ==
+			        runtimeForTest()->lines().constFirst().text.constData());
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
 			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_incremental_updates").toInt() >
 			            updatesBefore);
@@ -16978,6 +17214,35 @@ end
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("lazy-000")));
 
 			resetTestState();
+		}
+
+		/**
+		 * @brief Verifies full rebuilds share one-source text while retaining copy-on-write isolation.
+		 */
+		void nativeFullRebuildSharesSingleSourceTextAndPreservesCopyOnWrite()
+		{
+			resetTestState();
+			const ScopedTestStateReset resetState;
+
+			WorldRuntime *const        runtime = runtimeForTest();
+			WorldView                  view;
+			setTestRuntimeObserver(view, runtime);
+
+			WorldRuntime::LineEntry entry;
+			entry.text       = QString(256, QLatin1Char('s')) + QStringLiteral("-shared-source");
+			entry.flags      = WorldRuntime::LineOutput;
+			entry.hardReturn = true;
+			entry.lineNumber = 1;
+			runtime->replaceOutputLines({entry});
+
+			const WorldView::NativeOutputRenderLines &renderLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(renderLines.size()), 1);
+			QCOMPARE(renderLines.constFirst().text, entry.text);
+			QVERIFY(renderLines.constFirst().text.constData() ==
+			        runtime->lines().constFirst().text.constData());
+
+			entry.text[0] = QLatin1Char('m');
+			QCOMPARE(renderLines.constFirst().text.at(0), QLatin1Char('s'));
 		}
 
 		void applyRuntimeSettingsRebuildPreservesEndAnchorForRestoredBuffer()

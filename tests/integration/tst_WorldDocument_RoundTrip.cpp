@@ -8,6 +8,7 @@
 
 #include "TestEnvironment.h"
 #include "WorldDocument.h"
+#include "WorldOptions.h"
 #include "WorldRuntime.h"
 
 #include <QColor>
@@ -161,6 +162,8 @@ namespace
 				                          QStringLiteral("37"));
 				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 				                          QStringLiteral("y"));
+				runtime.setWorldAttribute(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName),
+				                          QStringLiteral("0"));
 				QString saveError;
 				QVERIFY2(runtime.saveWorldFile(roundTripPath, &saveError), qPrintable(saveError));
 				QFile serializedWorld(roundTripPath);
@@ -185,6 +188,9 @@ namespace
 				QCOMPARE(
 				    loaded.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
 				    QStringLiteral("y"));
+				QCOMPARE(loaded.worldAttributes().value(
+				             QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+				         QStringLiteral("0"));
 				QCOMPARE(loaded.worldMultilineAttributes(), source.worldMultilineAttributes());
 
 				const auto *trigger = entryByAttribute(loaded.triggers(), QStringLiteral("name"),

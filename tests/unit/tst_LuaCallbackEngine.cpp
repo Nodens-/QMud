@@ -59,6 +59,7 @@
 #include <QTcpSocket>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QTextDocument>
 #include <QThread>
 #include <QTimeZone>
 #include <QUdpSocket>
@@ -403,6 +404,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void overriddenWorldCollectionMutationsDoNotDirtyPersistentState();
 		void setAlphaOptionSupportsTwoCharacterCommandStackSeparator();
 		void setAlphaOptionUpdatesEveryPresentationFromDeferredCallback();
+		void setAlphaOptionRejectsWorldSoundDirectory();
 		void setOptionItemAppliesChatListenerSettings();
 		/** @brief Verifies NAWS tracks effective view geometry and output metrics only. */
 		void nawsTracksEffectiveOutputGeometryAndMetrics();
@@ -754,6 +756,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerVanishedRuntimeDoesNotPublishEmptyLinePage();
 		void notepadMutationReplayKeepsCreateClaimsAttachedAcrossErase();
 		void freshNotepadSnapshotDoesNotReplayFlushedClose();
+		/** @brief Verifies callback notepad appends stay lazy, coalesce, and preserve mutation ordering. */
+		void workerNotepadAppendsAreLazyAndCoalesced();
 		void workerNotepadCachesPreserveGlobalAndOwnerLists();
 		void workerUnavailableNotepadRefreshDoesNotExportStaleCaches();
 		void workerUnavailableNotepadRefreshSurvivesNestedMutationBoundary();
@@ -5832,6 +5836,38 @@ end
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
 	         QStringLiteral("::"));
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")), QStringLiteral("0"));
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::setAlphaOptionRejectsWorldSoundDirectory()
+{
+	WorldRuntime runtime;
+	runtime.applyDefaultWorldOptions();
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function reject_world_sound_directory()
+  assert(GetAlphaOption("default_world_sound_directory") == "./sounds/")
+  assert(SetAlphaOption("default_world_sound_directory", "./sounds/other/") == 30032)
+  assert(GetAlphaOption("default_world_sound_directory") == "./sounds/")
+end
+)lua"),
+	                            &runtime))
+	{
+		QFAIL("Worker engine initialization failed");
+	}
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("reject_world_sound_directory");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("default_world_sound_directory")),
+	         QStringLiteral("./sounds/"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -15084,6 +15120,69 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QCOMPARE(result.stringResult, QStringLiteral("2|25|100"));
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
+	QString bundledLuaPattern = QDir::fromNativeSeparators(
+	    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("../lua/?.lua")));
+	bundledLuaPattern.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+	bundledLuaPattern.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+	auto ppiEngine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, ppiEngine,
+	                            QStringLiteral(R"lua(
+	package.path = package.path .. ";%1"
+	local audio_id = "aedf0cb0be5bf045860d54b7"
+	local PPI = require "ppi"
+	local audio = assert(PPI.Load(audio_id))
+	function OnPluginEnable()
+	  local id = audio.play("coin.wav", nil, 4, 70)
+	  local initial_volume = audio.getVolume(id)
+	  audio.setVol(35, id)
+	  local volume = audio.getVolume(id)
+	  local playing = audio.isPlaying(id)
+	  local variables = GetPluginVariableList(audio_id)
+	  local malformed_code = CallPlugin(audio_id, "PPI_play_PPI_", "not a serialized table")
+	  lua_audio_ppi_info = table.concat({
+	    tostring(PluginSupports(audio_id, "PPI_play_PPI_")),
+	    tostring(id), string.format("%.0f", initial_volume), string.format("%.0f", volume), tostring(playing),
+	    tostring(variables["PPI__returns__PPI_"] ~= nil),
+	    tostring(GetPluginVariable(audio_id, "ppi__returns__ppi_") ~= nil),
+	    string.format("%.0f", GetPluginInfo(audio_id, 12)),
+	    string.format("%.0f", malformed_code)
+	  }, "|")
+	end
+	function lua_audio_ppi_status(value)
+	  return lua_audio_ppi_info
+	end
+	)lua")
+	                                .arg(bundledLuaPattern),
+	                            &runtime))
+		QFAIL("Worker engine initialization failed");
+	auto ppiSnapshot = captureMutableDispatchSnapshotForTest(runtime);
+	QVERIFY(ppiSnapshot);
+	ppiSnapshot->soundStatusByBuffer.insert(1, -2);
+	ppiSnapshot->soundStatusByBuffer.insert(2, -2);
+	request.engines             = {ppiEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = ppiSnapshot;
+	QVERIFY(dispatchWorkerAndWait(executor, request));
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("lua_audio_ppi_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("0.0|1|70|35|true|true|true|2|%1").arg(eErrorCallingPluginRoutine));
+	QMudNativePluginRegistry::LuaAudioRuntimeBufferState sparsePpiState;
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, sparsePpiState));
+	QCOMPARE(sparsePpiState.loop, false);
+	QCOMPARE(sparsePpiState.pan, 4.0);
+	QCOMPARE(sparsePpiState.volume, 35.0);
+	QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, QMudNativePluginRegistry::luaAudioPluginId(),
+	                                               QStringLiteral("stop"), {1}, audioContext)
+	             .errorCode,
+	         eOK);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+	QVERIFY(teardownWorkerEngine(executor, ppiEngine));
+
 	auto preStartEngine = QSharedPointer<LuaCallbackEngine>::create();
 	if (!initializeWorkerEngine(executor, preStartEngine, QStringLiteral(R"lua(
 	function OnPluginEnable()
@@ -15422,8 +15521,9 @@ void tst_LuaCallbackEngine::blacklistedPluginsAreHiddenFromPluginApis()
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
 	const QString     blacklistedId = QStringLiteral("bb6a05ed7534b5db1ed40511");
-	const QStringList blacklistedIds{blacklistedId, QStringLiteral("b8e6dac1ee7fe8e3de931fb7"),
-	                                 QStringLiteral("8238deec7c06bade8ebc3819")};
+	const QStringList blacklistedIds{
+	    blacklistedId, QStringLiteral("b8e6dac1ee7fe8e3de931fb7"), QStringLiteral("8238deec7c06bade8ebc3819"),
+	    QStringLiteral("7da63d78d9f91bebb5285127"), QStringLiteral("1df4fa3b486a36ededa19433")};
 	for (const QString &id : blacklistedIds)
 		QVERIFY(QMudNativePluginRegistry::isBlacklistedId(id));
 
@@ -29587,6 +29687,22 @@ void tst_LuaCallbackEngine::notepadMutationReplayKeepsCreateClaimsAttachedAcross
 	QCOMPARE(presentation.at(1).text, QStringLiteral("second"));
 	QVERIFY(presentation.at(0).hasText);
 	QVERIFY(presentation.at(1).hasText);
+	QVERIFY(presentation.at(0).hasTextLength);
+	QVERIFY(presentation.at(1).hasTextLength);
+	QCOMPARE(presentation.at(0).textLength, 5);
+	QCOMPARE(presentation.at(1).textLength, 6);
+
+	QVector<LuaCallbackNotepadSnapshot> unresolvedPresentation{makeNotepad(QStringLiteral("Existing"))};
+	QVector<Mutation>                   unresolvedMutations{
+	    {Mutation::Kind::Write, &runtime, QStringLiteral("world-id"), QStringLiteral("Existing"),
+	     QStringLiteral("+tail"), false},
+	};
+	QMudLuaCallbackNotepadPresentation::applyMutations(unresolvedPresentation, unresolvedMutations);
+	QVERIFY(unresolvedMutations.isEmpty());
+	QCOMPARE(unresolvedPresentation.size(), 1);
+	QVERIFY(!unresolvedPresentation.constFirst().hasText);
+	QVERIFY(!unresolvedPresentation.constFirst().hasTextLength);
+	QCOMPARE(unresolvedPresentation.constFirst().pendingAppend, QStringLiteral("+tail"));
 }
 
 void tst_LuaCallbackEngine::freshNotepadSnapshotDoesNotReplayFlushedClose()
@@ -29615,6 +29731,151 @@ void tst_LuaCallbackEngine::freshNotepadSnapshotDoesNotReplayFlushedClose()
 	QVERIFY(mutations.isEmpty());
 	QCOMPARE(presentation.size(), 1);
 	QCOMPARE(presentation.constFirst().title, QStringLiteral("DUPLICATE"));
+}
+
+void tst_LuaCallbackEngine::workerNotepadAppendsAreLazyAndCoalesced()
+{
+	MainWindow frame;
+	frame.resize(900, 700);
+	frame.show();
+
+	WorldRuntime runtime(&frame);
+	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("world-id"));
+	runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("World"));
+	auto *worldWindow = new WorldChildWindow(QStringLiteral("World"));
+	worldWindow->setRuntime(&runtime);
+	frame.addMdiSubWindow(worldWindow, true);
+	worldWindow->show();
+	QVERIFY(frame.appendToNotepad(QStringLiteral("Batch Target"), QStringLiteral("base"), false, &runtime));
+	QVERIFY(frame.appendToNotepad(QStringLiteral("Barrier Target"), QStringLiteral("base"), false, &runtime));
+	QVERIFY(frame.appendToNotepad(QStringLiteral("Length Target"), QStringLiteral("base"), false, &runtime));
+	QCoreApplication::processEvents();
+
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+notepad_append_result = ""
+function append_only_cb(name, line, wildcards)
+  local first, first_id = AppendToNotepad("Batch Target", "+one")
+  local second, second_id = utils.appendtonotepad("batch target", "+two", false)
+  notepad_append_result = table.concat({tostring(first), tostring(first_id ~= nil),
+                                        tostring(second), tostring(second_id ~= nil)}, "|")
+end
+function append_barriers_cb(name, line, wildcards)
+  AppendToNotepad("Barrier Target", "+before")
+  ReplaceNotepad("Barrier Target", "middle")
+  AppendToNotepad("Barrier Target", "+after")
+end
+function append_length_cb(name, line, wildcards)
+  local accepted = AppendToNotepad("Length Target", "+tail")
+  notepad_append_result = tostring(accepted) .. "|" .. tostring(GetNotepadLength("Length Target"))
+end
+function empty_append_cb(name, line, wildcards)
+  AppendToNotepad("Empty Target", "")
+end
+function append_status(value)
+  return notepad_append_result
+end
+)lua"),
+	                            &runtime))
+		QFAIL("Worker engine initialization failed");
+
+	auto findNotepad = [&frame](const QString &title) -> TextChildWindow *
+	{
+		for (TextChildWindow *notepad : frame.notepadWindows())
+		{
+			if (notepad && notepad->windowTitle().compare(title, Qt::CaseInsensitive) == 0)
+				return notepad;
+		}
+		return nullptr;
+	};
+	auto mutationCount = [](const LuaBatchDispatchResult &result)
+	{
+		qsizetype count = 0;
+		for (const LuaDeferredRuntimeMutationBatch &batch : result.deferredRuntimeMutationBatches)
+			count += batch.mutations.size();
+		return count;
+	};
+	auto dispatch = [&](const QString &functionName)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+		request.functionName        = functionName;
+		request.stringListArg       = {QStringLiteral("notepad_alias"), QStringLiteral("ignored")};
+		request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+		LuaBatchDispatchResult result;
+		if (!dispatchWorkerAndWait(executor, request, result))
+			QTest::qFail("Worker callback dispatch failed", __FILE__, __LINE__);
+		return result;
+	};
+	auto readStatus = [&]()
+	{
+		LuaBatchDispatchRequest request;
+		request.engines      = {engine};
+		request.kind         = LuaBatchDispatchKind::StringInOut;
+		request.functionName = QStringLiteral("append_status");
+		request.stringArg    = QStringLiteral("ignored");
+		LuaBatchDispatchResult result;
+		if (!dispatchWorkerAndWait(executor, request, result))
+			QTest::qFail("Worker status dispatch failed", __FILE__, __LINE__);
+		return result.stringResult;
+	};
+
+	TextChildWindow *batchTarget = findNotepad(QStringLiteral("Batch Target"));
+	QVERIFY(batchTarget);
+	QVERIFY(batchTarget->editor());
+	QVERIFY(batchTarget->editor()->document());
+	QSignalSpy             batchChangeSpy(batchTarget->editor()->document(), &QTextDocument::contentsChange);
+	LuaBatchDispatchResult appendOnlyResult = dispatch(QStringLiteral("append_only_cb"));
+	QVERIFY(!appendOnlyResult.suspended);
+	QCOMPARE(mutationCount(appendOnlyResult), qsizetype{1});
+	QCOMPARE(readStatus(), QStringLiteral("true|true|true|true"));
+	executeDeferredMutations(appendOnlyResult);
+	QCoreApplication::processEvents();
+	QCOMPARE(batchTarget->editor()->toPlainText(), QStringLiteral("base+one+two"));
+	QCOMPARE(batchChangeSpy.count(), 1);
+
+	LuaBatchDispatchResult barrierResult = dispatch(QStringLiteral("append_barriers_cb"));
+	QVERIFY(!barrierResult.suspended);
+	QCOMPARE(mutationCount(barrierResult), qsizetype{3});
+	executeDeferredMutations(barrierResult);
+	QCoreApplication::processEvents();
+	TextChildWindow *barrierTarget = findNotepad(QStringLiteral("Barrier Target"));
+	QVERIFY(barrierTarget);
+	QVERIFY(barrierTarget->editor());
+	QCOMPARE(barrierTarget->editor()->toPlainText(), QStringLiteral("middle+after"));
+
+	LuaBatchDispatchResult lengthResult = dispatch(QStringLiteral("append_length_cb"));
+	QVERIFY(lengthResult.suspended);
+	int lengthResumeCount = 0;
+	QVERIFY(completeWorkerSuspensions(executor, engine, runtime, lengthResult, lengthResumeCount));
+	QCOMPARE(lengthResumeCount, 1);
+	QCOMPARE(readStatus(), QStringLiteral("true|9.0"));
+	TextChildWindow *lengthTarget = findNotepad(QStringLiteral("Length Target"));
+	QVERIFY(lengthTarget);
+	QVERIFY(lengthTarget->editor());
+	QCOMPARE(lengthTarget->editor()->toPlainText(), QStringLiteral("base+tail"));
+
+	LuaBatchDispatchResult emptyResult = dispatch(QStringLiteral("empty_append_cb"));
+	QVERIFY(!emptyResult.suspended);
+	QCOMPARE(mutationCount(emptyResult), qsizetype{1});
+	executeDeferredMutations(emptyResult);
+	QCoreApplication::processEvents();
+	TextChildWindow *emptyTarget = findNotepad(QStringLiteral("Empty Target"));
+	QVERIFY(emptyTarget);
+	QVERIFY(emptyTarget->editor());
+	QVERIFY(emptyTarget->editor()->toPlainText().isEmpty());
+
+	QVERIFY(teardownWorkerEngine(executor, engine));
+	for (TextChildWindow *notepad : frame.notepadWindows())
+	{
+		if (notepad)
+			notepad->setQuerySaveOnClose(false);
+	}
+	worldWindow->setRuntime(nullptr);
 }
 
 void tst_LuaCallbackEngine::workerNotepadCachesPreserveGlobalAndOwnerLists()
@@ -29891,7 +30152,7 @@ end
 	int lazyDocumentResumeCount = 0;
 	QVERIFY(completeWorkerSuspensions(executor, engine, primaryRuntime, lazyDocumentResult,
 	                                  lazyDocumentResumeCount));
-	QCOMPARE(lazyDocumentResumeCount, 1);
+	QCOMPARE(lazyDocumentResumeCount, 2);
 	QVERIFY(dispatchWorkerAndWait(executor, status, statusResult));
 	QCOMPARE(statusResult.stringResult, QStringLiteral("9.0|primary b"));
 

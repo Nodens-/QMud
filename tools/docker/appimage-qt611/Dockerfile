@@ -20,6 +20,7 @@ RUN dnf -y upgrade && \
       git \
       glibc-langpack-en \
       libglvnd-devel \
+      libXrandr \
       libxkbcommon \
       libxkbcommon-devel \
       lua \
@@ -35,7 +36,9 @@ RUN dnf -y upgrade && \
       patchelf \
       pipewire-libs \
       pkgconf-pkg-config \
+      pulseaudio \
       pulseaudio-libs \
+      pulseaudio-utils \
       python3 \
       python3-pip \
       rsync \
@@ -73,11 +76,10 @@ RUN mkdir -p /etc/aqt && \
 
 ENV AQT_CONFIG=/etc/aqt/settings.ini
 
-ARG QT_SERIES=6.11
+ARG QT_VERSION=6.11.2
 ARG QT_ARCH=linux_gcc_64
 
 RUN set -eux; \
-    QT_VERSION="$(aqt list-qt linux desktop --spec "${QT_SERIES}" --latest-version)"; \
     aqt install-qt -O /opt/Qt linux desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qttasktree; \
     ln -sfn "/opt/Qt/${QT_VERSION}" /opt/Qt/latest
 
@@ -100,5 +102,8 @@ RUN set -eux; \
 
 ENV QMUD_APPIMAGE_QT_PREFIX=/opt/Qt/latest/gcc_64
 ENV PATH=/opt/Qt/latest/gcc_64/bin:${PATH}
+
+COPY tools/scripts/start-test-audio.sh /usr/local/bin/qmud-start-test-audio
+RUN chmod 0755 /usr/local/bin/qmud-start-test-audio
 
 WORKDIR /work

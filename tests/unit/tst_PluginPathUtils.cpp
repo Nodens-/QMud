@@ -24,6 +24,10 @@ namespace
 			static void resolvesLegacyAbsolutePathsUnderQmudHome();
 			static void resolvesNativeAbsolutePathsInsideQmudHome();
 			static void rejectsParentTraversalAndSymlinkEscapes();
+			/** @brief Verifies generic contained-directory resolution uses portable separators and canonical roots. */
+			static void resolvesRelativePathsInsideContainedDirectory();
+			/** @brief Verifies plugin roots cannot overlap QMud home or its sounds tree. */
+			static void rejectsPluginDirectoriesThatOverlapSoundStorage();
 			static void returnsRelativePosixPathsForGetInfo();
 			static void keepsWindowsStyleRelativePathsPosix();
 	};
@@ -119,6 +123,56 @@ namespace
 			                                                    &resolved, &error));
 			QVERIFY(!error.isEmpty());
 		}
+	}
+
+	void tst_PluginPathUtils::resolvesRelativePathsInsideContainedDirectory()
+	{
+		QString root;
+		QVERIFY(prepareSandbox(&root));
+		const QString sounds = QDir(root).filePath(QStringLiteral("home/sounds"));
+
+		QString       resolved;
+		QVERIFY(QMudPluginPathUtils::resolveInsideDirectory(
+		    sounds, QStringLiteral(R"(world\zone\missing.wav)"), &resolved));
+		QCOMPARE(QMudPluginPathUtils::normalizeSeparators(QDir(sounds).relativeFilePath(resolved)),
+		         QStringLiteral("world/zone/missing.wav"));
+		QVERIFY(!QMudPluginPathUtils::resolveInsideDirectory(sounds, QStringLiteral("../logs/test.txt"),
+		                                                     &resolved));
+		QVERIFY(!QMudPluginPathUtils::resolveInsideDirectory(
+		    sounds, QDir(root).filePath(QStringLiteral("home/sounds/absolute.wav")), &resolved));
+		QFile obstructingFile(QDir(sounds).filePath(QStringLiteral("not-a-directory")));
+		QVERIFY(obstructingFile.open(QIODevice::WriteOnly));
+		obstructingFile.close();
+		QVERIFY(!QMudPluginPathUtils::resolveInsideDirectory(
+		    sounds, QStringLiteral("not-a-directory/missing.wav"), &resolved));
+
+		const QString outside = QDir(root).filePath(QStringLiteral("home/logs"));
+		const QString link    = QDir(sounds).filePath(QStringLiteral("escape"));
+		if (QFile::link(outside, link))
+		{
+			QVERIFY(!QMudPluginPathUtils::resolveInsideDirectory(sounds, QStringLiteral("escape/missing.wav"),
+			                                                     &resolved));
+		}
+	}
+
+	void tst_PluginPathUtils::rejectsPluginDirectoriesThatOverlapSoundStorage()
+	{
+		QString root;
+		QVERIFY(prepareSandbox(&root));
+		const QString home = QDir(root).filePath(QStringLiteral("home"));
+		QVERIFY(QDir().mkpath(QDir(home).filePath(QStringLiteral("sounds/plugin-data"))));
+		QVERIFY(QDir().mkpath(QDir(home).filePath(QStringLiteral("worlds/plugins"))));
+		QVERIFY(QDir().mkpath(QDir(home).filePath(QStringLiteral("sounds-other/plugins"))));
+
+		QVERIFY(QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(home, home));
+		QVERIFY(
+		    QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(home, QStringLiteral("./sounds/")));
+		QVERIFY(QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(
+		    home, QStringLiteral(R"(.\sounds\plugin-data\)")));
+		QVERIFY(!QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(
+		    home, QStringLiteral("./worlds/plugins/")));
+		QVERIFY(!QMudPluginPathUtils::pluginDirectoryConflictsWithSoundStorage(
+		    home, QStringLiteral("./sounds-other/plugins/")));
 	}
 
 	void tst_PluginPathUtils::returnsRelativePosixPathsForGetInfo()

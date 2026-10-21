@@ -435,7 +435,7 @@ jobs:
             --label "org.opencontainers.image.version=${GHCR_IMAGE##*:}" \
             --file tools/docker/appimage-qt611/Dockerfile \
             --tag "$LOCAL_IMAGE" \
-            tools/docker/appimage-qt611
+            .
           if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
             echo "needs_push=false" >> "$GITHUB_OUTPUT"
           else
@@ -509,6 +509,8 @@ jobs:
             "$QMUD_LINUX_IMAGE" bash -s -- "$TEST_SUITE" <<'CONTAINER'
           set -euo pipefail
           TEST_SUITE=$1
+          export XDG_RUNTIME_DIR=/home/user/build/xdg-runtime
+          qmud-start-test-audio
           cmake -S /home/user/project -B /home/user/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
@@ -552,6 +554,8 @@ jobs:
             -v "$GITHUB_WORKSPACE/ci-build:/home/user/build:rw" \
             "$QMUD_LINUX_IMAGE" bash -s <<'CONTAINER'
           set -euo pipefail
+          export XDG_RUNTIME_DIR=/home/user/build/xdg-runtime
+          qmud-start-test-audio
           cmake -S /home/user/project -B /home/user/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
@@ -659,7 +663,7 @@ jobs:
             appimage)
               IMAGE=qmud-appimage-builder:qt6.11
               DOCKERFILE=tools/docker/appimage-qt611/Dockerfile
-              CONTEXT=tools/docker/appimage-qt611 ;;
+              CONTEXT=. ;;
             macos)
               IMAGE=qmud-macos-builder:qt6.11
               DOCKERFILE=tools/docker/macos-qt611/Dockerfile

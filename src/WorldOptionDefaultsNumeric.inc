@@ -95,6 +95,8 @@
     //{"show_grid_lines_in_list_views", true},
     {"show_italic", true, 0, 0, OPT_UPDATE_VIEWS | OPT_UPDATE_OUTPUT_FONT},
     {"show_underline", true, 0, 0, OPT_UPDATE_VIEWS | OPT_UPDATE_OUTPUT_FONT},
+    {QMudSplitView::kLivePaneRatioOptionName, QMudSplitView::kDefaultLivePaneRatio,
+     QMudSplitView::kMinimumLivePaneRatio, QMudSplitView::kMaximumLivePaneRatio},
     {"spam_line_count", 20, 5, 500}, {"speed_walk_delay", 0, 0, 30000, OPT_FIX_SPEEDWALK_DELAY},
     {"spell_check_on_send", false}, {"start_paused", false}, {"tab_completion_excludes_symbol_prefix", true},
     {"tab_completion_excludes_symbol_suffix", true}, {"tab_completion_lines", 200, 1, 500000},

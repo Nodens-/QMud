@@ -15,6 +15,7 @@
 
 #include <QByteArray>
 #include <QDebug>
+#include <QScopeGuard>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
 
@@ -933,6 +934,163 @@ bool QMudLuaSupport::callLuaNamedProcedureWithString(lua_State *L, const QString
 
 	lua_pop(L, 1);
 	return true;
+}
+
+bool QMudLuaSupport::decodePpiArguments(lua_State *L, const QString &serializedArguments,
+                                        const qsizetype argumentCount, QVector<QVariant> &arguments,
+                                        QString &errorText)
+{
+	arguments.clear();
+	errorText.clear();
+	if (!L)
+	{
+		errorText = QStringLiteral("Lua state is unavailable");
+		return false;
+	}
+
+	const int  stackBase    = lua_gettop(L);
+	const auto restoreStack = qScopeGuard([L, stackBase] { lua_settop(L, stackBase); });
+	Q_UNUSED(restoreStack);
+	const QByteArray payload = QByteArrayLiteral("local _ = _ENV\nreturn ") + serializedArguments.toUtf8();
+	if (luaL_loadbuffer(L, payload.constData(), static_cast<size_t>(payload.size()),
+	                    "native PPI arguments") != LUA_OK)
+	{
+		const char *error = lua_tostring(L, -1);
+		errorText         = QString::fromUtf8(error ? error : "Unable to compile serialized PPI arguments");
+		return false;
+	}
+
+	const int chunkIndex = lua_gettop(L);
+	lua_newtable(L);
+	if (lua_setupvalue(L, chunkIndex, 1) == nullptr)
+	{
+		errorText = QStringLiteral("Unable to isolate serialized PPI arguments");
+		return false;
+	}
+	if (callLuaProtected(L, 0, 1, 0) != LUA_OK)
+	{
+		const char *error = lua_tostring(L, -1);
+		errorText         = QString::fromUtf8(error ? error : "Unable to decode serialized PPI arguments");
+		return false;
+	}
+	if (!lua_istable(L, -1))
+	{
+		errorText = QStringLiteral("Serialized PPI arguments did not produce a table");
+		return false;
+	}
+
+	if (argumentCount < 0 || argumentCount > std::numeric_limits<int>::max() ||
+	    lua_checkstack(L, static_cast<int>(argumentCount)) == 0)
+	{
+		errorText = QStringLiteral("Invalid PPI target arity");
+		return false;
+	}
+	arguments.reserve(argumentCount);
+	for (qsizetype index = 1; index <= argumentCount; ++index)
+	{
+		lua_rawgeti(L, -1, static_cast<lua_Integer>(index));
+		switch (lua_type(L, -1))
+		{
+		case LUA_TSTRING:
+		{
+			size_t      length = 0;
+			const char *value  = lua_tolstring(L, -1, &length);
+			arguments.push_back(QString::fromUtf8(value, static_cast<qsizetype>(length)));
+			break;
+		}
+		case LUA_TNUMBER:
+			if (lua_isinteger(L, -1))
+				arguments.push_back(QVariant::fromValue<qlonglong>(lua_tointeger(L, -1)));
+			else
+				arguments.push_back(lua_tonumber(L, -1));
+			break;
+		case LUA_TBOOLEAN:
+			arguments.push_back(lua_toboolean(L, -1) != 0);
+			break;
+		case LUA_TNIL:
+			arguments.push_back(QVariant());
+			break;
+		default:
+			errorText = QStringLiteral("PPI argument #%1 has unsupported %2 type")
+			                .arg(index)
+			                .arg(QString::fromLatin1(lua_typename(L, lua_type(L, -1))));
+			return false;
+		}
+		lua_pop(L, 1);
+	}
+	return true;
+}
+
+bool QMudLuaSupport::decodePpiArguments(const QString &serializedArguments, const qsizetype argumentCount,
+                                        QVector<QVariant> &arguments, QString &errorText)
+{
+	thread_local LuaStateOwner parserState(luaL_newstate());
+	return decodePpiArguments(parserState.get(), serializedArguments, argumentCount, arguments, errorText);
+}
+
+QString QMudLuaSupport::serializePpiReturnValues(const QVector<QVariant> &values)
+{
+	auto stringLiteral = [](const QString &value)
+	{
+		QByteArray       encoded = QByteArrayLiteral("\"");
+		const QByteArray bytes   = value.toUtf8();
+		encoded.reserve(2 + bytes.size() * 4);
+		for (const unsigned char byte : bytes)
+		{
+			encoded += '\\';
+			encoded += QByteArray::number(byte).rightJustified(3, '0');
+		}
+		encoded += '"';
+		return QString::fromLatin1(encoded);
+	};
+
+	QString serialized = QStringLiteral("{");
+	for (qsizetype index = 0; index < values.size(); ++index)
+	{
+		const QVariant &value = values.at(index);
+		if (!value.isValid() || value.isNull())
+			continue;
+		QString encoded;
+		switch (value.typeId())
+		{
+		case QMetaType::Bool:
+			encoded = value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+			break;
+		case QMetaType::Char:
+		case QMetaType::SChar:
+		case QMetaType::Short:
+		case QMetaType::Int:
+		case QMetaType::Long:
+		case QMetaType::LongLong:
+			encoded = QString::number(value.toLongLong());
+			break;
+		case QMetaType::UChar:
+		case QMetaType::UShort:
+		case QMetaType::UInt:
+		case QMetaType::ULong:
+		case QMetaType::ULongLong:
+			encoded = QString::number(value.toULongLong());
+			break;
+		case QMetaType::Float:
+		case QMetaType::Double:
+		{
+			const double number = value.toDouble();
+			if (std::isnan(number))
+				encoded = QStringLiteral("0/0");
+			else if (std::isinf(number))
+				encoded = number < 0.0 ? QStringLiteral("-1/0") : QStringLiteral("1/0");
+			else
+				encoded = QString::number(number, 'g', std::numeric_limits<double>::max_digits10);
+			break;
+		}
+		default:
+			encoded = stringLiteral(value.toString());
+			break;
+		}
+		serialized += QStringLiteral("[%1]=%2,").arg(index + 1).arg(encoded);
+	}
+	serialized += QLatin1Char('}');
+	return serialized;
 }
 
 void QMudLuaSupport::applyLuaPackageRestrictions(lua_State *L, const bool enablePackage)

@@ -27,6 +27,7 @@
 #include "helpers/ColorUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/OutputWrapUtils.h"
+#include "helpers/VariableMapUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QClipboard>
@@ -2572,7 +2573,7 @@ WorldCommandProcessor::decodedTriggerEvaluationCache(QList<WorldRuntime::Trigger
 			{
 				decoded.matcherIndex = safeQSizeToInt(rebuilt->matchers.size());
 				matcherIndexByKey.insert(warningKey, decoded.matcherIndex);
-				rebuilt->matchers.push_back({std::move(warningKey), QRegularExpression(pattern, options)});
+				rebuilt->matchers.push_back({std::move(warningKey), {QRegularExpression(pattern, options)}});
 			}
 		}
 		rebuilt->triggers.push_back(std::move(decoded));
@@ -5068,15 +5069,7 @@ bool WorldCommandProcessor::findVariable(const QString &name, QString &value, co
 		const WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
 		if (!plugin)
 			return false;
-		for (auto it = plugin->variables.constBegin(); it != plugin->variables.constEnd(); ++it)
-		{
-			if (it.key().compare(name, Qt::CaseInsensitive) == 0)
-			{
-				value = it.value();
-				return true;
-			}
-		}
-		return false;
+		return QMudVariableMapUtils::findValue(plugin->variables, name, value);
 	}
 	return m_runtime && m_runtime->findVariable(name, value);
 }
@@ -5471,7 +5464,6 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 	auto cached = m_regexCache.constFind(cacheKey);
 	if (cached == m_regexCache.constEnd())
 	{
-		QRegularExpression regex(pattern, options);
 		// Keep cache bounded; clear all on overflow to avoid unbounded growth
 		// from variable-expanded dynamic patterns.
 		if (constexpr int kRegexCacheLimit = 4096; m_regexCache.size() >= kRegexCacheLimit)
@@ -5479,35 +5471,41 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 			m_regexCache.clear();
 			m_invalidRegexWarnings.clear();
 		}
-		m_regexCache.insert(cacheKey, regex);
+		m_regexCache.insert(cacheKey, {QRegularExpression(pattern, options)});
 		cached = m_regexCache.constFind(cacheKey);
 	}
 	return compiledRegexMatch(cached.value(), cacheKey, subject, wildcards, namedWildcards, startCol, endCol,
 	                          startOffset, executionTimeNs, matchCount, matchAttempts, matchOptions);
 }
 
-bool WorldCommandProcessor::compiledRegexMatch(const QRegularExpression &regex, const QString &warningKey,
-                                               const QString &subject, QStringList &wildcards,
-                                               QMap<QString, QString> &namedWildcards, int *startCol,
-                                               int *endCol, const int startOffset, qint64 *executionTimeNs,
-                                               int *matchCount, int *matchAttempts,
+bool WorldCommandProcessor::compiledRegexMatch(const CachedRegularExpression &cachedRegex,
+                                               const QString &warningKey, const QString &subject,
+                                               QStringList &wildcards, QMap<QString, QString> &namedWildcards,
+                                               int *startCol, int *endCol, const int startOffset,
+                                               qint64 *executionTimeNs, int *matchCount, int *matchAttempts,
                                                const QRegularExpression::MatchOptions matchOptions) const
 {
-	if (!regex.isValid())
+	if (!cachedRegex.validityKnown)
+	{
+		cachedRegex.valid         = cachedRegex.regex.isValid();
+		cachedRegex.validityKnown = true;
+	}
+	if (!cachedRegex.valid)
 	{
 		if (!m_invalidRegexWarnings.contains(warningKey))
 		{
 			m_invalidRegexWarnings.insert(warningKey);
 			QMessageBox::warning(m_view, QStringLiteral("QMud"),
 			                     QStringLiteral("Failed: %1 at offset %2")
-			                         .arg(regex.errorString())
-			                         .arg(regex.patternErrorOffset()));
+			                         .arg(cachedRegex.regex.errorString())
+			                         .arg(cachedRegex.regex.patternErrorOffset()));
 		}
 		return false;
 	}
 
-	const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchWithCaptures(
-	    regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs, matchAttempts, matchOptions);
+	const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchValidRegexWithCaptures(
+	    cachedRegex.regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs, matchAttempts,
+	    matchOptions);
 	if (!result.matched)
 		return false;
 
@@ -5739,7 +5737,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				if (decoded.matcherIndex < 0 || decoded.matcherIndex >= cacheEntry->matchers.size())
 					return false;
 				const CompiledTriggerMatcher &matcher = cacheEntry->matchers.at(decoded.matcherIndex);
-				return compiledRegexMatch(matcher.regex, matcher.warningKey, *target, wildcards,
+				return compiledRegexMatch(matcher.cachedRegex, matcher.warningKey, *target, wildcards,
 				                          namedWildcards, &startCol, &endCol, startOffset, &executionTimeNs,
 				                          &matchCount, &matchAttempts, trustedTriggerSubject);
 			};

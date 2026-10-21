@@ -108,6 +108,7 @@ class GlobalPreferencesDialog : public QDialog
 		QLabel                            *m_pluginsSelected{nullptr};
 		QLabel                            *m_pluginsDefaultDir{nullptr};
 		QListWidget                       *m_pluginsList{nullptr};
+		QWidget                           *m_pluginsPage{nullptr};
 
 		QPushButton                       *m_printerFontButton{nullptr};
 		QLabel                            *m_printerFontLabel{nullptr};

@@ -64,7 +64,9 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSignalBlocker>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QSplitter>
+#include <QSplitterHandle>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -685,6 +687,7 @@ namespace
 		                                   QStringLiteral("history_lines"),
 		                                   QStringLiteral("auto_pause"),
 		                                   QStringLiteral("keep_pause_at_bottom"),
+		                                   QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName),
 		                                   QStringLiteral("start_paused")};
 		return keys;
 	}
@@ -800,7 +803,8 @@ namespace
 		                                   QStringLiteral("tab_completion_lines"),
 		                                   QStringLiteral("auto_resize_minimum_lines"),
 		                                   QStringLiteral("auto_resize_maximum_lines"),
-		                                   QStringLiteral("history_lines")};
+		                                   QStringLiteral("history_lines"),
+		                                   QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)};
 		return keys;
 	}
 
@@ -1911,7 +1915,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_outputSplitter->addWidget(m_output);
 	m_outputSplitter->addWidget(m_liveOutput);
 	m_outputSplitter->setStretchFactor(0, 1);
-	m_outputSplitter->setStretchFactor(1, 0);
+	m_outputSplitter->setStretchFactor(1, 1);
 	m_outputSplitter->setCollapsible(0, false);
 	m_outputSplitter->setCollapsible(1, true);
 	m_outputSplitter->setSizes(QList<int>() << 1 << 0);
@@ -1950,6 +1954,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_outputContainer->installEventFilter(this);
 	m_outputStack->installEventFilter(this);
 	m_outputSplitter->installEventFilter(this);
+	m_outputSplitter->handle(1)->installEventFilter(this);
 	m_outputScrollBar->installEventFilter(this);
 
 	m_input = new InputTextEdit(this, splitter);
@@ -2121,8 +2126,8 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 		        {
 			        if (!m_scrollbackSplitActive || !m_outputSplitter)
 				        return;
-			        if (const QList<int> sizes = m_outputSplitter->sizes(); sizes.size() >= 2)
-				        m_lastLiveSplitSize = sizes.at(1);
+			        if (!m_applyingScrollbackSplitRatio)
+				        captureScrollbackSplitRatio();
 			        scrollViewToEnd(m_liveOutput);
 			        notifySemanticOutputViewportChanged(true);
 		        });
@@ -2300,6 +2305,7 @@ void WorldView::synchronizeRuntimePartialOutputPresentation()
 
 void WorldView::setRuntime(WorldRuntime *runtime)
 {
+	persistScrollbackSplitRatio();
 	m_runtimeObserver = false;
 	setCommandInteractionEnabled(true);
 	if (runtime && m_runtime == runtime)
@@ -2341,6 +2347,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	resetDrawOutputWindowNotificationState();
 	resetNativeOutputPresentationRequestState();
 	m_nativeRenderModel = runtime ? runtime->m_outputRenderModel : std::make_shared<WorldOutputRenderModel>();
+	resetAccessibleOutputStateForRenderModelChange();
 	m_nativeConsumedRenderRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	m_nativeLayoutCacheValid       = false;
 	m_nativeExactLayoutCache.clear();
@@ -2418,6 +2425,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 
 void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 {
+	persistScrollbackSplitRatio();
 	m_runtimeObserver = runtime != nullptr;
 	if (runtime != m_runtime)
 		resetMiniWindowPresentationUpdateState();
@@ -2453,6 +2461,7 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	resetDrawOutputWindowNotificationState();
 	resetNativeOutputPresentationRequestState();
 	m_nativeRenderModel = runtime ? runtime->m_outputRenderModel : std::make_shared<WorldOutputRenderModel>();
+	resetAccessibleOutputStateForRenderModelChange();
 	m_nativeConsumedRenderRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	m_nativeLayoutCacheValid       = false;
 	m_nativeExactLayoutCache.clear();
@@ -3940,6 +3949,30 @@ const QMudAccessibleTextUtils::LineOffsetMap &WorldView::accessibleNativeOutputT
 	return m_accessibleOutputTextMapCache;
 }
 
+void WorldView::resetAccessibleOutputStateForRenderModelChange() const
+{
+	m_accessibleOutputCharacterCount                 = -1;
+	m_accessibleOutputRevision                       = 0;
+	m_accessibleOutputText                           = QString();
+	m_accessibleOutputPendingTailAppend              = false;
+	m_accessibleOutputLastAnnouncedPartialText       = QString();
+	m_accessibleOutputLiveEventsSuppressed           = false;
+	m_accessibleOutputBaselineLineCount              = -1;
+	m_accessibleOutputBaselineTailText               = QString();
+	m_accessibleOutputBaselineLineLengths            = QVector<int>();
+	m_accessibleOutputReviewActive                   = false;
+	m_accessibleOutputReviewTargetKind               = AccessibleOutputReviewTargetKind::None;
+	m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+	m_accessibleOutputReviewLastNotifiedScrollValue  = -1;
+	m_accessibleOutputLineStartCache                 = QVector<int>();
+	m_accessibleOutputLineStartCacheRevision         = 0;
+	m_accessibleOutputLineStartCacheNextOffset       = 0;
+	m_accessibleOutputLineStartCacheCharacterCount   = -1;
+	m_accessibleOutputTextMapCache                   = QMudAccessibleTextUtils::LineOffsetMap();
+	m_accessibleOutputTextMapCacheRevision           = 0;
+	m_accessibleOutputTextMapCacheValid              = false;
+}
+
 int WorldView::accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines)
 {
 	int       characterCount = 0;
@@ -4169,15 +4202,18 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 
 	if (!QAccessible::isActive())
 	{
-		m_accessibleOutputCharacterCount = -1;
-		m_accessibleOutputRevision       = 0;
-		m_accessibleOutputText.clear();
-		m_accessibleOutputPendingTailAppend = false;
-		m_accessibleOutputLastAnnouncedPartialText.clear();
-		m_accessibleOutputLiveEventsSuppressed = false;
-		m_accessibleOutputBaselineLineCount    = -1;
-		m_accessibleOutputBaselineTailText.clear();
-		m_accessibleOutputBaselineLineLengths.clear();
+		m_accessibleOutputCharacterCount           = -1;
+		m_accessibleOutputRevision                 = 0;
+		m_accessibleOutputText                     = QString();
+		m_accessibleOutputPendingTailAppend        = false;
+		m_accessibleOutputLastAnnouncedPartialText = QString();
+		m_accessibleOutputLiveEventsSuppressed     = false;
+		m_accessibleOutputBaselineLineCount        = -1;
+		m_accessibleOutputBaselineTailText         = QString();
+		m_accessibleOutputBaselineLineLengths      = QVector<int>();
+		m_accessibleOutputTextMapCache             = QMudAccessibleTextUtils::LineOffsetMap();
+		m_accessibleOutputTextMapCacheRevision     = 0;
+		m_accessibleOutputTextMapCacheValid        = false;
 		clearTransientReview();
 		return;
 	}
@@ -8116,11 +8152,12 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 		QString                          displayText(entry.text);
 		QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
-		const int renderStart  = sizeToInt(currentLineText.size());
-		const int prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
-		const int textLength   = sizeToInt(displayText.size()) - prefixLength;
+		const int  renderStart  = sizeToInt(currentLineText.size());
+		const int  prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
+		const int  textLength   = sizeToInt(displayText.size()) - prefixLength;
+		const bool firstSource  = !currentLogicalLineHasSource;
 
-		if (!currentLogicalLineHasSource)
+		if (firstSource)
 		{
 			currentFirstRuntimeLine     = entry.lineNumber;
 			currentLastRuntimeLine      = entry.lineNumber;
@@ -8147,7 +8184,10 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 			currentLastRuntimeLine  = qMax(currentLastRuntimeLine, entry.lineNumber);
 		}
 
-		currentLineText += displayText;
+		if (firstSource)
+			currentLineText = std::move(displayText);
+		else
+			currentLineText += displayText;
 		currentLineFadeTimestamp = entry.time;
 		appendPositiveStyleSpans(currentLineSpans, displaySpans);
 
@@ -8647,11 +8687,12 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			QString                          displayText(entry.text);
 			QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 			buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
-			const int renderStart  = sizeToInt(rebuiltText.size());
-			const int prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
-			const int textLength   = sizeToInt(displayText.size()) - prefixLength;
+			const int  renderStart  = sizeToInt(rebuiltText.size());
+			const int  prefixLength = qMax(0, sizeToInt(displayText.size()) - sizeToInt(entry.text.size()));
+			const int  textLength   = sizeToInt(displayText.size()) - prefixLength;
+			const bool firstSource  = !hasSource;
 
-			if (!hasSource)
+			if (firstSource)
 			{
 				rebuiltFirstRuntime       = entry.lineNumber;
 				rebuiltLastRuntime        = entry.lineNumber;
@@ -8679,7 +8720,10 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			}
 			rebuiltSourceRuntimeLines.push_back(entry.lineNumber);
 
-			rebuiltText += displayText;
+			if (firstSource)
+				rebuiltText = std::move(displayText);
+			else
+				rebuiltText += displayText;
 			rebuiltFadeTimestamp = entry.time;
 			appendPositiveStyleSpans(rebuiltSpans, displaySpans);
 
@@ -11693,6 +11737,8 @@ void WorldView::setScrollbackSplitActive(bool active)
 		active = false;
 	if (m_scrollbackSplitActive == active)
 		return;
+	if (!active)
+		persistScrollbackSplitRatio();
 	clearNativePrimaryViewportAnchor();
 	m_scrollbackSplitActive = active;
 	if (!m_outputSplitter || !m_liveOutput)
@@ -11702,23 +11748,13 @@ void WorldView::setScrollbackSplitActive(bool active)
 	if (m_scrollbackSplitActive)
 	{
 		m_nativeSplitTopHeadTrimAdjustedRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		const int total                          = m_outputSplitter->size().height();
-		int       liveSize                       = m_lastLiveSplitSize;
-		if (liveSize <= 0 && total > 0)
-			liveSize = qMax(1, total / 4);
-		if (total > 0)
-		{
-			const int topSize = qMax(1, total - liveSize);
-			m_outputSplitter->setSizes(QList<int>() << topSize << liveSize);
-		}
+		applyScrollbackSplitRatio();
 		if (!m_frozen)
 			scrollViewToEnd(m_liveOutput);
 	}
 	else
 	{
 		clearAccessibleOutputReviewCursor();
-		if (const QList<int> sizes = m_outputSplitter->sizes(); sizes.size() >= 2)
-			m_lastLiveSplitSize = sizes.at(1);
 		m_outputSplitter->setSizes(QList<int>() << 1 << 0);
 		if (m_lastOutputSelectionView == m_liveOutput)
 			m_lastOutputSelectionView = m_output;
@@ -11814,6 +11850,51 @@ void WorldView::transformPendingNativeRuntimeRestitches(
 			m_nativeRenderModel->m_nativeRuntimeLastAppendedIndexExclusive = -1;
 		}
 	}
+}
+
+void WorldView::applyScrollbackSplitRatio()
+{
+	if (!m_outputSplitter || !m_scrollbackSplitActive)
+		return;
+	const int            ratio = qBound(QMudSplitView::kMinimumLivePaneRatio, m_splitViewLivePaneRatio,
+	                                    QMudSplitView::kMaximumLivePaneRatio);
+	QScopedValueRollback applyingRatio(m_applyingScrollbackSplitRatio, true);
+	m_outputSplitter->setSizes(QList<int>() << QMudSplitView::kRatioScale - ratio << ratio);
+}
+
+void WorldView::captureScrollbackSplitRatio()
+{
+	if (!m_outputSplitter || !m_scrollbackSplitActive)
+		return;
+	const QList<int> sizes = m_outputSplitter->sizes();
+	if (sizes.size() < 2 || sizes.at(0) <= 0 || sizes.at(1) < 0)
+		return;
+	const qint64 total      = static_cast<qint64>(sizes.at(0)) + sizes.at(1);
+	const qint64 scaledLive = static_cast<qint64>(sizes.at(1)) * QMudSplitView::kRatioScale;
+	m_splitViewLivePaneRatio =
+	    qBound(QMudSplitView::kMinimumLivePaneRatio, static_cast<int>((scaledLive + total / 2) / total),
+	           QMudSplitView::kMaximumLivePaneRatio);
+	m_splitViewLivePaneRatioDirty = true;
+}
+
+void WorldView::persistScrollbackSplitRatio()
+{
+	if (!m_splitViewLivePaneRatioDirty || !m_runtime || m_runtime->view() != this)
+		return;
+
+	const WorldNumericOption *const option = QMudWorldOptions::findWorldNumericOption(
+	    QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName));
+	if (!option)
+		return;
+	const auto currentValue = QMudWorldOptions::publicNumericOptionValue(
+	    *option, m_runtime->worldAttributes().value(QString::fromLatin1(option->name)));
+	if (currentValue && *currentValue == m_splitViewLivePaneRatio)
+	{
+		m_splitViewLivePaneRatioDirty = false;
+		return;
+	}
+	if (m_runtime->setOptionItem(*option, m_splitViewLivePaneRatio) == eOK)
+		m_splitViewLivePaneRatioDirty = false;
 }
 
 void WorldView::markNativeRuntimeRangeRestitchPending(
@@ -16069,6 +16150,20 @@ void WorldView::applyNumericWorldOptionPresentation(const WorldNumericOptionBind
 	case ShowUnderline:
 		m_showUnderline = enabled;
 		break;
+	case SplitViewLivePaneRatio:
+	{
+		const int ratio =
+		    static_cast<int>(qBound(static_cast<long long>(QMudSplitView::kMinimumLivePaneRatio), value,
+		                            static_cast<long long>(QMudSplitView::kMaximumLivePaneRatio)));
+		const bool ratioChanged       = m_splitViewLivePaneRatio != ratio;
+		m_splitViewLivePaneRatio      = ratio;
+		m_splitViewLivePaneRatioDirty = false;
+		if (ratioChanged)
+		{
+			applyScrollbackSplitRatio();
+		}
+		break;
+	}
 	case TabCompletionExcludesSymbolPrefix:
 		setTabCompletionExcludesSymbolPrefix(enabled);
 		break;
@@ -16300,7 +16395,9 @@ void WorldView::applyRuntimeSettingsWithPolicy(const bool allowRebuild)
 	const bool needsFullRebuild =
 	    allowRebuild && transformsSharedRenderModel &&
 	    runtimeSettingsNeedFullRebuild(changedViewAttributeKeys, changedViewMultilineKeys);
-	applyRuntimeSettingsImpl(needsFullRebuild);
+	const bool refreshSplitRatio =
+	    changedViewAttributeKeys.contains(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName));
+	applyRuntimeSettingsImpl(needsFullRebuild, refreshSplitRatio);
 
 	m_lastRuntimeSettingsAttributes.clear();
 	for (const QString &key : runtimeSettingsAttributeKeys())
@@ -16314,7 +16411,7 @@ void WorldView::applyRuntimeSettingsWithPolicy(const bool allowRebuild)
 	m_hasRuntimeSettingsSnapshot     = true;
 }
 
-void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
+void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput, const bool refreshSplitRatio)
 {
 	if (!m_runtime)
 		return;
@@ -16515,6 +16612,17 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	if (m_noEchoOff)
 		m_noEcho = false;
 	applyHistoryLimit(attrs.value(QStringLiteral("history_lines")).toInt());
+	if (refreshSplitRatio)
+	{
+		bool      splitRatioOk = false;
+		const int splitRatio =
+		    attrs.value(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)).toInt(&splitRatioOk);
+		m_splitViewLivePaneRatio = splitRatioOk ? qBound(QMudSplitView::kMinimumLivePaneRatio, splitRatio,
+		                                                 QMudSplitView::kMaximumLivePaneRatio)
+		                                        : QMudSplitView::kDefaultLivePaneRatio;
+		m_splitViewLivePaneRatioDirty = false;
+		applyScrollbackSplitRatio();
+	}
 	// Runtime output renders from native line state only.
 	if (hyperlinkPresentationChanged)
 		requestNativeOutputRepaint();
@@ -17105,12 +17213,6 @@ void WorldView::resizeEvent(QResizeEvent *event)
 	updateInputWrap();
 	if (!m_defaultInputHeightApplied)
 		applyDefaultInputHeight(true);
-	if (m_scrollbackSplitActive && m_outputSplitter)
-	{
-		const QList<int> sizes = m_outputSplitter->sizes();
-		if (sizes.size() >= 2)
-			m_lastLiveSplitSize = sizes.at(1);
-	}
 	refreshMiniWindows(true);
 	if (m_commandInteractionEnabled && m_runtime)
 	{
@@ -17180,6 +17282,11 @@ void WorldView::mouseReleaseEvent(QMouseEvent *event)
 
 bool WorldView::eventFilter(QObject *watched, QEvent *event)
 {
+	if (m_outputSplitter && watched == m_outputSplitter->handle(1) &&
+	    event->type() == QEvent::MouseButtonRelease)
+	{
+		QMetaObject::invokeMethod(this, [this] { persistScrollbackSplitRatio(); }, Qt::QueuedConnection);
+	}
 	const QWidget *outputViewport     = m_output ? m_output->viewport() : nullptr;
 	const QWidget *liveOutputViewport = m_liveOutput ? m_liveOutput->viewport() : nullptr;
 	const bool isOutputWidget = watched == m_outputContainer || watched == m_outputStack ||

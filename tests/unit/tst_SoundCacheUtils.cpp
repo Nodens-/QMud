@@ -77,6 +77,65 @@ namespace
 				QCOMPARE(cache.idleBackendCount(QStringLiteral("effect:file")), 1);
 			}
 
+			/** @brief Verifies completed backends precede idle reuse and enter idle state only after grace. */
+			static void retainedCompletionPrecedesIdleCacheAndHonorsGrace()
+			{
+				Cache      cache;
+				const auto retained =
+				    cache.insertActive(QStringLiteral("effect:file"), 40, 1, makeBackend(10), 100);
+				const auto idle =
+				    cache.insertActive(QStringLiteral("effect:file"), 40, 2, makeBackend(20), 110);
+				QVERIFY(retained.backend);
+				QVERIFY(idle.backend);
+				cache.markRetained(QStringLiteral("effect:file"), 1, 120);
+				cache.markIdle(QStringLiteral("effect:file"), 2, 130);
+				QCOMPARE(cache.retainedBackendCount(QStringLiteral("effect:file")), 1);
+				QCOMPARE(cache.idleBackendCount(QStringLiteral("effect:file")), 1);
+
+				const Cache::RetainedResult reused = cache.takeRetained(QStringLiteral("effect:file"), 140);
+				QCOMPARE(reused.backend, retained.backend);
+				QCOMPARE(reused.completedAtMsecs, 120);
+				QCOMPARE(cache.retainedBackendCount(QStringLiteral("effect:file")), 0);
+				QCOMPARE(cache.idleBackendCount(QStringLiteral("effect:file")), 1);
+
+				cache.markRetained(QStringLiteral("effect:file"), 1, reused.completedAtMsecs);
+				const Cache::RetainedReleaseResult beforeExpiry = cache.releaseExpiredRetained(419, 300, 1);
+				QCOMPARE(beforeExpiry.released, 0);
+				QVERIFY(!beforeExpiry.expiredRemain);
+				QCOMPARE(cache.retainedBackendCount(QStringLiteral("effect:file")), 1);
+				const Cache::RetainedReleaseResult atExpiry = cache.releaseExpiredRetained(420, 300, 1);
+				QCOMPARE(atExpiry.released, 1);
+				QVERIFY(!atExpiry.expiredRemain);
+				QCOMPARE(cache.retainedBackendCount(QStringLiteral("effect:file")), 0);
+				QCOMPARE(cache.idleBackendCount(QStringLiteral("effect:file")), 2);
+				QVERIFY(cache.hasIdleSource());
+			}
+
+			/** @brief Verifies retained maintenance is bounded and reports only real continuation work. */
+			static void retainedReleaseIsBoundedAndOldestFirst()
+			{
+				Cache               cache;
+				constexpr qsizetype limit =
+				    SoundEngine::CachePolicy::kMaximumRetainedTransitionsPerMaintenance;
+				for (qsizetype index = 0; index <= limit; ++index)
+				{
+					const QString key = QString::number(index);
+					static_cast<void>(cache.insertActive(key, 1, static_cast<quint64>(index + 1),
+					                                     makeBackend(static_cast<int>(index)), index + 1));
+					cache.markRetained(key, static_cast<quint64>(index + 1), index + 1);
+				}
+
+				const Cache::RetainedReleaseResult first = cache.releaseExpiredRetained(limit + 2, 1, limit);
+				QCOMPARE(first.released, limit);
+				QVERIFY(first.expiredRemain);
+				QCOMPARE(cache.retainedBackendCount(QString::number(limit)), 1);
+
+				const Cache::RetainedReleaseResult second = cache.releaseExpiredRetained(limit + 2, 1, limit);
+				QCOMPARE(second.released, 1);
+				QVERIFY(!second.expiredRemain);
+				QCOMPARE(cache.retainedBackendCount(QString::number(limit)), 0);
+			}
+
 			/** @brief Verifies only fully idle sources enter least-recently-used eviction order. */
 			static void evictionProtectsPartlyActiveSourcesAndUsesLruOrder()
 			{
@@ -132,6 +191,7 @@ namespace
 				static_cast<void>(
 				    cache.insertActive(QStringLiteral("two"), 30, 2, makeBackend(2, &secondDestroyed), 200));
 				cache.markIdle(QStringLiteral("one"), 1, 100);
+				cache.markRetained(QStringLiteral("two"), 2, 200);
 				cache.clear([](TestBackend &backend) { backend.value = -1; });
 				QVERIFY(firstDestroyed);
 				QVERIFY(secondDestroyed);

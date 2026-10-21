@@ -19,6 +19,20 @@ constexpr int MAX_LINE_WIDTH           = 500;
 constexpr int DEFAULT_TRIGGER_SEQUENCE = 100;
 constexpr int DEFAULT_ALIAS_SEQUENCE   = 100;
 
+namespace QMudSplitView
+{
+	/** Name of the per-world live-pane split ratio option. */
+	inline constexpr char kLivePaneRatioOptionName[] = "split_view_live_pane_ratio";
+	/** Fixed-point scale used to persist the live-pane share of the output split. */
+	inline constexpr int  kRatioScale = 10000;
+	/** Default live-pane share, equal to 25 percent. */
+	inline constexpr int  kDefaultLivePaneRatio = 2500;
+	/** Smallest persisted live-pane share; zero keeps the live pane collapsed. */
+	inline constexpr int  kMinimumLivePaneRatio = 0;
+	/** Largest persisted live-pane share that leaves room for scrollback. */
+	inline constexpr int  kMaximumLivePaneRatio = kRatioScale - 1;
+} // namespace QMudSplitView
+
 namespace QMudPluginSequence
 {
 	/** Default plugin dispatch sequence when no sequence is declared. */
@@ -205,6 +219,7 @@ enum class WorldNumericOptionBinding
 	ShowBold,
 	ShowItalic,
 	ShowUnderline,
+	SplitViewLivePaneRatio,
 	TabCompletionExcludesSymbolPrefix,
 	TabCompletionExcludesSymbolSuffix,
 	TabCompletionLines,

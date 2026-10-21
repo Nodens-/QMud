@@ -124,6 +124,17 @@ namespace
 				QCOMPARE(saveDeleted->binding, WorldNumericOptionBinding::SaveDeletedCommand);
 			}
 
+			void splitViewLivePaneRatioHasRequestedRangeDefaultAndBinding()
+			{
+				const WorldNumericOption *option = QMudWorldOptions::findWorldNumericOption(
+				    QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName));
+				QVERIFY(option);
+				QCOMPARE(option->defaultValue, static_cast<long long>(QMudSplitView::kDefaultLivePaneRatio));
+				QCOMPARE(option->minValue, static_cast<long long>(QMudSplitView::kMinimumLivePaneRatio));
+				QCOMPARE(option->maxValue, static_cast<long long>(QMudSplitView::kMaximumLivePaneRatio));
+				QCOMPARE(option->binding, WorldNumericOptionBinding::SplitViewLivePaneRatio);
+			}
+
 			void rgbOptionStorageNormalizesColorRefToInternalRgbText()
 			{
 				const WorldNumericOption *option =

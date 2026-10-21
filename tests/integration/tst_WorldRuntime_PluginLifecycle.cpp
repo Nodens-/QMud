@@ -27,6 +27,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
 #include <QRegularExpression>
@@ -6296,6 +6297,91 @@ end
 			    qPrintable(reinstalledDocument.errorString()));
 			QCOMPARE(reinstalledDocument.plugins().size(), 1);
 			QVERIFY(!reinstalledDocument.plugins().constFirst().dispatchSequenceOverride.has_value());
+		}
+
+		/**
+		 * @brief Persists native LuaAudio variables through the normal plugin-state lifecycle.
+		 */
+		static void nativeLuaAudioVariablesUsePluginStateLifecycle()
+		{
+			QTemporaryDir tempDir(QDir::current().filePath(QStringLiteral("native_audio_state_XXXXXX")));
+			QVERIFY(tempDir.isValid());
+
+			const QString stateDir = QDir(tempDir.path()).filePath(QStringLiteral("state"));
+			QVERIFY(QDir().mkpath(stateDir));
+			const QString worldId    = QStringLiteral("abcdefabcdefabcdefabcdef");
+			const QString worldPath  = QDir(tempDir.path()).filePath(QStringLiteral("native_audio.qdl"));
+			const QString pluginPath = QDir(tempDir.path()).filePath(QStringLiteral("legacy_lua_audio.xml"));
+			QVERIFY(writeTextFile(worldPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <world id="%1" name="Native Audio State"/>
+</qmud>
+)xml")
+			                                     .arg(worldId)));
+			QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="LuaAudio" id="%1" language="lua" enabled="y" save_state="y"/>
+  <variables>
+    <variable name="vol">80</variable>
+    <variable name="source_only">embedded</variable>
+  </variables>
+</muclient>
+)xml")
+			                                      .arg(QMudNativePluginRegistry::luaAudioPluginId())));
+
+			WorldDocument document;
+			QVERIFY2(document.loadFromFile(worldPath), qPrintable(document.errorString()));
+			const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
+			{
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QDir::currentPath());
+				runtime.setStateFilesDirectory(stateDir);
+				runtime.applyFromDocument(document);
+				QString loadError;
+				QVERIFY2(runtime.loadPluginFile(pluginPath, &loadError), qPrintable(loadError));
+				QCOMPARE(runtime.pluginVariableValue(audioId, QStringLiteral("vol")), QStringLiteral("80"));
+				QCOMPARE(runtime.pluginVariableValue(audioId, QStringLiteral("source_only")),
+				         QStringLiteral("embedded"));
+				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeMasterState(&runtime).volume, 80.0);
+				QVERIFY(runtime.pluginInfo(audioId, 15).toBool());
+
+				runtime.setPluginVariableValue(audioId, QStringLiteral("VOL"), QStringLiteral("35"));
+				QCOMPARE(runtime.pluginVariableValue(audioId, QStringLiteral("vol")), QStringLiteral("35"));
+				QCOMPARE(runtime.pluginVariableValue(audioId, QStringLiteral("VOL")), QStringLiteral("35"));
+				runtime.setPluginVariableValue(audioId, QStringLiteral("PPI__returns__PPI_"),
+				                               QStringLiteral("{[1]=7,}"));
+				QCOMPARE(runtime.pluginInfo(audioId, 12).toInt(), 3);
+				runtime.setPluginVariableValue(audioId, QStringLiteral("temporary"), QStringLiteral("value"));
+				QCOMPARE(runtime.deletePluginVariable(audioId, QStringLiteral("TEMPORARY")), eOK);
+				QCOMPARE(runtime.pluginInfo(audioId, 12).toInt(), 3);
+				QCOMPARE(runtime.savePluginState(audioId, true), eOK);
+				runtime.setPluginVariableValue(audioId, QStringLiteral("PPI__returns__PPI_"),
+				                               QStringLiteral("{[1]=9,}"));
+			}
+
+			const QString stateFile =
+			    QDir(stateDir).filePath(worldId + QLatin1Char('-') + audioId + QStringLiteral("-state.xml"));
+			QVERIFY(QFileInfo::exists(stateFile));
+
+			WorldRuntime restored;
+			restored.setStartupDirectory(QDir::currentPath());
+			restored.setStateFilesDirectory(stateDir);
+			restored.applyFromDocument(document);
+			QCOMPARE(restored.pluginVariableValue(audioId.toUpper(), QStringLiteral("vol")),
+			         QStringLiteral("35"));
+			QCOMPARE(restored.pluginVariableValue(audioId, QStringLiteral("VOL")), QStringLiteral("35"));
+			QCOMPARE(restored.pluginVariableValue(audioId, QStringLiteral("PPI__returns__PPI_")),
+			         QStringLiteral("{[1]=9,}"));
+			QCOMPARE(restored.pluginVariableValue(audioId, QStringLiteral("source_only")),
+			         QStringLiteral("embedded"));
+			QCOMPARE(restored.pluginVariableList(audioId).size(), 3);
+			QCOMPARE(restored.pluginInfo(audioId, 12).toInt(), 3);
+			QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeMasterState(&restored).volume, 35.0);
+			QString reloadError;
+			QCOMPARE(restored.reloadPlugin(audioId, &reloadError), eOK);
+			QVERIFY2(reloadError.isEmpty(), qPrintable(reloadError));
+			QCOMPARE(restored.pluginVariableValue(audioId, QStringLiteral("PPI__returns__PPI_")),
+			         QStringLiteral("{[1]=9,}"));
 		}
 
 		static void pluginReorderPersistsEffectiveSequenceWithoutChangingDeclaredMetadata()

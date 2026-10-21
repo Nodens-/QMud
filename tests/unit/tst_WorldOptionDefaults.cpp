@@ -7,6 +7,7 @@
  */
 
 #include "WorldOptionDefaults.h"
+#include "WorldOptions.h"
 
 #include <QMap>
 #include <QtTest/QTest>
@@ -45,6 +46,10 @@ namespace
 				QVERIFY(attrs.contains(QStringLiteral("wrap")));
 				QCOMPARE(attrs.value(QStringLiteral("wrap")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("beep_sound")), QStringLiteral("sounds/QMud/beep.wav"));
+				QCOMPARE(attrs.value(QStringLiteral("default_world_sound_directory")),
+				         QStringLiteral("./sounds/"));
+				QCOMPARE(attrs.value(QStringLiteral("enable_embedded_msp")), QStringLiteral("n"));
+				QCOMPARE(attrs.value(QStringLiteral("disable_msp_playback")), QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("confirm_before_replacing_typing")), QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("utf_8")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("legacy_encoding")), QStringLiteral("windows-1252"));
@@ -54,6 +59,8 @@ namespace
 				         QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("partial_save_character_threshold")),
 				         QStringLiteral("10"));
+				QCOMPARE(attrs.value(QString::fromLatin1(QMudSplitView::kLivePaneRatioOptionName)),
+				         QString::number(QMudSplitView::kDefaultLivePaneRatio));
 				QCOMPARE(attrs.value(QStringLiteral("regexp_match_empty")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
 				         QStringLiteral("y"));

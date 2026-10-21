@@ -29,11 +29,32 @@ class SoundEngineTestAccess final
 				CacheState firstStep;
 				CacheState secondStep;
 		};
-		/** @brief Source-free playback backend readiness observed on the worker thread. */
+		/** @brief Source-free media-player readiness observed on the worker thread. */
 		struct PlaybackInitializationState
 		{
-				bool effectReady{false};
 				bool mediaPlayerReady{false};
+		};
+		/** @brief Sound-file catalog state observed on the worker thread. */
+		struct FileCatalogState
+		{
+				qsizetype fileCount{0};
+				qsizetype directoryCount{0};
+				qsizetype watchedDirectoryCount{0};
+				qsizetype failedWatchCount{0};
+				qsizetype maximumIndexBatchSize{0};
+				qsizetype maximumDirectoryBatchSize{0};
+				qsizetype maximumReconciliationStepSize{0};
+				qsizetype watchStatePathEntryCount{0};
+				quint64   revision{0};
+				bool      ready{false};
+		};
+		/** @brief Worker-owned state for one native protocol playback stream. */
+		struct NativePlaybackState
+		{
+				int     buffer{0};
+				QString filePattern;
+				int     priority{0};
+				bool    current{false};
 		};
 
 		/**
@@ -48,6 +69,35 @@ class SoundEngineTestAccess final
 		                           const qint64 sourceBytes, const bool idle, const qint64 usedAtMsecs)
 		{
 			engine.addCacheSourceForTest(identity, sourceBytes, idle, usedAtMsecs);
+		}
+
+		/**
+		 * @brief Seeds one real file request into the production cache indexes without multimedia objects.
+		 * @param engine Sound engine whose worker owns the cache.
+		 * @param session Session owning the request.
+		 * @param request Request text used as the session cache key.
+		 * @param absolutePath Existing catalog file identity.
+		 * @return `true` when the cache identity was installed.
+		 */
+		[[nodiscard]] static bool cacheFileRequest(const SoundEngine                         &engine,
+		                                           const std::shared_ptr<SoundEngineSession> &session,
+		                                           const QString &request, const QString &absolutePath)
+		{
+			return engine.cacheFileRequestForTest(session, request, absolutePath);
+		}
+
+		/**
+		 * @brief Reports whether one request retains a reusable exact-file cache association.
+		 * @param engine Sound engine whose worker owns the cache.
+		 * @param session Session owning the request.
+		 * @param request Request text used as the session cache key.
+		 * @return `true` when the request remains cached.
+		 */
+		[[nodiscard]] static bool fileRequestIsCached(const SoundEngine                         &engine,
+		                                              const std::shared_ptr<SoundEngineSession> &session,
+		                                              const QString                             &request)
+		{
+			return engine.fileRequestIsCachedForTest(session, request);
 		}
 
 		/**
@@ -96,6 +146,48 @@ class SoundEngineTestAccess final
 		}
 
 		/**
+		 * @brief Completes one active channel through the sound worker's production transition.
+		 * @param engine Sound engine whose worker owns the session.
+		 * @param session Session containing the active channel.
+		 * @param buffer One-based active channel to complete.
+		 * @return `true` when the worker completed the active assignment.
+		 */
+		[[nodiscard]] static bool completeActiveChannel(const SoundEngine                         &engine,
+		                                                const std::shared_ptr<SoundEngineSession> &session,
+		                                                const int                                  buffer)
+		{
+			return engine.completeActiveChannelForTest(session, buffer);
+		}
+
+		/**
+		 * @brief Expires one active assignment through the production playback-progress watchdog.
+		 * @param engine Sound engine whose worker owns the session.
+		 * @param session Session containing the active channel.
+		 * @param buffer One-based active channel to expire.
+		 * @return `true` when the watchdog removed the active assignment.
+		 */
+		[[nodiscard]] static bool
+		expireActivePlaybackWatchdog(const SoundEngine                         &engine,
+		                             const std::shared_ptr<SoundEngineSession> &session, const int buffer)
+		{
+			return engine.expireActivePlaybackWatchdogForTest(session, buffer);
+		}
+
+		/**
+		 * @brief Reads the resolved file identity assigned to one active channel.
+		 * @param engine Sound engine whose worker owns the session.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel to inspect.
+		 * @return Absolute file identity, or an empty string when no file backend is assigned.
+		 */
+		[[nodiscard]] static QString activeFileIdentity(const SoundEngine                         &engine,
+		                                                const std::shared_ptr<SoundEngineSession> &session,
+		                                                const int                                  buffer)
+		{
+			return engine.activeFileIdentityForTest(session, buffer);
+		}
+
+		/**
 		 * @brief Fails a prepared occurrence through the sound worker's production error transition.
 		 * @param engine Sound engine whose worker owns the session.
 		 * @param session Session receiving the prepared occurrence.
@@ -138,14 +230,152 @@ class SoundEngineTestAccess final
 		/**
 		 * @brief Reads startup playback backend readiness from the sound worker.
 		 * @param engine Sound engine whose initialized playback objects are inspected.
-		 * @return Availability of the source-free effect and media-player backends.
+		 * @return Availability of the source-free media-player backend.
 		 */
 		[[nodiscard]] static PlaybackInitializationState
 		playbackInitializationState(const SoundEngine &engine)
 		{
 			const SoundEngine::PlaybackInitializationStateForTest state =
 			    engine.playbackInitializationStateForTest();
-			return {state.effectReady, state.mediaPlayerReady};
+			return {state.mediaPlayerReady};
+		}
+
+		/**
+		 * @brief Reads the process-wide sound-file catalog state from the worker.
+		 * @param engine Sound engine whose catalog is inspected.
+		 * @return Catalog sizes and initial-scan completion state.
+		 */
+		[[nodiscard]] static FileCatalogState fileCatalogState(const SoundEngine &engine)
+		{
+			const SoundEngine::FileCatalogStateForTest state = engine.fileCatalogStateForTest();
+			return {state.fileCount,
+			        state.directoryCount,
+			        state.watchedDirectoryCount,
+			        state.failedWatchCount,
+			        state.maximumIndexBatchSize,
+			        state.maximumDirectoryBatchSize,
+			        state.maximumReconciliationStepSize,
+			        state.watchStatePathEntryCount,
+			        state.revision,
+			        state.ready};
+		}
+
+		/**
+		 * @brief Pauses or resumes low-priority catalog events.
+		 * @param engine Sound engine whose worker owns the catalog.
+		 * @param paused Whether later catalog events should remain suspended.
+		 */
+		static void setCatalogPaused(const SoundEngine &engine, const bool paused)
+		{
+			engine.setCatalogPausedForTest(paused);
+		}
+
+		/**
+		 * @brief Pauses or resumes persistent-index ingestion.
+		 * @param engine Sound engine whose I/O worker owns the index reader.
+		 * @param paused Whether index batches must remain suspended.
+		 */
+		static void setIndexReadPaused(const SoundEngine &engine, const bool paused)
+		{
+			engine.setIndexReadPausedForTest(paused);
+		}
+
+		/**
+		 * @brief Publishes synthetic catalog paths through the production bounded directory handoff.
+		 * @param engine Sound engine whose workers receive the paths.
+		 * @param fileCount Number of paths to publish.
+		 * @return `true` when the quiescent catalog accepted the publication.
+		 */
+		[[nodiscard]] static bool publishSyntheticCatalogDirectory(const SoundEngine &engine,
+		                                                           const qsizetype    fileCount)
+		{
+			return engine.publishSyntheticCatalogDirectoryForTest(fileCount);
+		}
+
+		/**
+		 * @brief Reads how many file requests required full filesystem resolution.
+		 * @param engine Sound engine whose worker resolution path is inspected.
+		 * @return Number of slow file-resolution attempts.
+		 */
+		[[nodiscard]] static quint64 slowFileResolutionCount(const SoundEngine &engine)
+		{
+			return engine.slowFileResolutionCountForTest();
+		}
+
+		/**
+		 * @brief Reads one worker-owned native playback stream.
+		 * @param engine Sound engine whose worker owns the session.
+		 * @param session Session owning the playback stream.
+		 * @param protocol Native protocol namespace.
+		 * @param media Native media namespace.
+		 * @return Current logical playback state.
+		 */
+		[[nodiscard]] static NativePlaybackState
+		nativePlaybackState(const SoundEngine &engine, const std::shared_ptr<SoundEngineSession> &session,
+		                    const QMudNativeSoundProtocol protocol, const QMudNativeSoundMedia media)
+		{
+			const SoundEngine::NativePlaybackStateForTest state =
+			    engine.nativePlaybackStateForTest(session, protocol, media);
+			return {state.buffer, state.filePattern, state.priority, state.current};
+		}
+
+		/**
+		 * @brief Attempts one catalog watch through the production registration path.
+		 * @param engine Sound engine whose watcher receives the path.
+		 * @param directory Directory to register.
+		 * @return `true` when registration succeeded.
+		 */
+		[[nodiscard]] static bool attemptCatalogWatch(const SoundEngine &engine, const QString &directory)
+		{
+			return engine.attemptCatalogWatchForTest(directory);
+		}
+
+		/**
+		 * @brief Reconciles the configured sounds root through the production watcher transition.
+		 * @param engine Sound engine whose catalog root is reconciled.
+		 */
+		static void reconcileSoundRoot(const SoundEngine &engine)
+		{
+			engine.reconcileSoundRootForTest();
+		}
+
+		/**
+		 * @brief Reconciles one catalog directory through the production watcher transition.
+		 * @param engine Sound engine whose catalog directory is reconciled.
+		 * @param directory Changed catalog directory.
+		 */
+		static void reconcileCatalogDirectory(const SoundEngine &engine, const QString &directory)
+		{
+			engine.reconcileCatalogDirectoryForTest(directory);
+		}
+
+		/**
+		 * @brief Runs one production periodic maintenance pass.
+		 * @param engine Sound engine whose worker performs maintenance.
+		 */
+		static void runPeriodicMaintenance(const SoundEngine &engine)
+		{
+			engine.runPeriodicMaintenanceForTest();
+		}
+
+		/**
+		 * @brief Replaces the native-download inactivity timeout for deterministic tests.
+		 * @param engine Sound engine whose worker starts later download requests.
+		 * @param milliseconds Positive no-progress interval.
+		 */
+		static void setDownloadStallTimeout(const SoundEngine &engine, const int milliseconds)
+		{
+			engine.setDownloadStallTimeoutForTest(milliseconds);
+		}
+
+		/**
+		 * @brief Processes an existing file through native download completion.
+		 * @param engine Sound engine whose I/O worker owns the download path.
+		 * @param destination Existing sound file beneath the configured sounds root.
+		 */
+		static void processExistingDownload(const SoundEngine &engine, const QString &destination)
+		{
+			engine.processExistingDownloadForTest(destination);
 		}
 
 		/**
@@ -156,6 +386,15 @@ class SoundEngineTestAccess final
 		static void setPlaybackInitializationBarrier(const SoundEngine &engine, std::function<void()> barrier)
 		{
 			engine.setPlaybackInitializationBarrierForTest(std::move(barrier));
+		}
+
+		/**
+		 * @brief Forces startup device discovery to report no usable output.
+		 * @param engine Sound engine whose next initialization attempt is rejected.
+		 */
+		static void forceNoAudioOutput(const SoundEngine &engine)
+		{
+			engine.forceNoAudioOutputForTest();
 		}
 
 		/**
