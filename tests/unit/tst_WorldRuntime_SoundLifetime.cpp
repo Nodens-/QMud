@@ -651,7 +651,7 @@ namespace
 					engine.configureSoundDirectory(root.path());
 					QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
 					QCOMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, 1);
-					QVERIFY(QFileInfo::exists(
+					QTRY_VERIFY(QFileInfo::exists(
 					    QDir(root.path()).filePath(QStringLiteral("worlds/state/sound-index.qss"))));
 				}
 
