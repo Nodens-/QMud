@@ -1038,7 +1038,7 @@ namespace
 				const auto session = engine.registerSession({}, QStringLiteral("./sounds/world-one/"));
 				QVERIFY(session);
 				const QString baseUrl = QStringLiteral("http://127.0.0.1:%1/base/").arg(server.serverPort());
-				QMudNativeSoundRequest request = nativeSoundRequest(QStringLiteral("nested/downloaded.mp3"));
+				QMudNativeSoundRequest request = nativeSoundRequest(QStringLiteral("nested/downloaded.wav"));
 				request.downloadUrl            = baseUrl;
 				QVERIFY(session->submitNativeSound(request));
 				int selectedBuffer =
@@ -1048,10 +1048,10 @@ namespace
 				QVERIFY(selectedBuffer > 0);
 
 				const QString downloaded =
-				    QDir(root.path()).filePath(QStringLiteral("sounds/World-One/nested/downloaded.mp3"));
+				    QDir(root.path()).filePath(QStringLiteral("sounds/World-One/nested/downloaded.wav"));
 				QTRY_VERIFY(QFileInfo::exists(downloaded));
 				QCOMPARE(requestCount, 1);
-				QCOMPARE(requestedTarget, QStringLiteral("/base/nested/downloaded.mp3"));
+				QCOMPARE(requestedTarget, QStringLiteral("/base/nested/downloaded.wav"));
 				QFile installed(downloaded);
 				QVERIFY(installed.open(QIODevice::ReadOnly));
 				QCOMPARE(installed.readAll(), payload);
