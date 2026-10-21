@@ -20,6 +20,7 @@ RUN dnf -y upgrade && \
       git \
       glibc-langpack-en \
       libglvnd-devel \
+      libXrandr \
       libxkbcommon \
       libxkbcommon-devel \
       lua \
@@ -35,7 +36,9 @@ RUN dnf -y upgrade && \
       patchelf \
       pipewire-libs \
       pkgconf-pkg-config \
+      pulseaudio \
       pulseaudio-libs \
+      pulseaudio-utils \
       python3 \
       python3-pip \
       rsync \
@@ -100,5 +103,8 @@ RUN set -eux; \
 
 ENV QMUD_APPIMAGE_QT_PREFIX=/opt/Qt/latest/gcc_64
 ENV PATH=/opt/Qt/latest/gcc_64/bin:${PATH}
+
+COPY start-test-audio.sh /usr/local/bin/qmud-start-test-audio
+RUN chmod 0755 /usr/local/bin/qmud-start-test-audio
 
 WORKDIR /work

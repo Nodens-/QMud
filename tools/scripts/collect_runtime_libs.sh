@@ -60,7 +60,7 @@ copy_lib() {
       return 0
       ;;
     ld-musl*.so*|\
-    libwayland-*.so*|libxkbcommon*.so*|libxcb*.so*|libX11*.so*|libXau.so*|libXdmcp.so*|libXext.so*|libXrender.so*|libSM.so*|libICE.so*|\
+    libwayland-*.so*|libxkbcommon*.so*|libxcb*.so*|libX11*.so*|libXau.so*|libXdmcp.so*|libXext.so*|libXrandr.so*|libXrender.so*|libSM.so*|libICE.so*|\
     libEGL.so*|libGLX.so*|libOpenGL.so*|libGLdispatch.so*|libdrm.so*|libgbm.so*|\
     libdbus-1.so*|libglib-2.0.so*|libgobject-2.0.so*|libgmodule-2.0.so*|libgio-2.0.so*|\
     libsystemd.so*|libmount.so*|libblkid.so*|libcap.so*)
