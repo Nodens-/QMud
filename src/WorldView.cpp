@@ -1467,8 +1467,11 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			}
 			if (type == QAccessible::Value)
 			{
-				const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleText();
-				return map.text(0, map.characterCount());
+				const WorldView *view = worldView();
+				if (!view)
+					return {};
+				const WorldView::NativeOutputRenderLines &lines = view->nativeOutputRenderLines();
+				return view->accessibleOutputText(lines, 0, view->accessibleOutputCharacterCount(lines));
 			}
 			return QAccessibleWidget::text(type);
 		}
@@ -1499,7 +1502,8 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			if (!view || !view->nativeOutputSelectionBounds(startLine, startColumn, endLine, endColumn))
 				return;
 
-			const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleText();
+			view->ensureAccessibleOutputLineIndex(view->nativeOutputRenderLines());
+			const QMudAccessibleTextUtils::LineOffsetIndex &map = view->m_accessibleOutputLineIndex;
 			if (startOffset)
 				*startOffset = map.offsetForPosition({qMax(0, startLine - 1), qMax(0, startColumn - 1)});
 			if (endOffset)
@@ -1539,8 +1543,9 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			if (!view || !browser)
 				return;
 
-			const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleText();
-			const QMudAccessibleTextUtils::TextPosition   start =
+			view->ensureAccessibleOutputLineIndex(view->nativeOutputRenderLines());
+			const QMudAccessibleTextUtils::LineOffsetIndex &map = view->m_accessibleOutputLineIndex;
+			const QMudAccessibleTextUtils::TextPosition     start =
 			    map.positionForOffset(qMin(startOffset, endOffset));
 			const QMudAccessibleTextUtils::TextPosition end =
 			    map.positionForOffset(qMax(startOffset, endOffset));
@@ -1562,7 +1567,9 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 
 		[[nodiscard]] QString text(int startOffset, int endOffset) const override
 		{
-			return accessibleText().text(startOffset, endOffset);
+			const WorldView *view = worldView();
+			return view ? view->accessibleOutputText(view->nativeOutputRenderLines(), startOffset, endOffset)
+			            : QString();
 		}
 
 		[[nodiscard]] QString textBeforeOffset(const int                           offset,
@@ -1590,21 +1597,22 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 
 		[[nodiscard]] int characterCount() const override
 		{
-			return accessibleText().characterCount();
+			const WorldView *view = worldView();
+			return view ? view->accessibleOutputCharacterCount(view->nativeOutputRenderLines()) : 0;
 		}
 
 		[[nodiscard]] QRect characterRect(int offset) const override
 		{
-			const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleText();
-			if (map.isEmpty())
-				return {};
-
-			const QMudAccessibleTextUtils::TextPosition position =
-			    map.positionForOffset(qBound(0, offset, map.characterCount()));
 			WorldView       *view    = worldView();
 			WrapTextBrowser *browser = targetBrowser();
 			if (!view || !browser)
 				return {};
+			view->ensureAccessibleOutputLineIndex(view->nativeOutputRenderLines());
+			const QMudAccessibleTextUtils::LineOffsetIndex &map = view->m_accessibleOutputLineIndex;
+			if (map.isEmpty())
+				return {};
+			const QMudAccessibleTextUtils::TextPosition position =
+			    map.positionForOffset(qBound(0, offset, map.characterCount()));
 
 			QRect rect;
 			return view->nativeOutputCharacterRect(browser, {position.line, position.column}, rect) ? rect
@@ -1626,7 +1634,8 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 				return -1;
 			}
 
-			const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleText();
+			view->ensureAccessibleOutputLineIndex(view->nativeOutputRenderLines());
+			const QMudAccessibleTextUtils::LineOffsetIndex &map = view->m_accessibleOutputLineIndex;
 			return map.offsetForPosition({position.line, position.column});
 		}
 
@@ -1637,7 +1646,8 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			if (!view || !browser)
 				return;
 
-			const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleText();
+			view->ensureAccessibleOutputLineIndex(view->nativeOutputRenderLines());
+			const QMudAccessibleTextUtils::LineOffsetIndex &map = view->m_accessibleOutputLineIndex;
 			if (map.isEmpty())
 				return;
 
@@ -1679,26 +1689,20 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			return canvas ? canvas->worldView() : nullptr;
 		}
 
-		[[nodiscard]] const QMudAccessibleTextUtils::LineOffsetMap &accessibleText() const
-		{
-			const WorldView *view = worldView();
-			if (!view)
-			{
-				static const QMudAccessibleTextUtils::LineOffsetMap emptyMap;
-				return emptyMap;
-			}
-
-			return view->accessibleNativeOutputTextMap();
-		}
-
 		[[nodiscard]] QString boundaryText(const int offset, const QAccessible::TextBoundaryType boundaryType,
 		                                   int *startOffset, int *endOffset,
 		                                   const QMudAccessibleTextUtils::TextBoundaryQuery query) const
 		{
-			const QMudAccessibleTextUtils::LineOffsetMap     &map    = accessibleText();
-			const int                                         cursor = resolvedBoundaryOffset(offset, map);
-			const QMudAccessibleTextUtils::TextBoundaryResult result =
-			    map.boundaryText(cursor, boundaryKind(boundaryType), query);
+			const WorldView *view = worldView();
+			if (!view)
+				return {};
+			const WorldView::NativeOutputRenderLines &lines = view->nativeOutputRenderLines();
+			view->ensureAccessibleOutputLineIndex(lines);
+			const QMudAccessibleTextUtils::LineOffsetIndex &index = view->m_accessibleOutputLineIndex;
+			const int cursor = resolvedBoundaryOffset(offset, index.characterCount());
+			const QMudAccessibleTextUtils::TextBoundaryResult result = index.boundaryText(
+			    cursor, boundaryKind(boundaryType), query,
+			    [&lines](const int line) -> const QString & { return lines.at(line).text; });
 			if (startOffset)
 				*startOffset = result.startOffset;
 			if (endOffset)
@@ -1706,13 +1710,12 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			return result.text;
 		}
 
-		[[nodiscard]] int resolvedBoundaryOffset(const int                                     offset,
-		                                         const QMudAccessibleTextUtils::LineOffsetMap &map) const
+		[[nodiscard]] int resolvedBoundaryOffset(const int offset, const int characterCount) const
 		{
 			constexpr int kTextOffsetLength = -1;
 			constexpr int kTextOffsetCaret  = -2;
 			if (offset == kTextOffsetLength)
-				return map.characterCount();
+				return characterCount;
 			if (offset == kTextOffsetCaret)
 				return cursorPosition();
 			return offset;
@@ -3927,266 +3930,151 @@ void WorldView::requestNativeOutputPresentationRepaint(const bool repaintVisible
 	requestNativeOutputRepaint();
 }
 
-QMudAccessibleTextUtils::LineOffsetMap
-WorldView::accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines)
-{
-	QVector<QString> textLines;
-	textLines.reserve(lines.size());
-	for (const NativeOutputRenderLine &line : lines)
-		textLines.push_back(line.text);
-	return QMudAccessibleTextUtils::LineOffsetMap(std::move(textLines));
-}
-
-const QMudAccessibleTextUtils::LineOffsetMap &WorldView::accessibleNativeOutputTextMap() const
-{
-	if (!m_accessibleOutputTextMapCacheValid ||
-	    m_accessibleOutputTextMapCacheRevision != m_nativeRenderModel->m_nativeRenderLineCacheRevision)
-	{
-		m_accessibleOutputTextMapCache         = accessibleNativeOutputTextMap(nativeOutputRenderLines());
-		m_accessibleOutputTextMapCacheRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		m_accessibleOutputTextMapCacheValid    = true;
-	}
-	return m_accessibleOutputTextMapCache;
-}
-
 void WorldView::resetAccessibleOutputStateForRenderModelChange() const
 {
-	m_accessibleOutputCharacterCount                 = -1;
-	m_accessibleOutputRevision                       = 0;
-	m_accessibleOutputText                           = QString();
+	m_accessibleOutputCharacterCount = -1;
+	m_accessibleOutputRevision       = 0;
+	m_accessibleOutputLineIndex.clear();
+	m_accessibleOutputLineIndexRevision = 0;
+	m_accessibleOutputLineIndexValid    = false;
+	m_accessibleOutputPendingTextEdits.clear();
 	m_accessibleOutputPendingTailAppend              = false;
 	m_accessibleOutputLastAnnouncedPartialText       = QString();
 	m_accessibleOutputLiveEventsSuppressed           = false;
-	m_accessibleOutputBaselineLineCount              = -1;
-	m_accessibleOutputBaselineTailText               = QString();
-	m_accessibleOutputBaselineLineLengths            = QVector<int>();
 	m_accessibleOutputReviewActive                   = false;
 	m_accessibleOutputReviewTargetKind               = AccessibleOutputReviewTargetKind::None;
 	m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
 	m_accessibleOutputReviewLastNotifiedScrollValue  = -1;
-	m_accessibleOutputLineStartCache                 = QVector<int>();
-	m_accessibleOutputLineStartCacheRevision         = 0;
-	m_accessibleOutputLineStartCacheNextOffset       = 0;
-	m_accessibleOutputLineStartCacheCharacterCount   = -1;
-	m_accessibleOutputTextMapCache                   = QMudAccessibleTextUtils::LineOffsetMap();
-	m_accessibleOutputTextMapCacheRevision           = 0;
-	m_accessibleOutputTextMapCacheValid              = false;
 }
 
-int WorldView::accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines)
+void WorldView::ensureAccessibleOutputLineIndex(const NativeOutputRenderLines &lines) const
 {
-	int       characterCount = 0;
-	const int lineCount      = sizeToInt(lines.size());
-	for (int i = 0; i < lineCount; ++i)
-	{
-		if (i > 0)
-			characterCount = saturatedAccessibleAdd(characterCount, 1);
-		characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.at(i).text.size()));
-	}
-	return characterCount;
+	if (m_accessibleOutputLineIndexValid &&
+	    m_accessibleOutputLineIndexRevision == m_nativeRenderModel->m_nativeRenderLineCacheRevision)
+		return;
+	QVector<int> lengths;
+	lengths.reserve(lines.size());
+	for (const NativeOutputRenderLine &line : lines)
+		lengths.push_back(sizeToInt(line.text.size()));
+	m_accessibleOutputLineIndex.reset(lengths);
+	m_accessibleOutputLineIndexRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+	m_accessibleOutputLineIndexValid    = true;
 }
 
-int WorldView::accessibleRetainedLineCountForTailDelta(const NativeRenderCacheDelta &delta,
-                                                       const int                     lineCount)
+QString WorldView::accessibleOutputText(const NativeOutputRenderLines &lines, const int startOffset,
+                                        const int endOffset) const
 {
-	if (delta.newLineCount != lineCount)
-		return -1;
-	switch (delta.kind)
-	{
-	case NativeRenderCacheDeltaKind::TailAppend:
-		return qBound(0, delta.oldLineCount, delta.newLineCount);
-	case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
-		return delta.headTrimCount > 0
-		           ? qBound(0, delta.oldLineCount - qBound(0, delta.headTrimCount, delta.oldLineCount),
-		                    delta.newLineCount)
-		           : -1;
-	default:
-		return -1;
-	}
+	ensureAccessibleOutputLineIndex(lines);
+	return m_accessibleOutputLineIndex.text(
+	    startOffset, endOffset, [&lines](const int line) -> const QString & { return lines.at(line).text; });
 }
 
 void WorldView::primeAccessibleOutputTextState() const
 {
-	const NativeOutputRenderLines               &lines = nativeOutputRenderLines();
-	const QMudAccessibleTextUtils::LineOffsetMap map   = accessibleNativeOutputTextMap(lines);
-	m_accessibleOutputCharacterCount                   = map.characterCount();
-	m_accessibleOutputRevision                         = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-	m_accessibleOutputText                             = map.text(0, map.characterCount());
-	recordAccessibleOutputTailBaseline(lines);
-	m_accessibleOutputBaselineLineLengths.clear();
-}
-
-void WorldView::recordAccessibleOutputTailBaseline(const NativeOutputRenderLines &lines) const
-{
-	m_accessibleOutputBaselineLineCount = sizeToInt(lines.size());
-	m_accessibleOutputBaselineTailText  = lines.isEmpty() ? QString() : lines.constLast().text;
-}
-
-void WorldView::recordSuppressedAccessibleOutputLengthBaseline(const NativeOutputRenderLines &lines) const
-{
-	m_accessibleOutputBaselineLineLengths.clear();
-	m_accessibleOutputBaselineLineLengths.reserve(lines.size());
-	for (const NativeOutputRenderLine &line : lines)
-		m_accessibleOutputBaselineLineLengths.push_back(sizeToInt(line.text.size()));
-	recordAccessibleOutputTailBaseline(lines);
-}
-
-bool WorldView::updateSuppressedAccessibleOutputBaseline(const NativeOutputRenderLines &lines) const
-{
-	auto rebuildBaseline = [this, &lines]
-	{
-		m_accessibleOutputCharacterCount = accessibleNativeOutputCharacterCount(lines);
-		m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		recordSuppressedAccessibleOutputLengthBaseline(lines);
-		return false;
-	};
-
-	if (lines.isEmpty())
-	{
-		m_accessibleOutputCharacterCount = 0;
-		m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		recordAccessibleOutputTailBaseline(lines);
-		m_accessibleOutputBaselineLineLengths.clear();
-		return true;
-	}
-
-	const NativeRenderCacheDelta &delta = m_nativeRenderModel->m_nativeRenderCacheDelta;
-	if (m_accessibleOutputRevision != delta.fromRevision || m_accessibleOutputCharacterCount < 0)
-		return rebuildBaseline();
-
-	int       characterCount      = m_accessibleOutputCharacterCount;
-	const int lineCount           = sizeToInt(lines.size());
-	const int baselineLengthCount = sizeToInt(m_accessibleOutputBaselineLineLengths.size());
-	auto updateBaselineLineLength = [this, &lines, &characterCount, lineCount](const int lineIndex) -> bool
-	{
-		if (lineIndex < 0 || lineIndex >= lineCount ||
-		    lineIndex >= sizeToInt(m_accessibleOutputBaselineLineLengths.size()))
-		{
-			return false;
-		}
-		const int previousLength = m_accessibleOutputBaselineLineLengths.at(lineIndex);
-		const int currentLength  = sizeToInt(lines.at(lineIndex).text.size());
-		characterCount           = qMax(0, characterCount - previousLength);
-		characterCount           = saturatedAccessibleAdd(characterCount, currentLength);
-		m_accessibleOutputBaselineLineLengths[lineIndex] = currentLength;
-		return true;
-	};
-	switch (delta.kind)
-	{
-	case NativeRenderCacheDeltaKind::TailAppend:
-	{
-		if (delta.newLineCount < delta.oldLineCount || delta.newLineCount != lineCount)
-			return rebuildBaseline();
-		if (baselineLengthCount != m_accessibleOutputBaselineLineCount)
-			return rebuildBaseline();
-		if (m_accessibleOutputBaselineLineCount == lineCount && !lines.isEmpty())
-		{
-			if (delta.headLineMutated && lineCount > 1 && !updateBaselineLineLength(0))
-				return rebuildBaseline();
-			if (!updateBaselineLineLength(lineCount - 1))
-				return rebuildBaseline();
-			break;
-		}
-		if (m_accessibleOutputBaselineLineCount != delta.oldLineCount)
-			return rebuildBaseline();
-		if (delta.headLineMutated && !updateBaselineLineLength(0))
-			return rebuildBaseline();
-		int firstInsertedLine = delta.oldLineCount;
-		if (delta.tailLineMutated && delta.oldLineCount > 0)
-		{
-			firstInsertedLine                   = delta.oldLineCount - 1;
-			const bool alreadyUpdatedAsHeadLine = delta.headLineMutated && firstInsertedLine == 0;
-			if (!alreadyUpdatedAsHeadLine && !updateBaselineLineLength(firstInsertedLine))
-				return rebuildBaseline();
-		}
-		for (int i = qMax(0, firstInsertedLine); i < lineCount; ++i)
-		{
-			if (delta.tailLineMutated && delta.oldLineCount > 0 && i == firstInsertedLine)
-				continue;
-			if (i > 0)
-				characterCount = saturatedAccessibleAdd(characterCount, 1);
-			characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.at(i).text.size()));
-			m_accessibleOutputBaselineLineLengths.push_back(sizeToInt(lines.at(i).text.size()));
-		}
-		break;
-	}
-	case NativeRenderCacheDeltaKind::TailRemove:
-	{
-		if (delta.newLineCount > delta.oldLineCount || delta.newLineCount != lineCount)
-			return rebuildBaseline();
-		if (m_accessibleOutputBaselineLineCount != delta.oldLineCount)
-			return rebuildBaseline();
-		if (baselineLengthCount != delta.oldLineCount)
-			return rebuildBaseline();
-		if (delta.tailLineMutated && delta.newLineCount > 0)
-		{
-			characterCount = qMax(0, characterCount - sizeToInt(m_accessibleOutputBaselineTailText.size()));
-			characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.constLast().text.size()));
-			m_accessibleOutputBaselineLineLengths.last() = sizeToInt(lines.constLast().text.size());
-			break;
-		}
-		if (delta.oldLineCount != delta.newLineCount + 1)
-			return rebuildBaseline();
-		const int removedCharacters =
-		    sizeToInt(m_accessibleOutputBaselineTailText.size()) + (delta.newLineCount > 0 ? 1 : 0);
-		characterCount = qMax(0, characterCount - removedCharacters);
-		m_accessibleOutputBaselineLineLengths.removeLast();
-		break;
-	}
-	case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
-	{
-		if (delta.newLineCount != lineCount || delta.headTrimCount <= 0)
-			return rebuildBaseline();
-		if (m_accessibleOutputBaselineLineCount != delta.oldLineCount)
-			return rebuildBaseline();
-		if (baselineLengthCount != delta.oldLineCount)
-			return rebuildBaseline();
-
-		const int headTrimCount = qBound(0, delta.headTrimCount, delta.oldLineCount);
-		if (headTrimCount <= 0)
-			return rebuildBaseline();
-
-		int removedCharacters = 0;
-		for (int i = 0; i < headTrimCount; ++i)
-			removedCharacters =
-			    saturatedAccessibleAdd(removedCharacters, m_accessibleOutputBaselineLineLengths.at(i));
-		const int removedSeparators =
-		    delta.oldLineCount > headTrimCount ? headTrimCount : qMax(0, headTrimCount - 1);
-		removedCharacters = saturatedAccessibleAdd(removedCharacters, removedSeparators);
-		characterCount    = qMax(0, characterCount - removedCharacters);
-		m_accessibleOutputBaselineLineLengths.remove(0, headTrimCount);
-
-		int preservedLineCount = accessibleRetainedLineCountForTailDelta(delta, lineCount);
-		if (preservedLineCount < 0)
-			return rebuildBaseline();
-		if (delta.headLineMutated && preservedLineCount > 0 && !updateBaselineLineLength(0))
-			return rebuildBaseline();
-		if (delta.tailLineMutated && preservedLineCount > 0)
-		{
-			const int  tailMutatedLineIndex     = preservedLineCount - 1;
-			const bool alreadyUpdatedAsHeadLine = delta.headLineMutated && tailMutatedLineIndex == 0;
-			if (!alreadyUpdatedAsHeadLine && !updateBaselineLineLength(tailMutatedLineIndex))
-				return rebuildBaseline();
-		}
-		if (sizeToInt(m_accessibleOutputBaselineLineLengths.size()) != preservedLineCount)
-			return rebuildBaseline();
-		for (int i = preservedLineCount; i < lineCount; ++i)
-		{
-			if (i > 0)
-				characterCount = saturatedAccessibleAdd(characterCount, 1);
-			characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.at(i).text.size()));
-			m_accessibleOutputBaselineLineLengths.push_back(sizeToInt(lines.at(i).text.size()));
-		}
-		break;
-	}
-	default:
-		return rebuildBaseline();
-	}
-
-	m_accessibleOutputCharacterCount = characterCount;
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	ensureAccessibleOutputLineIndex(lines);
+	m_accessibleOutputCharacterCount = m_accessibleOutputLineIndex.characterCount();
 	m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-	recordAccessibleOutputTailBaseline(lines);
-	return true;
+	m_accessibleOutputPendingTextEdits.clear();
+}
+
+void WorldView::consumeAccessibleOutputTextDelta(const NativeRenderCacheDelta &delta) const
+{
+	if (!QAccessible::isActive())
+	{
+		m_accessibleOutputLineIndexValid = false;
+		m_accessibleOutputPendingTextEdits.clear();
+		return;
+	}
+	if (!m_accessibleOutputLineIndexValid || m_accessibleOutputLineIndexRevision != delta.fromRevision)
+	{
+		m_accessibleOutputLineIndexValid = false;
+		m_accessibleOutputPendingTextEdits.clear();
+		return;
+	}
+
+	const bool emitTextEvents = !m_runtimeObserver &&
+	                            !(m_runtime && m_runtime->hasMushReaderLiveSpeechOwner()) &&
+	                            qtAccessibilityOutputSpeechEnabled();
+	auto       eventText = [](const QVector<QString> &textLines, const int firstLine, const int totalLines)
+	{
+		if (textLines.isEmpty())
+			return QString();
+		QStringList joinedLines;
+		joinedLines.reserve(textLines.size());
+		for (const QString &line : textLines)
+			joinedLines.push_back(line);
+		QString text = joinedLines.join(QLatin1Char('\n'));
+		if (firstLine > 0)
+			text.prepend(QLatin1Char('\n'));
+		else if (textLines.size() < totalLines)
+			text.append(QLatin1Char('\n'));
+		return text;
+	};
+	for (const NativeRenderCacheDelta::TextEdit &edit : delta.textEdits)
+	{
+		const int oldLineCount = m_accessibleOutputLineIndex.lineCount();
+		const int removeCount  = sizeToInt(edit.removedLines.size());
+		const int insertCount  = sizeToInt(edit.insertedLines.size());
+		if (edit.firstLine < 0 || edit.firstLine > oldLineCount ||
+		    removeCount > oldLineCount - edit.firstLine)
+		{
+			m_accessibleOutputLineIndexValid = false;
+			m_accessibleOutputPendingTextEdits.clear();
+			return;
+		}
+
+		int position = 0;
+		if (!m_runtimeObserver)
+		{
+			if (edit.firstLine == oldLineCount)
+				position = m_accessibleOutputLineIndex.characterCount();
+			else if (edit.firstLine > 0)
+				position = qMax(0, m_accessibleOutputLineIndex.offsetForPosition({edit.firstLine, 0}) - 1);
+		}
+		const int     newLineCount = oldLineCount - removeCount + insertCount;
+		const QString removedText =
+		    m_runtimeObserver ? QString() : eventText(edit.removedLines, edit.firstLine, oldLineCount);
+		const QString insertedText =
+		    m_runtimeObserver ? QString() : eventText(edit.insertedLines, edit.firstLine, newLineCount);
+		QVector<int> insertedLengths;
+		insertedLengths.reserve(insertCount);
+		for (const QString &line : edit.insertedLines)
+			insertedLengths.push_back(sizeToInt(line.size()));
+		if (!m_accessibleOutputLineIndex.replace(edit.firstLine, removeCount, insertedLengths))
+		{
+			m_accessibleOutputLineIndexValid = false;
+			m_accessibleOutputPendingTextEdits.clear();
+			return;
+		}
+		if (!m_runtimeObserver && removedText != insertedText)
+		{
+			const bool announce =
+			    m_accessibleOutputPendingTailAppend && edit.firstLine + removeCount == oldLineCount;
+			if (!m_accessibleOutputPendingTextEdits.isEmpty())
+			{
+				PendingAccessibleOutputTextEdit &last = m_accessibleOutputPendingTextEdits.last();
+				if (last.position == position && last.insertedText.isEmpty() && removedText.isEmpty())
+				{
+					last.insertedText  = insertedText;
+					last.emitTextEvent = last.emitTextEvent && emitTextEvents;
+					last.announce      = last.announce || announce;
+					if (last.removedText == last.insertedText)
+						m_accessibleOutputPendingTextEdits.removeLast();
+					continue;
+				}
+			}
+			m_accessibleOutputPendingTextEdits.push_back(
+			    {position, removedText, insertedText, emitTextEvents, announce});
+		}
+	}
+	if (m_accessibleOutputLineIndex.lineCount() != delta.newLineCount)
+	{
+		m_accessibleOutputLineIndexValid = false;
+		m_accessibleOutputPendingTextEdits.clear();
+		return;
+	}
+	m_accessibleOutputLineIndexRevision = delta.revision;
 }
 
 void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const
@@ -4202,21 +4090,19 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 
 	if (!QAccessible::isActive())
 	{
-		m_accessibleOutputCharacterCount           = -1;
-		m_accessibleOutputRevision                 = 0;
-		m_accessibleOutputText                     = QString();
+		m_accessibleOutputCharacterCount = -1;
+		m_accessibleOutputRevision       = 0;
+		m_accessibleOutputLineIndex.clear();
+		m_accessibleOutputLineIndexRevision = 0;
+		m_accessibleOutputLineIndexValid    = false;
+		m_accessibleOutputPendingTextEdits.clear();
 		m_accessibleOutputPendingTailAppend        = false;
 		m_accessibleOutputLastAnnouncedPartialText = QString();
 		m_accessibleOutputLiveEventsSuppressed     = false;
-		m_accessibleOutputBaselineLineCount        = -1;
-		m_accessibleOutputBaselineTailText         = QString();
-		m_accessibleOutputBaselineLineLengths      = QVector<int>();
-		m_accessibleOutputTextMapCache             = QMudAccessibleTextUtils::LineOffsetMap();
-		m_accessibleOutputTextMapCacheRevision     = 0;
-		m_accessibleOutputTextMapCacheValid        = false;
 		clearTransientReview();
 		return;
 	}
+	ensureAccessibleOutputLineIndex(lines);
 
 	const bool suppressLiveAccessibilityEvents = m_runtimeObserver ||
 	                                             (m_runtime && m_runtime->hasMushReaderLiveSpeechOwner()) ||
@@ -4225,16 +4111,9 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 	    m_accessibleOutputRevision != m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	if (suppressLiveAccessibilityEvents)
 	{
-		if (m_accessibleOutputLiveEventsSuppressed && m_accessibleOutputCharacterCount >= 0 &&
-		    !revisionChanged)
-		{
-			m_accessibleOutputPendingTailAppend = false;
-			m_accessibleOutputLastAnnouncedPartialText.clear();
-			clearTransientReview();
-			return;
-		}
-		static_cast<void>(updateSuppressedAccessibleOutputBaseline(lines));
-		m_accessibleOutputText.clear();
+		m_accessibleOutputCharacterCount = m_accessibleOutputLineIndex.characterCount();
+		m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+		m_accessibleOutputPendingTextEdits.clear();
 		m_accessibleOutputPendingTailAppend = false;
 		m_accessibleOutputLastAnnouncedPartialText.clear();
 		m_accessibleOutputLiveEventsSuppressed = true;
@@ -4242,45 +4121,34 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 		return;
 	}
 
-	const bool wasLiveAccessibilitySuppressed = m_accessibleOutputLiveEventsSuppressed;
-	if (!wasLiveAccessibilitySuppressed && m_accessibleOutputCharacterCount >= 0 && !revisionChanged)
+	if (!m_accessibleOutputLiveEventsSuppressed && m_accessibleOutputCharacterCount >= 0 && !revisionChanged)
 	{
 		m_accessibleOutputPendingTailAppend = false;
 		clearTransientReview();
 		return;
 	}
 
-	const QMudAccessibleTextUtils::LineOffsetMap map                   = accessibleNativeOutputTextMap(lines);
-	const int                                    currentCharacterCount = map.characterCount();
-	const QString                                currentText           = map.text(0, currentCharacterCount);
-	m_accessibleOutputLiveEventsSuppressed                             = false;
+	const int  currentCharacterCount          = m_accessibleOutputLineIndex.characterCount();
+	const bool wasLiveAccessibilitySuppressed = m_accessibleOutputLiveEventsSuppressed;
+	m_accessibleOutputLiveEventsSuppressed    = false;
 	if (m_accessibleOutputCharacterCount < 0)
 	{
 		m_accessibleOutputCharacterCount = currentCharacterCount;
 		m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		m_accessibleOutputText           = currentText;
-		recordAccessibleOutputTailBaseline(lines);
-		m_accessibleOutputBaselineLineLengths.clear();
+		m_accessibleOutputPendingTextEdits.clear();
 		clearTransientReview();
 		return;
 	}
 
-	if (!revisionChanged)
+	if (!revisionChanged || (wasLiveAccessibilitySuppressed && m_accessibleOutputPendingTextEdits.isEmpty()))
 	{
 		m_accessibleOutputCharacterCount = currentCharacterCount;
-		m_accessibleOutputText           = currentText;
-		recordAccessibleOutputTailBaseline(lines);
-		m_accessibleOutputBaselineLineLengths.clear();
+		m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+		m_accessibleOutputPendingTextEdits.clear();
 		clearTransientReview();
 		return;
 	}
 
-	const bool exactTailAppend =
-	    m_accessibleOutputPendingTailAppend &&
-	    m_accessibleOutputRevision == m_nativeRenderModel->m_nativeRenderCacheDelta.fromRevision &&
-	    !m_nativeRenderModel->m_nativeRenderCacheDelta.headLineMutated &&
-	    (m_nativeRenderModel->m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::TailAppend ||
-	     m_nativeRenderModel->m_nativeRenderLineCacheSource == NativeRenderCacheSource::Standalone);
 	auto announceCanvasText = [this](const QString &announcement) -> bool
 	{
 		if (!m_nativeOutputCanvas || !m_nativeOutputCanvas->isVisible() || announcement.isEmpty())
@@ -4290,92 +4158,47 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 		QAccessible::updateAccessibility(&event);
 		return true;
 	};
-	auto announceSuppressedResumeTailAppend = [this, &lines, &announceCanvasText]() -> bool
+	QStringList announcements;
+	if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
 	{
-		const NativeRenderCacheDelta &delta     = m_nativeRenderModel->m_nativeRenderCacheDelta;
-		const int                     lineCount = sizeToInt(lines.size());
-		if (delta.headLineMutated && delta.kind != NativeRenderCacheDeltaKind::HeadTrimTailAppend)
-			return false;
-
-		int preservedLineCount = accessibleRetainedLineCountForTailDelta(delta, lineCount);
-		if (delta.tailLineMutated && preservedLineCount > 0)
-			--preservedLineCount;
-		if (preservedLineCount < 0 || preservedLineCount >= lineCount)
-			return false;
-
-		QStringList insertedLines;
-		insertedLines.reserve(lineCount - preservedLineCount);
-		for (int i = preservedLineCount; i < lineCount; ++i)
-			insertedLines.push_back(lines.at(i).text);
-		return announceCanvasText(trimLeadingAnnouncementBreaks(insertedLines.join(QLatin1Char('\n'))));
-	};
-	if (wasLiveAccessibilitySuppressed && !exactTailAppend)
-	{
-		static_cast<void>(announceSuppressedResumeTailAppend());
-		m_accessibleOutputCharacterCount    = currentCharacterCount;
-		m_accessibleOutputRevision          = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		m_accessibleOutputText              = currentText;
-		m_accessibleOutputPendingTailAppend = false;
-		m_accessibleOutputLastAnnouncedPartialText.clear();
-		recordAccessibleOutputTailBaseline(lines);
-		m_accessibleOutputBaselineLineLengths.clear();
-		clearTransientReview();
-		return;
-	}
-	if (currentCharacterCount > m_accessibleOutputCharacterCount && exactTailAppend)
-	{
-		const QString insertedText = map.text(m_accessibleOutputCharacterCount, currentCharacterCount);
-		const QString announcement = trimLeadingAnnouncementBreaks(insertedText);
-		bool          announced    = false;
-		if (!insertedText.isEmpty())
+		for (const PendingAccessibleOutputTextEdit &edit : std::as_const(m_accessibleOutputPendingTextEdits))
 		{
-			if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
+			if (edit.emitTextEvent && edit.removedText.isEmpty())
 			{
-				QAccessibleTextInsertEvent event(m_nativeOutputCanvas, m_accessibleOutputCharacterCount,
-				                                 insertedText);
+				QAccessibleTextInsertEvent event(m_nativeOutputCanvas, edit.position, edit.insertedText);
 				QAccessible::updateAccessibility(&event);
 			}
-			announced = announceCanvasText(announcement);
+			else if (edit.emitTextEvent)
+			{
+				QAccessibleTextUpdateEvent event(m_nativeOutputCanvas, edit.position, edit.removedText,
+				                                 edit.insertedText);
+				QAccessible::updateAccessibility(&event);
+			}
+			if (!edit.announce && edit.removedText.isEmpty())
+				continue;
+			const QString announcement =
+			    edit.removedText.isEmpty() ? trimLeadingAnnouncementBreaks(edit.insertedText)
+			                               : accessibleAnnouncementDelta(edit.removedText, edit.insertedText);
+			if (!announcement.isEmpty())
+				announcements.push_back(announcement);
 		}
+	}
+	const QString announcement = announcements.join(QLatin1Char('\n'));
+	if (!announcement.isEmpty() && announcement == m_accessibleOutputLastAnnouncedPartialText)
+		m_accessibleOutputLastAnnouncedPartialText.clear();
+	else if (announceCanvasText(announcement))
+	{
 		const QString partialAnnouncement =
 		    m_nativeRenderModel->m_nativeHasPartialOutput
 		        ? trimLeadingAnnouncementBreaks(m_nativeRenderModel->m_nativePartialOutputText)
 		        : QString();
-		if (announced && !partialAnnouncement.isEmpty() && announcement == partialAnnouncement)
-		{
-			m_accessibleOutputLastAnnouncedPartialText = announcement;
-		}
-		else
-		{
-			m_accessibleOutputLastAnnouncedPartialText.clear();
-		}
+		m_accessibleOutputLastAnnouncedPartialText =
+		    !partialAnnouncement.isEmpty() && announcement == partialAnnouncement ? announcement : QString();
 	}
-	else if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
-	{
-		if (m_accessibleOutputText != currentText)
-		{
-			QAccessibleTextUpdateEvent event(m_nativeOutputCanvas, 0, m_accessibleOutputText, currentText);
-			QAccessible::updateAccessibility(&event);
-			const QString announcement = trimLeadingAnnouncementBreaks(
-			    accessibleAnnouncementDelta(m_accessibleOutputText, currentText));
-			if (!announcement.isEmpty() && announcement == m_accessibleOutputLastAnnouncedPartialText)
-			{
-				m_accessibleOutputLastAnnouncedPartialText.clear();
-			}
-			else
-			{
-				announceCanvasText(announcement);
-				if (!announcement.isEmpty())
-					m_accessibleOutputLastAnnouncedPartialText.clear();
-			}
-		}
-	}
-	m_accessibleOutputCharacterCount    = currentCharacterCount;
-	m_accessibleOutputRevision          = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-	m_accessibleOutputText              = currentText;
+	m_accessibleOutputCharacterCount = currentCharacterCount;
+	m_accessibleOutputRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+	m_accessibleOutputPendingTextEdits.clear();
 	m_accessibleOutputPendingTailAppend = false;
-	recordAccessibleOutputTailBaseline(lines);
-	m_accessibleOutputBaselineLineLengths.clear();
 	clearTransientReview();
 }
 
@@ -4511,7 +4334,8 @@ void WorldView::setAccessibleOutputCursorPosition(const int cursorOffset) const
 	if (lines.isEmpty())
 		return;
 
-	const QMudAccessibleTextUtils::LineOffsetMap &map = accessibleNativeOutputTextMap();
+	ensureAccessibleOutputLineIndex(lines);
+	const QMudAccessibleTextUtils::LineOffsetIndex &map = m_accessibleOutputLineIndex;
 	if (map.isEmpty())
 		return;
 
@@ -4719,67 +4543,14 @@ int WorldView::accessibleOutputOffsetForLine(const NativeOutputRenderLines &line
 {
 	if (lines.isEmpty())
 		return 0;
-	if (lineIndex <= 0)
-		return 0;
-	const int lineCount = sizeToInt(lines.size());
-	if (lineIndex >= lineCount)
-		return accessibleOutputCharacterCount(lines);
-
-	ensureAccessibleOutputOffsetCachePrefix(lines, lineIndex);
-	return m_accessibleOutputLineStartCache.at(static_cast<qsizetype>(lineIndex));
+	ensureAccessibleOutputLineIndex(lines);
+	return m_accessibleOutputLineIndex.offsetForPosition({lineIndex, 0});
 }
 
 int WorldView::accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const
 {
-	if (m_accessibleOutputRevision == m_nativeRenderModel->m_nativeRenderLineCacheRevision &&
-	    m_accessibleOutputCharacterCount >= 0)
-		return m_accessibleOutputCharacterCount;
-	if (m_accessibleOutputLineStartCacheRevision == m_nativeRenderModel->m_nativeRenderLineCacheRevision &&
-	    m_accessibleOutputLineStartCacheCharacterCount >= 0)
-	{
-		return m_accessibleOutputLineStartCacheCharacterCount;
-	}
-	if (lines.isEmpty())
-		return 0;
-
-	ensureAccessibleOutputOffsetCachePrefix(lines, sizeToInt(lines.size()) - 1);
-	return m_accessibleOutputLineStartCacheCharacterCount;
-}
-
-void WorldView::ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
-                                                        const int                      lineIndex) const
-{
-	if (m_accessibleOutputLineStartCacheRevision != m_nativeRenderModel->m_nativeRenderLineCacheRevision ||
-	    m_accessibleOutputLineStartCache.size() > lines.size())
-	{
-		m_accessibleOutputLineStartCache.clear();
-		m_accessibleOutputLineStartCacheRevision       = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-		m_accessibleOutputLineStartCacheNextOffset     = 0;
-		m_accessibleOutputLineStartCacheCharacterCount = -1;
-	}
-
-	if (lines.isEmpty())
-	{
-		m_accessibleOutputLineStartCacheCharacterCount = 0;
-		return;
-	}
-
-	const int       boundedLineIndex   = qBound(0, lineIndex, sizeToInt(lines.size()) - 1);
-	const qsizetype requiredLineStarts = static_cast<qsizetype>(boundedLineIndex) + 1;
-
-	while (m_accessibleOutputLineStartCache.size() < requiredLineStarts)
-	{
-		const qsizetype i = m_accessibleOutputLineStartCache.size();
-		m_accessibleOutputLineStartCache.push_back(m_accessibleOutputLineStartCacheNextOffset);
-		m_accessibleOutputLineStartCacheNextOffset = saturatedAccessibleAdd(
-		    m_accessibleOutputLineStartCacheNextOffset, sizeToInt(lines.at(i).text.size()));
-		if (i + 1 < lines.size())
-			m_accessibleOutputLineStartCacheNextOffset =
-			    saturatedAccessibleAdd(m_accessibleOutputLineStartCacheNextOffset, 1);
-	}
-
-	if (m_accessibleOutputLineStartCache.size() == lines.size())
-		m_accessibleOutputLineStartCacheCharacterCount = m_accessibleOutputLineStartCacheNextOffset;
+	ensureAccessibleOutputLineIndex(lines);
+	return m_accessibleOutputLineIndex.characterCount();
 }
 
 WorldView::NativeOutputPanePaintState *
@@ -5575,12 +5346,17 @@ void WorldView::removeNativePartialRenderLineOverlay() const
 	if (m_nativeRenderModel->m_nativePartialRenderLineAppended)
 	{
 		if (!m_nativeRenderModel->m_nativeRenderLineCache.isEmpty())
+		{
+			recordNativeRenderTextEdit(oldLineCount - 1, nativeRenderTextRange(oldLineCount - 1, 1), {});
 			m_nativeRenderModel->m_nativeRenderLineCache.removeLast();
+		}
 	}
 	else if (!m_nativeRenderModel->m_nativeRenderLineCache.isEmpty())
 	{
+		const QVector<QString> removedText = nativeRenderTextRange(oldLineCount - 1, 1);
 		m_nativeRenderModel->m_nativeRenderLineCache.last() =
 		    std::move(m_nativeRenderModel->m_nativePartialRenderLineBaseTail);
+		recordNativeRenderTextEdit(oldLineCount - 1, removedText, nativeRenderTextRange(oldLineCount - 1, 1));
 	}
 
 	m_nativeRenderModel->m_nativePartialRenderLineApplied           = false;
@@ -5627,6 +5403,8 @@ void WorldView::applyNativePartialRenderLineOverlay() const
 
 	if (appendToLastBaseLine)
 	{
+		const int              tailIndex   = oldLineCount - 1;
+		const QVector<QString> removedText = nativeRenderTextRange(tailIndex, 1);
 		m_nativeRenderModel->m_nativePartialRenderLineBaseTail =
 		    m_nativeRenderModel->m_nativeRenderLineCache.last();
 		NativeOutputRenderLine &line = m_nativeRenderModel->m_nativeRenderLineCache.last();
@@ -5637,6 +5415,7 @@ void WorldView::applyNativePartialRenderLineOverlay() const
 		for (const WorldRuntime::StyleSpan &span : partialSpans)
 			line.spans.push_back(span);
 		line.visualHash = nativeLineContentHash(line);
+		recordNativeRenderTextEdit(tailIndex, removedText, nativeRenderTextRange(tailIndex, 1));
 	}
 	else
 	{
@@ -5647,6 +5426,7 @@ void WorldView::applyNativePartialRenderLineOverlay() const
 		renderLine.flags         = WorldRuntime::LineOutput;
 		renderLine.visualHash    = nativeLineContentHash(renderLine);
 		m_nativeRenderModel->m_nativeRenderLineCache.push_back(std::move(renderLine));
+		recordNativeRenderTextEdit(oldLineCount, {}, nativeRenderTextRange(oldLineCount, 1));
 	}
 
 	m_nativeRenderModel->m_nativePartialRenderLineApplied = true;
@@ -7569,14 +7349,64 @@ void WorldView::commitNativeRenderCacheDelta(NativeRenderCacheDelta delta) const
 {
 	const quint64 previousRevision = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 	++m_nativeRenderModel->m_nativeRenderLineCacheRevision;
-	delta.fromRevision                            = previousRevision;
-	delta.revision                                = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+	delta.fromRevision = previousRevision;
+	delta.revision     = m_nativeRenderModel->m_nativeRenderLineCacheRevision;
+	delta.textEdits    = std::move(m_nativeRenderModel->m_nativePendingRenderTextEdits);
+	m_nativeRenderModel->m_nativePendingRenderTextEdits.clear();
 	m_nativeRenderModel->m_nativeRenderCacheDelta = delta;
 	++m_nativeRenderModel->transformationCount;
 	consumeNativeRenderCacheDelta(delta);
 	if (m_runtime && m_nativeRenderModel == m_runtime->m_outputRenderModel &&
 	    m_runtime->m_outputRenderDeltaObserverCount > 0)
 		emit m_runtime->outputRenderDeltaCommitted();
+	m_nativeRenderModel->m_nativeRenderCacheDelta.textEdits.clear();
+}
+
+void WorldView::recordNativeRenderTextEdit(const int firstLine, QVector<QString> removedLines,
+                                           QVector<QString> insertedLines) const
+{
+	if (!QAccessible::isActive() || removedLines == insertedLines)
+		return;
+	QVector<NativeRenderCacheDelta::TextEdit> &edits = m_nativeRenderModel->m_nativePendingRenderTextEdits;
+	if (!edits.isEmpty())
+	{
+		NativeRenderCacheDelta::TextEdit &last = edits.last();
+		if (last.removedLines.isEmpty() && removedLines.isEmpty() &&
+		    last.firstLine + last.insertedLines.size() == firstLine)
+		{
+			last.insertedLines.append(insertedLines);
+			return;
+		}
+		if (last.firstLine == firstLine && last.removedLines.size() == 1 && last.insertedLines.size() == 1 &&
+		    removedLines.size() == 1 && insertedLines.size() == 1 &&
+		    last.insertedLines.constFirst() == removedLines.constFirst())
+		{
+			last.insertedLines = std::move(insertedLines);
+			return;
+		}
+		if (last.firstLine == firstLine && last.insertedLines.isEmpty() && removedLines.isEmpty())
+		{
+			last.insertedLines = std::move(insertedLines);
+			if (last.removedLines == last.insertedLines)
+				edits.removeLast();
+			return;
+		}
+	}
+	edits.push_back({firstLine, std::move(removedLines), std::move(insertedLines)});
+}
+
+QVector<QString> WorldView::nativeRenderTextRange(const int firstLine, const int lineCount) const
+{
+	QVector<QString> result;
+	if (!QAccessible::isActive() || lineCount <= 0)
+		return result;
+	const int available = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+	const int first     = qBound(0, firstLine, available);
+	const int end       = qBound(first, first + lineCount, available);
+	result.reserve(end - first);
+	for (int line = first; line < end; ++line)
+		result.push_back(m_nativeRenderModel->m_nativeRenderLineCache.at(line).text);
+	return result;
 }
 
 void WorldView::consumeNativeRenderCacheDelta(const NativeRenderCacheDelta &delta) const
@@ -7589,6 +7419,7 @@ void WorldView::consumeNativeRenderCacheDelta(const NativeRenderCacheDelta &delt
 	           "Every attached presentation must consume each shared render delta synchronously");
 	if (!deltaIsContiguous)
 		m_nativeLayoutCacheValid = false;
+	consumeAccessibleOutputTextDelta(delta);
 	const bool layoutCacheWasValid           = m_nativeLayoutCacheValid && deltaIsContiguous;
 	const bool canCarrySplitTopHeadTrim      = delta.kind != NativeRenderCacheDeltaKind::FullReset &&
 	                                           delta.kind != NativeRenderCacheDeltaKind::Unknown &&
@@ -8125,7 +7956,8 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 	m_nativeRenderModel->m_nativeRuntimeLineRestitchIndex       = -1;
 	m_nativeRenderModel->m_nativeRuntimeRangeRestitchStartIndex = -1;
 	clearPendingNativeRuntimeStructuralEdits();
-	const int oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+	const int              oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+	const QVector<QString> removedText  = nativeRenderTextRange(0, oldLineCount);
 	m_nativeRenderModel->m_nativeRenderLineCache.clear();
 	m_nativeRenderModel->m_nativeRenderLineCache.reserve(lines.size());
 	m_nativeRenderModel->m_nativeRenderRuntimeIndexBase = 0;
@@ -8239,6 +8071,9 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(
 		renderLine.sourceRuntimeLineKey        = nativeRuntimeLineKey(renderLine);
 		m_nativeRenderModel->m_nativeRenderLineCache.push_back(std::move(renderLine));
 	}
+	recordNativeRenderTextEdit(
+	    0, removedText,
+	    nativeRenderTextRange(0, sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size())));
 
 	m_nativeRenderModel->m_nativeRenderLineCacheValid = true;
 	m_nativeRenderModel->m_nativeRenderLineCacheSource =
@@ -8309,8 +8144,9 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 
 	auto clearRuntimeCache = [this]
 	{
-		const int  oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
-		const bool hadCacheState =
+		const int              oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const QVector<QString> removedText  = nativeRenderTextRange(0, oldLineCount);
+		const bool             hadCacheState =
 		    !m_nativeRenderModel->m_nativeRenderLineCache.isEmpty() ||
 		    !m_nativeRenderModel->m_nativeRenderLineCacheValid ||
 		    m_nativeRenderModel->m_nativeRenderLineCacheSource != NativeRenderCacheSource::RuntimeLive ||
@@ -8320,6 +8156,7 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 		    !m_nativeRenderModel->m_nativeCachedRuntimeLastHardReturn ||
 		    !m_nativeRenderModel->m_nativeCachedRuntimeLineNumbersContiguous;
 		m_nativeRenderModel->m_nativeRenderLineCache.clear();
+		recordNativeRenderTextEdit(0, removedText, {});
 		m_nativeRenderModel->m_nativeRenderRuntimeIndexBase       = 0;
 		m_nativeRenderModel->m_nativeRenderLineCacheValid         = true;
 		m_nativeRenderModel->m_nativeRenderLineCacheSource        = NativeRenderCacheSource::RuntimeLive;
@@ -8385,8 +8222,10 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			fullRebuildFromRuntime(runtimeLines);
 			return finalizeNativeOutputRenderLines();
 		}
-		const int oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const int              oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const QVector<QString> removedText  = nativeRenderTextRange(0, oldLineCount);
 		m_nativeRenderModel->m_nativeRenderLineCache.clear();
+		recordNativeRenderTextEdit(0, removedText, {});
 		if (oldLineCount > 0)
 		{
 			bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::FullReset, oldLineCount);
@@ -8546,9 +8385,11 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 		if (startIndex >= rangeEnd)
 			return;
 
-		const int oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
-		bool      cacheChanged = false;
-		bool      tailMutated  = false;
+		const int              oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const QVector<QString> previousTailText =
+		    oldLineCount > 0 ? nativeRenderTextRange(oldLineCount - 1, 1) : QVector<QString>();
+		bool      cacheChanged                      = false;
+		bool      tailMutated                       = false;
 		int       pendingMutatedRenderLineHashIndex = -1;
 		QDateTime previousLineTime;
 		if (const int previousIndex = previousRenderableRuntimeIndex(startIndex); previousIndex >= 0)
@@ -8639,6 +8480,12 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			*outOldLineCount = oldLineCount;
 		if (cacheChanged)
 		{
+			const int firstChangedLine = tailMutated ? oldLineCount - 1 : oldLineCount;
+			recordNativeRenderTextEdit(
+			    qMax(0, firstChangedLine), tailMutated ? previousTailText : QVector<QString>(),
+			    nativeRenderTextRange(qMax(0, firstChangedLine),
+			                          sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size()) -
+			                              qMax(0, firstChangedLine)));
 			recordNativeAppendDiagnostic(diagnosticKind, startIndex, rangeEnd - startIndex);
 			++m_nativeRenderCacheIncrementalUpdates;
 			if (!suppressRevisionBump)
@@ -8758,8 +8605,10 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 		rebuiltLine.compositeRuntimeSourceSpans = std::move(rebuiltCompositeRuntimeSources);
 		rebuiltLine.visualHash                  = nativeLineContentHash(rebuiltLine);
 		rebuiltLine.sourceRuntimeLineKey        = nativeRuntimeLineKey(rebuiltLine);
-		const int oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const int              oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const QVector<QString> removedText  = nativeRenderTextRange(0, 1);
 		m_nativeRenderModel->m_nativeRenderLineCache.first() = std::move(rebuiltLine);
+		recordNativeRenderTextEdit(0, removedText, nativeRenderTextRange(0, 1));
 		if (!suppressRevisionBump)
 		{
 			++m_nativeRenderCacheIncrementalUpdates;
@@ -8793,7 +8642,9 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 		}
 		if (dropCount > 0)
 		{
+			const QVector<QString> removedText = nativeRenderTextRange(0, dropCount);
 			m_nativeRenderModel->m_nativeRenderLineCache.remove(0, dropCount);
+			recordNativeRenderTextEdit(0, removedText, {});
 			++m_nativeRenderCacheTrimDrops;
 			cacheTrimmed = true;
 			trimmedHeadCount += dropCount;
@@ -8903,6 +8754,7 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 		}
 
 		const int oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		recordNativeRenderTextEdit(oldLineCount - 1, nativeRenderTextRange(oldLineCount - 1, 1), {});
 		m_nativeRenderModel->m_nativeRenderLineCache.removeLast();
 		if (tailStartIndex > 0)
 		{
@@ -9010,8 +8862,12 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 			    qBound(0, dropRenderIndex, sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size()));
 			if (dropRenderIndex < m_nativeRenderModel->m_nativeRenderLineCache.size())
 			{
+				const int removeCount =
+				    sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size()) - dropRenderIndex;
+				const QVector<QString> removedText = nativeRenderTextRange(dropRenderIndex, removeCount);
 				m_nativeRenderModel->m_nativeRenderLineCache.remove(
 				    dropRenderIndex, m_nativeRenderModel->m_nativeRenderLineCache.size() - dropRenderIndex);
+				recordNativeRenderTextEdit(dropRenderIndex, removedText, {});
 			}
 			if (rebuildStartIndex < runtimeLines.size())
 			{
@@ -9199,6 +9055,11 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 #endif
 
 		NativeOutputRenderLines preservedSuffix;
+		const int removeEndIndex = preserveSuffix
+		                               ? suffixRenderIndex
+		                               : sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const QVector<QString> removedText =
+		    nativeRenderTextRange(dropRenderIndex, qMax(0, removeEndIndex - dropRenderIndex));
 		if (preserveSuffix && suffixRenderIndex < m_nativeRenderModel->m_nativeRenderLineCache.size())
 		{
 			const qint64 firstPreservedRuntimeIndex =
@@ -9217,12 +9078,10 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 				preservedSuffix.push_back(std::move(line));
 			}
 		}
-		const int removeEndIndex = preserveSuffix
-		                               ? suffixRenderIndex
-		                               : sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
 		if (dropRenderIndex < m_nativeRenderModel->m_nativeRenderLineCache.size())
 			m_nativeRenderModel->m_nativeRenderLineCache.remove(
 			    dropRenderIndex, m_nativeRenderModel->m_nativeRenderLineCache.size() - dropRenderIndex);
+		recordNativeRenderTextEdit(dropRenderIndex, removedText, {});
 		if (const int cachePreviousRuntimeIndex = previousRenderableRuntimeIndex(rebuildStartIndex);
 		    cachePreviousRuntimeIndex >= 0)
 		{
@@ -9351,8 +9210,10 @@ WorldView::nativeOutputRenderLines(const bool reconcileDuringRuntimeBatch) const
 		renderLine.sourceRuntimeLineKey      = nativeRuntimeLineKey(renderLine);
 		renderLine.firstRuntimeLineIndex = m_nativeRenderModel->m_nativeRenderRuntimeIndexBase + runtimeIndex;
 
-		const int oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const int              oldLineCount = sizeToInt(m_nativeRenderModel->m_nativeRenderLineCache.size());
+		const QVector<QString> removedText  = nativeRenderTextRange(renderIndex, 1);
 		m_nativeRenderModel->m_nativeRenderLineCache[renderIndex] = std::move(renderLine);
+		recordNativeRenderTextEdit(renderIndex, removedText, nativeRenderTextRange(renderIndex, 1));
 		if (runtimeIndex == 0)
 			m_nativeRenderModel->m_nativeCachedRuntimeFirstEntry = entry;
 		if (runtimeIndex == runtimeLines.size() - 1)

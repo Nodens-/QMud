@@ -87,18 +87,32 @@ class WorldOutputRenderModel final
 		 */
 		struct Delta
 		{
-				DeltaKind kind{DeltaKind::Unknown};
-				quint64   fromRevision{0};
-				quint64   revision{0};
-				int       oldLineCount{0};
-				int       newLineCount{0};
-				bool      tailLineMutated{false};
-				bool      headLineMutated{false};
-				int       headTrimCount{0};
-				int       stablePrefixCount{0};
-				int       replaceFirstLine{-1};
-				int       removedLineCount{0};
-				int       insertedLineCount{0};
+				/**
+				 * @brief One ordered logical text replacement performed while producing the delta.
+				 *
+				 * The strings are implicitly shared snapshots retained only through synchronous delta consumption.
+				 * They let view-local consumers advance without retaining a second copy of the render model.
+				 */
+				struct TextEdit
+				{
+						int              firstLine{0};
+						QVector<QString> removedLines;
+						QVector<QString> insertedLines;
+				};
+
+				DeltaKind         kind{DeltaKind::Unknown};
+				quint64           fromRevision{0};
+				quint64           revision{0};
+				int               oldLineCount{0};
+				int               newLineCount{0};
+				bool              tailLineMutated{false};
+				bool              headLineMutated{false};
+				int               headTrimCount{0};
+				int               stablePrefixCount{0};
+				int               replaceFirstLine{-1};
+				int               removedLineCount{0};
+				int               insertedLineCount{0};
+				QVector<TextEdit> textEdits;
 		};
 
 		using RenderLines = IndexedRingBuffer<RenderLine>;
@@ -117,6 +131,7 @@ class WorldOutputRenderModel final
 		qint64                           m_nativeRenderRuntimeIndexBase{0};
 		quint64                          m_nativeRenderLineCacheRevision{0};
 		Delta                            m_nativeRenderCacheDelta;
+		QVector<Delta::TextEdit>         m_nativePendingRenderTextEdits;
 		bool                             m_nativePartialRenderLineApplied{false};
 		bool                             m_nativePartialRenderLineAppended{false};
 		bool                             m_nativePartialRenderBaseLastHardReturn{true};

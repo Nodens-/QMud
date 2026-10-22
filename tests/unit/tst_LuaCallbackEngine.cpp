@@ -588,6 +588,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerAnsiNoteTerminatesAndPreservesUtf8();
 		void workerNoteHrTerminatesOpenOutputLine();
 		void workerScreendrawReceivesCompletedPresentedLines();
+		void nativeMushReaderScreendrawDoesNotWaitForLuaCallback();
 		void unrelatedScreendrawQueuesWhilePriorCallbackRuns();
 		void inputCriticalInsertionUsesAuthoritativeEventIdentity();
 		void promotedAnchorTracksPositionPresentationAndIdentity();
@@ -19841,6 +19842,67 @@ end
 	WorldRuntimeTestAccess::plugins(fallbackRuntime).clear();
 	QVERIFY(teardownWorkerEngine(fallbackExecutor, fallbackOutputEngine));
 	QVERIFY(teardownWorkerEngine(fallbackExecutor, fallbackScreenEngine));
+}
+
+void tst_LuaCallbackEngine::nativeMushReaderScreendrawDoesNotWaitForLuaCallback()
+{
+	WorldRuntime         runtime;
+
+	WorldRuntime::Plugin mushReaderPlugin;
+	mushReaderPlugin.enabled    = true;
+	mushReaderPlugin.nativeShim = true;
+	mushReaderPlugin.attributes.insert(QStringLiteral("id"), QMudNativePluginRegistry::mushReaderPluginId());
+	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
+	WorldRuntimeTestAccess::plugins(runtime).push_back(mushReaderPlugin);
+	QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+	QMudNativePluginRegistry::setTestSpeechSink(
+	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+	    { speechEvents.push_back(event); });
+	const auto    restoreSpeechSink = qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+
+	const QString callbackName = QStringLiteral("OnPluginScreendraw");
+	const QString pluginId     = QStringLiteral("held.screendraw.plugin");
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginScreendraw(draw_type, log, text)
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Held screendraw plugin"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName);
+
+	runtime.firePluginScreendraw(1, 0, QStringLiteral("immediate native speech"));
+	QCOMPARE(speechEvents.size(), 1);
+	QCOMPARE(speechEvents.constFirst().text, QStringLiteral("immediate native speech"));
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	QCOMPARE(speechEvents.size(), 1);
+
+	heldExecutorPointer->releaseHeldCompletion();
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
 }
 
 void tst_LuaCallbackEngine::unrelatedScreendrawQueuesWhilePriorCallbackRuns()

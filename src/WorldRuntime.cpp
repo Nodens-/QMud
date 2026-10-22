@@ -27406,6 +27406,7 @@ void WorldRuntime::firePluginScreendraw(int type, int log, const QString &text)
 {
 	if (m_screendrawMutationReplayDepth > 0)
 		return;
+	QMudNativePluginRegistry::handleMushReaderScreenDraw(this, type, log, text);
 	constexpr LuaCallbackEvent callbackEvent = LuaCallbackEvent::ScreenDraw;
 	const QString              callbackName  = luaCallbackEventFunctionName(callbackEvent);
 	const QVector<QSharedPointer<LuaCallbackEngine>> recipients =
@@ -27423,17 +27424,8 @@ void WorldRuntime::firePluginScreendraw(int type, int log, const QString &text)
 		request.defaultResult                = true;
 		request.revalidateObservedRecipients = true;
 		request.screendrawExecutionGuard     = true;
-		const QPointer<WorldRuntime> runtime(this);
-		queuePluginCallbackDispatchAsync(request,
-		                                 [runtime, type, log, text](const LuaBatchDispatchResult & /*result*/)
-		                                 {
-			                                 if (runtime)
-				                                 QMudNativePluginRegistry::handleMushReaderScreenDraw(
-				                                     runtime, type, log, text);
-		                                 });
-		return;
+		queuePluginCallbackDispatchAsync(request);
 	}
-	QMudNativePluginRegistry::handleMushReaderScreenDraw(this, type, log, text);
 }
 
 void WorldRuntime::firePluginTick()

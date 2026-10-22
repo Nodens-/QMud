@@ -4081,7 +4081,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void worldOutputAccessibleSuppressedPartialUpdatesDoNotBuildLineOffsetCache()
+		void worldOutputAccessibleSuppressedPartialUpdatesAdvanceNumericIndex()
 		{
 			resetTestState();
 			qmudInstallWorldOutputAccessibility();
@@ -4102,14 +4102,10 @@ class tst_WorldView_Basic : public QObject
 				    QStringLiteral("suppressed-partial-baseline-%1").arg(i), true);
 			QCoreApplication::processEvents();
 			view.primeAccessibleOutputTextState();
-			view.m_accessibleOutputLineStartCache.clear();
-			view.m_accessibleOutputLineStartCacheRevision       = 0;
-			view.m_accessibleOutputLineStartCacheNextOffset     = 0;
-			view.m_accessibleOutputLineStartCacheCharacterCount = -1;
 
 			const int baselineCharacterCount = view.m_accessibleOutputCharacterCount;
 			QVERIFY(baselineCharacterCount > 0);
-			const qsizetype               lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
+			const int                     baselineLineCount = view.m_accessibleOutputLineIndex.lineCount();
 
 			ScopedAccessibleUpdateCapture capture;
 			setFakeMushReaderLiveSpeechOwner(true);
@@ -4118,7 +4114,8 @@ class tst_WorldView_Basic : public QObject
 			view.updatePartialOutputText(firstPrompt);
 			QTRY_COMPARE(view.m_accessibleOutputCharacterCount,
 			             baselineCharacterCount + 1 + sizeToInt(firstPrompt.size()));
-			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineCount(), baselineLineCount + 1);
+			QVERIFY(view.m_accessibleOutputLineIndexValid);
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
@@ -4127,7 +4124,8 @@ class tst_WorldView_Basic : public QObject
 			view.updatePartialOutputText(secondPrompt);
 			QTRY_COMPARE(view.m_accessibleOutputCharacterCount,
 			             baselineCharacterCount + 1 + sizeToInt(secondPrompt.size()));
-			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineCount(), baselineLineCount + 1);
+			QVERIFY(view.m_accessibleOutputLineIndexValid);
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
@@ -4348,42 +4346,33 @@ class tst_WorldView_Basic : public QObject
 		}
 
 		/**
-		 * @brief Verifies inactive Qt accessibility releases full-text caches without dropping native review state.
+		 * @brief Verifies inactive Qt accessibility releases incremental state without dropping native review state.
 		 */
-		void inactiveQtAccessibilityReleasesFullTextStateButKeepsNativeReviewState()
+		void inactiveQtAccessibilityReleasesIncrementalStateButKeepsNativeReviewState()
 		{
 			resetTestState();
 			const ScopedTestStateReset        resetState;
 			const ScopedAccessibleActiveState accessibleActive(false);
 
 			WorldView                         view;
-			view.m_accessibleOutputText             = QString(4096, QLatin1Char('x'));
-			view.m_accessibleOutputBaselineTailText = QString(4096, QLatin1Char('y'));
-			view.m_accessibleOutputBaselineLineLengths.reserve(1024);
-			view.m_accessibleOutputBaselineLineLengths.push_back(4096);
-			view.m_accessibleOutputTextMapCache =
-			    QMudAccessibleTextUtils::LineOffsetMap({QString(4096, QLatin1Char('z'))});
-			view.m_accessibleOutputTextMapCacheRevision = 42;
-			view.m_accessibleOutputTextMapCacheValid    = true;
-			view.m_accessibleOutputReviewActive         = true;
+			view.m_accessibleOutputLineIndex.reset({4096});
+			view.m_accessibleOutputLineIndexRevision = 42;
+			view.m_accessibleOutputLineIndexValid    = true;
+			view.m_accessibleOutputPendingTextEdits.push_back(
+			    {0, QStringLiteral("old"), QStringLiteral("new"), true, true});
+			view.m_accessibleOutputReviewActive = true;
 			view.m_accessibleOutputReviewTargetKind =
 			    WorldView::AccessibleOutputReviewTargetKind::SplitTopPane;
-			view.m_accessibleOutputLineStartCache         = {0, 5};
-			view.m_accessibleOutputLineStartCacheRevision = 42;
 
 			view.notifyAccessibleOutputPresented({});
 
-			QVERIFY(view.m_accessibleOutputText.isNull());
-			QVERIFY(view.m_accessibleOutputBaselineTailText.isNull());
-			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.capacity(), qsizetype{0});
-			QVERIFY(view.m_accessibleOutputTextMapCache.isEmpty());
-			QVERIFY(!view.m_accessibleOutputTextMapCacheValid);
-			QCOMPARE(view.m_accessibleOutputTextMapCacheRevision, quint64{0});
+			QVERIFY(view.m_accessibleOutputLineIndex.isEmpty());
+			QVERIFY(!view.m_accessibleOutputLineIndexValid);
+			QCOMPARE(view.m_accessibleOutputLineIndexRevision, quint64{0});
+			QVERIFY(view.m_accessibleOutputPendingTextEdits.isEmpty());
 			QVERIFY(view.m_accessibleOutputReviewActive);
 			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
 			         WorldView::AccessibleOutputReviewTargetKind::SplitTopPane);
-			QCOMPARE(view.m_accessibleOutputLineStartCache, QVector<int>({0, 5}));
-			QCOMPARE(view.m_accessibleOutputLineStartCacheRevision, quint64{42});
 		}
 
 		/**
@@ -4403,15 +4392,16 @@ class tst_WorldView_Basic : public QObject
 			setTestRuntimeObserver(view, firstRuntime);
 			const WorldView::NativeOutputRenderLines &firstLines = view.nativeOutputRenderLines();
 			QCOMPARE(sizeToInt(firstLines.size()), 1);
-			const auto &firstMap = view.accessibleNativeOutputTextMap();
-			QCOMPARE(firstMap.text(0, firstMap.characterCount()), QStringLiteral("first-world-output"));
+			QCOMPARE(
+			    view.accessibleOutputText(firstLines, 0, view.accessibleOutputCharacterCount(firstLines)),
+			    QStringLiteral("first-world-output"));
 			const quint64 firstRevision = view.m_nativeRenderModel->m_nativeRenderLineCacheRevision;
 
 			view.m_accessibleOutputReviewActive = true;
 			view.m_accessibleOutputReviewTargetKind =
 			    WorldView::AccessibleOutputReviewTargetKind::SplitTopPane;
-			view.m_accessibleOutputLineStartCache         = {0};
-			view.m_accessibleOutputLineStartCacheRevision = firstRevision;
+			QVERIFY(view.m_accessibleOutputLineIndexValid);
+			QCOMPARE(view.m_accessibleOutputLineIndexRevision, firstRevision);
 
 			setTestRuntimeObserver(view, secondRuntime);
 			const WorldView::NativeOutputRenderLines &secondLines = view.nativeOutputRenderLines();
@@ -4420,11 +4410,11 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(!view.m_accessibleOutputReviewActive);
 			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
 			         WorldView::AccessibleOutputReviewTargetKind::None);
-			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
-			QVERIFY(!view.m_accessibleOutputTextMapCacheValid);
+			QVERIFY(!view.m_accessibleOutputLineIndexValid);
 
-			const auto &secondMap = view.accessibleNativeOutputTextMap();
-			QCOMPARE(secondMap.text(0, secondMap.characterCount()), QStringLiteral("second-world-output"));
+			QCOMPARE(
+			    view.accessibleOutputText(secondLines, 0, view.accessibleOutputCharacterCount(secondLines)),
+			    QStringLiteral("second-world-output"));
 		}
 
 		void worldOutputAccessibleScrollToSubstringUsesTopPaneAfterAutoPauseScroll()
@@ -4585,7 +4575,7 @@ class tst_WorldView_Basic : public QObject
 			const int lastLineStart = stringIndexToInt(outputText.lastIndexOf(QLatin1Char('\n')) + 1);
 			QVERIFY(lastLineStart > 0);
 			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
-			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(view.m_accessibleOutputLineIndexValid);
 
 			ScopedAccessibleUpdateCapture capture;
 			QTest::keyClick(viewport, Qt::Key_PageUp);
@@ -4601,9 +4591,7 @@ class tst_WorldView_Basic : public QObject
 			const int     reviewEnd  = nextBreak < 0 ? sizeToInt(outputText.size()) : nextBreak;
 			const QString reviewLine = outputText.mid(reviewCursor, reviewEnd - reviewCursor);
 			QVERIFY(view.isScrollbackSplitActive());
-			QVERIFY(!view.m_accessibleOutputLineStartCache.isEmpty());
-			QVERIFY(view.m_accessibleOutputLineStartCache.size() < view.nativeOutputRenderLines().size());
-			QCOMPARE(view.m_accessibleOutputLineStartCacheCharacterCount, -1);
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineCount(), view.nativeOutputRenderLines().size());
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
@@ -4959,7 +4947,7 @@ class tst_WorldView_Basic : public QObject
 			QAccessibleTextInterface *textInterface = accessible->textInterface();
 			QVERIFY(textInterface);
 			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
-			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(view.m_accessibleOutputLineIndexValid);
 
 			ScopedAccessibleUpdateCapture capture;
 			QTest::keyClick(viewport, Qt::Key_PageUp);
@@ -4968,7 +4956,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(view.isScrollbackSplitActive());
 			QVERIFY(view.m_accessibleOutputReviewActive);
 			QCOMPARE(view.m_accessibleOutputReviewLastNotifiedCursorOffset, -1);
-			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(view.m_accessibleOutputLineIndexValid);
 			QCOMPARE(g_accessibleTextCursorRecords.size(), 0);
 			QCOMPARE(g_accessibleTextSelectionRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
@@ -5083,22 +5071,25 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(bar->maximum() > bar->minimum());
 			QCOMPARE(view.setOutputScroll(999999, true), 0);
 			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
-			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(!view.m_accessibleOutputLineIndexValid);
 
 			QTest::keyClick(viewport, Qt::Key_PageUp);
 			QCoreApplication::processEvents();
 
 			QVERIFY(view.isScrollbackSplitActive());
 			QVERIFY(view.m_accessibleOutputReviewActive);
-			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(!view.m_accessibleOutputLineIndexValid);
 			QCOMPARE(view.m_accessibleOutputReviewLastNotifiedCursorOffset, -1);
 		}
 
 		void worldOutputAccessibleInsertNotificationUsesPresentedAppendPayload()
 		{
+			resetTestState();
+			const ScopedTestStateReset resetState;
 			qmudInstallWorldOutputAccessibility();
 
 			WorldView view;
+			setTestRuntime(view, runtimeForTest());
 			view.resize(640, 360);
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
@@ -5381,7 +5372,6 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(textInterface);
 
 			ScopedAccessibleUpdateCapture capture;
-			const qsizetype               lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
 
 			appendRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
 			appendRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
@@ -5396,7 +5386,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("beta\ngamma"));
 			QCOMPARE(view.m_accessibleOutputCharacterCount, sizeToInt(QStringLiteral("beta\ngamma").size()));
-			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineCount(), 2);
 
 			setTestQtAccessibilitySpeechEnabled(true);
 			appendRuntimeOutputText(view, QStringLiteral("delta"), {}, false, true);
@@ -5446,6 +5436,7 @@ class tst_WorldView_Basic : public QObject
 			view.m_nativeRenderModel->m_nativeRenderLineCacheValid = true;
 			view.m_nativeRenderModel->m_nativeRenderLineCacheSource =
 			    WorldView::NativeRenderCacheSource::RuntimeLive;
+			view.m_accessibleOutputLineIndexValid = false;
 
 			ScopedAccessibleUpdateCapture capture;
 			view.notifyAccessibleOutputPresented(view.m_nativeRenderModel->m_nativeRenderLineCache);
@@ -5454,10 +5445,15 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
+			view.recordNativeRenderTextEdit(0, view.nativeRenderTextRange(0, 2), {});
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 2);
+			const QVector<QString> previousHead                       = view.nativeRenderTextRange(0, 1);
 			view.m_nativeRenderModel->m_nativeRenderLineCache[0].text = QStringLiteral("restitched-head");
+			view.recordNativeRenderTextEdit(0, previousHead, view.nativeRenderTextRange(0, 1));
 			view.m_nativeRenderModel->m_nativeRenderLineCache.push_back(
 			    makeRenderLine(QStringLiteral("resumed-tail"), 5));
+			view.recordNativeRenderTextEdit(2, {}, view.nativeRenderTextRange(2, 1));
+			view.m_accessibleOutputPendingTailAppend = true;
 			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
 			                                       oldLineCount, false, 2, 0, true);
 
@@ -5509,6 +5505,7 @@ class tst_WorldView_Basic : public QObject
 			view.m_nativeRenderModel->m_nativeRenderLineCacheValid = true;
 			view.m_nativeRenderModel->m_nativeRenderLineCacheSource =
 			    WorldView::NativeRenderCacheSource::RuntimeLive;
+			view.m_accessibleOutputLineIndexValid = false;
 
 			ScopedAccessibleUpdateCapture capture;
 			view.notifyAccessibleOutputPresented(view.m_nativeRenderModel->m_nativeRenderLineCache);
@@ -5518,14 +5515,17 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(
 			    view.m_accessibleOutputCharacterCount,
 			    sizeToInt(QStringLiteral("trimmed-head\ntrimmed-fragment\nretained-tail\nold-tail").size()));
-			QCOMPARE(sizeToInt(view.m_accessibleOutputBaselineLineLengths.size()), 4);
-			const qsizetype lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineCount(), 4);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
+			view.recordNativeRenderTextEdit(0, view.nativeRenderTextRange(0, 2), {});
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 2);
+			const QVector<QString> previousHead                       = view.nativeRenderTextRange(0, 1);
 			view.m_nativeRenderModel->m_nativeRenderLineCache[0].text = QStringLiteral("restitched-head");
+			view.recordNativeRenderTextEdit(0, previousHead, view.nativeRenderTextRange(0, 1));
 			view.m_nativeRenderModel->m_nativeRenderLineCache.push_back(
 			    makeRenderLine(QStringLiteral("resumed-tail"), 5));
+			view.recordNativeRenderTextEdit(2, {}, view.nativeRenderTextRange(2, 1));
 			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
 			                                       oldLineCount, false, 2, 0, true);
 
@@ -5535,17 +5535,16 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(view.m_accessibleOutputCharacterCount,
 			         sizeToInt(QStringLiteral("restitched-head\nold-tail\nresumed-tail").size()));
-			QCOMPARE(sizeToInt(view.m_accessibleOutputBaselineLineLengths.size()), 3);
-			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.at(0),
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineCount(), 3);
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineLength(0),
 			         sizeToInt(QStringLiteral("restitched-head").size()));
-			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.at(1),
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineLength(1),
 			         sizeToInt(QStringLiteral("old-tail").size()));
-			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.at(2),
+			QCOMPARE(view.m_accessibleOutputLineIndex.lineLength(2),
 			         sizeToInt(QStringLiteral("resumed-tail").size()));
-			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
 		}
 
-		void worldOutputAccessibleNonAppendMutationsUseContentChangedFallback()
+		void worldOutputAccessibleNonAppendMutationsEmitExactTextEdits()
 		{
 			qmudInstallWorldOutputAccessibility();
 
@@ -5586,25 +5585,24 @@ class tst_WorldView_Basic : public QObject
 			QVector<WorldRuntime::LineEntry> replacementLines{
 			    makeRuntimeLine(QStringLiteral("replacement"), WorldRuntime::LineOutput, true, 1)};
 			view.restoreOutputFromPersistedLines(replacementLines);
-			QTRY_COMPARE(g_accessibleTextUpdateRecords.size(), 2);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(1).object, canvas);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(1).position, 0);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(1).removedText, QString());
-			QCOMPARE(g_accessibleTextUpdateRecords.at(1).insertedText, QStringLiteral("replacement"));
+			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 2);
+			QCOMPARE(g_accessibleTextInsertRecords.at(1).object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.at(1).position, 0);
+			QCOMPARE(g_accessibleTextInsertRecords.at(1).text, QStringLiteral("replacement"));
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
 			QCOMPARE(g_accessibleValueChangedCount, 0);
-			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 1);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("replacement"));
 
 			QVector<WorldRuntime::LineEntry> preservedPrefixLines{
 			    makeRuntimeLine(QStringLiteral("replacement"), WorldRuntime::LineOutput, true, 1),
 			    makeRuntimeLine(QStringLiteral("delta"), WorldRuntime::LineOutput, true, 2)};
 			view.restoreOutputFromPersistedLines(preservedPrefixLines);
-			QTRY_COMPARE(g_accessibleTextUpdateRecords.size(), 3);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(2).object, canvas);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(2).position, 0);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(2).removedText, QStringLiteral("replacement"));
-			QCOMPARE(g_accessibleTextUpdateRecords.at(2).insertedText, QStringLiteral("replacement\ndelta"));
+			QTRY_COMPARE(g_accessibleTextUpdateRecords.size(), 2);
+			QCOMPARE(g_accessibleTextUpdateRecords.at(1).object, canvas);
+			QCOMPARE(g_accessibleTextUpdateRecords.at(1).position, 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.at(1).removedText, QStringLiteral("replacement"));
+			QCOMPARE(g_accessibleTextUpdateRecords.at(1).insertedText, QStringLiteral("replacement\ndelta"));
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 2);
 			QCOMPARE(g_accessibleAnnouncementRecords.at(1).object, canvas);
 			QCOMPARE(g_accessibleAnnouncementRecords.at(1).message, QStringLiteral("delta"));
@@ -5612,7 +5610,7 @@ class tst_WorldView_Basic : public QObject
 			         QStringLiteral("replacement\ndelta"));
 		}
 
-		void worldOutputAccessibleHeadTrimAppendUsesContentChangedFallback()
+		void worldOutputAccessibleHeadTrimAppendEmitsExactTextEdits()
 		{
 			resetTestState();
 			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("2"));
@@ -5644,13 +5642,16 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(g_accessibleTextUpdateRecords.size(), 1);
 			QCOMPARE(g_accessibleTextUpdateRecords.at(0).object, canvas);
 			QCOMPARE(g_accessibleTextUpdateRecords.at(0).position, 0);
-			QCOMPARE(g_accessibleTextUpdateRecords.at(0).removedText, QStringLiteral("one\ntwo"));
-			QCOMPARE(g_accessibleTextUpdateRecords.at(0).insertedText, QStringLiteral("two\nthree"));
+			QCOMPARE(g_accessibleTextUpdateRecords.at(0).removedText, QStringLiteral("one\n"));
+			QCOMPARE(g_accessibleTextUpdateRecords.at(0).insertedText, QString());
+			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 3);
+			QCOMPARE(g_accessibleTextInsertRecords.at(2).object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.at(2).position, 3);
+			QCOMPARE(g_accessibleTextInsertRecords.at(2).text, QStringLiteral("\nthree"));
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 3);
 			QCOMPARE(g_accessibleAnnouncementRecords.at(2).object, canvas);
 			QCOMPARE(g_accessibleAnnouncementRecords.at(2).message, QStringLiteral("three"));
 			QCOMPARE(g_accessibleValueChangedCount, 0);
-			QCOMPARE(g_accessibleTextInsertRecords.size(), 2);
 			QVERIFY(view.outputLines().contains(QStringLiteral("three")));
 			QVERIFY(!view.outputLines().contains(QStringLiteral("one")));
 			resetTestState();

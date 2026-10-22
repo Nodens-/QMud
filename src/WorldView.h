@@ -1178,6 +1178,17 @@ class WorldView : public QWidget
 			QtAccessibility,
 			MushReader,
 		};
+		/**
+		 * @brief One pending accessible text event expressed against the preceding document state.
+		 */
+		struct PendingAccessibleOutputTextEdit
+		{
+				int     position{0};
+				QString removedText;
+				QString insertedText;
+				bool    emitTextEvent{true};
+				bool    announce{false};
+		};
 
 		/**
 		 * @brief Miniwindow rendering/input hit-testing and output view internals.
@@ -1415,53 +1426,37 @@ class WorldView : public QWidget
 		void requestNativeOutputPresentationRepaint(bool                           repaintVisiblePanes,
 		                                            const NativeOutputRenderLines &lines) const;
 		/**
-		 * @brief Builds an accessible text offset map from native output lines.
-		 * @param lines Native render lines to expose.
-		 * @return Accessible text map over the current logical output.
-		 */
-		[[nodiscard]] static QMudAccessibleTextUtils::LineOffsetMap
-		accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
-		/**
-		 * @brief Returns a revision-cached accessible text offset map for the current native output.
-		 * @return Cached accessible text map over the current logical output.
-		 */
-		[[nodiscard]] const QMudAccessibleTextUtils::LineOffsetMap &accessibleNativeOutputTextMap() const;
-		/**
 		 * @brief Clears accessibility state tied to the current native render-model identity.
 		 */
-		void                     resetAccessibleOutputStateForRenderModelChange() const;
+		void resetAccessibleOutputStateForRenderModelChange() const;
 		/**
-		 * @brief Counts accessible native output text without materializing an offset map.
-		 * @param lines Native render lines to count.
-		 * @return UTF-16 code-unit count including inserted newline separators.
+		 * @brief Ensures the numeric accessible offset index matches the current render revision.
+		 * @param lines Current native render lines.
 		 */
-		[[nodiscard]] static int accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines);
+		void ensureAccessibleOutputLineIndex(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Returns accessible text directly from the authoritative render lines.
+		 * @param lines Current native render lines.
+		 * @param startOffset Inclusive accessible offset.
+		 * @param endOffset Exclusive accessible offset.
+		 * @return Requested newline-joined text range.
+		 */
+		[[nodiscard]] QString accessibleOutputText(const NativeOutputRenderLines &lines, int startOffset,
+		                                           int endOffset) const;
+		/**
+		 * @brief Applies one render delta to the numeric accessible index and pending event journal.
+		 * @param delta Synchronously consumed render delta.
+		 */
+		void                  consumeAccessibleOutputTextDelta(const NativeRenderCacheDelta &delta) const;
 		/**
 		 * @brief Primes the accessible text length without emitting backlog events.
 		 */
-		void                     primeAccessibleOutputTextState() const;
-		/**
-		 * @brief Records tail metadata for incremental accessible character-count tracking.
-		 * @param lines Native render lines for the current accessible baseline.
-		 */
-		void recordAccessibleOutputTailBaseline(const NativeOutputRenderLines &lines) const;
-		/**
-		 * @brief Records line lengths for muted live-accessibility baseline tracking.
-		 * @param lines Native render lines for the current accessible baseline.
-		 */
-		void recordSuppressedAccessibleOutputLengthBaseline(const NativeOutputRenderLines &lines) const;
-		/**
-		 * @brief Updates the muted live-accessibility baseline without building full accessible text.
-		 * @param lines Native render lines after presentation synchronization.
-		 * @return `true` when the baseline was advanced incrementally.
-		 */
-		[[nodiscard]] bool
-		     updateSuppressedAccessibleOutputBaseline(const NativeOutputRenderLines &lines) const;
+		void                  primeAccessibleOutputTextState() const;
 		/**
 		 * @brief Emits primary-view live accessibility notifications and advances observer baselines silently.
 		 * @param lines Native render lines after presentation synchronization.
 		 */
-		void notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const;
+		void                  notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Returns the output pane used for accessibility text geometry.
 		 * @return Scrollback review pane while reviewing, otherwise the active output pane.
@@ -1587,13 +1582,6 @@ class WorldView : public QWidget
 		 * @return Accessible text character count.
 		 */
 		[[nodiscard]] int accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const;
-		/**
-		 * @brief Extends cached accessible text line offsets through a render line.
-		 * @param lines Native render lines.
-		 * @param lineIndex Zero-based render line index required by the caller.
-		 */
-		void              ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
-		                                                          int                            lineIndex) const;
 		[[nodiscard]] QRect nativeOutputPaneRect(const WrapTextBrowser *view) const;
 		/**
 		 * @brief Returns the visible native output area to repaint when selection geometry is unavailable.
@@ -1704,14 +1692,6 @@ class WorldView : public QWidget
 		 * @return `true` when topology and approximate layout metadata advance exactly to the delta revision.
 		 */
 		bool        advanceNativeLayoutTopologyForDelta(const NativeRenderCacheDelta &delta) const;
-		/**
-		 * @brief Returns the retained line count for incremental accessible tail-delta handling.
-		 * @param delta Native render cache delta to inspect.
-		 * @param lineCount Current native render-line count.
-		 * @return Number of current lines retained from the previous accessible baseline, or `-1`.
-		 */
-		[[nodiscard]] static int accessibleRetainedLineCountForTailDelta(const NativeRenderCacheDelta &delta,
-		                                                                 int lineCount);
 		/**
 		 * @brief Deferred split-pane head-trim adjustment computed from pre-mutation layout state.
 		 */
@@ -2285,6 +2265,21 @@ class WorldView : public QWidget
 		 * @param delta Prepared delta with pre-revision fields filled in.
 		 */
 		void commitNativeRenderCacheDelta(NativeRenderCacheDelta delta) const;
+		/**
+		 * @brief Records one ordered logical text replacement for accessibility consumers.
+		 * @param firstLine First line replaced in the pre-edit render state.
+		 * @param removedLines Removed logical line texts.
+		 * @param insertedLines Inserted logical line texts.
+		 */
+		void recordNativeRenderTextEdit(int firstLine, QVector<QString> removedLines,
+		                                QVector<QString> insertedLines) const;
+		/**
+		 * @brief Copies one render-line text range for a transient accessibility edit.
+		 * @param firstLine First line to copy.
+		 * @param lineCount Number of lines to copy.
+		 * @return Implicitly shared line-text snapshots.
+		 */
+		[[nodiscard]] QVector<QString> nativeRenderTextRange(int firstLine, int lineCount) const;
 		/**
 		 * @brief Applies one shared logical render revision to this view's local presentation state.
 		 * @param delta Shared render revision to consume.
@@ -3124,67 +3119,60 @@ class WorldView : public QWidget
 		std::shared_ptr<WorldOutputRenderModel>              m_nativeRenderModel;
 		mutable int                                          m_accessibleOutputCharacterCount{-1};
 		mutable quint64                                      m_accessibleOutputRevision{0};
-		mutable QString                                      m_accessibleOutputText;
+		mutable QMudAccessibleTextUtils::LineOffsetIndex     m_accessibleOutputLineIndex;
+		mutable quint64                                      m_accessibleOutputLineIndexRevision{0};
+		mutable bool                                         m_accessibleOutputLineIndexValid{false};
+		mutable QVector<PendingAccessibleOutputTextEdit>     m_accessibleOutputPendingTextEdits;
 		mutable bool                                         m_accessibleOutputPendingTailAppend{false};
 		mutable QString                                      m_accessibleOutputLastAnnouncedPartialText;
 		mutable bool                                         m_accessibleOutputLiveEventsSuppressed{false};
-		mutable int                                          m_accessibleOutputBaselineLineCount{-1};
-		mutable QString                                      m_accessibleOutputBaselineTailText;
-		mutable QVector<int>                                 m_accessibleOutputBaselineLineLengths;
 		mutable bool                                         m_accessibleOutputReviewActive{false};
 		mutable AccessibleOutputReviewTargetKind             m_accessibleOutputReviewTargetKind{
 		    AccessibleOutputReviewTargetKind::None};
-		mutable int                                    m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
-		mutable int                                    m_accessibleOutputReviewLastNotifiedScrollValue{-1};
-		mutable QVector<int>                           m_accessibleOutputLineStartCache;
-		mutable quint64                                m_accessibleOutputLineStartCacheRevision{0};
-		mutable int                                    m_accessibleOutputLineStartCacheNextOffset{0};
-		mutable int                                    m_accessibleOutputLineStartCacheCharacterCount{-1};
-		mutable QMudAccessibleTextUtils::LineOffsetMap m_accessibleOutputTextMapCache;
-		mutable quint64                                m_accessibleOutputTextMapCacheRevision{0};
-		mutable bool                                   m_accessibleOutputTextMapCacheValid{false};
-		mutable int                                    m_nativeRenderCacheFullRebuilds{0};
-		mutable int                                    m_nativeRenderCacheSoftRebuilds{0};
-		mutable int                                    m_nativeRenderCacheIncrementalUpdates{0};
-		mutable int                                    m_nativeRenderCacheTrimDrops{0};
-		mutable int                                    m_nativeRenderCacheRebuildReasonCacheInvalid{0};
-		mutable int                                    m_nativeRenderCacheRebuildReasonRuntimeDisjoint{0};
-		mutable int                                    m_nativeRenderCacheRebuildReasonNonContigNoOverlap{0};
-		mutable int                                    m_nativeRenderCacheRebuildReasonRestitchFailure{0};
-		mutable int                                    m_nativeRenderCacheRebuildReasonAppendIndex{0};
-		mutable int                                    m_nativeRangeRestitchDiagCount{0};
-		mutable int                                    m_nativeRangeRestitchDiagMinStart{-1};
-		mutable int                                    m_nativeRangeRestitchDiagRebuiltTotal{0};
-		mutable int                                    m_nativeRangeRestitchDiagRebuiltMax{0};
-		mutable int                                    m_nativeRangeRestitchDiagDroppedTotal{0};
-		mutable int                                    m_nativeRangeRestitchDiagDroppedMax{0};
-		mutable NativeAppendDiagnosticBucket           m_nativeTailAppendDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeNonContiguousTailAppendDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeHeadTrimAppendDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeTailRestitchAppendDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRangeRestitchAppendDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeSoftCacheInvalidDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeSoftRuntimeDisjointDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeSoftNonContiguousNoOverlapDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeSoftRestitchFailureDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeSoftAppendStartOutOfRangeDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeFullRebuildAppendDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeHeadTrimDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeEmptyDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeDropMissDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeAppendNoChangeDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailLineHiddenOrOpenDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailLineRenderMissDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailLineCompositeDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailTailIndexMissDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailTailAppendNoChangeDiag;
-		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailHeadTrimDiag;
-		mutable quint64                                m_nativeSplitTopHeadTrimPixelsRevision{0};
-		mutable int                                    m_nativeSplitTopHeadTrimPixels{0};
-		mutable int                                    m_nativeSplitTopHeadTrimLines{0};
-		mutable quint64                                m_nativeSplitTopHeadTrimAdjustedRevision{0};
-		mutable quint64                                m_nativeSplitTopHeadTrimCapturedRevision{0};
-		mutable NativeViewportAnchor                   m_nativePrimaryViewportAnchor;
+		mutable int                          m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
+		mutable int                          m_accessibleOutputReviewLastNotifiedScrollValue{-1};
+		mutable int                          m_nativeRenderCacheFullRebuilds{0};
+		mutable int                          m_nativeRenderCacheSoftRebuilds{0};
+		mutable int                          m_nativeRenderCacheIncrementalUpdates{0};
+		mutable int                          m_nativeRenderCacheTrimDrops{0};
+		mutable int                          m_nativeRenderCacheRebuildReasonCacheInvalid{0};
+		mutable int                          m_nativeRenderCacheRebuildReasonRuntimeDisjoint{0};
+		mutable int                          m_nativeRenderCacheRebuildReasonNonContigNoOverlap{0};
+		mutable int                          m_nativeRenderCacheRebuildReasonRestitchFailure{0};
+		mutable int                          m_nativeRenderCacheRebuildReasonAppendIndex{0};
+		mutable int                          m_nativeRangeRestitchDiagCount{0};
+		mutable int                          m_nativeRangeRestitchDiagMinStart{-1};
+		mutable int                          m_nativeRangeRestitchDiagRebuiltTotal{0};
+		mutable int                          m_nativeRangeRestitchDiagRebuiltMax{0};
+		mutable int                          m_nativeRangeRestitchDiagDroppedTotal{0};
+		mutable int                          m_nativeRangeRestitchDiagDroppedMax{0};
+		mutable NativeAppendDiagnosticBucket m_nativeTailAppendDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeNonContiguousTailAppendDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeHeadTrimAppendDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeTailRestitchAppendDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRangeRestitchAppendDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeSoftCacheInvalidDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeSoftRuntimeDisjointDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeSoftNonContiguousNoOverlapDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeSoftRestitchFailureDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeSoftAppendStartOutOfRangeDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeFullRebuildAppendDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailRangeHeadTrimDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailRangeEmptyDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailRangeDropMissDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailRangeAppendNoChangeDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailLineHiddenOrOpenDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailLineRenderMissDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailLineCompositeDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailTailIndexMissDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailTailAppendNoChangeDiag;
+		mutable NativeAppendDiagnosticBucket m_nativeRestitchFailHeadTrimDiag;
+		mutable quint64                      m_nativeSplitTopHeadTrimPixelsRevision{0};
+		mutable int                          m_nativeSplitTopHeadTrimPixels{0};
+		mutable int                          m_nativeSplitTopHeadTrimLines{0};
+		mutable quint64                      m_nativeSplitTopHeadTrimAdjustedRevision{0};
+		mutable quint64                      m_nativeSplitTopHeadTrimCapturedRevision{0};
+		mutable NativeViewportAnchor         m_nativePrimaryViewportAnchor;
 		mutable PagedIndexedRingBuffer<NativeLayoutSlot>       m_nativeLayoutSlots;
 		mutable QCache<NativeExactLayoutCacheKey, QTextLayout> m_nativeExactLayoutCache{
 		    kNativeExactLayoutCacheLimit};
