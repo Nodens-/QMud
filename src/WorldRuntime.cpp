@@ -7460,7 +7460,8 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 	m_worldStartTime = QDateTime::currentDateTimeUtc();
 	m_lineTimer.start();
 	m_nextLineNumber = 1;
-	m_scriptWatcher  = new QFileSystemWatcher(this);
+	setLuaCurrentLinePresent(true);
+	m_scriptWatcher = new QFileSystemWatcher(this);
 	connect(m_scriptWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &changedPath)
 	        { refreshScriptFileWatcher(true, changedPath == m_cachedScriptFileModTimePath); });
 	connect(m_scriptWatcher, &QFileSystemWatcher::directoryChanged, this,
@@ -7866,19 +7867,32 @@ double WorldRuntime::scriptTimeSeconds() const noexcept
 
 void WorldRuntime::resetAnsiRenderState()
 {
-	m_ansiStreamState = QMudAnsiStreamState{};
-	m_partialLineText.clear();
-	m_partialLineSpans.clear();
-	m_partialLineServerSideWrapActive = false;
-	m_pendingCarriageReturnOverwrite  = false;
-	setIncomingPartialLineRevision(m_incomingPartialLineRevision + 1);
-	clearPartialOutputPresentation();
+	const bool currentLineStyleChanged = m_ansiRenderState != AnsiRenderState{};
+	m_ansiStreamState                  = QMudAnsiStreamState{};
+	clearIncomingPartialLineState();
 	m_ansiRenderState = AnsiRenderState{};
+	if (currentLineStyleChanged)
+		invalidateLuaCallbackCurrentLineSnapshot();
 	m_streamUtf8Carry.clear();
 	m_streamUtf8DecoderEnabled = false;
 	m_streamLegacyEncodingName.clear();
 	m_streamLegacyDecoder = QStringDecoder();
 	resetMxpRenderState();
+}
+
+void WorldRuntime::clearIncomingPartialLineState()
+{
+	const bool currentLineChanged =
+	    !m_partialLineText.isEmpty() || !m_partialLineSpans.isEmpty() || m_luaCurrentLineBookmarked;
+	m_partialLineText.clear();
+	m_partialLineSpans.clear();
+	m_luaCurrentLineBookmarked        = false;
+	m_partialLineServerSideWrapActive = false;
+	m_pendingCarriageReturnOverwrite  = false;
+	setIncomingPartialLineRevision(m_incomingPartialLineRevision + 1);
+	clearPartialOutputPresentation();
+	if (currentLineChanged)
+		invalidateLuaCallbackCurrentLineSnapshot();
 }
 
 void WorldRuntime::resetMxpRenderState()
@@ -7892,11 +7906,14 @@ void WorldRuntime::resetMxpRenderState()
 
 void WorldRuntime::clearAnsiActionContext()
 {
-	m_ansiRenderState.actionType = ActionNone;
+	const AnsiRenderState previousState = m_ansiRenderState;
+	m_ansiRenderState.actionType        = ActionNone;
 	m_ansiRenderState.action.clear();
 	m_ansiRenderState.hint.clear();
 	m_ansiRenderState.variable.clear();
 	m_ansiRenderState.startTag = false;
+	if (m_ansiRenderState != previousState)
+		invalidateLuaCallbackCurrentLineSnapshot();
 }
 
 void WorldRuntime::receiveRawData(const QByteArray &data)
@@ -9759,6 +9776,7 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 		ansiState.startTag             = current.startTag;
 		ansiState.monospace            = current.monospace;
 
+		bool ansiRenderStateDirty   = false;
 		auto persistAnsiRenderState = [&]
 		{
 			current.bold                 = ansiState.bold;
@@ -9778,12 +9796,16 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 			current.startTag             = ansiState.startTag;
 			current.monospace            = ansiState.monospace;
 
-			m_ansiRenderState                 = current;
-			m_partialLineText                 = lineText;
-			m_partialLineSpans                = lineSpans;
-			m_partialLineServerSideWrapActive = lineServerSideWrapActive;
-			m_pendingCarriageReturnOverwrite  = carriageReturnPending;
+			const bool currentLineStyleChanged = m_ansiRenderState != current;
+			m_ansiRenderState                  = current;
+			m_partialLineText                  = lineText;
+			m_partialLineSpans                 = lineSpans;
+			m_partialLineServerSideWrapActive  = lineServerSideWrapActive;
+			m_pendingCarriageReturnOverwrite   = carriageReturnPending;
 			setIncomingPartialLineRevision(incomingPartialLineRevision);
+			const bool currentLinePresenceChanged = ensureLuaCurrentLineForPersistedPartialInput();
+			if (ansiRenderStateDirty || currentLineStyleChanged || currentLinePresenceChanged)
+				invalidateLuaCallbackCurrentLineSnapshot();
 		};
 		auto publishAnsiPartialLine = [&]
 		{
@@ -9796,8 +9818,7 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 		};
 
 		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
-		bool                       ansiRenderStateDirty = false;
-		auto                       appendAnsiBytes      = [&](const QByteArrayView bytes)
+		auto                       appendAnsiBytes = [&](const QByteArrayView bytes)
 		{
 			if (bytes.isEmpty())
 				return;
@@ -10758,6 +10779,9 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 
 		auto persistMxpRenderState = [&]
 		{
+			const AnsiRenderState previousAnsiRenderState = m_ansiRenderState;
+			const bool            currentLineValueChanged =
+			    m_partialLineText != lineText || m_partialLineSpans != lineSpans;
 			m_mxpRenderStyle                       = current;
 			m_mxpRenderStack                       = stack;
 			m_mxpRenderBlockStack                  = blockStack;
@@ -10785,6 +10809,12 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 			m_partialLineServerSideWrapActive = lineServerSideWrapActive;
 			m_pendingCarriageReturnOverwrite  = carriageReturnPending;
 			setIncomingPartialLineRevision(incomingPartialLineRevision);
+			const bool currentLinePresenceChanged = ensureLuaCurrentLineForPersistedPartialInput();
+			if (currentLineValueChanged || m_ansiRenderState != previousAnsiRenderState ||
+			    currentLinePresenceChanged)
+			{
+				invalidateLuaCallbackCurrentLineSnapshot();
+			}
 		};
 		auto publishMxpPartialLine = [&]
 		{
@@ -14597,6 +14627,15 @@ void WorldRuntime::bookmarkLine(int lineNumber, bool set)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::bookmarkLine");
 	if (m_sessionStateOutputBufferSealed)
 		return;
+	const LuaContextBufferPresentation presentation = luaContextBufferPresentation();
+	if (presentation.hasCurrentLine && lineNumber == presentation.lineCount())
+	{
+		if (m_luaCurrentLineBookmarked == set)
+			return;
+		m_luaCurrentLineBookmarked = set;
+		invalidateLuaCallbackCurrentLineSnapshot();
+		return;
+	}
 	if (lineNumber <= 0 || lineNumber > m_lines.size())
 		return;
 
@@ -14606,6 +14645,143 @@ void WorldRuntime::bookmarkLine(int lineNumber, bool set)
 	else
 		entry.flags &= ~LineBookmark;
 	invalidateLuaCallbackLineBufferSnapshot();
+}
+
+bool WorldRuntime::setLuaCallbackLineBookmark(const LuaCallbackLineIdentity &identity, const bool set)
+{
+	if (QThread::currentThread() != thread())
+	{
+		return qmudInvokeMethodOr(this, false, [this, identity, set]
+		                          { return setLuaCallbackLineBookmark(identity, set); });
+	}
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setLuaCallbackLineBookmark");
+	const qint64 absoluteLineNumber = identity.resolvedAbsoluteLineNumber();
+	if (m_sessionStateOutputBufferSealed || !identity.isValid() || absoluteLineNumber <= 0)
+		return false;
+
+	auto updateNonStoredEntry = [&]() -> bool
+	{
+		if (m_luaContextLineState == LuaContextLineState::Pending &&
+		    m_luaContextLineNumber == absoluteLineNumber)
+		{
+			if (set)
+				m_luaPendingContextLineEntry.flags |= LineBookmark;
+			else
+				m_luaPendingContextLineEntry.flags &= ~LineBookmark;
+			invalidateLuaCallbackLineBufferSnapshot();
+			return true;
+		}
+		if (m_luaCurrentLineMetadata && m_luaCurrentLineMetadata->lineNumber == absoluteLineNumber)
+		{
+			if (m_luaCurrentLineBookmarked != set)
+			{
+				m_luaCurrentLineBookmarked = set;
+				invalidateLuaCallbackCurrentLineSnapshot();
+			}
+			return true;
+		}
+		return false;
+	};
+	if (identity.capturedCurrentLine && updateNonStoredEntry())
+		return true;
+
+	const LuaContextBufferPresentation presentation      = luaContextBufferPresentation();
+	auto                               updateStoredEntry = [&](const int physicalIndex) -> bool
+	{
+		if (physicalIndex < 0 || physicalIndex >= m_lines.size() ||
+		    m_lines.at(physicalIndex).lineNumber != absoluteLineNumber)
+		{
+			return false;
+		}
+		LineEntry &entry = m_lines[physicalIndex];
+		if (set)
+			entry.flags |= LineBookmark;
+		else
+			entry.flags &= ~LineBookmark;
+		invalidateLuaCallbackLineBufferSnapshot();
+		return true;
+	};
+
+	if (updateStoredEntry(presentation.physicalIndexForBufferIndex(identity.preferredBufferIndex)))
+		return true;
+
+	if (!m_lines.isEmpty() && m_outputLineNumberDiscontinuityCount == 0)
+	{
+		const qint64 offset = absoluteLineNumber - m_lines.constFirst().lineNumber;
+		if (offset >= 0 && offset < m_lines.size() && updateStoredEntry(static_cast<int>(offset)))
+			return true;
+	}
+	else
+	{
+		for (int physicalIndex = 0; physicalIndex < m_lines.size(); ++physicalIndex)
+		{
+			if (updateStoredEntry(physicalIndex))
+				return true;
+		}
+	}
+	return !identity.capturedCurrentLine && updateNonStoredEntry();
+}
+
+std::optional<WorldRuntime::LuaCallbackOutputIdentity>
+WorldRuntime::adjustedLuaCallbackOutputIdentity(const LuaCallbackOutputIdentity &identity) const
+{
+	if (!identity.lineIdentityState || !identity.lineIdentityState->layoutDiverged())
+		return std::nullopt;
+
+	LuaCallbackOutputIdentity resolved = identity;
+	resolved.bookmarkTransferSource    = {};
+	if (!identity.fillsCurrentLine || !m_luaCurrentLineBookmarked || !m_luaCurrentLineMetadata)
+	{
+		return resolved;
+	}
+
+	const LuaContextBufferPresentation presentation = luaContextBufferPresentation();
+	resolved.bookmarkTransferSource = {presentation.lineCount(), m_luaCurrentLineMetadata->lineNumber, true};
+	return resolved;
+}
+
+void WorldRuntime::reconcileLuaCallbackOutputLayout(const LuaCallbackOutputIdentity &identity,
+                                                    const bool complete, const int physicalLineCount,
+                                                    const bool replacedAnchor)
+{
+	if (!identity.lineIdentityState)
+		return;
+	if (!complete || physicalLineCount != 1)
+		identity.lineIdentityState->markLayoutDiverged(false);
+	else if (identity.expectsAnchorReplacement != replacedAnchor)
+		identity.lineIdentityState->markLayoutDiverged(true);
+}
+
+void WorldRuntime::transferLuaCallbackLineBookmark(const LuaCallbackLineIdentity &source,
+                                                   const qint64                   targetAbsoluteLineNumber)
+{
+	if (!source.isValid() || targetAbsoluteLineNumber <= 0)
+		return;
+	if (source.resolvedAbsoluteLineNumber() != targetAbsoluteLineNumber)
+		static_cast<void>(setLuaCallbackLineBookmark(source, false));
+	else if (source.capturedCurrentLine && m_luaCurrentLineBookmarked)
+	{
+		m_luaCurrentLineBookmarked = false;
+		invalidateLuaCallbackCurrentLineSnapshot();
+	}
+	const LuaCallbackLineIdentity target{1, targetAbsoluteLineNumber};
+	static_cast<void>(setLuaCallbackLineBookmark(target, true));
+}
+
+void WorldRuntime::publishLuaCallbackLineIdentity(const LuaCallbackDeferredLineIdentity &identity,
+                                                  const qint64                           absoluteLineNumber)
+{
+	if (identity.isValid() && absoluteLineNumber > 0)
+		identity.state->publish(identity.identity, absoluteLineNumber);
+}
+
+void WorldRuntime::publishLuaCallbackCurrentLineIdentity(
+    const LuaCallbackDeferredLineIdentity &identity) const
+{
+	if (!identity.isValid() || !m_luaCurrentLineMetadata)
+		return;
+	publishLuaCallbackLineIdentity(identity, m_luaCurrentLineMetadata->lineNumber);
 }
 
 void WorldRuntime::setStopTriggerEvaluation(StopTriggerEvaluation mode)
@@ -14665,6 +14841,7 @@ const ILuaExecutor *WorldRuntime::luaExecutor() const
 void WorldRuntime::invalidateLuaCallbackLineBufferSnapshot() const
 {
 	++m_luaCallbackLineBufferSnapshotGeneration;
+	++m_luaCallbackCurrentLineSnapshotGeneration;
 	m_luaCallbackLastLineBufferSnapshotCache.clear();
 	m_luaCallbackLastLineBufferSnapshotCacheGeneration = 0;
 	m_luaCallbackLineBufferSnapshotCache.clear();
@@ -14673,6 +14850,31 @@ void WorldRuntime::invalidateLuaCallbackLineBufferSnapshot() const
 	m_luaCallbackRecentLineBufferSnapshotCacheGeneration = 0;
 	m_luaCallbackRecentTextLineBufferSnapshotCache.clear();
 	m_luaCallbackRecentTextLineBufferSnapshotCacheGeneration = 0;
+}
+
+void WorldRuntime::invalidateLuaCallbackCurrentLineSnapshot() const
+{
+	++m_luaCallbackCurrentLineSnapshotGeneration;
+}
+
+void WorldRuntime::refreshLuaCallbackCurrentLineSnapshot(
+    QSharedPointer<const LuaCallbackLineBufferSnapshot> &snapshot) const
+{
+	if (!snapshot || snapshot->currentLineGeneration == m_luaCallbackCurrentLineSnapshotGeneration)
+		return;
+
+	const LuaContextBufferPresentation presentation = luaContextBufferPresentation();
+	Q_ASSERT(snapshot->materializedLineBufferCount == presentation.materializedLineCount());
+	QSharedPointer<LuaCallbackLineBufferSnapshot> refreshed =
+	    QSharedPointer<LuaCallbackLineBufferSnapshot>::create(*snapshot);
+	refreshed->currentLineGeneration = m_luaCallbackCurrentLineSnapshotGeneration;
+	refreshed->lineBufferCount       = presentation.lineCount();
+	refreshed->currentLineTemplate   = QMudLuaCallbackLineSnapshot::fromLineEntry(luaCurrentLineTemplate());
+	if (const std::optional<LineEntry> currentLine = luaCurrentLineEntry(); currentLine)
+		refreshed->currentLine = QMudLuaCallbackLineSnapshot::fromLineEntry(*currentLine);
+	else
+		refreshed->currentLine.reset();
+	snapshot = std::move(refreshed);
 }
 
 void WorldRuntime::insertOutputLineRange(const int insertionIndex, QVector<LineEntry> entries)
@@ -16042,11 +16244,17 @@ void WorldRuntime::clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot 
 	snapshot.triggerMatchedLineSnapshot         = {};
 	snapshot.hasLineBufferSnapshot              = false;
 	snapshot.lineBufferCount                    = 0;
+	snapshot.materializedLineBufferCount        = -1;
+	snapshot.currentLineTemplate.reset();
+	snapshot.currentLine.reset();
 	snapshot.lineBufferSnapshot.clear();
 	snapshot.lineEntriesByBufferIndex.clear();
-	snapshot.hasLineBufferDeltaSnapshot = false;
-	snapshot.hasLineBufferCountDelta    = false;
-	snapshot.lineBufferDeltaCount       = 0;
+	snapshot.hasLineBufferDeltaSnapshot       = false;
+	snapshot.hasLineBufferCountDelta          = false;
+	snapshot.lineBufferDeltaCount             = 0;
+	snapshot.materializedLineBufferDeltaCount = -1;
+	snapshot.currentLineDeltaPresent          = false;
+	snapshot.currentLineDelta.reset();
 	snapshot.lineEntryDeltasByBufferIndex.clear();
 	snapshot.missingLineEntryDeltasByBufferIndex.clear();
 	snapshot.linePresentationRequiresRefresh             = false;
@@ -16119,8 +16327,9 @@ void WorldRuntime::clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot 
 
 void WorldRuntime::populateLuaCallbackOutputAnchorSnapshot(LuaCallbackSnapshot &snapshot) const
 {
-	const int incomingLineIndex = incomingLineLuaContextBufferIndex();
-	const int anchorIndex       = incomingLineIndex > 0 ? incomingLineIndex : luaContextLinesInBufferCount();
+	const LuaContextBufferPresentation presentation      = luaContextBufferPresentation();
+	const int                          incomingLineIndex = incomingLineLuaContextBufferIndex();
+	const int anchorIndex = incomingLineIndex > 0 ? incomingLineIndex : presentation.materializedLineCount();
 	if (anchorIndex <= 0)
 		return;
 
@@ -17132,7 +17341,10 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 		snapshot.hasLineBufferSnapshot = static_cast<bool>(snapshot.lineBufferSnapshot);
 		if (snapshot.lineBufferSnapshot)
 		{
-			snapshot.lineBufferCount = snapshot.lineBufferSnapshot->lineBufferCount;
+			snapshot.lineBufferCount             = snapshot.lineBufferSnapshot->lineBufferCount;
+			snapshot.materializedLineBufferCount = snapshot.lineBufferSnapshot->materializedLineBufferCount;
+			snapshot.currentLineTemplate         = snapshot.lineBufferSnapshot->currentLineTemplate;
+			snapshot.currentLine                 = snapshot.lineBufferSnapshot->currentLine;
 			if (lineSnapshotPolicy != LuaCallbackLineSnapshotPolicy::CountAndLast)
 			{
 				snapshot.recentLinesSnapshot    = snapshot.lineBufferSnapshot->recentLinesSnapshot;
@@ -17181,36 +17393,46 @@ WorldRuntime::captureLuaCallbackLineBufferSnapshotForDispatch(
 	    m_luaCallbackLastLineBufferSnapshotCache &&
 	    m_luaCallbackLastLineBufferSnapshotCacheGeneration == m_luaCallbackLineBufferSnapshotGeneration)
 	{
+		refreshLuaCallbackCurrentLineSnapshot(m_luaCallbackLastLineBufferSnapshotCache);
 		return m_luaCallbackLastLineBufferSnapshotCache;
 	}
 	if (lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::Full && m_luaCallbackLineBufferSnapshotCache &&
 	    m_luaCallbackLineBufferSnapshotCacheGeneration == m_luaCallbackLineBufferSnapshotGeneration)
 	{
+		refreshLuaCallbackCurrentLineSnapshot(m_luaCallbackLineBufferSnapshotCache);
 		return m_luaCallbackLineBufferSnapshotCache;
 	}
 	if (lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::CountAndRecent &&
 	    m_luaCallbackRecentLineBufferSnapshotCache &&
 	    m_luaCallbackRecentLineBufferSnapshotCacheGeneration == m_luaCallbackLineBufferSnapshotGeneration)
 	{
+		refreshLuaCallbackCurrentLineSnapshot(m_luaCallbackRecentLineBufferSnapshotCache);
 		return m_luaCallbackRecentLineBufferSnapshotCache;
 	}
 	if (lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::CountAndRecentText &&
 	    m_luaCallbackRecentTextLineBufferSnapshotCache &&
 	    m_luaCallbackRecentTextLineBufferSnapshotCacheGeneration == m_luaCallbackLineBufferSnapshotGeneration)
 	{
+		refreshLuaCallbackCurrentLineSnapshot(m_luaCallbackRecentTextLineBufferSnapshotCache);
 		return m_luaCallbackRecentTextLineBufferSnapshotCache;
 	}
 
 	const QSharedPointer<LuaCallbackLineBufferSnapshot> snapshot =
 	    QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
-	snapshot->lineBufferGeneration = m_luaCallbackLineBufferSnapshotGeneration;
-	snapshot->lineBufferCount      = luaContextLinesInBufferCount();
+	const LuaContextBufferPresentation presentation = luaContextBufferPresentation();
+	snapshot->lineBufferGeneration                  = m_luaCallbackLineBufferSnapshotGeneration;
+	snapshot->currentLineGeneration                 = m_luaCallbackCurrentLineSnapshotGeneration;
+	snapshot->lineBufferCount                       = presentation.lineCount();
+	snapshot->materializedLineBufferCount           = presentation.materializedLineCount();
+	snapshot->currentLineTemplate = QMudLuaCallbackLineSnapshot::fromLineEntry(luaCurrentLineTemplate());
+	if (const std::optional<LineEntry> currentLine = luaCurrentLineEntry(); currentLine)
+		snapshot->currentLine = QMudLuaCallbackLineSnapshot::fromLineEntry(*currentLine);
 	if (lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::CountAndLast ||
 	    lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::CountAndRecentText)
 	{
-		if (snapshot->lineBufferCount > 0)
+		if (snapshot->materializedLineBufferCount > 0)
 		{
-			const int lastLineNumber               = snapshot->lineBufferCount;
+			const int lastLineNumber               = snapshot->materializedLineBufferCount;
 			snapshot->firstCapturedLineBufferIndex = lastLineNumber;
 			snapshot->lastCapturedLineBufferIndex  = lastLineNumber;
 			LineEntry entry;
@@ -17222,12 +17444,14 @@ WorldRuntime::captureLuaCallbackLineBufferSnapshotForDispatch(
 	else
 	{
 		constexpr int kRecentLineSnapshotLimit = 200;
-		const int firstLineNumber = lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::Full
-		                                ? 1
-		                                : qMax(1, snapshot->lineBufferCount - kRecentLineSnapshotLimit + 1);
+		const int     firstLineNumber =
+		    lineSnapshotPolicy == LuaCallbackLineSnapshotPolicy::Full
+		        ? 1
+		        : qMax(1, snapshot->materializedLineBufferCount - kRecentLineSnapshotLimit + 1);
 		snapshot->firstCapturedLineBufferIndex = firstLineNumber;
-		snapshot->lastCapturedLineBufferIndex  = snapshot->lineBufferCount;
-		for (int lineNumber = firstLineNumber; lineNumber <= snapshot->lineBufferCount; ++lineNumber)
+		snapshot->lastCapturedLineBufferIndex  = snapshot->materializedLineBufferCount;
+		for (int lineNumber = firstLineNumber; lineNumber <= snapshot->materializedLineBufferCount;
+		     ++lineNumber)
 		{
 			LineEntry entry;
 			if (luaContextLineEntry(lineNumber, entry))
@@ -20064,6 +20288,7 @@ static bool worldAttributeAffectsResolvedOutputColours(const QString &key)
 void WorldRuntime::invalidateResolvedOutputColourCache() const
 {
 	m_resolvedOutputColourCache.valid = false;
+	invalidateLuaCallbackCurrentLineSnapshot();
 }
 
 const WorldRuntime::ResolvedOutputColourCache &WorldRuntime::resolvedOutputColourCache() const
@@ -20730,9 +20955,27 @@ void WorldRuntime::deleteLines(int count)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deleteLines");
 	if (m_sessionStateOutputBufferSealed)
 		return;
-	if (count <= 0 || m_lines.isEmpty())
+	if (count <= 0)
 		return;
-	const int boundedCount      = qMin(count, safeQSizeToInt(m_lines.size()));
+	m_luaCurrentLineBookmarked    = false;
+	int materializedLinesToDelete = count;
+	if (m_luaCurrentLineMetadata && !m_partialLineText.isEmpty())
+	{
+		clearIncomingPartialLineState();
+		--materializedLinesToDelete;
+		if (materializedLinesToDelete <= 0)
+		{
+			setLuaCurrentLinePresent(true);
+			return;
+		}
+	}
+	if (m_lines.isEmpty())
+	{
+		setLuaCurrentLinePresent(true);
+		invalidateLuaCallbackCurrentLineSnapshot();
+		return;
+	}
+	const int boundedCount      = qMin(materializedLinesToDelete, safeQSizeToInt(m_lines.size()));
 	const int firstRemovedIndex = safeQSizeToInt(m_lines.size()) - boundedCount;
 	const int removedCount      = removeOutputLineRange(firstRemovedIndex, boundedCount);
 	const int firstChangedIndex =
@@ -20740,6 +20983,7 @@ void WorldRuntime::deleteLines(int count)
 	notifyOutputViewRangeChanged(firstChangedIndex, safeQSizeToInt(m_lines.size()),
 	                             {firstRemovedIndex, removedCount, 0},
 	                             firstRemovedIndex == 0 ? removedCount : 0);
+	setLuaCurrentLinePresent(true);
 }
 
 void WorldRuntime::deleteOutput()
@@ -20753,6 +20997,9 @@ void WorldRuntime::deleteOutput()
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deleteOutput");
 	if (m_sessionStateOutputBufferSealed)
 		return;
+	m_luaCurrentLineBookmarked = false;
+	clearIncomingPartialLineState();
+	setLuaCurrentLinePresent(true);
 	if (removeOutputLineRange(0, safeQSizeToInt(m_lines.size())) == 0)
 	{
 		invalidateTrackedLuaCallbackOutputAnchors();
@@ -20761,7 +21008,7 @@ void WorldRuntime::deleteOutput()
 		m_luaCallbackOutputAnchorLinesByStream.clear();
 		m_luaCallbackOutputIndexOrigin = 0;
 		reconcileIncomingLineAfterOutputReplacement();
-		invalidateLuaCallbackLineBufferSnapshot();
+		invalidateLuaCallbackCurrentLineSnapshot();
 	}
 	clearOutputPresentationViews();
 }
@@ -25960,20 +26207,64 @@ void WorldRuntime::outputText(const QString &text, const bool note, const bool n
 void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan> &spans, const bool note,
                                     const bool newLine)
 {
-	if (text.isEmpty() && spans.isEmpty() && !newLine)
-		return;
-	const int  type      = note ? 1 : 0;
 	const bool shouldLog = isEnabledFlag(
 	    m_worldAttributes.value(note ? QStringLiteral("log_notes") : QStringLiteral("log_output")));
-	const int                   log             = shouldLog ? 1 : 0;
-	const int                   insertionIndex  = safeQSizeToInt(m_lines.size());
-	const QString               openLinePrefix  = openOutputTextBeforeIndex(insertionIndex);
-	const QStringList           screenDrawLines = completedScreenDrawLines(text, newLine, openLinePrefix);
-	const int                   outputFlags     = (note ? LineNote : LineOutput) | (log != 0 ? LineLog : 0);
-	OutputLogCommitContext      logContext      = prepareOutputLogCommit(insertionIndex);
-	const QVector<LineEntry>    logicalLogSegments   = logicalOutputLogSegments(text, spans, newLine);
-	QString                     displayText          = text;
-	QVector<StyleSpan>          displaySpans         = spans;
+	const int flags = (note ? LineNote : LineOutput) | (shouldLog ? LineLog : 0);
+	static_cast<void>(outputStyledTextInternal(text, spans, flags, newLine, {}));
+}
+
+bool WorldRuntime::writeLuaCallbackOutput(const QString &text, const int flags,
+                                          const QVector<StyleSpan> &spans, const bool hardReturn,
+                                          const LuaCallbackOutputIdentity &outputIdentity)
+{
+	return outputStyledTextInternal(text, spans, flags, hardReturn, outputIdentity);
+}
+
+bool WorldRuntime::outputStyledTextInternal(const QString &text, const QVector<StyleSpan> &spans,
+                                            const int flags, const bool newLine,
+                                            const LuaCallbackOutputIdentity &outputIdentity)
+{
+	if (text.isEmpty() && spans.isEmpty() && !newLine)
+		return false;
+	const std::optional<LuaCallbackOutputIdentity> adjustedIdentity =
+	    adjustedLuaCallbackOutputIdentity(outputIdentity);
+	const LuaCallbackOutputIdentity &playbackIdentity = adjustedIdentity ? *adjustedIdentity : outputIdentity;
+	int                              playbackFlags    = flags;
+	if (outputIdentity.lineIdentityState)
+	{
+		playbackFlags &= ~LineBookmark;
+		if (playbackIdentity.bookmarkTransferSource.isValid())
+			playbackFlags |= LineBookmark;
+	}
+	if ((playbackFlags & LineHorizontalRule) != 0)
+	{
+		finalizeOpenOutputLineHardReturn();
+		const qint64 firstNewLineNumber = m_nextLineNumber;
+		if (WorldView *const outputView = view())
+			outputView->appendHorizontalRule();
+		else
+			addLine(QString(), LineHorizontalRule, true);
+		const bool outputCommitted = m_nextLineNumber > firstNewLineNumber;
+		reconcileLuaCallbackOutputLayout(playbackIdentity, outputCommitted, outputCommitted ? 1 : 0, false);
+		if (outputCommitted)
+		{
+			publishLuaCallbackLineIdentity(playbackIdentity.producedLine, firstNewLineNumber);
+			publishLuaCallbackCurrentLineIdentity(playbackIdentity.resultingCurrentLine);
+			transferLuaCallbackLineBookmark(playbackIdentity.bookmarkTransferSource, firstNewLineNumber);
+		}
+		return outputCommitted;
+	}
+
+	const bool                  note               = (playbackFlags & LineNote) != 0;
+	const int                   type               = note ? 1 : ((playbackFlags & LineInput) != 0 ? 2 : 0);
+	const int                   log                = (playbackFlags & LineLog) != 0 ? 1 : 0;
+	const int                   insertionIndex     = safeQSizeToInt(m_lines.size());
+	const QString               openLinePrefix     = openOutputTextBeforeIndex(insertionIndex);
+	const QStringList           screenDrawLines    = completedScreenDrawLines(text, newLine, openLinePrefix);
+	OutputLogCommitContext      logContext         = prepareOutputLogCommit(insertionIndex);
+	const QVector<LineEntry>    logicalLogSegments = logicalOutputLogSegments(text, spans, newLine);
+	QString                     displayText        = text;
+	QVector<StyleSpan>          displaySpans       = spans;
 	const bool                  serverSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
 	const FixedColumnWrapConfig wrapConfig =
 	    (!note && serverSideWrapActive)
@@ -25999,15 +26290,22 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	QVector<LineEntry> completedLogLines;
 	if (outputCommitted)
 	{
+		reconcileLuaCallbackOutputLayout(playbackIdentity, true, safeQSizeToInt(segments.size()), false);
+		publishLuaCallbackLineIdentity(playbackIdentity.producedLine, firstNewLineNumber);
+		publishLuaCallbackCurrentLineIdentity(playbackIdentity.resultingCurrentLine);
+		transferLuaCallbackLineBookmark(playbackIdentity.bookmarkTransferSource, firstNewLineNumber);
 		const qint64 finalPhysicalLineNumber =
 		    m_nextLineNumber > firstNewLineNumber ? m_nextLineNumber - 1 : 0;
-		completedLogLines = commitOutputLogSegments(std::move(logContext), logicalLogSegments, outputFlags,
+		completedLogLines = commitOutputLogSegments(std::move(logContext), logicalLogSegments, playbackFlags,
 		                                            finalPhysicalLineNumber);
 	}
+	else
+		reconcileLuaCallbackOutputLayout(playbackIdentity, false, 0, false);
 	for (const QString &line : screenDrawLines)
 		firePluginScreendraw(type, log, line);
 	if (outputCommitted)
 		logCompletedOutputLines(completedLogLines);
+	return outputCommitted;
 }
 
 bool WorldRuntime::prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans,
@@ -26101,14 +26399,21 @@ void WorldRuntime::outputAnsiNoteText(const QString &text)
 bool WorldRuntime::writeLuaCallbackAnsiOutputAtLineAnchor(
     const qint64 anchorLineNumber, const int anchorBufferIndex, const int anchorRelativeOffset,
     const bool replaceAnchor, const QString &text, const int flags, const quint64 outputStreamId,
-    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *const resolvedAnchorBufferIndex)
+    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *const resolvedAnchorBufferIndex,
+    const LuaCallbackOutputIdentity &outputIdentity)
 {
-	const bool written =
-	    outputAnsiTextInternal(text, true, true, anchorLineNumber, anchorBufferIndex, anchorRelativeOffset,
-	                           replaceAnchor, flags, outputStreamId, anchorState, resolvedAnchorBufferIndex);
+	const bool written = outputAnsiTextInternal(text, true, true, anchorLineNumber, anchorBufferIndex,
+	                                            anchorRelativeOffset, replaceAnchor, flags, outputStreamId,
+	                                            anchorState, resolvedAnchorBufferIndex, outputIdentity);
 	if (!written)
 		invalidateLuaCallbackOutputAnchor(outputStreamId, anchorLineNumber, anchorState);
 	return written;
+}
+
+bool WorldRuntime::writeLuaCallbackAnsiOutput(const QString &text, const int flags,
+                                              const LuaCallbackOutputIdentity &outputIdentity)
+{
+	return outputAnsiTextInternal(text, true, true, 0, 0, 0, false, flags, 0, {}, nullptr, outputIdentity);
 }
 
 QVector<WorldRuntime::StyleSpan> WorldRuntime::inputEchoStyleSpans(const QString &text) const
@@ -26140,12 +26445,23 @@ bool WorldRuntime::outputAnsiTextInternal(const QString &text, const bool note, 
                                           const int anchorRelativeOffset, const bool replaceAnchor,
                                           const int flags, const quint64 outputStreamId,
                                           const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState,
-                                          int *const resolvedAnchorBufferIndex)
+                                          int *const                       resolvedAnchorBufferIndex,
+                                          const LuaCallbackOutputIdentity &outputIdentity)
 {
 	if (resolvedAnchorBufferIndex)
 		*resolvedAnchorBufferIndex = 0;
 	if (text.isEmpty() && !finishLine)
 		return false;
+	const std::optional<LuaCallbackOutputIdentity> adjustedIdentity =
+	    adjustedLuaCallbackOutputIdentity(outputIdentity);
+	const LuaCallbackOutputIdentity &playbackIdentity = adjustedIdentity ? *adjustedIdentity : outputIdentity;
+	int                              playbackFlags    = flags;
+	if (outputIdentity.lineIdentityState)
+	{
+		playbackFlags &= ~LineBookmark;
+		if (playbackIdentity.bookmarkTransferSource.isValid())
+			playbackFlags |= LineBookmark;
+	}
 	const bool                  anchored             = anchorLineNumber > 0;
 	const bool                  serverSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
 	const FixedColumnWrapConfig wrapConfig =
@@ -26164,15 +26480,17 @@ bool WorldRuntime::outputAnsiTextInternal(const QString &text, const bool note, 
 	QString screenLinePrefix   = insertionIndex >= 0 ? openOutputTextBeforeIndex(insertionIndex) : QString();
 	bool    firstLinePrefixEndsWithSpace = screenLinePrefix.endsWith(QLatin1Char(' '));
 	QStringList screenDrawLines;
-	const int   screenDrawType = note ? 1 : 0;
+	const int   screenDrawType   = note ? 1 : 0;
+	const bool  hasCapturedFlags = anchored || playbackFlags != 0;
 	const int   screenDrawLog =
-	    anchored ? ((flags & LineLog) != 0 ? 1 : 0)
-	             : (isEnabledFlag(m_worldAttributes.value(note ? QStringLiteral("log_notes")
-	                                                           : QStringLiteral("log_output")))
-	                    ? 1
-	                    : 0);
-	const int outputFlags =
-	    anchored ? flags : ((note ? LineNote : LineOutput) | (screenDrawLog != 0 ? LineLog : 0));
+	    hasCapturedFlags ? ((playbackFlags & LineLog) != 0 ? 1 : 0)
+	                     : (isEnabledFlag(m_worldAttributes.value(note ? QStringLiteral("log_notes")
+	                                                                   : QStringLiteral("log_output")))
+	                            ? 1
+	                            : 0);
+	const int outputFlags = hasCapturedFlags
+	                            ? playbackFlags
+	                            : ((note ? LineNote : LineOutput) | (screenDrawLog != 0 ? LineLog : 0));
 	OutputLogCommitContext logContext =
 	    anchored ? prepareOutputLogCommit(insertionIndex) : OutputLogCommitContext{};
 	bool allOutputSegmentsCommitted = true;
@@ -26281,7 +26599,10 @@ bool WorldRuntime::outputAnsiTextInternal(const QString &text, const bool note, 
 	QVector<StyleSpan> lineSpans;
 	QVector<LineEntry> anchoredSegments;
 	QVector<LineEntry> logicalLogSegments;
-	bool               endedWithHardReturn = false;
+	bool               endedWithHardReturn        = false;
+	bool               bookmarkTransferred        = false;
+	bool               producedIdentityPublished  = false;
+	int                committedPhysicalLineCount = 0;
 
 	auto               emitLine = [&](bool newLine)
 	{
@@ -26324,6 +26645,18 @@ bool WorldRuntime::outputAnsiTextInternal(const QString &text, const bool note, 
 			QVector<LineEntry> completedLogLines;
 			if (committed)
 			{
+				committedPhysicalLineCount += safeQSizeToInt(outputSegments.size());
+				if (!producedIdentityPublished)
+				{
+					publishLuaCallbackLineIdentity(playbackIdentity.producedLine, firstSegmentLineNumber);
+					producedIdentityPublished = true;
+				}
+				if (!bookmarkTransferred)
+				{
+					transferLuaCallbackLineBookmark(playbackIdentity.bookmarkTransferSource,
+					                                firstSegmentLineNumber);
+					bookmarkTransferred = playbackIdentity.bookmarkTransferSource.isValid();
+				}
 				const qint64 finalPhysicalLineNumber =
 				    m_nextLineNumber > firstSegmentLineNumber ? m_nextLineNumber - 1 : 0;
 				completedLogLines = commitOutputLogSegments(std::move(segmentLogContext), {logicalSegment},
@@ -26413,11 +26746,20 @@ bool WorldRuntime::outputAnsiTextInternal(const QString &text, const bool note, 
 	else if (finishLine && !endedWithHardReturn)
 		emitLine(true);
 	if (!anchored)
+	{
+		reconcileLuaCallbackOutputLayout(playbackIdentity, allOutputSegmentsCommitted,
+		                                 committedPhysicalLineCount, false);
+		if (allOutputSegmentsCommitted)
+		{
+			publishLuaCallbackCurrentLineIdentity(playbackIdentity.resultingCurrentLine);
+		}
 		return allOutputSegmentsCommitted;
-	return writeLuaCallbackOutputSegmentsAtLineAnchor(
-	    anchorLineNumber, anchorRelativeOffset, replaceAnchor, outputPosition, anchoredSegments, flags,
+	}
+	const bool committed = writeLuaCallbackOutputSegmentsAtLineAnchor(
+	    anchorLineNumber, anchorRelativeOffset, replaceAnchor, outputPosition, anchoredSegments, outputFlags,
 	    outputStreamId, screenDrawLines, std::move(logContext), logicalLogSegments, anchorState,
-	    resolvedAnchorBufferIndex);
+	    resolvedAnchorBufferIndex, playbackIdentity);
+	return committed;
 }
 
 int WorldRuntime::sendCommand(const QString &text, bool echo, bool queue, bool log, bool history,
@@ -34698,6 +35040,11 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 {
 	if (m_sessionStateOutputBufferSealed)
 		return;
+	if (m_luaCurrentLineBookmarked && m_partialLineText.isEmpty())
+	{
+		flags |= LineBookmark;
+		m_luaCurrentLineBookmarked = false;
+	}
 
 	LineEntry entry;
 	entry.text       = text;
@@ -34720,6 +35067,7 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 		entry.elapsed         = fallback;
 	}
 	appendOutputLine(std::move(entry));
+	reconcileLuaCurrentLineAfterTailOutput(hardReturn);
 	const int removedHeadCount = enforceOutputLineLimit();
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (!m_lines.isEmpty())
@@ -34731,6 +35079,11 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 {
 	if (m_sessionStateOutputBufferSealed)
 		return;
+	if (m_luaCurrentLineBookmarked && m_partialLineText.isEmpty())
+	{
+		flags |= LineBookmark;
+		m_luaCurrentLineBookmarked = false;
+	}
 
 	LineEntry entry;
 	entry.text       = text;
@@ -34753,6 +35106,7 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 		entry.elapsed         = fallback;
 	}
 	appendOutputLine(std::move(entry));
+	reconcileLuaCurrentLineAfterTailOutput(hardReturn);
 	const int removedHeadCount = enforceOutputLineLimit();
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (!m_lines.isEmpty())
@@ -34895,6 +35249,8 @@ void WorldRuntime::replaceOutputLines(const IndexedRingBuffer<LineEntry> &lines)
 
 	invalidateTrackedLuaCallbackOutputAnchors();
 	m_pendingOutputLogLines.clear();
+	m_luaCurrentLineBookmarked = false;
+	m_luaCurrentLineMetadata.reset();
 	m_lines                              = lines;
 	m_outputLineNumberDiscontinuityCount = outputLineNumberDiscontinuityCount(m_lines);
 	m_luaCallbackAfterAnchorInsertionCursors.clear();
@@ -34908,6 +35264,7 @@ void WorldRuntime::replaceOutputLines(const IndexedRingBuffer<LineEntry> &lines)
 	for (const LineEntry &line : m_lines)
 		maxLineNumber = qMax(maxLineNumber, line.lineNumber);
 	m_nextLineNumber = qMax<qint64>(1, maxLineNumber + 1);
+	setLuaCurrentLinePresent(m_lines.isEmpty() || m_lines.constLast().hardReturn);
 
 	static_cast<void>(enforceOutputLineLimit());
 	invalidateLuaCallbackLineBufferSnapshot();
@@ -34934,6 +35291,7 @@ void WorldRuntime::finalizePendingInputLineHardReturn()
 		return;
 
 	last.hardReturn = true;
+	setLuaCurrentLinePresent(true);
 	invalidateLuaCallbackLineBufferSnapshot();
 }
 
@@ -34952,6 +35310,7 @@ void WorldRuntime::finalizeOpenOutputLineHardReturn()
 	LineEntry              completion;
 	completion.hardReturn = true;
 	last.hardReturn       = true;
+	setLuaCurrentLinePresent(true);
 	invalidateLuaCallbackLineBufferSnapshot();
 	notifyOutputViewLineChanged(safeQSizeToInt(m_lines.size()) - 1);
 	if ((completedFlags & LineHorizontalRule) == 0)
@@ -34977,12 +35336,19 @@ void WorldRuntime::clearLastLineHardReturn()
 		return;
 
 	last.hardReturn = false;
+	setLuaCurrentLinePresent(false);
 	invalidateLuaCallbackLineBufferSnapshot();
 }
 
 void WorldRuntime::beginIncomingLineLuaContext(const QString &text, int flags,
                                                const QVector<StyleSpan> &spans, bool hardReturn)
 {
+	setLuaCurrentLinePresent(false);
+	if (m_luaCurrentLineBookmarked)
+	{
+		flags |= LineBookmark;
+		m_luaCurrentLineBookmarked = false;
+	}
 	m_luaPendingContextLineEntry.text       = text;
 	m_luaPendingContextLineEntry.flags      = flags;
 	m_luaPendingContextLineEntry.hardReturn = hardReturn;
@@ -35837,12 +36203,22 @@ bool WorldRuntime::writeLuaCallbackOutputAtLineAnchor(
     const qint64 anchorLineNumber, const int anchorBufferIndex, const int anchorRelativeOffset,
     const bool replaceAnchor, const QString &text, int flags, const QVector<StyleSpan> &spans,
     const bool hardReturn, const quint64 outputStreamId,
-    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *const resolvedAnchorBufferIndex)
+    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *const resolvedAnchorBufferIndex,
+    const LuaCallbackOutputIdentity &outputIdentity)
 {
 	if (resolvedAnchorBufferIndex)
 		*resolvedAnchorBufferIndex = 0;
 	if (text.isEmpty() && !hardReturn)
 		return false;
+	const std::optional<LuaCallbackOutputIdentity> adjustedIdentity =
+	    adjustedLuaCallbackOutputIdentity(outputIdentity);
+	const LuaCallbackOutputIdentity &playbackIdentity = adjustedIdentity ? *adjustedIdentity : outputIdentity;
+	if (outputIdentity.lineIdentityState)
+	{
+		flags &= ~LineBookmark;
+		if (playbackIdentity.bookmarkTransferSource.isValid())
+			flags |= LineBookmark;
+	}
 
 	const auto failWrite = [this, outputStreamId, anchorLineNumber, &anchorState]
 	{
@@ -35901,7 +36277,7 @@ bool WorldRuntime::writeLuaCallbackOutputAtLineAnchor(
 	const bool written = writeLuaCallbackOutputSegmentsAtLineAnchor(
 	    anchorLineNumber, anchorRelativeOffset, replaceAnchor, outputPosition, preparedSegments, flags,
 	    outputStreamId, screenDrawLines, std::move(logContext), logicalLogSegments, anchorState,
-	    resolvedAnchorBufferIndex);
+	    resolvedAnchorBufferIndex, playbackIdentity);
 	if (!written)
 		return failWrite();
 	return true;
@@ -36229,7 +36605,8 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
     const LuaCallbackOutputPosition &position, const QVector<LineEntry> &segments, const int flags,
     const quint64 outputStreamId, const QStringList &screenDrawLines, OutputLogCommitContext logContext,
     const QVector<LineEntry>                            &logicalLogSegments,
-    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *const resolvedAnchorBufferIndex)
+    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *const resolvedAnchorBufferIndex,
+    const LuaCallbackOutputIdentity &outputIdentity)
 {
 	if (m_sessionStateOutputBufferSealed || anchorLineNumber <= 0 || anchorRelativeOffset < 0 ||
 	    segments.isEmpty())
@@ -36276,11 +36653,13 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		}
 	}
 
-	auto makeInsertedEntry = [&](const LineEntry &segment)
+	auto makeInsertedEntry = [&](const LineEntry &segment, const bool firstLogicalSegment)
 	{
 		LineEntry entry;
-		entry.text       = segment.text;
-		entry.flags      = flags & ~LineHidden;
+		entry.text  = segment.text;
+		entry.flags = flags & ~LineHidden;
+		if (!firstLogicalSegment)
+			entry.flags &= ~LineBookmark;
 		entry.spans      = segment.spans;
 		entry.hardReturn = segment.hardReturn;
 		entry.time       = QDateTime::currentDateTimeUtc();
@@ -36305,7 +36684,7 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		QVector<LineEntry> entries;
 		entries.reserve(segmentCount - firstSegmentIndex);
 		for (int index = firstSegmentIndex; index < segmentCount; ++index)
-			entries.push_back(makeInsertedEntry(segments.at(index)));
+			entries.push_back(makeInsertedEntry(segments.at(index), index == 0));
 		return entries;
 	};
 	auto fireCompletedLines = [&](const int outputFlags)
@@ -36355,6 +36734,9 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		entry.spans      = firstSegment.spans;
 		entry.hardReturn = firstSegment.hardReturn;
 		insertOutputLineRange(anchorIndex + 1, makeInsertedEntries(1));
+		publishLuaCallbackLineIdentity(outputIdentity.producedLine, anchorLineNumber);
+		transferLuaCallbackLineBookmark(outputIdentity.bookmarkTransferSource, anchorLineNumber);
+		synchronizeLuaCurrentLineAbsoluteNumber();
 		auto cursorIt = m_luaCallbackAfterAnchorInsertionCursors.find({outputStreamId, anchorLineNumber});
 		Q_ASSERT(cursorIt != m_luaCallbackAfterAnchorInsertionCursors.end());
 		cursorIt->anchorPosition             = m_luaCallbackOutputIndexOrigin + anchorIndex;
@@ -36371,6 +36753,9 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		const int    removedHeadCount = enforceOutputLineLimit();
 		const qint64 finalSegmentLineNumber =
 		    retainedLineNumberAfterHeadRemoval(cursorIndex, insertedFinalLineNumber, removedHeadCount);
+		if (mutationIsAtTail)
+			reconcileLuaCurrentLineAfterTailOutput(segments.constLast().hardReturn);
+		publishLuaCallbackCurrentLineIdentity(outputIdentity.resultingCurrentLine);
 		invalidateLuaCallbackLineBufferSnapshot();
 		if (!m_lines.isEmpty())
 		{
@@ -36428,6 +36813,7 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		{
 			*resolvedAnchorBufferIndex = luaCallbackOutputAnchorBufferIndex(outputStreamId, anchorLineNumber);
 		}
+		reconcileLuaCallbackOutputLayout(outputIdentity, true, segmentCount, true);
 		return true;
 	}
 
@@ -36452,9 +36838,13 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		}
 	}
 	insertOutputLineRange(insertIndex, makeInsertedEntries(0));
-	const int    finalSegmentIndex            = insertIndex + segmentCount - 1;
-	const qint64 insertedFinalLineNumber      = m_lines.at(finalSegmentIndex).lineNumber;
-	const bool   convertedReplacementToAppend = replaceAnchor && !effectiveReplaceAnchor;
+	const int    finalSegmentIndex       = insertIndex + segmentCount - 1;
+	const qint64 insertedFirstLineNumber = m_lines.at(insertIndex).lineNumber;
+	const qint64 insertedFinalLineNumber = m_lines.at(finalSegmentIndex).lineNumber;
+	publishLuaCallbackLineIdentity(outputIdentity.producedLine, insertedFirstLineNumber);
+	transferLuaCallbackLineBookmark(outputIdentity.bookmarkTransferSource, insertedFirstLineNumber);
+	synchronizeLuaCurrentLineAbsoluteNumber();
+	const bool convertedReplacementToAppend = replaceAnchor && !effectiveReplaceAnchor;
 	if (anchorRelativeOffset > 0 || convertedReplacementToAppend)
 	{
 		auto cursorIt = m_luaCallbackAfterAnchorInsertionCursors.find({outputStreamId, anchorLineNumber});
@@ -36466,6 +36856,9 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 	const int    removedHeadCount = enforceOutputLineLimit();
 	const qint64 finalSegmentLineNumber =
 	    retainedLineNumberAfterHeadRemoval(finalSegmentIndex, insertedFinalLineNumber, removedHeadCount);
+	if (insertIndex == preMutationSize)
+		reconcileLuaCurrentLineAfterTailOutput(segments.constLast().hardReturn);
+	publishLuaCallbackCurrentLineIdentity(outputIdentity.resultingCurrentLine);
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (!m_lines.isEmpty())
 	{
@@ -36531,6 +36924,7 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 	logCompletedOutputLines(completedLogLines);
 	if (resolvedAnchorBufferIndex)
 		*resolvedAnchorBufferIndex = luaCallbackOutputAnchorBufferIndex(outputStreamId, anchorLineNumber);
+	reconcileLuaCallbackOutputLayout(outputIdentity, true, segmentCount, false);
 	return true;
 }
 
@@ -36543,6 +36937,8 @@ void WorldRuntime::endIncomingLineLuaContext()
 			m_deferredHiddenLuaContextLineBufferIndex = m_luaContextLineBufferIndex;
 			m_deferredHiddenLuaContextLineNumber      = m_luaContextLineNumber;
 			resetIncomingLineLuaContext();
+			setLuaCurrentLinePresent(!m_partialLineText.isEmpty() || !m_partialLineSpans.isEmpty() ||
+			                         m_lines.isEmpty() || m_lines.constLast().hardReturn);
 			invalidateLuaCallbackLineBufferSnapshot();
 			return;
 		}
@@ -36558,6 +36954,11 @@ void WorldRuntime::endIncomingLineLuaContext()
 		}
 	}
 	resetIncomingLineLuaContext();
+	if (!m_luaCurrentLineMetadata)
+	{
+		setLuaCurrentLinePresent(!m_partialLineText.isEmpty() || !m_partialLineSpans.isEmpty() ||
+		                         m_lines.isEmpty() || m_lines.constLast().hardReturn);
+	}
 	invalidateLuaCallbackLineBufferSnapshot();
 }
 
@@ -36722,22 +37123,156 @@ bool WorldRuntime::luaContextLineEntry(int lineNumber, LineEntry &entry) const
 		return true;
 	}
 
-	if (presentation.hasPendingLine && lineNumber == presentation.lineCount())
+	if (presentation.hasPendingLine && lineNumber == presentation.materializedLineCount())
 	{
 		entry            = m_luaPendingContextLineEntry;
 		entry.lineNumber = m_luaContextLineNumber;
 		return true;
 	}
+	if (presentation.hasCurrentLine && lineNumber == presentation.lineCount())
+	{
+		const std::optional<LineEntry> currentLine = luaCurrentLineEntry();
+		if (!currentLine)
+			return false;
+		entry = *currentLine;
+		return true;
+	}
 	return false;
+}
+
+void WorldRuntime::setLuaCurrentLinePresent(const bool present)
+{
+	if (!present)
+	{
+		m_luaCurrentLineMetadata.reset();
+		return;
+	}
+	if (m_luaCurrentLineMetadata)
+		return;
+	m_luaCurrentLineMetadata = newLuaCurrentLineMetadata();
+}
+
+bool WorldRuntime::ensureLuaCurrentLineForPersistedPartialInput()
+{
+	if (m_luaContextLineState != LuaContextLineState::Inactive || m_luaCurrentLineMetadata ||
+	    (m_partialLineText.isEmpty() && m_partialLineSpans.isEmpty()))
+	{
+		return false;
+	}
+
+	setLuaCurrentLinePresent(true);
+	return true;
+}
+
+WorldRuntime::LineEntry WorldRuntime::newLuaCurrentLineMetadata() const
+{
+	LineEntry metadata;
+	metadata.flags      = LineOutput;
+	metadata.hardReturn = false;
+	metadata.time       = QDateTime::currentDateTimeUtc();
+	metadata.lineNumber = m_nextLineNumber;
+	if (m_lineTimer.isValid())
+	{
+		metadata.ticks   = static_cast<double>(m_lineTimer.nsecsElapsed()) / 1000000000.0;
+		metadata.elapsed = metadata.ticks;
+	}
+	else
+	{
+		const double fallback = (m_worldStartTime.isValid() && metadata.time.isValid())
+		                            ? static_cast<double>(m_worldStartTime.msecsTo(metadata.time)) / 1000.0
+		                            : 0.0;
+		metadata.ticks        = fallback;
+		metadata.elapsed      = fallback;
+	}
+	return metadata;
+}
+
+WorldRuntime::StyleSpan WorldRuntime::luaCurrentLineStyleSpan() const
+{
+	const ResolvedOutputColourCache &outputColours = resolvedOutputColourCache();
+	StyleSpan                        span;
+	span.fore = QColor(m_ansiRenderState.fore.isEmpty() ? outputColours.defaultFore : m_ansiRenderState.fore);
+	span.back = QColor(m_ansiRenderState.back.isEmpty() ? outputColours.defaultBack : m_ansiRenderState.back);
+	if (!span.fore.isValid())
+		span.fore = Qt::white;
+	if (!span.back.isValid())
+		span.back = Qt::black;
+	span.bold       = m_ansiRenderState.bold;
+	span.underline  = m_ansiRenderState.underline;
+	span.italic     = m_ansiRenderState.italic;
+	span.blink      = m_ansiRenderState.blink;
+	span.strike     = m_ansiRenderState.strike;
+	span.inverse    = m_ansiRenderState.inverse;
+	span.actionType = m_ansiRenderState.actionType;
+	span.action     = m_ansiRenderState.action;
+	span.hint       = m_ansiRenderState.hint;
+	span.variable   = m_ansiRenderState.variable;
+	span.startTag   = m_ansiRenderState.startTag;
+	return span;
+}
+
+WorldRuntime::LineEntry WorldRuntime::luaCurrentLineTemplate() const
+{
+	LineEntry entry = m_luaCurrentLineMetadata ? *m_luaCurrentLineMetadata : newLuaCurrentLineMetadata();
+	entry.text.clear();
+	entry.flags      = LineOutput;
+	entry.hardReturn = false;
+	entry.spans      = {luaCurrentLineStyleSpan()};
+	return entry;
+}
+
+void WorldRuntime::reconcileLuaCurrentLineAfterTailOutput(const bool hardReturn)
+{
+	if (m_luaCurrentLineMetadata && !m_partialLineText.isEmpty())
+	{
+		m_luaCurrentLineMetadata->lineNumber = m_nextLineNumber;
+		return;
+	}
+	m_luaCurrentLineMetadata.reset();
+	setLuaCurrentLinePresent(hardReturn);
+}
+
+void WorldRuntime::synchronizeLuaCurrentLineAbsoluteNumber()
+{
+	if (!m_luaCurrentLineMetadata || m_luaCurrentLineMetadata->lineNumber == m_nextLineNumber)
+		return;
+	m_luaCurrentLineMetadata->lineNumber = m_nextLineNumber;
+	invalidateLuaCallbackCurrentLineSnapshot();
+}
+
+std::optional<WorldRuntime::LineEntry> WorldRuntime::luaCurrentLineEntry() const
+{
+	if (!m_luaCurrentLineMetadata)
+		return std::nullopt;
+
+	LineEntry entry  = *m_luaCurrentLineMetadata;
+	entry.text       = m_partialLineText;
+	entry.flags      = LineOutput | (m_luaCurrentLineBookmarked ? LineBookmark : 0);
+	entry.hardReturn = false;
+	entry.spans      = m_partialLineSpans;
+	if (entry.spans.isEmpty())
+	{
+		StyleSpan span = luaCurrentLineStyleSpan();
+		span.length    = safeQSizeToInt(entry.text.size());
+		entry.spans.push_back(std::move(span));
+	}
+	else
+	{
+		StyleSpan currentStyle = luaCurrentLineStyleSpan();
+		if (!entry.spans.constLast().hasSameStyleAttributes(currentStyle))
+			entry.spans.push_back(std::move(currentStyle));
+	}
+	return entry;
 }
 
 WorldRuntime::LuaContextBufferPresentation WorldRuntime::luaContextBufferPresentation() const
 {
-	return {
-	    safeQSizeToInt(m_lines.size()),
-	    deferredHiddenIncomingLineIndex(),
-	    m_luaContextLineState == LuaContextLineState::Pending,
-	};
+	LuaContextBufferPresentation presentation;
+	presentation.physicalLineCount           = safeQSizeToInt(m_lines.size());
+	presentation.deferredHiddenPhysicalIndex = deferredHiddenIncomingLineIndex();
+	presentation.hasPendingLine              = m_luaContextLineState == LuaContextLineState::Pending;
+	presentation.hasCurrentLine              = m_luaCurrentLineMetadata.has_value();
+	return presentation;
 }
 
 const WorldRuntime::LineEntry *
@@ -36770,7 +37305,7 @@ bool WorldRuntime::resolveLuaCallbackMatchedLineEntry(const int    preferredBuff
 	{
 		entry               = m_luaPendingContextLineEntry;
 		entry.lineNumber    = m_luaContextLineNumber;
-		resolvedBufferIndex = presentation.lineCount();
+		resolvedBufferIndex = presentation.materializedLineCount();
 		return true;
 	};
 	if (m_luaContextLineNumber == absoluteLineNumber)
@@ -36792,7 +37327,7 @@ bool WorldRuntime::resolveLuaCallbackMatchedLineEntry(const int    preferredBuff
 	{
 		return acceptStoredEntry(preferredBufferIndex, *preferredEntry);
 	}
-	if (presentation.hasPendingLine && preferredBufferIndex == presentation.lineCount() &&
+	if (presentation.hasPendingLine && preferredBufferIndex == presentation.materializedLineCount() &&
 	    m_luaContextLineNumber == absoluteLineNumber)
 	{
 		return acceptPendingEntry();
@@ -36847,22 +37382,23 @@ bool WorldRuntime::luaContextLineEntryByAbsoluteNumber(const qint64 absoluteLine
 	return false;
 }
 
-int WorldRuntime::luaContextLinePageByBufferIndex(const int firstBufferIndex, const int lastBufferIndex,
-                                                  quint64               &lineBufferGeneration,
-                                                  QHash<int, LineEntry> &entries,
-                                                  QStringList           &recentLinesSnapshot,
-                                                  const bool             includeRecentLines) const
+int WorldRuntime::luaContextLinePageByBufferIndex(
+    const int firstBufferIndex, const int lastBufferIndex, quint64 &lineBufferGeneration,
+    QHash<int, LineEntry> &entries, QStringList &recentLinesSnapshot, const bool includeRecentLines,
+    int *const materializedLineBufferCount, std::optional<LineEntry> *const currentLine,
+    LineEntry *const currentLineTemplate) const
 {
 	if (QThread::currentThread() != thread())
 	{
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), 0,
-		                          [this, firstBufferIndex, lastBufferIndex, &lineBufferGeneration, &entries,
-		                           &recentLinesSnapshot, includeRecentLines]
-		                          {
-			                          return luaContextLinePageByBufferIndex(
-			                              firstBufferIndex, lastBufferIndex, lineBufferGeneration, entries,
-			                              recentLinesSnapshot, includeRecentLines);
-		                          });
+		return qmudInvokeMethodOr(
+		    const_cast<WorldRuntime *>(this), 0,
+		    [this, firstBufferIndex, lastBufferIndex, &lineBufferGeneration, &entries, &recentLinesSnapshot,
+		     includeRecentLines, materializedLineBufferCount, currentLine, currentLineTemplate]
+		    {
+			    return luaContextLinePageByBufferIndex(
+			        firstBufferIndex, lastBufferIndex, lineBufferGeneration, entries, recentLinesSnapshot,
+			        includeRecentLines, materializedLineBufferCount, currentLine, currentLineTemplate);
+		    });
 	}
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::luaContextLinePageByBufferIndex");
 	entries.clear();
@@ -36870,20 +37406,27 @@ int WorldRuntime::luaContextLinePageByBufferIndex(const int firstBufferIndex, co
 	lineBufferGeneration = m_luaCallbackLineBufferSnapshotGeneration;
 	if (includeRecentLines)
 		recentLinesSnapshot = recentLines();
-	const int lineBufferCount = luaContextLinesInBufferCount();
+	const LuaContextBufferPresentation presentation    = luaContextBufferPresentation();
+	const int                          lineBufferCount = presentation.lineCount();
+	if (materializedLineBufferCount)
+		*materializedLineBufferCount = presentation.materializedLineCount();
+	if (currentLine)
+		*currentLine = luaCurrentLineEntry();
+	if (currentLineTemplate)
+		*currentLineTemplate = luaCurrentLineTemplate();
 	if (firstBufferIndex == 0 && lastBufferIndex == 0)
 	{
-		if (lineBufferCount > 0)
+		if (presentation.materializedLineCount() > 0)
 		{
 			LineEntry entry;
-			if (luaContextLineEntry(lineBufferCount, entry))
-				entries.insert(lineBufferCount, std::move(entry));
+			if (luaContextLineEntry(presentation.materializedLineCount(), entry))
+				entries.insert(presentation.materializedLineCount(), std::move(entry));
 		}
 		return lineBufferCount;
 	}
 	if (firstBufferIndex <= 0 || lastBufferIndex < firstBufferIndex)
 		return lineBufferCount;
-	const int boundedLastBufferIndex = qMin(lastBufferIndex, lineBufferCount);
+	const int boundedLastBufferIndex = qMin(lastBufferIndex, presentation.materializedLineCount());
 	for (int lineNumber = firstBufferIndex; lineNumber <= boundedLastBufferIndex; ++lineNumber)
 	{
 		LineEntry entry;

@@ -64,6 +64,208 @@ struct lua_State;
 #endif
 
 /**
+ * @brief Shared runtime identities for lines created by one deferred Lua callback output sequence.
+ *
+ * Identity numbers are allocated by the Lua worker. Ordered output playback publishes and resolves committed line
+ * numbers on the runtime thread, so the runtime-owned table itself needs no cross-thread synchronization.
+ */
+class LuaCallbackDeferredLineIdentityState final
+{
+	public:
+		/**
+		 * @brief Allocates one nonzero deferred line identity.
+		 * @return Process-local identity within this callback output sequence.
+		 */
+		[[nodiscard]] quint64 allocateIdentity() noexcept
+		{
+			return m_nextIdentity.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		/**
+		 * @brief Publishes the runtime line committed for one deferred identity.
+		 * @param identity Deferred identity allocated by @ref allocateIdentity.
+		 * @param absoluteLineNumber Committed `LineEntry::lineNumber` value.
+		 */
+		void publish(const quint64 identity, const qint64 absoluteLineNumber)
+		{
+			if (identity == 0 || absoluteLineNumber <= 0 ||
+			    identity > static_cast<quint64>(std::numeric_limits<qsizetype>::max()))
+			{
+				return;
+			}
+			const auto index = static_cast<qsizetype>(identity - 1);
+			if (m_absoluteLineNumbers.size() <= index)
+				m_absoluteLineNumbers.resize(index + 1);
+			m_absoluteLineNumbers[index] = absoluteLineNumber;
+		}
+
+		/**
+		 * @brief Resolves one deferred identity during ordered runtime playback.
+		 * @param identity Deferred identity allocated by @ref allocateIdentity.
+		 * @return Committed absolute line number, or zero before a successful output commit.
+		 */
+		[[nodiscard]] qint64 resolve(const quint64 identity) const
+		{
+			if (identity == 0 || identity > static_cast<quint64>(m_absoluteLineNumbers.size()))
+				return 0;
+			return m_absoluteLineNumbers.at(static_cast<qsizetype>(identity - 1));
+		}
+
+		/**
+		 * @brief Records that canonical output playback produced a different physical layout than the callback overlay.
+		 * @param exactIdentitiesRemainReliable Whether every published deferred identity still names the callback-visible
+		 * line represented by that identity.
+		 */
+		void markLayoutDiverged(const bool exactIdentitiesRemainReliable) noexcept
+		{
+			if (!exactIdentitiesRemainReliable)
+			{
+				m_layoutState.store(LayoutState::DivergedWithUnreliableIdentities, std::memory_order_release);
+				return;
+			}
+
+			LayoutState expected = LayoutState::Exact;
+			static_cast<void>(
+			    m_layoutState.compare_exchange_strong(expected, LayoutState::DivergedWithReliableIdentities,
+			                                          std::memory_order_release, std::memory_order_relaxed));
+		}
+
+		/**
+		 * @brief Tests whether canonical output playback diverged from the callback overlay's line layout.
+		 * @return `true` after any output in this callback sequence produced a different physical layout.
+		 */
+		[[nodiscard]] bool layoutDiverged() const noexcept
+		{
+			return m_layoutState.load(std::memory_order_acquire) != LayoutState::Exact;
+		}
+
+		/**
+		 * @brief Tests whether published deferred identities still identify their callback-visible lines exactly.
+		 * @return `true` until incomplete or multi-line playback makes an identity ambiguous.
+		 */
+		[[nodiscard]] bool exactIdentitiesRemainReliable() const noexcept
+		{
+			return m_layoutState.load(std::memory_order_acquire) !=
+			       LayoutState::DivergedWithUnreliableIdentities;
+		}
+
+	private:
+		enum class LayoutState : quint8
+		{
+			Exact,
+			DivergedWithReliableIdentities,
+			DivergedWithUnreliableIdentities
+		};
+
+		std::atomic<quint64>     m_nextIdentity{1};
+		std::atomic<LayoutState> m_layoutState{LayoutState::Exact};
+		QVector<qint64>          m_absoluteLineNumbers;
+};
+
+/**
+ * @brief Reference to one line in a shared deferred callback output identity sequence.
+ */
+struct LuaCallbackDeferredLineIdentity final
+{
+		std::shared_ptr<LuaCallbackDeferredLineIdentityState>
+		                   state;       ///< Shared callback output identity state.
+		quint64            identity{0}; ///< Identity within @ref state.
+
+		/**
+		 * @brief Tests whether this reference can be published and resolved.
+		 * @return `true` when both the shared state and nonzero identity are present.
+		 */
+		[[nodiscard]] bool isValid() const noexcept
+		{
+			return state && identity > 0;
+		}
+};
+
+/**
+ * @brief Sparse callback-visible index of deferred output-line identities.
+ *
+ * Raw hash keys include a monotonically increasing origin. Advancing that origin after output-buffer head eviction
+ * shifts every retained identity in constant time without rebuilding the hash.
+ */
+class LuaCallbackDeferredLineIdentityIndex final
+{
+	public:
+		/**
+		 * @brief Returns the deferred identity at one callback-visible buffer position.
+		 * @param bufferIndex One-based callback-visible buffer position.
+		 * @return Deferred identity at the requested position, or an empty identity when none is tracked.
+		 */
+		[[nodiscard]] LuaCallbackDeferredLineIdentity value(const int bufferIndex) const
+		{
+			return bufferIndex > 0 ? m_identities.value(m_origin + bufferIndex)
+			                       : LuaCallbackDeferredLineIdentity{};
+		}
+
+		/**
+		 * @brief Stores a deferred identity at one callback-visible buffer position.
+		 * @param bufferIndex One-based callback-visible buffer position.
+		 * @param identity Deferred identity to store.
+		 */
+		void insert(const int bufferIndex, const LuaCallbackDeferredLineIdentity &identity)
+		{
+			if (bufferIndex > 0)
+				m_identities.insert(m_origin + bufferIndex, identity);
+		}
+
+		/**
+		 * @brief Removes identities in an inclusive callback-visible position range.
+		 * @param firstBufferIndex First one-based position to remove.
+		 * @param lastBufferIndex Last one-based position to remove.
+		 */
+		void removeRange(const int firstBufferIndex, const int lastBufferIndex)
+		{
+			if (firstBufferIndex <= 0 || lastBufferIndex < firstBufferIndex || m_identities.isEmpty())
+				return;
+
+			const qint64 firstKey  = m_origin + firstBufferIndex;
+			const qint64 lastKey   = m_origin + lastBufferIndex;
+			const qint64 rangeSize = static_cast<qint64>(lastBufferIndex) - firstBufferIndex + 1;
+			if (rangeSize < m_identities.size())
+			{
+				for (qint64 key = firstKey; key <= lastKey; ++key)
+					m_identities.remove(key);
+				return;
+			}
+
+			for (auto it = m_identities.begin(); it != m_identities.end();)
+			{
+				if (it.key() >= firstKey && it.key() <= lastKey)
+					it = m_identities.erase(it);
+				else
+					++it;
+			}
+		}
+
+		/**
+		 * @brief Removes callback-visible head positions and shifts every retained identity left logically.
+		 * @param count Number of leading positions removed by output-buffer trimming.
+		 */
+		void removeHead(const int count)
+		{
+			if (count <= 0)
+				return;
+			removeRange(1, count);
+			m_origin += count;
+		}
+
+		/** @brief Removes all deferred identities and resets the callback-visible position origin. */
+		void clear()
+		{
+			m_identities.clear();
+			m_origin = 0;
+		}
+
+	private:
+		QHash<qint64, LuaCallbackDeferredLineIdentity> m_identities;
+		qint64                                         m_origin{0};
+};
+
+/**
  * @brief Shared cancellation generation for callbacks derived from one world connection.
  *
  * Network and reload ingress retain this object through queued callback commands and mutation journals. Replacing
@@ -1808,12 +2010,21 @@ struct LuaCallbackLineEntrySnapshot
  */
 struct LuaCallbackLineBufferSnapshot
 {
-		quint64                                  lineBufferGeneration{0};
-		int                                      lineBufferCount{0};
-		int                                      firstCapturedLineBufferIndex{0};
-		int                                      lastCapturedLineBufferIndex{0};
-		QHash<int, LuaCallbackLineEntrySnapshot> lineEntriesByBufferIndex;
-		QStringList                              recentLinesSnapshot;
+		/** Generation of the materialized output-buffer presentation. */
+		quint64                                     lineBufferGeneration{0};
+		/** Generation of the independently refreshed non-stored current line. */
+		quint64                                     currentLineGeneration{0};
+		int                                         lineBufferCount{0};
+		/** Number of Lua-visible entries backed by output storage or the active incoming line. */
+		int                                         materializedLineBufferCount{-1};
+		/** Runtime-captured metadata and active style for constructing a non-stored current line. */
+		std::optional<LuaCallbackLineEntrySnapshot> currentLineTemplate;
+		/** Non-stored MUSHclient-compatible current line, when one follows the materialized lines. */
+		std::optional<LuaCallbackLineEntrySnapshot> currentLine;
+		int                                         firstCapturedLineBufferIndex{0};
+		int                                         lastCapturedLineBufferIndex{0};
+		QHash<int, LuaCallbackLineEntrySnapshot>    lineEntriesByBufferIndex;
+		QStringList                                 recentLinesSnapshot;
 };
 
 /**
@@ -3287,53 +3498,65 @@ struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
 		/** MUSHclient WindowAddHotspot recursion guard inherited by this callback dispatch. */
 		bool                                                            windowAddHotspotReentryBlocked{false};
 		QString                                                         geometryConstrainedMiniWindowName;
-		int                                                 geometryConstraintDisplayClientHeight{0};
-		int                                                 geometryConstraintDisplayClientWidth{0};
-		double                                              absoluteMiniWindowScaleXOver{1.0};
-		double                                              absoluteMiniWindowScaleYOver{1.0};
-		double                                              absoluteMiniWindowScaleXUnder{1.0};
-		double                                              absoluteMiniWindowScaleYUnder{1.0};
-		bool                                                hasRuntimeCountersSnapshot{false};
-		LuaCallbackRuntimeCountersSnapshotState             runtimeCountersSnapshotState;
+		int                                                   geometryConstraintDisplayClientHeight{0};
+		int                                                   geometryConstraintDisplayClientWidth{0};
+		double                                                absoluteMiniWindowScaleXOver{1.0};
+		double                                                absoluteMiniWindowScaleYOver{1.0};
+		double                                                absoluteMiniWindowScaleXUnder{1.0};
+		double                                                absoluteMiniWindowScaleYUnder{1.0};
+		bool                                                  hasRuntimeCountersSnapshot{false};
+		LuaCallbackRuntimeCountersSnapshotState               runtimeCountersSnapshotState;
 		// Dispatch-sampled external/asynchronous domains.
-		bool                                                hasChatSnapshot{false};
-		QList<long>                                         chatConnectionIdsSnapshot;
-		QHash<long, QHash<int, QVariant>>                   chatInfoValuesById;
-		QHash<long, QHash<QString, QVariant>>               chatOptionValuesById;
-		QHash<QString, long>                                chatIdsByLookupKey;
+		bool                                                  hasChatSnapshot{false};
+		QList<long>                                           chatConnectionIdsSnapshot;
+		QHash<long, QHash<int, QVariant>>                     chatInfoValuesById;
+		QHash<long, QHash<QString, QVariant>>                 chatOptionValuesById;
+		QHash<QString, long>                                  chatIdsByLookupKey;
 		// Dispatch-sampled cross-runtime and backend state.
-		bool                                                hasUdpPortSnapshot{false};
-		QList<int>                                          udpPortsSnapshot;
-		QHash<int, QString>                                 udpListenerPluginIdsByPort;
-		bool                                                hasUsedUdpPortsSnapshot{false};
-		QSet<int>                                           usedUdpPortsSnapshot;
-		QHash<int, int>                                     usedUdpPortReferenceCountsSnapshot;
-		QHash<int, int>                                     soundStatusByBuffer;
+		bool                                                  hasUdpPortSnapshot{false};
+		QList<int>                                            udpPortsSnapshot;
+		QHash<int, QString>                                   udpListenerPluginIdsByPort;
+		bool                                                  hasUsedUdpPortsSnapshot{false};
+		QSet<int>                                             usedUdpPortsSnapshot;
+		QHash<int, int>                                       usedUdpPortReferenceCountsSnapshot;
+		QHash<int, int>                                       soundStatusByBuffer;
 		// Request-local callback line context and overlays.
-		bool                                                hasLineBufferSnapshot{false};
-		int                                                 lineBufferCount{0};
-		QSharedPointer<const LuaCallbackLineBufferSnapshot> lineBufferSnapshot;
-		QHash<int, LuaCallbackLineEntrySnapshot>            lineEntriesByBufferIndex;
-		bool                                                hasCallbackOutputAnchor{false};
-		int                                                 callbackOutputAnchorBufferIndex{0};
-		qint64                                              callbackOutputAnchorAbsoluteNumber{0};
-		bool                                                callbackOutputAnchorIsActiveIncoming{false};
-		bool                                                callbackOutputAnchorIsHidden{false};
+		bool                                                  hasLineBufferSnapshot{false};
+		int                                                   lineBufferCount{0};
+		int                                                   materializedLineBufferCount{-1};
+		std::optional<LuaCallbackLineEntrySnapshot>           currentLineTemplate;
+		std::optional<LuaCallbackLineEntrySnapshot>           currentLine;
+		QSharedPointer<const LuaCallbackLineBufferSnapshot>   lineBufferSnapshot;
+		QHash<int, LuaCallbackLineEntrySnapshot>              lineEntriesByBufferIndex;
+		/** Whether @ref deferredLineIdentityIndex is an authoritative context snapshot. */
+		bool                                                  hasDeferredLineIdentitySnapshot{false};
+		/** Deferred identities for callback-created lines indexed by callback-visible presentation position. */
+		LuaCallbackDeferredLineIdentityIndex                  deferredLineIdentityIndex;
+		/** Shared output-layout state used by deferred line identities in this callback sequence. */
+		std::shared_ptr<LuaCallbackDeferredLineIdentityState> deferredLineIdentityState;
+		bool                                                  hasCallbackOutputAnchor{false};
+		int                                                   callbackOutputAnchorBufferIndex{0};
+		qint64                                                callbackOutputAnchorAbsoluteNumber{0};
+		bool                                                  callbackOutputAnchorIsActiveIncoming{false};
+		bool                                                  callbackOutputAnchorIsHidden{false};
 		// Deferred output playback and promoted runtime cursors share this state across immutable
 		// snapshots. Queued and suspended callbacks therefore retain position and presentation without a scan.
-		std::shared_ptr<LuaCallbackOutputAnchorState>       callbackOutputAnchorState;
-		bool                                                triggerMatchedLineSnapshotResolved{false};
-		bool                                                hasTriggerMatchedLineSnapshot{false};
-		int                                                 triggerMatchedLineBufferIndex{0};
-		qint64                                              triggerMatchedLineAbsoluteNumber{0};
-		LuaCallbackLineEntrySnapshot                        triggerMatchedLineSnapshot;
-		bool                                                hasLineBufferDeltaSnapshot{false};
-		bool                                                hasLineBufferCountDelta{false};
-		int                                                 lineBufferDeltaCount{0};
-		QHash<int, LuaCallbackLineEntrySnapshot>            lineEntryDeltasByBufferIndex;
-		QSet<int>                                           missingLineEntryDeltasByBufferIndex;
-		bool                                                linePresentationRequiresRefresh{false};
-		bool                                                outputScrollPositionRequiresRefresh{false};
+		std::shared_ptr<LuaCallbackOutputAnchorState>         callbackOutputAnchorState;
+		bool                                                  triggerMatchedLineSnapshotResolved{false};
+		bool                                                  hasTriggerMatchedLineSnapshot{false};
+		int                                                   triggerMatchedLineBufferIndex{0};
+		qint64                                                triggerMatchedLineAbsoluteNumber{0};
+		LuaCallbackLineEntrySnapshot                          triggerMatchedLineSnapshot;
+		bool                                                  hasLineBufferDeltaSnapshot{false};
+		bool                                                  hasLineBufferCountDelta{false};
+		int                                                   lineBufferDeltaCount{0};
+		int                                                   materializedLineBufferDeltaCount{-1};
+		bool                                                  currentLineDeltaPresent{false};
+		std::optional<LuaCallbackLineEntrySnapshot>           currentLineDelta;
+		QHash<int, LuaCallbackLineEntrySnapshot>              lineEntryDeltasByBufferIndex;
+		QSet<int>                                             missingLineEntryDeltasByBufferIndex;
+		bool                                                  linePresentationRequiresRefresh{false};
+		bool                                                  outputScrollPositionRequiresRefresh{false};
 		bool                                             miniWindowGeometryConstraintRequiresRefresh{false};
 		bool                                             recentLinesSnapshotInvalidated{false};
 		bool                                             hasRecentLinesSnapshot{false};

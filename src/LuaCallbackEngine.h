@@ -655,7 +655,7 @@ class LuaCallbackEngine
 		/**
 		 * @brief Resolves an entry from the last bounded line page when its presentation is unchanged.
 		 * @param runtime Runtime whose presentation owns the page.
-		 * @param lineBufferGeneration Current output-buffer presentation generation.
+		 * @param lineBufferGeneration Current materialized output-buffer presentation generation.
 		 * @param lineNumber One-based presentation index.
 		 * @param entry Output cached entry.
 		 * @return `true` when the entry is present in the cached page.
@@ -668,7 +668,7 @@ class LuaCallbackEngine
 		/**
 		 * @brief Returns the presentation range covered by the last bounded line page.
 		 * @param runtime Runtime whose presentation owns the page.
-		 * @param lineBufferGeneration Current output-buffer presentation generation.
+		 * @param lineBufferGeneration Current materialized output-buffer presentation generation.
 		 * @param firstLine Output first one-based presentation index.
 		 * @param lastLine Output last one-based presentation index.
 		 * @return `true` when a page for the requested generation is cached.
@@ -678,7 +678,7 @@ class LuaCallbackEngine
 		/**
 		 * @brief Replaces the bounded line-page cache for one runtime.
 		 * @param runtime Runtime whose presentation owns the page.
-		 * @param lineBufferGeneration Output-buffer presentation generation captured with the page.
+		 * @param lineBufferGeneration Materialized output-buffer presentation generation captured with the page.
 		 * @param firstLine First one-based presentation index covered by the page.
 		 * @param lastLine Last one-based presentation index covered by the page.
 		 * @param entries Page entries keyed by one-based presentation index.

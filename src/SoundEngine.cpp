@@ -504,14 +504,10 @@ namespace
 			{
 			}
 
-			/** @brief Initializes codec filters and event-loop-owned watcher state on the I/O thread. */
+			/** @brief Initializes event-loop-owned watcher state on the I/O thread. */
 			void initialize()
 			{
 				Q_ASSERT(QThread::currentThread() == thread());
-				const QSet<QString> &suffixes = soundPlaybackSupportedFileSuffixes();
-				m_soundNameFilters.reserve(suffixes.size());
-				for (const QString &suffix : suffixes)
-					m_soundNameFilters.push_back(QStringLiteral("*.%1").arg(suffix));
 				m_fileWatcher = std::make_unique<QFileSystemWatcher>();
 				connect(m_fileWatcher.get(), &QFileSystemWatcher::directoryChanged, this,
 				        [this](const QString &path) { handleWatchedDirectoryChanged(path); });
@@ -537,6 +533,13 @@ namespace
 				{
 					publishCatalogCleared(true);
 					return;
+				}
+				if (m_soundNameFilters.isEmpty())
+				{
+					const QSet<QString> &suffixes = soundPlaybackSupportedFileSuffixes();
+					m_soundNameFilters.reserve(suffixes.size());
+					for (const QString &suffix : suffixes)
+						m_soundNameFilters.push_back(QStringLiteral("*.%1").arg(suffix));
 				}
 				static_cast<void>(watchDirectory(m_qmudHome));
 				m_soundsPath = QMudPluginPathUtils::normalizeSeparators(

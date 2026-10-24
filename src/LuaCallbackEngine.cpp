@@ -575,6 +575,8 @@ static void          emitPluginAsyncResult(WorldRuntime &runtime, const LuaPlugi
                                            const QString &payload = QString());
 static void          reportLuaError(const LuaCallbackEngine &engine, const QString &message);
 static constexpr int kLuaLinePageYieldUnavailable = std::numeric_limits<int>::min();
+static bool          callbackLineLookupNeedsPage(const LuaCallbackEngine *engine, const WorldRuntime *runtime,
+                                                 int lineNumber);
 static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldRuntime *runtime,
                                  int lineNumber, lua_KFunction continuation, bool forceRecentLines = false);
 static int luaGetInfoOutputPresentationContinuation(lua_State *L, int status, lua_KContext context);
@@ -847,13 +849,18 @@ namespace
 
 	struct LuaCallbackExecutionContext
 	{
-			bool                                                originatedFromCallback{false};
-			bool                                                insidePlaySoundCallback{false};
-			CallbackWildcardDomain                              wildcardDomain{CallbackWildcardDomain::None};
-			QString                                             callbackLabelKey;
-			QStringList                                         wildcards;
-			QMap<QString, QString>                              namedWildcards;
-			QHash<int, WorldRuntime::LineEntry>                 lineEntries;
+			bool                                 originatedFromCallback{false};
+			bool                                 insidePlaySoundCallback{false};
+			CallbackWildcardDomain               wildcardDomain{CallbackWildcardDomain::None};
+			QString                              callbackLabelKey;
+			QStringList                          wildcards;
+			QMap<QString, QString>               namedWildcards;
+			QHash<int, WorldRuntime::LineEntry>  lineEntries;
+			LuaCallbackDeferredLineIdentityIndex deferredLineIdentityIndex;
+			std::shared_ptr<LuaCallbackDeferredLineIdentityState> deferredLineIdentityState;
+			std::optional<WorldRuntime::LuaCallbackLineIdentity>  bookmarkIdentityAfterLineMutationBoundary;
+			int bookmarkRequestLineAfterLineMutationBoundary{0};
+			int bookmarkOverlayLineAfterLineMutationBoundary{0};
 			QSharedPointer<const LuaCallbackLineBufferSnapshot> lineBufferSnapshot;
 			QSet<int>                                           missingLineEntries;
 			QSet<int>                                           pagedLineIndexes;
@@ -863,6 +870,7 @@ namespace
 			bool                                                hasLineBufferSnapshot{false};
 			bool                                                hasLineBufferMutationSnapshot{false};
 			bool                                                hasLineBufferCountMutation{false};
+			bool                                                bookmarkLineLayoutBoundaryCurrent{false};
 			bool                                                linePresentationRequiresRefresh{false};
 			bool                                                outputScrollPositionRequiresRefresh{false};
 			bool                                                outputScrollPositionChanged{false};
@@ -880,6 +888,10 @@ namespace
 			std::shared_ptr<LuaCallbackOutputAnchorState> callbackOutputAnchorState;
 			int                                           bufferedLineCount{0};
 			bool                                          hasBufferedLineCount{false};
+			int                                           materializedLineBufferCount{0};
+			std::optional<WorldRuntime::LineEntry>        currentLineTemplate;
+			std::optional<WorldRuntime::LineEntry>        currentLine;
+			bool                                          currentLineMutated{false};
 			QHash<int, QStringList>                       recentLinesByCount;
 			QStringList                                   recentLinesSnapshot;
 			bool                                          recentLinesSnapshotInvalidated{false};
@@ -1981,6 +1993,12 @@ namespace
 			cacheHit = true;
 			return false;
 		}
+		if (context->currentLine && lineNumber == context->materializedLineBufferCount + 1)
+		{
+			entry    = *context->currentLine;
+			cacheHit = true;
+			return true;
+		}
 		if (context->lineEntries.contains(lineNumber))
 		{
 			entry    = context->lineEntries.value(lineNumber);
@@ -2059,6 +2077,88 @@ namespace
 		context->mutatedLineEntries.insert(lineNumber);
 	}
 
+	void cacheCallbackCurrentLine(const LuaCallbackEngine               *engine,
+	                              std::optional<WorldRuntime::LineEntry> currentLine, const bool mutated)
+	{
+		auto *context = activeCallbackContext(engine);
+		if (!context)
+			return;
+		context->currentLine = std::move(currentLine);
+		if (mutated)
+		{
+			context->currentLineMutated            = true;
+			context->hasLineBufferMutationSnapshot = true;
+		}
+		context->bufferedLineCount =
+		    context->materializedLineBufferCount + (context->currentLine.has_value() ? 1 : 0);
+		context->hasBufferedLineCount = true;
+	}
+
+	/**
+	 * @brief Returns the runtime-captured metadata and active style for a callback-created current line.
+	 * @param context Active callback execution context.
+	 * @return Empty current-line template with valid metadata and style.
+	 */
+	WorldRuntime::LineEntry callbackCurrentLineTemplate(const LuaCallbackExecutionContext &context)
+	{
+		WorldRuntime::LineEntry result;
+		if (context.currentLineTemplate)
+			result = *context.currentLineTemplate;
+		else if (context.currentLine)
+			result = *context.currentLine;
+		result.text.clear();
+		result.flags      = WorldRuntime::LineOutput;
+		result.hardReturn = false;
+		WorldRuntime::StyleSpan style;
+		if (!result.spans.isEmpty())
+			style = result.spans.constLast();
+		if (!style.fore.isValid())
+			style.fore = Qt::white;
+		if (!style.back.isValid())
+			style.back = Qt::black;
+		style.length = 0;
+		result.spans = {std::move(style)};
+		return result;
+	}
+
+	/**
+	 * @brief Creates a callback-visible current line from the runtime template.
+	 * @param context Active callback execution context.
+	 * @param preservedMetadata Existing current line whose identity and timing must be retained, or `nullptr`.
+	 * @param lineNumber Required absolute line number, or zero to retain the template identity.
+	 * @return Empty current line with coherent identity, timing, and active output style.
+	 */
+	WorldRuntime::LineEntry makeCallbackCurrentLine(const LuaCallbackExecutionContext &context,
+	                                                const WorldRuntime::LineEntry     *preservedMetadata,
+	                                                const qint64                       lineNumber)
+	{
+		WorldRuntime::LineEntry result = callbackCurrentLineTemplate(context);
+		if (preservedMetadata)
+		{
+			result.time       = preservedMetadata->time;
+			result.lineNumber = preservedMetadata->lineNumber;
+			result.ticks      = preservedMetadata->ticks;
+			result.elapsed    = preservedMetadata->elapsed;
+		}
+		else
+		{
+			const QDateTime now = QDateTime::currentDateTimeUtc();
+			if (result.time.isValid())
+			{
+				const double elapsedSinceTemplate =
+				    static_cast<double>(qMax<qint64>(0, result.time.msecsTo(now))) / 1000.0;
+				result.ticks += elapsedSinceTemplate;
+				result.elapsed += elapsedSinceTemplate;
+			}
+			result.time = now;
+		}
+		if (lineNumber > 0)
+			result.lineNumber = qMax(result.lineNumber, lineNumber);
+		if (result.lineNumber <= 0)
+			result.lineNumber = 1;
+		return result;
+	}
+
 	bool tryResolveCallbackLineCountFromCache(const LuaCallbackEngine *engine, int &lineCount)
 	{
 		const auto *context = activeCallbackContextConst(engine);
@@ -2101,16 +2201,34 @@ namespace
 				context->missingLineEntries.remove(lineIndex);
 			}
 		}
+		context->deferredLineIdentityIndex.clear();
+		context->deferredLineIdentityState.reset();
 		context->pagedLineIndexes.clear();
-		context->lineBufferSnapshot              = presentation;
-		context->hasLineBufferSnapshot           = true;
-		context->lineBufferGeneration            = presentation->lineBufferGeneration;
-		context->hasLineBufferGeneration         = true;
-		context->bufferedLineCount               = qMax(0, presentation->lineBufferCount);
-		context->hasBufferedLineCount            = true;
-		context->hasLineBufferMutationSnapshot   = false;
-		context->hasLineBufferCountMutation      = false;
-		context->linePresentationRequiresRefresh = false;
+		context->lineBufferSnapshot      = presentation;
+		context->hasLineBufferSnapshot   = true;
+		context->lineBufferGeneration    = presentation->lineBufferGeneration;
+		context->hasLineBufferGeneration = true;
+		context->bufferedLineCount       = qMax(0, presentation->lineBufferCount);
+		context->hasBufferedLineCount    = true;
+		context->materializedLineBufferCount =
+		    presentation->materializedLineBufferCount >= 0
+		        ? qBound(0, presentation->materializedLineBufferCount, context->bufferedLineCount)
+		        : context->bufferedLineCount;
+		context->currentLineTemplate =
+		    presentation->currentLineTemplate
+		        ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(*presentation->currentLineTemplate))
+		        : std::nullopt;
+		context->currentLine =
+		    presentation->currentLine
+		        ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(*presentation->currentLine))
+		        : std::nullopt;
+		context->bufferedLineCount =
+		    context->materializedLineBufferCount + (context->currentLine.has_value() ? 1 : 0);
+		context->hasLineBufferMutationSnapshot     = false;
+		context->hasLineBufferCountMutation        = false;
+		context->bookmarkLineLayoutBoundaryCurrent = false;
+		context->currentLineMutated                = false;
+		context->linePresentationRequiresRefresh   = false;
 		context->mutatedLineEntries.clear();
 		if (hasRecentLinesSnapshot)
 		{
@@ -2143,9 +2261,10 @@ namespace
 			context->lineEntries.insert(lineNumber, QMudLuaCallbackLineSnapshot::toLineEntry(it.value()));
 		}
 		if (context->hasRuntimeCountersSnapshot)
-			context->runtimeCountersSnapshot.outputLineCount = context->bufferedLineCount;
+			context->runtimeCountersSnapshot.outputLineCount = context->materializedLineBufferCount;
 		if (context->hasRuntimeCountersSnapshotWithStrings)
-			context->runtimeCountersSnapshotWithStrings.outputLineCount = context->bufferedLineCount;
+			context->runtimeCountersSnapshotWithStrings.outputLineCount =
+			    context->materializedLineBufferCount;
 	}
 
 	void recordCallbackLineLookup(const LuaCallbackEngine *engine, const int lineNumber)
@@ -2160,8 +2279,9 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->hasLineBufferMutationSnapshot = true;
-		context->hasLineBufferCountMutation    = true;
+		context->hasLineBufferMutationSnapshot     = true;
+		context->hasLineBufferCountMutation        = true;
+		context->bookmarkLineLayoutBoundaryCurrent = false;
 	}
 
 	void invalidateCallbackRecentLines(const LuaCallbackEngine *engine)
@@ -2389,9 +2509,13 @@ namespace
 		if (matchedBufferIndexAtDispatch <= 0)
 		{
 			if (context->hasBufferedLineCount)
-				matchedBufferIndexAtDispatch = context->bufferedLineCount;
+				matchedBufferIndexAtDispatch = context->materializedLineBufferCount;
 			else if (context->lineBufferSnapshot)
-				matchedBufferIndexAtDispatch = context->lineBufferSnapshot->lineBufferCount;
+			{
+				matchedBufferIndexAtDispatch = context->lineBufferSnapshot->materializedLineBufferCount >= 0
+				                                   ? context->lineBufferSnapshot->materializedLineBufferCount
+				                                   : context->lineBufferSnapshot->lineBufferCount;
+			}
 		}
 		if (matchedBufferIndexAtDispatch <= 0)
 			matchedBufferIndexAtDispatch = 1;
@@ -2439,7 +2563,9 @@ namespace
 			context->bufferedLineCount    = matchedBufferIndexAtDispatch;
 			context->hasBufferedLineCount = true;
 		}
-		if (context->hasBufferedLineCount && matchedBufferIndexAtDispatch == context->bufferedLineCount)
+		context->materializedLineBufferCount =
+		    qMax(context->materializedLineBufferCount, matchedBufferIndexAtDispatch);
+		if (matchedBufferIndexAtDispatch == context->materializedLineBufferCount)
 		{
 			context->recentLinesByCount.insert(1, QStringList{line});
 		}
@@ -2575,7 +2701,7 @@ namespace
 	}
 
 	void setCallbackOutputLineCountSnapshot(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-	                                        const int lineCount)
+	                                        const int materializedLineCount)
 	{
 		auto *context = activeCallbackContext(engine);
 		if (!context)
@@ -2583,9 +2709,9 @@ namespace
 		WorldRuntime::RuntimeCountersSnapshot snapshot;
 		static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
 		if (context->hasRuntimeCountersSnapshot)
-			context->runtimeCountersSnapshot.outputLineCount = qMax(0, lineCount);
+			context->runtimeCountersSnapshot.outputLineCount = qMax(0, materializedLineCount);
 		if (context->hasRuntimeCountersSnapshotWithStrings)
-			context->runtimeCountersSnapshotWithStrings.outputLineCount = qMax(0, lineCount);
+			context->runtimeCountersSnapshotWithStrings.outputLineCount = qMax(0, materializedLineCount);
 	}
 
 	void
@@ -9528,9 +9654,18 @@ namespace
 		}
 		if (context.hasLineBufferSnapshot)
 		{
-			snapshot.hasLineBufferSnapshot = true;
-			snapshot.lineBufferCount       = context.bufferedLineCount;
-			snapshot.lineBufferSnapshot    = context.lineBufferSnapshot;
+			snapshot.hasLineBufferSnapshot       = true;
+			snapshot.lineBufferCount             = context.bufferedLineCount;
+			snapshot.materializedLineBufferCount = context.materializedLineBufferCount;
+			snapshot.currentLineTemplate =
+			    context.currentLineTemplate
+			        ? std::optional(QMudLuaCallbackLineSnapshot::fromLineEntry(*context.currentLineTemplate))
+			        : std::nullopt;
+			snapshot.currentLine =
+			    context.currentLine
+			        ? std::optional(QMudLuaCallbackLineSnapshot::fromLineEntry(*context.currentLine))
+			        : std::nullopt;
+			snapshot.lineBufferSnapshot = context.lineBufferSnapshot;
 			snapshot.lineEntriesByBufferIndex.clear();
 			if (!snapshot.lineBufferSnapshot)
 			{
@@ -9546,8 +9681,17 @@ namespace
 			snapshot.hasLineBufferDeltaSnapshot = true;
 			if (context.hasLineBufferCountMutation)
 			{
-				snapshot.hasLineBufferCountDelta = true;
-				snapshot.lineBufferDeltaCount    = context.bufferedLineCount;
+				snapshot.hasLineBufferCountDelta          = true;
+				snapshot.lineBufferDeltaCount             = context.bufferedLineCount;
+				snapshot.materializedLineBufferDeltaCount = context.materializedLineBufferCount;
+			}
+			if (context.currentLineMutated)
+			{
+				snapshot.currentLineDeltaPresent = true;
+				snapshot.currentLineDelta =
+				    context.currentLine
+				        ? std::optional(QMudLuaCallbackLineSnapshot::fromLineEntry(*context.currentLine))
+				        : std::nullopt;
 			}
 			for (const int lineNumber : context.mutatedLineEntries)
 			{
@@ -9565,6 +9709,9 @@ namespace
 				}
 			}
 		}
+		snapshot.hasDeferredLineIdentitySnapshot     = true;
+		snapshot.deferredLineIdentityIndex           = context.deferredLineIdentityIndex;
+		snapshot.deferredLineIdentityState           = context.deferredLineIdentityState;
 		snapshot.linePresentationRequiresRefresh     = context.linePresentationRequiresRefresh;
 		snapshot.outputScrollPositionRequiresRefresh = context.outputScrollPositionRequiresRefresh;
 		if (context.recentLinesSnapshotInvalidated)
@@ -10082,8 +10229,23 @@ namespace
 				context->lineBufferGeneration    = snapshot->lineBufferSnapshot->lineBufferGeneration;
 				context->hasLineBufferGeneration = true;
 				context->bufferedLineCount       = snapshot->lineBufferSnapshot->lineBufferCount;
-				context->hasBufferedLineCount    = true;
-				context->hasLineBufferSnapshot   = true;
+				context->materializedLineBufferCount =
+				    snapshot->lineBufferSnapshot->materializedLineBufferCount >= 0
+				        ? qBound(0, snapshot->lineBufferSnapshot->materializedLineBufferCount,
+				                 context->bufferedLineCount)
+				        : context->bufferedLineCount;
+				context->currentLineTemplate = snapshot->lineBufferSnapshot->currentLineTemplate
+				                                   ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(
+				                                         *snapshot->lineBufferSnapshot->currentLineTemplate))
+				                                   : std::nullopt;
+				context->currentLine         = snapshot->lineBufferSnapshot->currentLine
+				                                   ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(
+				                                         *snapshot->lineBufferSnapshot->currentLine))
+				                                   : std::nullopt;
+				context->bufferedLineCount =
+				    context->materializedLineBufferCount + (context->currentLine.has_value() ? 1 : 0);
+				context->hasBufferedLineCount  = true;
+				context->hasLineBufferSnapshot = true;
 			}
 			else
 			{
@@ -10093,7 +10255,21 @@ namespace
 					context->lineEntries.insert(it.key(),
 					                            QMudLuaCallbackLineSnapshot::toLineEntry(it.value()));
 				}
-				context->bufferedLineCount     = snapshot->lineBufferCount;
+				context->bufferedLineCount = snapshot->lineBufferCount;
+				context->materializedLineBufferCount =
+				    snapshot->materializedLineBufferCount >= 0
+				        ? qBound(0, snapshot->materializedLineBufferCount, context->bufferedLineCount)
+				        : context->bufferedLineCount;
+				context->currentLineTemplate = snapshot->currentLineTemplate
+				                                   ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(
+				                                         *snapshot->currentLineTemplate))
+				                                   : std::nullopt;
+				context->currentLine =
+				    snapshot->currentLine
+				        ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(*snapshot->currentLine))
+				        : std::nullopt;
+				context->bufferedLineCount =
+				    context->materializedLineBufferCount + (context->currentLine.has_value() ? 1 : 0);
 				context->hasBufferedLineCount  = true;
 				context->hasLineBufferSnapshot = true;
 			}
@@ -10131,26 +10307,47 @@ namespace
 			context->hasLineBufferMutationSnapshot = true;
 			if (snapshot->hasLineBufferCountDelta)
 			{
-				context->hasLineBufferCountMutation = true;
-				context->bufferedLineCount          = qMax(0, snapshot->lineBufferDeltaCount);
-				context->hasBufferedLineCount       = true;
+				context->hasLineBufferCountMutation        = true;
+				context->bookmarkLineLayoutBoundaryCurrent = false;
+				context->bufferedLineCount                 = qMax(0, snapshot->lineBufferDeltaCount);
+				context->materializedLineBufferCount =
+				    snapshot->materializedLineBufferDeltaCount >= 0
+				        ? qBound(0, snapshot->materializedLineBufferDeltaCount, context->bufferedLineCount)
+				        : context->bufferedLineCount;
+				context->bufferedLineCount =
+				    context->materializedLineBufferCount + (context->currentLine.has_value() ? 1 : 0);
+				context->hasBufferedLineCount = true;
 				for (auto it = context->lineEntries.begin(); it != context->lineEntries.end();)
 				{
-					if (it.key() > context->bufferedLineCount)
+					if (it.key() > context->materializedLineBufferCount)
 						it = context->lineEntries.erase(it);
 					else
 						++it;
 				}
-				context->missingLineEntries.removeIf([context](const int lineNumber)
-				                                     { return lineNumber > context->bufferedLineCount; });
-				context->pagedLineIndexes.removeIf([context](const int lineNumber)
-				                                   { return lineNumber > context->bufferedLineCount; });
-				context->mutatedLineEntries.removeIf([context](const int lineNumber)
-				                                     { return lineNumber > context->bufferedLineCount; });
+				context->missingLineEntries.removeIf(
+				    [context](const int lineNumber)
+				    { return lineNumber > context->materializedLineBufferCount; });
+				context->pagedLineIndexes.removeIf(
+				    [context](const int lineNumber)
+				    { return lineNumber > context->materializedLineBufferCount; });
+				context->mutatedLineEntries.removeIf(
+				    [context](const int lineNumber)
+				    { return lineNumber > context->materializedLineBufferCount; });
+			}
+			if (snapshot->currentLineDeltaPresent)
+			{
+				context->currentLineMutated = true;
+				context->currentLine =
+				    snapshot->currentLineDelta
+				        ? std::optional(QMudLuaCallbackLineSnapshot::toLineEntry(*snapshot->currentLineDelta))
+				        : std::nullopt;
+				context->bufferedLineCount =
+				    context->materializedLineBufferCount + (context->currentLine.has_value() ? 1 : 0);
+				context->hasBufferedLineCount = true;
 			}
 			for (const int lineNumber : snapshot->missingLineEntryDeltasByBufferIndex)
 			{
-				if (context->hasBufferedLineCount && lineNumber > context->bufferedLineCount)
+				if (context->hasBufferedLineCount && lineNumber > context->materializedLineBufferCount)
 					continue;
 				context->mutatedLineEntries.insert(lineNumber);
 				context->lineEntries.remove(lineNumber);
@@ -10159,12 +10356,17 @@ namespace
 			for (auto it = snapshot->lineEntryDeltasByBufferIndex.constBegin();
 			     it != snapshot->lineEntryDeltasByBufferIndex.constEnd(); ++it)
 			{
-				if (context->hasBufferedLineCount && it.key() > context->bufferedLineCount)
+				if (context->hasBufferedLineCount && it.key() > context->materializedLineBufferCount)
 					continue;
 				context->mutatedLineEntries.insert(it.key());
 				context->missingLineEntries.remove(it.key());
 				context->lineEntries.insert(it.key(), QMudLuaCallbackLineSnapshot::toLineEntry(it.value()));
 			}
+		}
+		if (snapshot->hasDeferredLineIdentitySnapshot)
+		{
+			context->deferredLineIdentityIndex = snapshot->deferredLineIdentityIndex;
+			context->deferredLineIdentityState = snapshot->deferredLineIdentityState;
 		}
 		context->linePresentationRequiresRefresh |= snapshot->linePresentationRequiresRefresh;
 		context->outputScrollPositionRequiresRefresh |= snapshot->outputScrollPositionRequiresRefresh;
@@ -11017,10 +11219,16 @@ namespace
 		    std::move(previous.miniWindowCommitBaseOutcomeByWindow);
 		refreshed.forceMiniWindowDeltaMergeIds = std::move(previous.forceMiniWindowDeltaMergeIds);
 
-		refreshed.actionSourceOverride               = previous.actionSourceOverride;
-		refreshed.hasActionSourceOverride            = previous.hasActionSourceOverride;
-		refreshed.directTriggerScriptActionPriority  = previous.directTriggerScriptActionPriority;
-		refreshed.callbackOutputStreamState          = std::move(previous.callbackOutputStreamState);
+		refreshed.actionSourceOverride              = previous.actionSourceOverride;
+		refreshed.hasActionSourceOverride           = previous.hasActionSourceOverride;
+		refreshed.directTriggerScriptActionPriority = previous.directTriggerScriptActionPriority;
+		refreshed.callbackOutputStreamState         = std::move(previous.callbackOutputStreamState);
+		refreshed.bookmarkIdentityAfterLineMutationBoundary =
+		    std::move(previous.bookmarkIdentityAfterLineMutationBoundary);
+		refreshed.bookmarkRequestLineAfterLineMutationBoundary =
+		    previous.bookmarkRequestLineAfterLineMutationBoundary;
+		refreshed.bookmarkOverlayLineAfterLineMutationBoundary =
+		    previous.bookmarkOverlayLineAfterLineMutationBoundary;
 		refreshed.deferredRuntimeTarget              = previous.deferredRuntimeTarget;
 		refreshed.deferredRuntimeMutations           = std::move(previous.deferredRuntimeMutations);
 		refreshed.hasPendingDeferredRuntimeMutations = previous.hasPendingDeferredRuntimeMutations;
@@ -11880,7 +12088,7 @@ namespace
 			qint64                                        anchorLineNumber{0};
 			int                                           anchorBufferIndex{0};
 			int                                           anchorRelativeOffset{0};
-			bool                                          replaceAnchor{false};
+			WorldRuntime::LuaCallbackOutputIdentity       outputIdentity;
 			quint64                                       outputStreamId{0};
 			std::shared_ptr<LuaCallbackOutputAnchorState> anchorState;
 	};
@@ -11899,15 +12107,22 @@ namespace
 		if (!context)
 			return target;
 
-		const int lineCount     = callbackOutputLineCountSeed(engine, runtime);
-		bool      outputLimitOk = false;
-		const int configuredOutputLimit =
+		const int  lineCount             = callbackOutputLineCountSeed(engine, runtime);
+		const int  materializedLineCount = qBound(0, context->materializedLineBufferCount, lineCount);
+		const bool currentLineHasContent = context->currentLine && !context->currentLine->text.isEmpty();
+		bool       outputLimitOk         = false;
+		const int  configuredOutputLimit =
 		    resolveWorldAttributeValueForApi(engine, runtime, QStringLiteral("max_output_lines"))
 		        .toInt(&outputLimitOk);
 		const int outputLimit =
 		    outputLimitOk && configuredOutputLimit > 0 ? qBound(1, configuredOutputLimit, 500000) : 0;
-		int mutationIndex      = outputLimit > 0 && lineCount >= outputLimit ? outputLimit : lineCount + 1;
-		int resultingLineCount = mutationIndex;
+		const int appendedMaterializedLineCount = materializedLineCount + 1;
+		const int removedHeadLineCount =
+		    outputLimit > 0 ? qMax(0, appendedMaterializedLineCount - outputLimit) : 0;
+		int resultingMaterializedLineCount = appendedMaterializedLineCount - removedHeadLineCount;
+		int mutationIndex                  = resultingMaterializedLineCount;
+		std::optional<WorldRuntime::LineEntry> resultingCurrentLine;
+		int resultingLineCount = resultingMaterializedLineCount + (hardReturn ? 1 : 0);
 		if (context->wildcardDomain == CallbackWildcardDomain::Trigger &&
 		    context->triggerOutputReplacesMatchedLine && !context->triggerOutputMatchedLineConsumed &&
 		    context->hasTriggerMatchedLineAnchor && context->triggerMatchedLineBufferIndexAtDispatch > 0 &&
@@ -11918,15 +12133,17 @@ namespace
 			target.anchorBufferIndex                  = context->triggerMatchedLineBufferIndexAtDispatch;
 			context->triggerOutputMatchedLineConsumed = true;
 			const bool activeReplacementAvailable =
-			    lineCount <= context->triggerMatchedLineBufferIndexAtDispatch &&
+			    materializedLineCount <= context->triggerMatchedLineBufferIndexAtDispatch &&
 			    context->callbackOutputAnchorIsHidden;
 			if (!context->callbackOutputAnchorIsActiveIncoming || activeReplacementAvailable)
 			{
-				mutationIndex                         = context->triggerMatchedLineBufferIndexAtDispatch;
-				resultingLineCount                    = lineCount;
-				target.anchorRelativeOffset           = 0;
-				target.replaceAnchor                  = true;
-				context->callbackOutputAnchorIsHidden = false;
+				mutationIndex                  = context->triggerMatchedLineBufferIndexAtDispatch;
+				resultingMaterializedLineCount = materializedLineCount;
+				resultingCurrentLine           = context->currentLine;
+				resultingLineCount             = lineCount;
+				target.anchorRelativeOffset    = 0;
+				target.outputIdentity.expectsAnchorReplacement = true;
+				context->callbackOutputAnchorIsHidden          = false;
 			}
 			else
 			{
@@ -11993,7 +12210,12 @@ namespace
 					outputState.runtimes.push_back(runtime);
 			}
 		}
-		const int               referenceIndex = target.replaceAnchor ? mutationIndex : lineCount;
+		const bool expectsAnchorReplacement = target.outputIdentity.expectsAnchorReplacement;
+		const bool fillsCurrentLine =
+		    !expectsAnchorReplacement && context->currentLine.has_value() && !currentLineHasContent;
+		target.outputIdentity.fillsCurrentLine = fillsCurrentLine;
+		const int referenceIndex =
+		    expectsAnchorReplacement ? mutationIndex : (fillsCurrentLine ? lineCount : materializedLineCount);
 		WorldRuntime::LineEntry referenceEntry;
 		bool                    referenceCacheHit = false;
 		const bool              hasReference =
@@ -12002,12 +12224,36 @@ namespace
 		    referenceCacheHit;
 
 		WorldRuntime::LineEntry entry =
-		    target.replaceAnchor && hasReference ? referenceEntry : WorldRuntime::LineEntry{};
-		entry.text       = text;
-		entry.flags      = flags;
+		    expectsAnchorReplacement && hasReference
+		        ? referenceEntry
+		        : (fillsCurrentLine ? *context->currentLine : WorldRuntime::LineEntry{});
+		entry.text  = text;
+		entry.flags = flags | (fillsCurrentLine ? entry.flags & WorldRuntime::LineBookmark : 0);
+		if (fillsCurrentLine && (entry.flags & WorldRuntime::LineBookmark) != 0)
+		{
+			target.outputIdentity.bookmarkTransferSource = {
+			    lineCount, context->currentLine->lineNumber, true,
+			    context->deferredLineIdentityIndex.value(lineCount)};
+		}
+		auto allocateDeferredLineIdentity = [&]()
+		{
+			if (!context->deferredLineIdentityState)
+				context->deferredLineIdentityState = std::make_shared<LuaCallbackDeferredLineIdentityState>();
+			return LuaCallbackDeferredLineIdentity{context->deferredLineIdentityState,
+			                                       context->deferredLineIdentityState->allocateIdentity()};
+		};
+		const LuaCallbackDeferredLineIdentity currentLineIdentity =
+		    fillsCurrentLine ? context->deferredLineIdentityIndex.value(lineCount)
+		                     : LuaCallbackDeferredLineIdentity{};
+		if (!expectsAnchorReplacement)
+			context->deferredLineIdentityIndex.removeHead(removedHeadLineCount);
+		target.outputIdentity.producedLine =
+		    currentLineIdentity.isValid() ? currentLineIdentity : allocateDeferredLineIdentity();
+		target.outputIdentity.lineIdentityState = context->deferredLineIdentityState;
+		context->deferredLineIdentityIndex.insert(mutationIndex, target.outputIdentity.producedLine);
 		entry.hardReturn = hardReturn;
 		entry.spans      = std::move(spans);
-		if (target.replaceAnchor)
+		if (expectsAnchorReplacement)
 		{
 			if (!hasReference)
 			{
@@ -12017,9 +12263,11 @@ namespace
 		}
 		else
 		{
-			entry.time = QDateTime::currentDateTimeUtc();
-			entry.lineNumber =
-			    hasReference && referenceEntry.lineNumber > 0 ? referenceEntry.lineNumber + 1 : mutationIndex;
+			if (!entry.time.isValid())
+				entry.time = QDateTime::currentDateTimeUtc();
+			entry.lineNumber = hasReference && referenceEntry.lineNumber > 0
+			                       ? referenceEntry.lineNumber + (fillsCurrentLine ? 0 : 1)
+			                       : (entry.lineNumber > 0 ? entry.lineNumber : mutationIndex);
 			if (hasReference)
 			{
 				entry.ticks   = referenceEntry.ticks;
@@ -12028,12 +12276,33 @@ namespace
 		}
 
 		cacheCallbackMutatedLineEntry(engine, mutationIndex, true, entry);
+		context->materializedLineBufferCount = resultingMaterializedLineCount;
+		if (!expectsAnchorReplacement && currentLineHasContent)
+		{
+			resultingCurrentLine             = context->currentLine;
+			resultingCurrentLine->lineNumber = entry.lineNumber > 0 ? entry.lineNumber + 1 : 0;
+		}
+		else if (!expectsAnchorReplacement && hardReturn)
+		{
+			resultingCurrentLine =
+			    makeCallbackCurrentLine(*context, nullptr, entry.lineNumber > 0 ? entry.lineNumber + 1 : 0);
+		}
+		else if (!expectsAnchorReplacement)
+			resultingCurrentLine.reset();
+		cacheCallbackCurrentLine(engine, std::move(resultingCurrentLine), true);
+		if (!expectsAnchorReplacement && context->currentLine)
+		{
+			target.outputIdentity.resultingCurrentLine = allocateDeferredLineIdentity();
+			context->deferredLineIdentityIndex.insert(resultingMaterializedLineCount + 1,
+			                                          target.outputIdentity.resultingCurrentLine);
+		}
+		resultingLineCount = context->bufferedLineCount;
 		cacheCallbackMutatedLineCount(engine, resultingLineCount);
 		context->linePresentationRequiresRefresh     = true;
 		context->outputScrollPositionRequiresRefresh = true;
-		setCallbackOutputLineCountSnapshot(engine, runtime, resultingLineCount);
+		setCallbackOutputLineCountSnapshot(engine, runtime, resultingMaterializedLineCount);
 		invalidateCallbackRecentLines(engine);
-		if (mutationIndex == resultingLineCount)
+		if (mutationIndex == resultingMaterializedLineCount)
 			cacheCallbackRecentLines(engine, 1, QStringList{text});
 		return target;
 	}
@@ -12046,33 +12315,54 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context || count <= 0)
 			return;
-		const int lineCount = callbackOutputLineCountSeed(engine, runtime);
-		if (lineCount <= 0)
+		const int  lineCount                  = callbackOutputLineCountSeed(engine, runtime);
+		const int  materializedLineCount      = qBound(0, context->materializedLineBufferCount, lineCount);
+		const bool deletesExistingCurrentLine = context->currentLine && !context->currentLine->text.isEmpty();
+		const int  materializedDeleteCount    = qMax(0, count - (deletesExistingCurrentLine ? 1 : 0));
+		if (materializedLineCount <= 0 && !deletesExistingCurrentLine)
 			return;
 		context->linePresentationRequiresRefresh     = true;
 		context->outputScrollPositionRequiresRefresh = true;
-		if (count >= lineCount)
+		if (materializedDeleteCount >= materializedLineCount &&
+		    (materializedDeleteCount > 0 || !deletesExistingCurrentLine))
 		{
 			clearCallbackOutputLines(engine, runtime);
 			return;
 		}
-		const int newLineCount = lineCount - count;
-		discardDeletedCallbackOutputAnchors(*context, newLineCount);
+		const int newMaterializedLineCount = materializedLineCount - materializedDeleteCount;
+		const int newLineCount             = newMaterializedLineCount + 1;
+		discardDeletedCallbackOutputAnchors(*context, newMaterializedLineCount);
 		for (auto it = context->lineEntries.begin(); it != context->lineEntries.end();)
 		{
-			if (it.key() > newLineCount)
+			if (it.key() > newMaterializedLineCount)
 				it = context->lineEntries.erase(it);
 			else
 				++it;
 		}
-		context->missingLineEntries.removeIf([newLineCount](const int lineNumber)
-		                                     { return lineNumber > newLineCount; });
-		context->pagedLineIndexes.removeIf([newLineCount](const int lineNumber)
-		                                   { return lineNumber > newLineCount; });
-		context->mutatedLineEntries.removeIf([newLineCount](const int lineNumber)
-		                                     { return lineNumber > newLineCount; });
+		context->deferredLineIdentityIndex.removeRange(newMaterializedLineCount + 1, lineCount);
+		context->missingLineEntries.removeIf([newMaterializedLineCount](const int lineNumber)
+		                                     { return lineNumber > newMaterializedLineCount; });
+		context->pagedLineIndexes.removeIf([newMaterializedLineCount](const int lineNumber)
+		                                   { return lineNumber > newMaterializedLineCount; });
+		context->mutatedLineEntries.removeIf([newMaterializedLineCount](const int lineNumber)
+		                                     { return lineNumber > newMaterializedLineCount; });
+		context->materializedLineBufferCount = newMaterializedLineCount;
+		const WorldRuntime::LineEntry *preservedCurrentLine =
+		    context->currentLine ? &*context->currentLine : nullptr;
+		qint64 currentLineNumber = preservedCurrentLine ? preservedCurrentLine->lineNumber : 0;
+		WorldRuntime::LineEntry previousEntry;
+		bool                    cacheHit = false;
+		if (currentLineNumber <= 0 && newMaterializedLineCount > 0 &&
+		    tryResolveCallbackLineEntryFromCache(engine, newMaterializedLineCount, previousEntry, cacheHit) &&
+		    cacheHit && previousEntry.lineNumber > 0)
+		{
+			currentLineNumber = previousEntry.lineNumber + 1;
+		}
+		WorldRuntime::LineEntry currentLine =
+		    makeCallbackCurrentLine(*context, preservedCurrentLine, currentLineNumber);
+		cacheCallbackCurrentLine(engine, std::move(currentLine), true);
 		cacheCallbackMutatedLineCount(engine, newLineCount);
-		setCallbackOutputLineCountSnapshot(engine, runtime, newLineCount);
+		setCallbackOutputLineCountSnapshot(engine, runtime, newMaterializedLineCount);
 		invalidateCallbackRecentLines(engine);
 	}
 
@@ -12098,20 +12388,33 @@ namespace
 
 	void finalizeCallbackOpenOutputLine(const LuaCallbackEngine *engine, WorldRuntime *runtime)
 	{
-		const int lineCount = callbackOutputLineCountSeed(engine, runtime);
-		if (lineCount <= 0)
+		auto *context = activeCallbackContext(engine);
+		if (!context)
+			return;
+		const int lineCount             = callbackOutputLineCountSeed(engine, runtime);
+		const int materializedLineCount = qBound(0, context->materializedLineBufferCount, lineCount);
+		if (materializedLineCount <= 0)
 			return;
 
 		WorldRuntime::LineEntry previousEntry;
 		bool                    cacheHit = false;
-		if (!tryResolveCallbackLineEntryFromCache(engine, lineCount, previousEntry, cacheHit) || !cacheHit ||
-		    previousEntry.hardReturn || previousEntry.text.isEmpty())
+		if (!tryResolveCallbackLineEntryFromCache(engine, materializedLineCount, previousEntry, cacheHit) ||
+		    !cacheHit || previousEntry.hardReturn || previousEntry.text.isEmpty())
 		{
 			return;
 		}
 
 		previousEntry.hardReturn = true;
-		cacheCallbackMutatedLineEntry(engine, lineCount, true, previousEntry);
+		cacheCallbackMutatedLineEntry(engine, materializedLineCount, true, previousEntry);
+		if (lineCount == materializedLineCount)
+		{
+			context->materializedLineBufferCount = materializedLineCount;
+			WorldRuntime::LineEntry currentLine  = makeCallbackCurrentLine(
+			    *context, nullptr, previousEntry.lineNumber > 0 ? previousEntry.lineNumber + 1 : 0);
+			cacheCallbackCurrentLine(engine, std::move(currentLine), true);
+			cacheCallbackMutatedLineCount(engine, materializedLineCount + 1);
+			setCallbackOutputLineCountSnapshot(engine, runtime, materializedLineCount);
+		}
 	}
 
 	void discardDeletedCallbackOutputAnchors(LuaCallbackExecutionContext &context, const int lineCount)
@@ -12141,16 +12444,38 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
+		static_cast<void>(callbackOutputLineCountSeed(engine, runtime));
+		const std::optional<WorldRuntime::LineEntry> previousCurrentLine = context->currentLine;
+		qint64                                       currentLineNumber   = 0;
+		if (!previousCurrentLine && context->materializedLineBufferCount > 0)
+		{
+			WorldRuntime::LineEntry previousEntry;
+			bool                    cacheHit = false;
+			if (tryResolveCallbackLineEntryFromCache(engine, context->materializedLineBufferCount,
+			                                         previousEntry, cacheHit) &&
+			    cacheHit && previousEntry.lineNumber > 0)
+			{
+				currentLineNumber = previousEntry.lineNumber + 1;
+			}
+		}
 		context->lineEntries.clear();
+		context->deferredLineIdentityIndex.clear();
+		context->deferredLineIdentityState.reset();
 		context->lineBufferSnapshot.clear();
 		context->missingLineEntries.clear();
 		context->pagedLineIndexes.clear();
 		context->mutatedLineEntries.clear();
-		context->bufferedLineCount             = 0;
-		context->hasBufferedLineCount          = true;
-		context->hasLineBufferMutationSnapshot = true;
-		context->hasLineBufferCountMutation    = true;
 		discardDeletedCallbackOutputAnchors(*context, 0);
+		WorldRuntime::LineEntry currentLine = makeCallbackCurrentLine(
+		    *context, previousCurrentLine ? &*previousCurrentLine : nullptr, currentLineNumber);
+		context->currentLine                       = std::move(currentLine);
+		context->currentLineMutated                = true;
+		context->bufferedLineCount                 = 1;
+		context->hasBufferedLineCount              = true;
+		context->materializedLineBufferCount       = 0;
+		context->hasLineBufferMutationSnapshot     = true;
+		context->hasLineBufferCountMutation        = true;
+		context->bookmarkLineLayoutBoundaryCurrent = false;
 		context->recentLinesByCount.clear();
 		context->recentLinesSnapshot.clear();
 		context->recentLinesSnapshotInvalidated      = true;
@@ -12160,6 +12485,121 @@ namespace
 		setCallbackOutputLineCountSnapshot(engine, runtime, 0);
 	}
 
+	/**
+	 * @brief Applies a reduced output-line limit to the active callback's line-buffer overlay.
+	 * @param engine Callback engine that owns the active overlay.
+	 * @param runtime Runtime whose output-line counter is represented by the overlay.
+	 * @param maximumMaterializedLines New maximum number of stored output lines.
+	 */
+	void applyCallbackOutputLineLimitReduction(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+	                                           const int maximumMaterializedLines)
+	{
+		auto *context = activeCallbackContext(engine);
+		if (!context || maximumMaterializedLines <= 0)
+			return;
+
+		static_cast<void>(callbackOutputLineCountSeed(engine, runtime));
+		const int oldMaterializedLineCount = context->materializedLineBufferCount;
+		const int removedHeadLineCount     = qMax(0, oldMaterializedLineCount - maximumMaterializedLines);
+		if (removedHeadLineCount <= 0)
+			return;
+
+		const int  oldBufferedLineCount = context->bufferedLineCount;
+		const auto rebaseLineEntries =
+		    [removedHeadLineCount, oldMaterializedLineCount](QHash<int, WorldRuntime::LineEntry> &entries)
+		{
+			QHash<int, WorldRuntime::LineEntry> rebased;
+			rebased.reserve(entries.size());
+			for (auto it = entries.constBegin(); it != entries.constEnd(); ++it)
+			{
+				if (it.key() > removedHeadLineCount && it.key() <= oldMaterializedLineCount)
+					rebased.insert(it.key() - removedHeadLineCount, it.value());
+			}
+			entries = std::move(rebased);
+		};
+		const auto rebaseLineIndexes = [removedHeadLineCount, oldMaterializedLineCount](QSet<int> &indexes)
+		{
+			QSet<int> rebased;
+			rebased.reserve(indexes.size());
+			for (const int index : std::as_const(indexes))
+			{
+				if (index > removedHeadLineCount && index <= oldMaterializedLineCount)
+					rebased.insert(index - removedHeadLineCount);
+			}
+			indexes = std::move(rebased);
+		};
+
+		rebaseLineEntries(context->lineEntries);
+		rebaseLineIndexes(context->missingLineEntries);
+		rebaseLineIndexes(context->pagedLineIndexes);
+		rebaseLineIndexes(context->mutatedLineEntries);
+		context->deferredLineIdentityIndex.removeHead(removedHeadLineCount);
+		if (context->lastResolvedLineIndex > removedHeadLineCount &&
+		    context->lastResolvedLineIndex <= oldBufferedLineCount)
+		{
+			context->lastResolvedLineIndex -= removedHeadLineCount;
+		}
+		else
+			context->lastResolvedLineIndex = 0;
+
+		if (context->lineBufferSnapshot)
+		{
+			auto rebasedSnapshot =
+			    QSharedPointer<LuaCallbackLineBufferSnapshot>::create(*context->lineBufferSnapshot);
+			QHash<int, LuaCallbackLineEntrySnapshot> rebasedEntries;
+			rebasedEntries.reserve(rebasedSnapshot->lineEntriesByBufferIndex.size());
+			for (auto it = rebasedSnapshot->lineEntriesByBufferIndex.constBegin();
+			     it != rebasedSnapshot->lineEntriesByBufferIndex.constEnd(); ++it)
+			{
+				if (it.key() > removedHeadLineCount && it.key() <= oldMaterializedLineCount)
+					rebasedEntries.insert(it.key() - removedHeadLineCount, it.value());
+			}
+			rebasedSnapshot->lineEntriesByBufferIndex = std::move(rebasedEntries);
+			if (rebasedSnapshot->lastCapturedLineBufferIndex <= removedHeadLineCount)
+			{
+				rebasedSnapshot->firstCapturedLineBufferIndex = 0;
+				rebasedSnapshot->lastCapturedLineBufferIndex  = 0;
+			}
+			else
+			{
+				rebasedSnapshot->firstCapturedLineBufferIndex =
+				    qMax(1, rebasedSnapshot->firstCapturedLineBufferIndex - removedHeadLineCount);
+				rebasedSnapshot->lastCapturedLineBufferIndex -= removedHeadLineCount;
+			}
+			rebasedSnapshot->materializedLineBufferCount = oldMaterializedLineCount - removedHeadLineCount;
+			rebasedSnapshot->lineBufferCount =
+			    rebasedSnapshot->materializedLineBufferCount + (context->currentLine ? 1 : 0);
+			rebasedSnapshot->recentLinesSnapshot.clear();
+			context->lineBufferSnapshot = std::move(rebasedSnapshot);
+		}
+
+		if (context->hasCallbackOutputAnchor)
+		{
+			if (context->callbackOutputAnchorBufferIndexAtDispatch <= removedHeadLineCount)
+				clearCallbackOutputPlacementAnchor(*context);
+			else
+				context->callbackOutputAnchorBufferIndexAtDispatch -= removedHeadLineCount;
+		}
+		if (context->hasTriggerMatchedLineAnchor)
+		{
+			if (context->triggerMatchedLineBufferIndexAtDispatch <= removedHeadLineCount)
+				clearTriggerOutputPlacementAnchor(*context);
+			else
+				context->triggerMatchedLineBufferIndexAtDispatch -= removedHeadLineCount;
+		}
+
+		context->materializedLineBufferCount -= removedHeadLineCount;
+		context->bufferedLineCount    = context->materializedLineBufferCount + (context->currentLine ? 1 : 0);
+		context->hasBufferedLineCount = true;
+		context->hasLineBufferMutationSnapshot       = true;
+		context->hasLineBufferCountMutation          = true;
+		context->bookmarkLineLayoutBoundaryCurrent   = false;
+		context->linePresentationRequiresRefresh     = true;
+		context->outputScrollPositionRequiresRefresh = true;
+		setCallbackOutputLineCountSnapshot(engine, runtime, context->materializedLineBufferCount);
+		invalidateCallbackRecentLines(engine);
+	}
+
 	bool tryBuildCallbackRecentLinesFromLineCache(const LuaCallbackEngine *engine, const int count,
 	                                              QStringList &lines)
 	{
@@ -12167,9 +12607,11 @@ namespace
 		int lineCount = 0;
 		if (count <= 0 || !tryResolveCallbackLineCountFromCache(engine, lineCount))
 			return false;
-		const int boundedCount = qBound(0, count, qMax(0, lineCount));
-		const int startIndex   = qMax(1, lineCount - boundedCount + 1);
-		for (int index = startIndex; index <= lineCount; ++index)
+		const auto *context               = activeCallbackContextConst(engine);
+		const int   materializedLineCount = context ? context->materializedLineBufferCount : lineCount;
+		const int   boundedCount          = qBound(0, count, qMax(0, materializedLineCount));
+		const int   startIndex            = qMax(1, materializedLineCount - boundedCount + 1);
+		for (int index = startIndex; index <= materializedLineCount; ++index)
 		{
 			WorldRuntime::LineEntry entry;
 			bool                    cacheHit = false;
@@ -15546,8 +15988,8 @@ static int luaAnsiNote(lua_State *L)
 	if (!runtime)
 		return 0;
 	const QString                      text   = concatLuaArgs(L, 1);
-	const int                          flags  = callbackOutputFlags(engine, runtime, true, false);
 	const CallbackOutputMutationTarget target = appendCallbackNoteOutputLine(engine, runtime, text, true);
+	const int                          flags  = callbackOutputFlags(engine, runtime, true, false);
 	enqueueRuntimeThreadDeferredMutationNoResult(
 	    engine, runtime,
 	    [text, flags, target](WorldRuntime &targetRuntime)
@@ -15558,8 +16000,8 @@ static int luaAnsiNote(lua_State *L)
 		    if (target.anchored && anchorBufferIndex > 0 &&
 		        targetRuntime.writeLuaCallbackAnsiOutputAtLineAnchor(
 		            target.anchorLineNumber, anchorBufferIndex, target.anchorRelativeOffset,
-		            target.replaceAnchor, text, flags, target.outputStreamId, target.anchorState,
-		            &resolvedAnchorBufferIndex))
+		            target.outputIdentity.expectsAnchorReplacement, text, flags, target.outputStreamId,
+		            target.anchorState, &resolvedAnchorBufferIndex, target.outputIdentity))
 		    {
 			    if (target.anchorState)
 				    target.anchorState->storeBufferIndex(resolvedAnchorBufferIndex);
@@ -15569,7 +16011,7 @@ static int luaAnsiNote(lua_State *L)
 		    {
 			    target.anchorState->clearPresentation();
 		    }
-		    targetRuntime.outputAnsiNoteText(text);
+		    static_cast<void>(targetRuntime.writeLuaCallbackAnsiOutput(text, flags, target.outputIdentity));
 	    });
 	return 0;
 }
@@ -15591,9 +16033,18 @@ static int luaBlendPixel(lua_State *L)
 	return 1;
 }
 
+static int luaBookmark(lua_State *L);
+
+static int luaBookmarkPageContinuation(lua_State *L, int status, lua_KContext context)
+{
+	Q_UNUSED(status);
+	lua_settop(L, static_cast<int>(context));
+	return luaBookmark(L);
+}
+
 static int luaBookmark(lua_State *L)
 {
-	const auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
 	if (!engine)
 		return 0;
 	WorldRuntime *runtime = engine->worldRuntimeForBridgedCall();
@@ -15606,27 +16057,121 @@ static int luaBookmark(lua_State *L)
 	{
 		return 0;
 	}
-	const int               lineNumber = static_cast<int>(requestedLineNumber);
-	const bool              set        = optBool(L, 2, true);
+	const int  lineNumber = static_cast<int>(requestedLineNumber);
+	const bool set        = optBool(L, 2, true);
+	if (!activeCallbackContextConst(engine))
+	{
+		enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
+		                                             [lineNumber, set](WorldRuntime &targetRuntime)
+		                                             { targetRuntime.bookmarkLine(lineNumber, set); });
+		return 0;
+	}
+	auto      *context                    = activeCallbackContext(engine);
+	const auto pendingBoundaryIdentity    = context->bookmarkIdentityAfterLineMutationBoundary;
+	const int  pendingBoundaryRequestLine = context->bookmarkRequestLineAfterLineMutationBoundary;
+	const int  pendingBoundaryOverlayLine = context->bookmarkOverlayLineAfterLineMutationBoundary;
+	context->bookmarkIdentityAfterLineMutationBoundary.reset();
+	context->bookmarkRequestLineAfterLineMutationBoundary = 0;
+	context->bookmarkOverlayLineAfterLineMutationBoundary = 0;
+	const bool canonicalBoundaryIdentityResolved =
+	    context->bookmarkLineLayoutBoundaryCurrent && pendingBoundaryOverlayLine > 0;
+	const bool exactLineMutationBoundary =
+	    pendingBoundaryIdentity && pendingBoundaryRequestLine == lineNumber &&
+	    pendingBoundaryIdentity->deferredLineIdentity.isValid() &&
+	    (!pendingBoundaryIdentity->deferredLineIdentity.state->layoutDiverged() ||
+	     (canonicalBoundaryIdentityResolved &&
+	      pendingBoundaryIdentity->deferredLineIdentity.state->exactIdentitiesRemainReliable()));
+	if (exactLineMutationBoundary)
+		context->bookmarkLineLayoutBoundaryCurrent = true;
+	const bool presentationRequiresRefresh = context && context->linePresentationRequiresRefresh;
+	const bool lineLayoutRequiresRefresh   = !exactLineMutationBoundary && presentationRequiresRefresh &&
+	                                         context->hasLineBufferCountMutation &&
+	                                         !context->bookmarkLineLayoutBoundaryCurrent;
+	if (lineLayoutRequiresRefresh)
+	{
+		const LuaCallbackDeferredLineIdentity deferredIdentity =
+		    context->deferredLineIdentityIndex.value(lineNumber);
+		if (deferredIdentity.isValid())
+		{
+			const bool isCurrentLine =
+			    context->currentLine && lineNumber == context->materializedLineBufferCount + 1;
+			context->bookmarkIdentityAfterLineMutationBoundary.emplace(lineNumber, 0, isCurrentLine,
+			                                                           deferredIdentity);
+			context->bookmarkRequestLineAfterLineMutationBoundary = lineNumber;
+			context->bookmarkOverlayLineAfterLineMutationBoundary = lineNumber;
+		}
+		const int yieldResult =
+		    yieldCallbackLinePage(L, engine, runtime, lineNumber, luaBookmarkPageContinuation);
+		if (yieldResult != kLuaLinePageYieldUnavailable)
+			return yieldResult;
+		context = activeCallbackContext(engine);
+		if (context)
+		{
+			context->bookmarkIdentityAfterLineMutationBoundary.reset();
+			context->bookmarkRequestLineAfterLineMutationBoundary = 0;
+			context->bookmarkOverlayLineAfterLineMutationBoundary = 0;
+		}
+		enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
+		                                             [lineNumber, set](WorldRuntime &targetRuntime)
+		                                             { targetRuntime.bookmarkLine(lineNumber, set); });
+		return 0;
+	}
+	const int lookupLineNumber = exactLineMutationBoundary ? pendingBoundaryOverlayLine : lineNumber;
 	WorldRuntime::LineEntry cachedEntry;
 	bool                    cacheHit = false;
-	if (tryResolveCallbackLineEntryFromCache(engine, lineNumber, cachedEntry, cacheHit) && cacheHit)
+	if (lookupLineNumber > 0)
+	{
+		static_cast<void>(
+		    tryResolveCallbackLineEntryFromCache(engine, lookupLineNumber, cachedEntry, cacheHit));
+	}
+	if (!exactLineMutationBoundary && !cacheHit && callbackLineLookupNeedsPage(engine, runtime, lineNumber))
+	{
+		const int yieldResult =
+		    yieldCallbackLinePage(L, engine, runtime, lineNumber, luaBookmarkPageContinuation);
+		if (yieldResult != kLuaLinePageYieldUnavailable)
+			return yieldResult;
+	}
+	if (!cacheHit && lookupLineNumber > 0)
+	{
+		static_cast<void>(
+		    tryResolveCallbackLineEntryFromCache(engine, lookupLineNumber, cachedEntry, cacheHit));
+	}
+	if (!exactLineMutationBoundary && (!cacheHit || cachedEntry.lineNumber <= 0))
+		return 0;
+	context = activeCallbackContext(engine);
+	const bool isCurrentLine =
+	    context && context->currentLine && lookupLineNumber == context->materializedLineBufferCount + 1;
+	const LuaCallbackDeferredLineIdentity deferredIdentity =
+	    context ? context->deferredLineIdentityIndex.value(lookupLineNumber)
+	            : LuaCallbackDeferredLineIdentity{};
+	const WorldRuntime::LuaCallbackLineIdentity identity =
+	    exactLineMutationBoundary
+	        ? *pendingBoundaryIdentity
+	        : WorldRuntime::LuaCallbackLineIdentity{lineNumber, cacheHit ? cachedEntry.lineNumber : 0,
+	                                                isCurrentLine, deferredIdentity};
+	if (cacheHit)
 	{
 		if (set)
 			cachedEntry.flags |= WorldRuntime::LineBookmark;
 		else
 			cachedEntry.flags &= ~WorldRuntime::LineBookmark;
-		cacheCallbackMutatedLineEntry(engine, lineNumber, true, cachedEntry);
+		if (auto *mutableContext = activeCallbackContext(engine);
+		    mutableContext && mutableContext->currentLine &&
+		    lookupLineNumber == mutableContext->materializedLineBufferCount + 1)
+		{
+			cacheCallbackCurrentLine(engine, std::move(cachedEntry), true);
+		}
+		else
+			cacheCallbackMutatedLineEntry(engine, lookupLineNumber, true, cachedEntry);
 	}
-	if (auto *context = activeCallbackContext(engine);
-	    context && lineNumber > 0 &&
-	    (!context->hasBufferedLineCount || lineNumber <= context->bufferedLineCount))
+	if (context && lookupLineNumber > 0 &&
+	    (!context->hasBufferedLineCount || lookupLineNumber <= context->bufferedLineCount))
 	{
 		context->linePresentationRequiresRefresh = true;
 	}
-	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
-	                                             [lineNumber, set](WorldRuntime &targetRuntime)
-	                                             { targetRuntime.bookmarkLine(lineNumber, set); });
+	enqueueRuntimeThreadDeferredMutationNoResult(
+	    engine, runtime, [identity, set](WorldRuntime &targetRuntime)
+	    { static_cast<void>(targetRuntime.setLuaCallbackLineBookmark(identity, set)); });
 	return 0;
 }
 
@@ -15703,11 +16248,20 @@ namespace
 		auto refreshed                   = QSharedPointer<LuaCallbackSnapshot>::create(*dispatchSnapshot);
 		refreshed->hasLineBufferSnapshot = true;
 		refreshed->lineBufferCount       = presentation->lineBufferCount;
-		refreshed->lineBufferSnapshot    = presentation;
+		refreshed->materializedLineBufferCount = presentation->materializedLineBufferCount;
+		refreshed->currentLineTemplate         = presentation->currentLineTemplate;
+		refreshed->currentLine                 = presentation->currentLine;
+		refreshed->lineBufferSnapshot          = presentation;
 		refreshed->lineEntriesByBufferIndex.clear();
-		refreshed->hasLineBufferDeltaSnapshot = false;
-		refreshed->hasLineBufferCountDelta    = false;
-		refreshed->lineBufferDeltaCount       = 0;
+		refreshed->hasDeferredLineIdentitySnapshot = true;
+		refreshed->deferredLineIdentityIndex.clear();
+		refreshed->deferredLineIdentityState.reset();
+		refreshed->hasLineBufferDeltaSnapshot       = false;
+		refreshed->hasLineBufferCountDelta          = false;
+		refreshed->lineBufferDeltaCount             = 0;
+		refreshed->materializedLineBufferDeltaCount = -1;
+		refreshed->currentLineDeltaPresent          = false;
+		refreshed->currentLineDelta.reset();
 		refreshed->lineEntryDeltasByBufferIndex.clear();
 		refreshed->missingLineEntryDeltasByBufferIndex.clear();
 		refreshed->linePresentationRequiresRefresh = false;
@@ -15724,7 +16278,8 @@ namespace
 			refreshed->recentLinesSnapshot.clear();
 		}
 		if (refreshed->hasRuntimeCountersSnapshot)
-			refreshed->runtimeCountersSnapshotState.outputLineCount = presentation->lineBufferCount;
+			refreshed->runtimeCountersSnapshotState.outputLineCount =
+			    presentation->materializedLineBufferCount;
 		dispatchSnapshot = refreshed;
 	}
 
@@ -17421,8 +17976,9 @@ namespace
 			if (anchorBufferIndex > 0 &&
 			    targetRuntime.writeLuaCallbackOutputAtLineAnchor(
 			        target.anchorLineNumber, anchorBufferIndex, target.anchorRelativeOffset,
-			        target.replaceAnchor, text, flags, spans, hardReturn, target.outputStreamId,
-			        target.anchorState, &resolvedAnchorBufferIndex))
+			        target.outputIdentity.expectsAnchorReplacement, text, flags, spans, hardReturn,
+			        target.outputStreamId, target.anchorState, &resolvedAnchorBufferIndex,
+			        target.outputIdentity))
 			{
 				if (target.anchorState)
 				{
@@ -17436,7 +17992,8 @@ namespace
 			}
 		}
 
-		targetRuntime.outputStyledText(text, spans, (flags & WorldRuntime::LineNote) != 0, hardReturn);
+		static_cast<void>(
+		    targetRuntime.writeLuaCallbackOutput(text, flags, spans, hardReturn, target.outputIdentity));
 	}
 } // namespace
 
@@ -18646,13 +19203,11 @@ static bool resolveRecentLinesForApi(const LuaCallbackEngine *engine, WorldRunti
 	if (const auto *context = activeCallbackContextConst(engine);
 	    context && context->wildcardDomain == CallbackWildcardDomain::Trigger)
 	{
-		int lineCountAtDispatch = 0;
-		if (!tryResolveCallbackLineCountFromCache(engine, lineCountAtDispatch))
-			lineCountAtDispatch = context->hasBufferedLineCount
-			                          ? context->bufferedLineCount
-			                          : context->triggerMatchedLineBufferIndexAtDispatch;
-		const int boundedCount = qBound(0, count, qMax(0, lineCountAtDispatch));
-		const int startIndex   = qMax(1, lineCountAtDispatch - boundedCount + 1);
+		const int lineCountAtDispatch = context->hasBufferedLineCount
+		                                    ? context->materializedLineBufferCount
+		                                    : context->triggerMatchedLineBufferIndexAtDispatch;
+		const int boundedCount        = qBound(0, count, qMax(0, lineCountAtDispatch));
+		const int startIndex          = qMax(1, lineCountAtDispatch - boundedCount + 1);
 		lines.reserve(boundedCount);
 		for (int index = startIndex; index <= lineCountAtDispatch; ++index)
 		{
@@ -22353,6 +22908,8 @@ static bool callbackLineLookupNeedsPage(const LuaCallbackEngine *engine, const W
 		return true;
 	if (context->hasBufferedLineCount && lineNumber > context->bufferedLineCount)
 		return false;
+	if (context->currentLine && lineNumber == context->materializedLineBufferCount + 1)
+		return false;
 	if (context->lineEntries.contains(lineNumber) || context->missingLineEntries.contains(lineNumber))
 		return false;
 	if (context->hasLineBufferMutationSnapshot)
@@ -22462,22 +23019,37 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 	{
 		struct LinePage
 		{
-				QPointer<WorldRuntime>                             runtime;
-				quint64                                            lineBufferGeneration{0};
-				int                                                lineBufferCount{0};
-				int                                                firstLine{0};
-				int                                                lastLine{0};
-				bool                                               hasRecentLinesSnapshot{false};
-				bool                                               hasCommandUiSnapshot{false};
-				bool                                               hasGeometryConstraintSnapshot{false};
-				bool                                               captureCompleted{false};
-				QHash<int, WorldRuntime::LineEntry>                entries;
-				QStringList                                        recentLinesSnapshot;
-				WorldRuntime::CommandUiSnapshot                    commandUiSnapshot;
-				WorldRuntime::MiniWindowGeometryConstraintSnapshot geometryConstraintSnapshot;
+				QPointer<WorldRuntime>                                runtime;
+				std::shared_ptr<LuaCallbackDeferredLineIdentityState> exactBookmarkIdentityState;
+				quint64                                               exactBookmarkIdentity{0};
+				int                                                   exactBookmarkBufferIndex{0};
+				quint64                                               lineBufferGeneration{0};
+				int                                                   lineBufferCount{0};
+				int                                                   materializedLineBufferCount{0};
+				WorldRuntime::LineEntry                               currentLineTemplate;
+				std::optional<WorldRuntime::LineEntry>                currentLine;
+				int                                                   firstLine{0};
+				int                                                   lastLine{0};
+				bool                                                  hasRecentLinesSnapshot{false};
+				bool                                                  hasCommandUiSnapshot{false};
+				bool                                                  hasGeometryConstraintSnapshot{false};
+				bool                                                  captureCompleted{false};
+				bool                                                  allowExactLineOverlay{true};
+				bool                                                  preserveExactLineOverlay{false};
+				QHash<int, WorldRuntime::LineEntry>                   entries;
+				QStringList                                           recentLinesSnapshot;
+				WorldRuntime::CommandUiSnapshot                       commandUiSnapshot;
+				WorldRuntime::MiniWindowGeometryConstraintSnapshot    geometryConstraintSnapshot;
 		};
-		auto page                              = std::make_shared<LinePage>();
-		page->runtime                          = runtime;
+		auto page     = std::make_shared<LinePage>();
+		page->runtime = runtime;
+		if (context->bookmarkIdentityAfterLineMutationBoundary)
+		{
+			page->exactBookmarkIdentityState =
+			    context->bookmarkIdentityAfterLineMutationBoundary->deferredLineIdentity.state;
+			page->exactBookmarkIdentity =
+			    context->bookmarkIdentityAfterLineMutationBoundary->deferredLineIdentity.identity;
+		}
 		auto pageResult                        = QSharedPointer<LuaCallbackLinePageResult>::create();
 		pageResult->runtime                    = runtime;
 		const bool includeRecentLines          = forceRecentLines || context->hasRecentLinesSnapshot;
@@ -22494,20 +23066,46 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 			WorldRuntime *const dataRuntime = page->runtime.data();
 			if (!dataRuntime)
 				return;
-			page->lineBufferCount = dataRuntime->luaContextLinePageByBufferIndex(
-			    firstLineInPage, lastLineInPage, page->lineBufferGeneration, page->entries,
-			    page->recentLinesSnapshot, includeRecentLines);
+			page->preserveExactLineOverlay = page->allowExactLineOverlay &&
+			                                 page->exactBookmarkIdentityState &&
+			                                 !page->exactBookmarkIdentityState->layoutDiverged();
+			if (!page->preserveExactLineOverlay)
+			{
+				page->lineBufferCount = dataRuntime->luaContextLinePageByBufferIndex(
+				    firstLineInPage, lastLineInPage, page->lineBufferGeneration, page->entries,
+				    page->recentLinesSnapshot, includeRecentLines, &page->materializedLineBufferCount,
+				    &page->currentLine, &page->currentLineTemplate);
+				const qint64 bookmarkLineNumber =
+				    page->exactBookmarkIdentityState && page->exactBookmarkIdentity > 0
+				        ? page->exactBookmarkIdentityState->resolve(page->exactBookmarkIdentity)
+				        : 0;
+				if (bookmarkLineNumber > 0)
+				{
+					if (page->currentLine && page->currentLine->lineNumber == bookmarkLineNumber)
+						page->exactBookmarkBufferIndex = page->materializedLineBufferCount + 1;
+					else
+					{
+						for (auto it = page->entries.constBegin(); it != page->entries.constEnd(); ++it)
+						{
+							if (it->lineNumber != bookmarkLineNumber)
+								continue;
+							page->exactBookmarkBufferIndex = it.key();
+							break;
+						}
+					}
+				}
+			}
 			page->captureCompleted       = true;
 			page->hasRecentLinesSnapshot = includeRecentLines;
 			if (firstLineInPage == 0 && lastLineInPage == 0)
 			{
-				page->firstLine = page->lineBufferCount > 0 ? page->lineBufferCount : 0;
+				page->firstLine = page->materializedLineBufferCount;
 				page->lastLine  = page->firstLine;
 			}
-			else if (firstLineInPage > 0 && firstLineInPage <= page->lineBufferCount)
+			else if (firstLineInPage > 0 && firstLineInPage <= page->materializedLineBufferCount)
 			{
 				page->firstLine = firstLineInPage;
-				page->lastLine  = qMin(lastLineInPage, page->lineBufferCount);
+				page->lastLine  = qMin(lastLineInPage, page->materializedLineBufferCount);
 			}
 			if (refreshOutputScrollPosition)
 			{
@@ -22529,19 +23127,43 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 		{
 			if (!page->captureCompleted || !page->runtime)
 				return;
-			auto presentation                  = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
-			presentation->lineBufferGeneration = page->lineBufferGeneration;
-			presentation->lineBufferCount      = page->lineBufferCount;
-			presentation->firstCapturedLineBufferIndex = page->firstLine;
-			presentation->lastCapturedLineBufferIndex  = page->lastLine;
-			presentation->recentLinesSnapshot          = page->recentLinesSnapshot;
-			presentation->lineEntriesByBufferIndex.reserve(page->entries.size());
-			for (auto it = page->entries.constBegin(); it != page->entries.constEnd(); ++it)
+			if (!page->preserveExactLineOverlay)
 			{
-				presentation->lineEntriesByBufferIndex.insert(
-				    it.key(), QMudLuaCallbackLineSnapshot::fromLineEntry(it.value()));
+				auto presentation                  = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
+				presentation->lineBufferGeneration = page->lineBufferGeneration;
+				presentation->lineBufferCount      = page->lineBufferCount;
+				presentation->materializedLineBufferCount = page->materializedLineBufferCount;
+				presentation->currentLineTemplate =
+				    QMudLuaCallbackLineSnapshot::fromLineEntry(page->currentLineTemplate);
+				presentation->currentLine =
+				    page->currentLine
+				        ? std::optional(QMudLuaCallbackLineSnapshot::fromLineEntry(*page->currentLine))
+				        : std::nullopt;
+				presentation->firstCapturedLineBufferIndex = page->firstLine;
+				presentation->lastCapturedLineBufferIndex  = page->lastLine;
+				presentation->recentLinesSnapshot          = page->recentLinesSnapshot;
+				presentation->lineEntriesByBufferIndex.reserve(page->entries.size());
+				for (auto it = page->entries.constBegin(); it != page->entries.constEnd(); ++it)
+				{
+					presentation->lineEntriesByBufferIndex.insert(
+					    it.key(), QMudLuaCallbackLineSnapshot::fromLineEntry(it.value()));
+				}
+				cacheCallbackLinePagePresentation(engine, presentation, page->hasRecentLinesSnapshot);
+				if (page->exactBookmarkIdentityState)
+				{
+					if (auto *context = activeCallbackContext(engine); context)
+					{
+						context->bookmarkOverlayLineAfterLineMutationBoundary =
+						    page->exactBookmarkBufferIndex;
+						context->bookmarkLineLayoutBoundaryCurrent = page->exactBookmarkBufferIndex > 0;
+					}
+				}
+				engine->replaceCachedLinePage(page->runtime.data(), page->lineBufferGeneration,
+				                              page->firstLine, page->lastLine,
+				                              presentation->lineEntriesByBufferIndex);
+				pageResult->presentation           = presentation;
+				pageResult->hasRecentLinesSnapshot = page->hasRecentLinesSnapshot;
 			}
-			cacheCallbackLinePagePresentation(engine, presentation, page->hasRecentLinesSnapshot);
 			if (page->hasCommandUiSnapshot)
 			{
 				cacheRefreshedCallbackOutputScrollSnapshot(engine, page->commandUiSnapshot);
@@ -22551,14 +23173,15 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 					    engine, page->geometryConstraintSnapshot);
 				}
 			}
-			engine->replaceCachedLinePage(page->runtime.data(), page->lineBufferGeneration, page->firstLine,
-			                              page->lastLine, presentation->lineEntriesByBufferIndex);
-			pageResult->presentation           = presentation;
-			pageResult->hasRecentLinesSnapshot = page->hasRecentLinesSnapshot;
 		};
 		request.internalImmediateResume = true;
 		setLuaModalResumeCallback(request, engine->callbackDispatchRuntime(), engine->pluginId());
 		yieldPrepared = beginModalStringYield(L, engine, std::move(request));
+		if (yieldPrepared)
+		{
+			if (const auto *activeContext = activeCallbackContextConst(engine); activeContext)
+				page->allowExactLineOverlay = !activeContext->refreshSnapshotAfterModalFlush;
+		}
 	}
 	if (!yieldPrepared)
 		return kLuaLinePageYieldUnavailable;
@@ -24844,8 +25467,9 @@ static int luaNoteHr(lua_State *L)
 			    if (anchorBufferIndex > 0 &&
 			        targetRuntime.writeLuaCallbackOutputAtLineAnchor(
 			            target.anchorLineNumber, anchorBufferIndex, target.anchorRelativeOffset,
-			            target.replaceAnchor, QString(), flags, {}, true, target.outputStreamId,
-			            target.anchorState, &resolvedAnchorBufferIndex))
+			            target.outputIdentity.expectsAnchorReplacement, QString(), flags, {}, true,
+			            target.outputStreamId, target.anchorState, &resolvedAnchorBufferIndex,
+			            target.outputIdentity))
 			    {
 				    if (target.anchorState)
 				    {
@@ -24858,14 +25482,8 @@ static int luaNoteHr(lua_State *L)
 				    target.anchorState->clearPresentation();
 			    }
 		    }
-		    targetRuntime.finalizeOpenOutputLineHardReturn();
-		    if (WorldView *const view = targetRuntime.view())
-		    {
-			    view->appendHorizontalRule();
-			    return;
-		    }
-
-		    targetRuntime.addLine(QString(), WorldRuntime::LineHorizontalRule, true);
+		    static_cast<void>(
+		        targetRuntime.writeLuaCallbackOutput(QString(), flags, {}, true, target.outputIdentity));
 	    });
 	return 0;
 }
@@ -47458,6 +48076,8 @@ static int luaSetOption(lua_State *L)
 		    engine, runtime, [option, publicValue](WorldRuntime &targetRuntime)
 		    { static_cast<void>(targetRuntime.setOptionItem(*option, publicValue)); });
 		updateCallbackWorldAttributeSnapshot(engine, runtime, canonical, storedValue, false);
+		if (canonical == QStringLiteral("max_output_lines"))
+			applyCallbackOutputLineLimitReduction(engine, runtime, static_cast<int>(publicValue));
 		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 		lua_pushnumber(L, eOK);
 		return 1;

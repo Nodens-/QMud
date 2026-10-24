@@ -334,6 +334,8 @@ end
 
 function OnPluginTelnetSubnegotiation(msg_type, data)
   qcb_append_order("telnet")
+  local count = GetLinesInBufferCount()
+  SetVariable("telnet_current_line", GetLineInfo(count, 1) or "")
   Note("telnet-note-b73")
   Send("qcmd-telnet-b73")
 end
@@ -549,12 +551,12 @@ end
 function OnPluginConnect()
   local count = GetLinesInBufferCount()
   SetVariable("observed_count", string.format("%.0f", count))
-  SetVariable("observed_last_line", GetLineInfo(count, 1) or "<nil>")
+  SetVariable("observed_last_line", GetLineInfo(count - 1, 1) or "<nil>")
 end
 function OnPluginDisconnect()
   local count = GetLinesInBufferCount()
   SetVariable("observed_unsuspended_count", string.format("%.0f", count))
-  SetVariable("observed_unsuspended_last_line", GetLineInfo(count, 1) or "<nil>")
+  SetVariable("observed_unsuspended_last_line", GetLineInfo(count - 1, 1) or "<nil>")
 end
 ]]></script>
   </plugin>
@@ -802,6 +804,8 @@ end
     <script><![CDATA[
 function OnPluginMXPsetEntity(payload)
   SetVariable("mxp_entity_payload", payload)
+  local count = GetLinesInBufferCount()
+  SetVariable("mxp_entity_current_line", GetLineInfo(count, 1) or "")
 end
 
 function OnPluginLineReceived(payload)
@@ -2953,7 +2957,7 @@ end
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_payload")),
 			    QStringLiteral("partial"));
 
-			QByteArray payload = QByteArrayLiteral("\x1B[1z<!ENTITY server '");
+			QByteArray payload = QByteArrayLiteral("-before-entity\x1B[1z<!ENTITY server '");
 			payload.append(QByteArray::fromHex("D6D0CEC4"));
 			payload.append("'>");
 			runtime.receiveRawData(payload);
@@ -2961,9 +2965,15 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("mxp_entity_payload")),
 			    QStringLiteral("server=中文"), 5000);
+			QCOMPARE(pluginVariable(runtime, kMxpEntityCallbackPluginId,
+			                        QStringLiteral("mxp_entity_current_line")),
+			         QStringLiteral("partial-before-entity"));
 			QCOMPARE(
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_count")),
-			    QStringLiteral("1"));
+			    QStringLiteral("2"));
+			QCOMPARE(
+			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_payload")),
+			    QStringLiteral("partial-before-entity"));
 		}
 
 		static void mxpParserContinuesAfterEarlierLineCallbackSuspends()
@@ -5001,7 +5011,7 @@ Note("post-ansi-output")
 			QCOMPARE(lines.sliced(lines.size() - expected.size()), expected);
 			QVERIFY(!lines.contains(QStringLiteral("ansi-ordered-origin")));
 			QCOMPARE(worldVariable(runtime, QStringLiteral("ansi_callback_lines")),
-			         QStringLiteral("3|prior-trigger-output|ansi-replacement-output"));
+			         QStringLiteral("4|ansi-replacement-output|following-partial"));
 		}
 
 		static void keepEvaluatingTriggerOutputRetainsActionOrderWhenMatchedLineIsOmitted_data()
@@ -5546,18 +5556,25 @@ ColourNote("red", "black", "single-note-two")
 			runtime.receiveRawData(QByteArrayLiteral("visible-partial"));
 			QCOMPARE(harness.view.outputLines().constLast(), QStringLiteral("visible-partial"));
 
-			runtime.receiveRawData(bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE}));
+			QByteArray callbackPayload = QByteArrayLiteral("-continued");
+			callbackPayload += bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE});
+			runtime.receiveRawData(callbackPayload);
 			QStringList afterCallback;
 			auto        callbackOutputPresented = [&]
 			{
 				afterCallback = harness.view.outputLines();
 				return afterCallback.size() >= 2 &&
 				       afterCallback.sliced(afterCallback.size() - 2) ==
-				           QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")};
+				           QStringList{QStringLiteral("telnet-note-b73"),
+				                       QStringLiteral("visible-partial-continued")};
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(callbackOutputPresented(), 5000);
 			QCOMPARE(afterCallback.sliced(afterCallback.size() - 2),
-			         (QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")}));
+			         (QStringList{QStringLiteral("telnet-note-b73"),
+			                      QStringLiteral("visible-partial-continued")}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("telnet_current_line")),
+			    QStringLiteral("visible-partial-continued"), 5000);
 
 			runtime.receiveRawData(QByteArrayLiteral("\r\n"));
 			QStringList afterCompletion;
@@ -5566,11 +5583,13 @@ ColourNote("red", "black", "single-note-two")
 				afterCompletion = harness.view.outputLines();
 				return afterCompletion.size() >= 2 &&
 				       afterCompletion.sliced(afterCompletion.size() - 2) ==
-				           QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")};
+				           QStringList{QStringLiteral("telnet-note-b73"),
+				                       QStringLiteral("visible-partial-continued")};
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(completedLinePresented(), 5000);
 			QCOMPARE(afterCompletion.sliced(afterCompletion.size() - 2),
-			         (QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")}));
+			         (QStringList{QStringLiteral("telnet-note-b73"),
+			                      QStringLiteral("visible-partial-continued")}));
 		}
 
 		static void delayedTelnetBroadcastOutputRetainsEventPosition()

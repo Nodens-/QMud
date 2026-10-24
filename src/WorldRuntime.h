@@ -751,6 +751,13 @@ class WorldRuntime : public QObject
 				QString hint;
 				QString variable;
 				bool    startTag{false};
+
+				/**
+				 * @brief Compares every persisted ANSI rendering attribute.
+				 * @param other Rendering state to compare with this state.
+				 * @return `true` when both states describe the same active output style.
+				 */
+				bool    operator==(const AnsiRenderState &other) const = default;
 		};
 		/**
 		 * @brief Incremental MXP style state carried across packet boundaries.
@@ -814,6 +821,73 @@ class WorldRuntime : public QObject
 				qint64             lineNumber{0};
 				double             ticks{0.0};
 				double             elapsed{0.0};
+		};
+		/**
+		 * @brief Stable identity for one Lua-visible output line across deferred callback playback.
+		 */
+		struct LuaCallbackLineIdentity
+		{
+				int    preferredBufferIndex; ///< One-based position captured with the line.
+				qint64 absoluteLineNumber;   ///< Stable `LineEntry::lineNumber` value.
+				bool   capturedCurrentLine;  ///< Identity began as the non-stored current line.
+				LuaCallbackDeferredLineIdentity
+				    deferredLineIdentity; ///< Runtime-published identity for callback-created output.
+
+				/**
+				 * @brief Constructs an optional stable callback line identity.
+				 * @param preferredIndex One-based position captured with the line.
+				 * @param absoluteNumber Stable `LineEntry::lineNumber` value.
+				 * @param currentLine Whether the captured entry was the non-stored current line.
+				 * @param deferredIdentity Shared identity published when deferred output commits.
+				 */
+				LuaCallbackLineIdentity(const int preferredIndex = 0, const qint64 absoluteNumber = 0,
+				                        const bool                      currentLine      = false,
+				                        LuaCallbackDeferredLineIdentity deferredIdentity = {}) noexcept
+				    : preferredBufferIndex(preferredIndex), absoluteLineNumber(absoluteNumber),
+				      capturedCurrentLine(currentLine), deferredLineIdentity(std::move(deferredIdentity))
+				{
+				}
+
+				/**
+				 * @brief Returns the committed absolute line number currently represented by this identity.
+				 * @return Published callback-output identity when available, otherwise the captured line number.
+				 */
+				[[nodiscard]] qint64 resolvedAbsoluteLineNumber() const noexcept
+				{
+					if (deferredLineIdentity.isValid())
+						return deferredLineIdentity.state->resolve(deferredLineIdentity.identity);
+					return absoluteLineNumber;
+				}
+
+				/**
+				 * @brief Returns whether this identity can resolve a callback-visible line.
+				 * @return `true` when a position and captured or deferred absolute identity are present.
+				 */
+				[[nodiscard]] bool isValid() const
+				{
+					return preferredBufferIndex > 0 &&
+					       (absoluteLineNumber > 0 || deferredLineIdentity.isValid());
+				}
+		};
+		/**
+		 * @brief Stable source and result identities shared by one deferred callback output mutation.
+		 */
+		struct LuaCallbackOutputIdentity
+		{
+				/** @brief Creates an empty callback-output identity. */
+				LuaCallbackOutputIdentity() noexcept
+				    : expectsAnchorReplacement(false), fillsCurrentLine(false)
+				{
+				}
+
+				LuaCallbackLineIdentity bookmarkTransferSource; ///< Bookmark source consumed by output.
+				LuaCallbackDeferredLineIdentity producedLine;   ///< First physical line committed by output.
+				LuaCallbackDeferredLineIdentity
+				    resultingCurrentLine; ///< Current line after output completes.
+				std::shared_ptr<LuaCallbackDeferredLineIdentityState>
+				     lineIdentityState;        ///< Shared canonical-versus-provisional layout state.
+				bool expectsAnchorReplacement; ///< Whether the callback overlay replaced an anchored line.
+				bool fillsCurrentLine;         ///< Whether this output consumes the callback's current line.
 		};
 		/**
 		 * @brief One exact structural edit to the physical output buffer.
@@ -2184,13 +2258,14 @@ class WorldRuntime : public QObject
 		 * @param outputStreamId Callback output stream that owns the anchored insertion cursor.
 		 * @param anchorState Shared presentation state maintained with the insertion cursor.
 		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after the write.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
 		 * @return `true` when runtime line state changed.
 		 */
 		bool                 writeLuaCallbackOutputAtLineAnchor(
 		    qint64 anchorLineNumber, int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
 		    const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
 		    quint64 outputStreamId = 0, const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState = {},
-		    int *resolvedAnchorBufferIndex = nullptr);
+		    int *resolvedAnchorBufferIndex = nullptr, const LuaCallbackOutputIdentity &outputIdentity = {});
 		/**
 		 * @brief Parses ANSI callback output and writes it relative to a stable output anchor.
 		 * @param anchorLineNumber Absolute line number of the callback output anchor.
@@ -2202,13 +2277,34 @@ class WorldRuntime : public QObject
 		 * @param outputStreamId Callback output stream that owns the anchored insertion cursor.
 		 * @param anchorState Shared presentation state maintained with the insertion cursor.
 		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after the write.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
 		 * @return `true` when the anchored output was written.
 		 */
 		bool writeLuaCallbackAnsiOutputAtLineAnchor(
 		    qint64 anchorLineNumber, int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
 		    const QString &text, int flags, quint64 outputStreamId = 0,
-		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState               = {},
-		    int                                                 *resolvedAnchorBufferIndex = nullptr);
+		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState = {},
+		    int *resolvedAnchorBufferIndex = nullptr, const LuaCallbackOutputIdentity &outputIdentity = {});
+		/**
+		 * @brief Writes unanchored callback output with its captured flags and bookmark transfer identity.
+		 * @param text Output text.
+		 * @param flags Line flags captured by the callback.
+		 * @param spans Style spans for @p text.
+		 * @param hardReturn Complete the final logical line when `true`.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
+		 * @return `true` when the complete output mutation was committed.
+		 */
+		bool writeLuaCallbackOutput(const QString &text, int flags, const QVector<StyleSpan> &spans,
+		                            bool hardReturn, const LuaCallbackOutputIdentity &outputIdentity = {});
+		/**
+		 * @brief Writes unanchored ANSI callback output with its captured bookmark transfer identity.
+		 * @param text ANSI output text.
+		 * @param flags Line flags captured by the callback.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
+		 * @return `true` when the complete output mutation was committed.
+		 */
+		bool writeLuaCallbackAnsiOutput(const QString &text, int flags,
+		                                const LuaCallbackOutputIdentity &outputIdentity = {});
 		/**
 		 * @brief Allocates a process-unique anchored-output insertion stream identifier.
 		 * @return Nonzero insertion stream identifier.
@@ -2265,16 +2361,21 @@ class WorldRuntime : public QObject
 		 * @brief Returns a bounded callback page using current one-based buffer indexes.
 		 * @param firstBufferIndex First one-based buffer index in the requested page.
 		 * @param lastBufferIndex Last one-based buffer index in the requested page.
-		 * @param lineBufferGeneration Output presentation generation captured with the page.
+		 * @param lineBufferGeneration Materialized output presentation generation captured with the page.
 		 * @param entries Output entries keyed by their current presentation index.
 		 * @param recentLinesSnapshot Output current recent lines when @p includeRecentLines is `true`.
 		 * @param includeRecentLines Whether to include the recent-text snapshot with the page.
+		 * @param materializedLineBufferCount Output count backed by storage or a pending callback line.
+		 * @param currentLine Output non-stored current line, when present.
+		 * @param currentLineTemplate Output runtime metadata and active style used for a new current line.
 		 * @return Current number of lines in the buffer presentation.
 		 */
-		int  luaContextLinePageByBufferIndex(int firstBufferIndex, int lastBufferIndex,
-		                                     quint64 &lineBufferGeneration, QHash<int, LineEntry> &entries,
-		                                     QStringList &recentLinesSnapshot,
-		                                     bool         includeRecentLines = false) const;
+		int luaContextLinePageByBufferIndex(int firstBufferIndex, int lastBufferIndex,
+		                                    quint64 &lineBufferGeneration, QHash<int, LineEntry> &entries,
+		                                    QStringList &recentLinesSnapshot, bool includeRecentLines = false,
+		                                    int                      *materializedLineBufferCount = nullptr,
+		                                    std::optional<LineEntry> *currentLine                 = nullptr,
+		                                    LineEntry                *currentLineTemplate = nullptr) const;
 		/**
 		 * @brief Returns buffered Lua-context line count.
 		 * @return Buffered Lua-context line count.
@@ -3902,10 +4003,17 @@ class WorldRuntime : public QObject
 		 */
 		void                      bookmarkLine(int lineNumber, bool set);
 		/**
+		 * @brief Sets or clears a callback line bookmark using stable deferred-playback identity.
+		 * @param identity Captured line position and absolute identity.
+		 * @param set Set the bookmark when `true`, clear it otherwise.
+		 * @return `true` when the identified line still exists.
+		 */
+		bool setLuaCallbackLineBookmark(const LuaCallbackLineIdentity &identity, bool set);
+		/**
 		 * @brief Sets trigger-evaluation stop mode.
 		 * @param mode New stop-evaluation mode.
 		 */
-		void                      setStopTriggerEvaluation(StopTriggerEvaluation mode);
+		void setStopTriggerEvaluation(StopTriggerEvaluation mode);
 		/**
 		 * @brief Returns trigger-evaluation stop mode.
 		 * @return Current stop-evaluation mode.
@@ -5905,13 +6013,26 @@ class WorldRuntime : public QObject
 		 * @param outputStreamId Callback output stream identity.
 		 * @param anchorState Shared anchor presentation state.
 		 * @param resolvedAnchorBufferIndex Receives the current one-based anchor position.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
 		 * @return `true` when output was committed.
 		 */
 		bool outputAnsiTextInternal(const QString &text, bool note, bool finishLine, qint64 anchorLineNumber,
 		                            int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
 		                            int flags, quint64 outputStreamId = 0,
 		                            const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState = {},
-		                            int *resolvedAnchorBufferIndex = nullptr);
+		                            int                             *resolvedAnchorBufferIndex = nullptr,
+		                            const LuaCallbackOutputIdentity &outputIdentity            = {});
+		/**
+		 * @brief Writes styled output with exact flags and optional callback bookmark transfer.
+		 * @param text Output text.
+		 * @param spans Style spans for @p text.
+		 * @param flags Exact flags for committed output lines.
+		 * @param newLine Complete the final logical line when `true`.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
+		 * @return `true` when the complete output mutation was committed.
+		 */
+		bool outputStyledTextInternal(const QString &text, const QVector<StyleSpan> &spans, int flags,
+		                              bool newLine, const LuaCallbackOutputIdentity &outputIdentity);
 		[[nodiscard]] QVector<StyleSpan> inputEchoStyleSpans(const QString &text) const;
 		/**
 		 * @brief Commits prepared callback-output segments at a resolved line anchor.
@@ -5927,6 +6048,7 @@ class WorldRuntime : public QObject
 		 * @param logicalLogSegments Unwrapped logical segments committed with @p segments.
 		 * @param anchorState Shared anchor presentation state, when one is tracked.
 		 * @param resolvedAnchorBufferIndex Receives the current one-based anchor position.
+		 * @param outputIdentity Stable source and result identities for deferred callback output.
 		 * @return `true` when the complete mutation was committed.
 		 */
 		bool                             writeLuaCallbackOutputSegmentsAtLineAnchor(
@@ -5934,7 +6056,43 @@ class WorldRuntime : public QObject
 		    const LuaCallbackOutputPosition &position, const QVector<LineEntry> &segments, int flags,
 		    quint64 outputStreamId, const QStringList &screenDrawLines, OutputLogCommitContext logContext,
 		    const QVector<LineEntry>                            &logicalLogSegments,
-		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *resolvedAnchorBufferIndex);
+		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *resolvedAnchorBufferIndex,
+		    const LuaCallbackOutputIdentity &outputIdentity);
+		/**
+		 * @brief Marks callback output layout as divergent when committed playback differs from its overlay.
+		 * @param identity Callback overlay identities and expected replacement outcome.
+		 * @param complete Whether the complete output mutation was committed.
+		 * @param physicalLineCount Number of physical output lines committed by the mutation.
+		 * @param replacedAnchor Whether committed playback replaced its anchored line.
+		 */
+		static void reconcileLuaCallbackOutputLayout(const LuaCallbackOutputIdentity &identity, bool complete,
+		                                             int physicalLineCount, bool replacedAnchor);
+		/**
+		 * @brief Resolves bookmark transfer against the canonical runtime layout during ordered playback.
+		 * @param identity Callback overlay identities captured when the output mutation was queued.
+		 * @return Adjusted playback identity after divergence, or no value when the captured identity remains valid.
+		 */
+		[[nodiscard]] std::optional<LuaCallbackOutputIdentity>
+		            adjustedLuaCallbackOutputIdentity(const LuaCallbackOutputIdentity &identity) const;
+		/**
+		 * @brief Publishes the first committed runtime line for deferred callback output.
+		 * @param identity Shared deferred identity, when the callback presentation created one.
+		 * @param absoluteLineNumber Committed `LineEntry::lineNumber` value.
+		 */
+		static void publishLuaCallbackLineIdentity(const LuaCallbackDeferredLineIdentity &identity,
+		                                           qint64                                 absoluteLineNumber);
+		/**
+		 * @brief Publishes the runtime's non-stored current line for deferred callback output.
+		 * @param identity Shared deferred identity for the callback-visible current line.
+		 */
+		void publishLuaCallbackCurrentLineIdentity(const LuaCallbackDeferredLineIdentity &identity) const;
+		/**
+		 * @brief Moves a callback current-line bookmark to the first committed output segment.
+		 * @param source Stable identity of the callback current line.
+		 * @param targetAbsoluteLineNumber Absolute identity of the first committed output segment.
+		 */
+		void transferLuaCallbackLineBookmark(const LuaCallbackLineIdentity &source,
+		                                     qint64                         targetAbsoluteLineNumber);
 		/**
 		 * @brief Resolves an anchored-output cursor's current one-based Lua buffer position.
 		 * @return Current anchor position, or zero when the anchor is no longer present.
@@ -6153,6 +6311,10 @@ class WorldRuntime : public QObject
 		 * @brief Resets ANSI rendering state machine.
 		 */
 		void resetAnsiRenderState();
+		/**
+		 * @brief Clears the pending incoming line while preserving the active decoder and style state.
+		 */
+		void clearIncomingPartialLineState();
 		/**
 		 * @brief Resets MXP rendering state machine.
 		 */
@@ -6949,6 +7111,16 @@ class WorldRuntime : public QObject
 		 */
 		void invalidateLuaCallbackLineBufferSnapshot() const;
 		/**
+		 * @brief Marks only the non-stored current-line portion of callback snapshots stale.
+		 */
+		void invalidateLuaCallbackCurrentLineSnapshot() const;
+		/**
+		 * @brief Refreshes current-line fields while retaining cached materialized-line data.
+		 * @param snapshot Cached line-buffer snapshot to refresh when stale.
+		 */
+		void refreshLuaCallbackCurrentLineSnapshot(
+		    QSharedPointer<const LuaCallbackLineBufferSnapshot> &snapshot) const;
+		/**
 		 * @brief Removes a contiguous output-buffer range and reconciles all line-identity state.
 		 * @param firstIndex Zero-based first line to remove.
 		 * @param count Maximum number of lines to remove.
@@ -6970,7 +7142,8 @@ class WorldRuntime : public QObject
 		{
 				int  physicalLineCount{0};            ///< Lines physically stored in the output buffer.
 				int  deferredHiddenPhysicalIndex{-1}; ///< Stored line excluded from Lua presentation.
-				bool hasPendingLine{false};           ///< Whether an unbuffered pending line follows storage.
+				bool hasPendingLine{false}; ///< Whether an unbuffered pending callback line follows storage.
+				bool hasCurrentLine{false}; ///< Whether a non-stored current line follows materialized lines.
 
 				/**
 				 * @brief Returns the number of physically stored lines visible to Lua.
@@ -6981,12 +7154,20 @@ class WorldRuntime : public QObject
 					return physicalLineCount - (deferredHiddenPhysicalIndex >= 0 ? 1 : 0);
 				}
 				/**
-				 * @brief Returns the complete Lua-visible line count, including a pending line.
+				 * @brief Returns the count backed by storage or a pending callback line.
+				 * @return Materialized Lua-visible line count.
+				 */
+				[[nodiscard]] int materializedLineCount() const
+				{
+					return storedLineCount() + (hasPendingLine ? 1 : 0);
+				}
+				/**
+				 * @brief Returns the complete Lua-visible line count, including the non-stored current line.
 				 * @return Complete Lua-visible line count.
 				 */
 				[[nodiscard]] int lineCount() const
 				{
-					return storedLineCount() + (hasPendingLine ? 1 : 0);
+					return materializedLineCount() + (hasCurrentLine ? 1 : 0);
 				}
 				/**
 				 * @brief Maps a one-based Lua buffer index to stored logical indexing.
@@ -7026,6 +7207,45 @@ class WorldRuntime : public QObject
 		 * @return Current physical-to-presentation mapping.
 		 */
 		[[nodiscard]] LuaContextBufferPresentation luaContextBufferPresentation() const;
+		/**
+		 * @brief Creates or removes the non-stored Lua current line.
+		 * @param present Whether the current line must exist.
+		 */
+		void                                       setLuaCurrentLinePresent(bool present);
+		/**
+		 * @brief Creates the non-stored Lua current line for persisted partial input outside an active line context.
+		 * @return `true` when the current line became visible.
+		 */
+		[[nodiscard]] bool                         ensureLuaCurrentLineForPersistedPartialInput();
+		/**
+		 * @brief Builds fresh metadata for the next Lua-visible current line.
+		 * @return Current-line metadata with a valid identity and timing values.
+		 */
+		[[nodiscard]] LineEntry                    newLuaCurrentLineMetadata() const;
+		/**
+		 * @brief Builds the active output style for the Lua-visible current line.
+		 * @return Zero-length style using the current ANSI/MXP state and resolved default colors.
+		 */
+		[[nodiscard]] StyleSpan                    luaCurrentLineStyleSpan() const;
+		/**
+		 * @brief Builds the metadata and active-style template used for a new Lua current line.
+		 * @return Empty current-line template independent of current-line visibility.
+		 */
+		[[nodiscard]] LineEntry                    luaCurrentLineTemplate() const;
+		/**
+		 * @brief Reconciles the non-stored current line after materialized output reaches the tail.
+		 * @param hardReturn Whether the new tail output ended with a hard return.
+		 */
+		void                                       reconcileLuaCurrentLineAfterTailOutput(bool hardReturn);
+		/**
+		 * @brief Advances the reserved current-line identity after non-tail callback output allocates lines.
+		 */
+		void                                       synchronizeLuaCurrentLineAbsoluteNumber();
+		/**
+		 * @brief Builds the Lua current-line entry from stable metadata and pending text.
+		 * @return Current-line entry, or no value when there is no current line.
+		 */
+		[[nodiscard]] std::optional<LineEntry>     luaCurrentLineEntry() const;
 		/**
 		 * @brief Returns a stored line at a one-based Lua buffer-presentation index without copying it.
 		 * @param bufferIndex One-based Lua buffer-presentation index.
@@ -8406,6 +8626,8 @@ class WorldRuntime : public QObject
 		int                                                        m_mxpRenderPreDepth{0};
 		QString                                                    m_partialLineText;
 		QVector<StyleSpan>                                         m_partialLineSpans;
+		std::optional<LineEntry>                                   m_luaCurrentLineMetadata;
+		bool                                                       m_luaCurrentLineBookmarked{false};
 		bool                                                       m_partialLineServerSideWrapActive{false};
 		bool                                                       m_pendingCarriageReturnOverwrite{false};
 		quint64                                                    m_incomingPartialLineRevision{0};
@@ -9146,6 +9368,7 @@ class WorldRuntime : public QObject
 		const std::shared_ptr<std::atomic<quint64>> m_luaCallbackOutputHeadRemovalCount =
 		    std::make_shared<std::atomic<quint64>>(0);
 		mutable quint64 m_luaCallbackLineBufferSnapshotGeneration{0};
+		mutable quint64 m_luaCallbackCurrentLineSnapshotGeneration{0};
 		mutable quint64 m_luaCallbackLastLineBufferSnapshotCacheGeneration{0};
 		mutable QSharedPointer<const LuaCallbackLineBufferSnapshot> m_luaCallbackLastLineBufferSnapshotCache;
 		mutable quint64 m_luaCallbackLineBufferSnapshotCacheGeneration{0};
