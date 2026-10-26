@@ -9,6 +9,8 @@
 #ifndef QMUD_IMPORTMERGEUTILS_H
 #define QMUD_IMPORTMERGEUTILS_H
 
+#include "VariableMapUtils.h"
+
 #include <QHash>
 #include <QMap>
 #include <QString>
@@ -93,15 +95,16 @@ namespace QMudImportMerge
 		indexByName.reserve(dest.size() + src.size());
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+			const QString name =
+			    QMudVariableMapUtils::Name(dest[i].attributes.value(QStringLiteral("name"))).key();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
 
 		for (const auto &item : src)
 		{
-			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toCaseFolded();
+			const QString key =
+			    QMudVariableMapUtils::Name(item.attributes.value(QStringLiteral("name"))).key();
 			if (key.isEmpty() || !indexByName.contains(key))
 			{
 				dest.push_back(item);
@@ -132,37 +135,29 @@ namespace QMudImportMerge
 	 * @param allowOverwrite Replace existing values when `true`.
 	 * @param duplicates Optional duplicate/change counter output.
 	 */
-	inline void mergePluginVariables(QMap<QString, QString> &dest, const QList<QPair<QString, QString>> &src,
-	                                 const bool allowOverwrite, int *duplicates)
+	inline void mergePluginVariables(QMudVariableMapUtils::Store          &dest,
+	                                 const QList<QPair<QString, QString>> &src, const bool allowOverwrite,
+	                                 int *duplicates)
 	{
-		QHash<QString, QString> storedNameByKey;
-		storedNameByKey.reserve(dest.size() + src.size());
-		for (auto it = dest.cbegin(); it != dest.cend(); ++it)
-			storedNameByKey.insert(it.key().trimmed().toCaseFolded(), it.key());
-
 		for (const auto &[rawName, value] : src)
 		{
-			const QString name = rawName.trimmed();
-			const QString key  = name.toCaseFolded();
-			if (name.isEmpty())
+			const QMudVariableMapUtils::Name name(rawName);
+			if (name.key().isEmpty())
 				continue;
-			const auto existing = storedNameByKey.constFind(key);
-			if (existing == storedNameByKey.cend())
+			const auto existing = dest.values().constFind(name.key());
+			if (existing == dest.values().cend())
 			{
 				dest.insert(name, value);
-				storedNameByKey.insert(key, name);
 				continue;
 			}
 			if (allowOverwrite)
 			{
-				dest[*existing] = value;
+				dest.insert(name, value);
 				if (duplicates)
 					++(*duplicates);
 			}
-			else if (dest.value(*existing) != value && duplicates)
-			{
+			else if (*existing != value && duplicates)
 				++(*duplicates);
-			}
 		}
 	}
 } // namespace QMudImportMerge

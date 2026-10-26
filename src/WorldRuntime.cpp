@@ -855,6 +855,21 @@ namespace
 		applyCausalSnapshotValueDelta(target.content, before.content, after.content);
 	}
 
+	/**
+	 * @brief Rebases only changed fields of a world variable row, preserving unrelated causal state.
+	 * @param target Variable row in the target event's view.
+	 * @param before Variable row before the mutation.
+	 * @param after Variable row after the mutation.
+	 */
+	void applyCausalSnapshotValueDelta(LuaCallbackVariableSnapshot       &target,
+	                                   const LuaCallbackVariableSnapshot &before,
+	                                   const LuaCallbackVariableSnapshot &after)
+	{
+		applyCausalSnapshotValueDelta(target.attributes, before.attributes, after.attributes);
+		applyCausalSnapshotValueDelta(target.content, before.content, after.content);
+		applyCausalSnapshotValueDelta(target.key, before.key, after.key);
+	}
+
 	void applyCausalSnapshotValueDelta(LuaCallbackTriggerSnapshot       &target,
 	                                   const LuaCallbackTriggerSnapshot &before,
 	                                   const LuaCallbackTriggerSnapshot &after)
@@ -1287,73 +1302,19 @@ namespace
 		}
 	}
 
-	void applyCausalCaseInsensitiveStringMapDelta(QMap<QString, QString>       &target,
-	                                              const QMap<QString, QString> &before,
-	                                              const QMap<QString, QString> &after)
-	{
-		using Entry                  = std::pair<QString, QString>;
-		const auto indexByFoldedName = [](const QMap<QString, QString> &values)
-		{
-			QHash<QString, Entry> indexed;
-			indexed.reserve(values.size());
-			for (auto it = values.cbegin(); it != values.cend(); ++it)
-			{
-				const QString foldedName = it.key().toCaseFolded();
-				Q_ASSERT(!indexed.contains(foldedName));
-				indexed.insert(foldedName, {it.key(), it.value()});
-			}
-			return indexed;
-		};
-
-		QHash<QString, Entry>       targetByName = indexByFoldedName(target);
-		const QHash<QString, Entry> beforeByName = indexByFoldedName(before);
-		const QHash<QString, Entry> afterByName  = indexByFoldedName(after);
-		for (auto beforeIt = beforeByName.cbegin(); beforeIt != beforeByName.cend(); ++beforeIt)
-		{
-			if (afterByName.contains(beforeIt.key()))
-				continue;
-			const auto targetIt = targetByName.constFind(beforeIt.key());
-			if (targetIt != targetByName.cend())
-				target.remove(targetIt->first);
-		}
-		for (auto afterIt = afterByName.cbegin(); afterIt != afterByName.cend(); ++afterIt)
-		{
-			const auto beforeIt = beforeByName.constFind(afterIt.key());
-			if (beforeIt == beforeByName.cend())
-			{
-				if (const auto targetIt = targetByName.constFind(afterIt.key());
-				    targetIt != targetByName.cend())
-				{
-					target.remove(targetIt->first);
-				}
-				target.insert(afterIt->first, afterIt->second);
-				continue;
-			}
-			const auto targetIt = targetByName.constFind(afterIt.key());
-			if (targetIt == targetByName.cend())
-				continue;
-			QString targetKey   = targetIt->first;
-			QString targetValue = targetIt->second;
-			if (beforeIt->first != afterIt->first)
-			{
-				target.remove(targetKey);
-				targetKey = afterIt->first;
-			}
-			applyCausalSnapshotValueDelta(targetValue, beforeIt->second, afterIt->second);
-			target.insert(targetKey, targetValue);
-		}
-	}
-
-	void
-	applyCausalCaseInsensitiveNamedSequenceDelta(QList<LuaCallbackAttributeContentSnapshot>       &target,
-	                                             const QList<LuaCallbackAttributeContentSnapshot> &before,
-	                                             const QList<LuaCallbackAttributeContentSnapshot> &after)
+	/**
+	 * @brief Applies world-variable row deltas using the keys captured at input boundaries.
+	 * @param target Causally rebased variable rows.
+	 * @param before Rows before the mutation.
+	 * @param after Rows after the mutation.
+	 */
+	void applyCausalVariableSequenceDelta(QList<LuaCallbackVariableSnapshot>       &target,
+	                                      const QList<LuaCallbackVariableSnapshot> &before,
+	                                      const QList<LuaCallbackVariableSnapshot> &after)
 	{
 		applyCausalSnapshotSequenceDelta(
-		    target, before, after, [](const LuaCallbackAttributeContentSnapshot &value)
-		    { return value.attributes.value(QStringLiteral("name")).toCaseFolded(); },
-		    [](const LuaCallbackAttributeContentSnapshot &value)
-		    { return !value.attributes.value(QStringLiteral("name")).isEmpty(); }, true);
+		    target, before, after, [](const LuaCallbackVariableSnapshot &value) { return value.key; },
+		    [](const LuaCallbackVariableSnapshot &value) { return !value.key.isEmpty(); }, true);
 	}
 
 	void applyCausalMiniWindowMutations(LuaCallbackSnapshot &target, const LuaCallbackSnapshot &before,
@@ -1909,12 +1870,10 @@ namespace
 		QMUD_CAUSAL_DOMAIN(WorldVariables)
 		{
 			QMUD_CAUSAL_FIELD(hasWorldVariablesSnapshot);
-			applyCausalCaseInsensitiveStringMapDelta(
-			    target.worldVariablesSnapshot, before.worldVariablesSnapshot, after.worldVariablesSnapshot);
+			QMUD_CAUSAL_FIELD(worldVariablesSnapshot);
 			QMUD_CAUSAL_FIELD(hasVariableEntriesSnapshot);
-			applyCausalCaseInsensitiveNamedSequenceDelta(target.variableEntriesSnapshot,
-			                                             before.variableEntriesSnapshot,
-			                                             after.variableEntriesSnapshot);
+			applyCausalVariableSequenceDelta(target.variableEntriesSnapshot, before.variableEntriesSnapshot,
+			                                 after.variableEntriesSnapshot);
 			const qsizetype variableCount = target.hasVariableEntriesSnapshot
 			                                    ? target.variableEntriesSnapshot.size()
 			                                    : target.worldVariablesSnapshot.size();
@@ -6894,98 +6853,88 @@ namespace
 		return result;
 	}
 
-	QString fixHtmlString(const QString &source)
+	/** @brief Selects the established XML attribute or element-text escaping rules. */
+	enum class XmlEscapeContext
 	{
-		QString cleaned;
-		cleaned.reserve(source.size());
-		for (const QChar ch : source)
+		Attribute,
+		Text
+	};
+
+	/**
+	 * @brief Escapes changed XML spans in one pass, sharing inputs that need no changes.
+	 * @param source Unescaped UTF-16 input.
+	 * @param context Attribute or element-text escaping rules.
+	 * @return Escaped XML preserving the existing whitespace and character handling.
+	 */
+	QString escapeXml(const QString &source, const XmlEscapeContext context)
+	{
+		QString           result;
+		const QStringView view(source);
+		qsizetype         runStart = 0;
+		bool              changed  = false;
+		for (qsizetype index = 0; index < view.size(); ++index)
 		{
-			const ushort code = ch.unicode();
-			if (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
-				continue;
-			cleaned += ch;
-		}
-
-		QString   strOldString = cleaned;
-		QString   strNewString;
-
-		qsizetype i;
-
-		while ((i = strOldString.indexOf(QRegularExpression(QStringLiteral("[<>&\\\"]")))) != -1)
-		{
-			strNewString += strOldString.left(i);
-
-			switch (strOldString.at(i).unicode())
+			const ushort      code = view.at(index).unicode();
+			QLatin1StringView replacement;
+			switch (code)
 			{
 			case '<':
-				strNewString += QStringLiteral("&lt;");
+				replacement = QLatin1StringView("&lt;");
 				break;
 			case '>':
-				strNewString += QStringLiteral("&gt;");
+				replacement = QLatin1StringView("&gt;");
 				break;
 			case '&':
-				strNewString += QStringLiteral("&amp;");
+				replacement = QLatin1StringView("&amp;");
 				break;
-			case '\"':
-				strNewString += QStringLiteral("&quot;");
-				break;
-			default:
-				break;
-			}
-
-			strOldString = strOldString.mid(i + 1);
-		}
-
-		strNewString += strOldString;
-
-		return strNewString;
-	}
-
-	QString fixHtmlMultilineString(const QString &source)
-	{
-		QString cleaned;
-		cleaned.reserve(source.size());
-		for (const QChar ch : source)
-		{
-			const ushort code = ch.unicode();
-			if (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
-				continue;
-			cleaned += ch;
-		}
-
-		QString   strOldString = cleaned;
-		QString   strNewString;
-
-		qsizetype i;
-
-		while ((i = strOldString.indexOf(QRegularExpression(QStringLiteral("[<>&\\t]")))) != -1)
-		{
-			strNewString += strOldString.left(i);
-
-			switch (strOldString.at(i).unicode())
-			{
-			case '<':
-				strNewString += QStringLiteral("&lt;");
-				break;
-			case '>':
-				strNewString += QStringLiteral("&gt;");
-				break;
-			case '&':
-				strNewString += QStringLiteral("&amp;");
+			case '"':
+				if (context != XmlEscapeContext::Attribute)
+					continue;
+				replacement = QLatin1StringView("&quot;");
 				break;
 			case '\t':
-				strNewString += QStringLiteral("&#9;");
+				if (context != XmlEscapeContext::Text)
+					continue;
+				replacement = QLatin1StringView("&#9;");
 				break;
 			default:
+				if (code >= 0x20 || code == '\n' || code == '\r')
+					continue;
 				break;
 			}
-
-			strOldString = strOldString.mid(i + 1);
+			if (!changed)
+			{
+				result.reserve(source.size());
+				changed = true;
+			}
+			result += view.sliced(runStart, index - runStart);
+			result += replacement;
+			runStart = index + 1;
 		}
+		if (!changed)
+			return source;
+		result += view.sliced(runStart);
+		return result;
+	}
 
-		strNewString += strOldString;
+	/**
+	 * @brief Escapes an XML attribute using the shared single-pass implementation.
+	 * @param source Unescaped attribute value.
+	 * @return Escaped attribute value.
+	 */
+	QString fixHtmlString(const QString &source)
+	{
+		return escapeXml(source, XmlEscapeContext::Attribute);
+	}
 
-		return strNewString;
+	/**
+	 * @brief Escapes XML element text using the shared single-pass implementation.
+	 * @param source Unescaped element text.
+	 * @return Escaped text with tab entities and preserved line breaks.
+	 */
+	QString fixHtmlMultilineString(const QString &source)
+	{
+		return escapeXml(source, XmlEscapeContext::Text);
 	}
 
 	QString replaceNewlines(const QString &value)
@@ -11159,7 +11108,7 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 						frame.tag          = tag;
 						frame.contentStart = mxpBaseOffset + ev.offset;
 						if (frame.variableName.isEmpty() && !customInfo.flag.isEmpty())
-							frame.variableName = QString::fromUtf8(customInfo.flag).toLower();
+							frame.variableName = QString::fromUtf8(customInfo.flag);
 						frame.closeTags = appliedCloseTags;
 						m_mxpTagStack.push_back(frame);
 					}
@@ -11179,13 +11128,13 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 						{
 							if (arg.name.isEmpty() && arg.position == 1)
 							{
-								frame.variableName = arg.value.toLower();
+								frame.variableName = arg.value;
 								break;
 							}
 						}
 					}
 					if (frame.variableName.isEmpty() && hasCustomElement && !customInfo.flag.isEmpty())
-						frame.variableName = QString::fromUtf8(customInfo.flag).toLower();
+						frame.variableName = QString::fromUtf8(customInfo.flag);
 					m_mxpTagStack.push_back(frame);
 				}
 
@@ -11744,7 +11693,8 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 
 						if (!frame.variableName.isEmpty())
 						{
-							const QString variableName = QStringLiteral("mxp_%1").arg(frame.variableName);
+							const QMudVariableMapUtils::Name variableName(
+							    QStringLiteral("mxp_%1").arg(frame.variableName));
 							setVariable(variableName, sanitizedText);
 							if (!setVarCallback.isEmpty() && m_luaCallbacks)
 							{
@@ -11755,7 +11705,7 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 								request.callbackEvent = LuaCallbackEvent::MxpSetVariable;
 								request.engines       = {worldLua};
 								request.functionName  = setVarCallback;
-								request.stringArg     = variableName;
+								request.stringArg     = variableName.key();
 								request.stringArg2    = sanitizedText;
 								persistMxpRenderState();
 								static_cast<void>(co_await awaitMxpCallback(std::move(request)));
@@ -11765,7 +11715,7 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 							}
 
 							const QString pluginVarPayload =
-							    QStringLiteral("%1=%2").arg(variableName, sanitizedText);
+							    QStringLiteral("%1=%2").arg(variableName.key(), sanitizedText);
 							LuaBatchDispatchRequest pluginVariableRequest;
 							pluginVariableRequest.kind          = LuaBatchDispatchKind::String;
 							pluginVariableRequest.callbackEvent = LuaCallbackEvent::MxpSetVariable;
@@ -16433,7 +16383,8 @@ void WorldRuntime::populateLuaCallbackWorldVariableSnapshots(LuaCallbackSnapshot
 	snapshot.variableEntriesSnapshot.reserve(m_variables.size());
 	for (const Variable &variable : m_variables)
 	{
-		LuaCallbackAttributeContentSnapshot row;
+		LuaCallbackVariableSnapshot row;
+		row.key        = variable.key;
 		row.attributes = variable.attributes;
 		row.content    = variable.content;
 		snapshot.variableEntriesSnapshot.push_back(std::move(row));
@@ -16453,7 +16404,7 @@ void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
 		{
 			const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
 			snapshot.unavailablePluginVariableSnapshotIds.remove(audioId);
-			snapshot.pluginVariablesSnapshotById.insert(audioId, m_luaAudioVariables);
+			snapshot.pluginVariablesSnapshotById.insert(audioId, m_luaAudioVariables.values());
 			if (auto pluginInfoIt = snapshot.pluginInfoValuesById.find(audioId);
 			    pluginInfoIt != snapshot.pluginInfoValuesById.end())
 			{
@@ -16469,7 +16420,7 @@ void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
 			return;
 		}
 		snapshot.unavailablePluginVariableSnapshotIds.remove(pluginId);
-		snapshot.pluginVariablesSnapshotById.insert(pluginId, plugin->variables);
+		snapshot.pluginVariablesSnapshotById.insert(pluginId, plugin->variables.values());
 		if (auto pluginInfoIt = snapshot.pluginInfoValuesById.find(pluginId);
 		    pluginInfoIt != snapshot.pluginInfoValuesById.end())
 		{
@@ -16485,7 +16436,7 @@ void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
 		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
 		if (pluginId.isEmpty())
 			continue;
-		snapshot.pluginVariablesSnapshotById.insert(pluginId, plugin.variables);
+		snapshot.pluginVariablesSnapshotById.insert(pluginId, plugin.variables.values());
 		if (auto pluginInfoIt = snapshot.pluginInfoValuesById.find(pluginId);
 		    pluginInfoIt != snapshot.pluginInfoValuesById.end())
 		{
@@ -16495,7 +16446,7 @@ void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
 	if (nativeShimVisibleForPluginApi(m_plugins, QMudNativePluginRegistry::luaAudioPluginId()))
 	{
 		const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
-		snapshot.pluginVariablesSnapshotById.insert(audioId, m_luaAudioVariables);
+		snapshot.pluginVariablesSnapshotById.insert(audioId, m_luaAudioVariables.values());
 		snapshot.unavailablePluginVariableSnapshotIds.remove(audioId);
 		if (auto pluginInfoIt = snapshot.pluginInfoValuesById.find(audioId);
 		    pluginInfoIt != snapshot.pluginInfoValuesById.end())
@@ -21307,7 +21258,7 @@ void WorldRuntime::deleteOutput()
 	clearOutputPresentationViews();
 }
 
-int WorldRuntime::deleteVariable(const QString &name)
+int WorldRuntime::deleteVariable(const QMudVariableMapUtils::Name &name)
 {
 	if (QThread::currentThread() != thread())
 		return qmudInvokeMethodOr(this, eVariableNotFound, [this, name] { return deleteVariable(name); });
@@ -21315,8 +21266,7 @@ int WorldRuntime::deleteVariable(const QString &name)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deleteVariable");
 	for (int i = 0; i < m_variables.size(); ++i)
 	{
-		const QString varName = m_variables.at(i).attributes.value(QStringLiteral("name"));
-		if (varName.compare(name, Qt::CaseInsensitive) == 0)
+		if (m_variables.at(i).key == name.key())
 		{
 			m_variables.removeAt(i);
 			m_variableCount = safeQSizeToInt(m_variables.size());
@@ -28420,10 +28370,15 @@ static void applyTimerDefaults(WorldRuntime::Timer &timer)
 	setDefault(a, QStringLiteral("temporary"), QStringLiteral("0"));
 }
 
+/**
+ * @brief Applies defaults and normalizes a raw variable definition at runtime ingestion.
+ * @param variable Imported or editor-supplied world variable.
+ */
 static void applyVariableDefaults(WorldRuntime::Variable &variable)
 {
 	QMap<QString, QString> &a = variable.attributes;
 	setDefault(a, QStringLiteral("trim"), QStringLiteral("0"));
+	variable.key = QMudVariableMapUtils::Name(a.value(QStringLiteral("name"))).key();
 }
 
 static void applyPrintingDefaults(WorldRuntime::PrintingStyle &style)
@@ -28757,7 +28712,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 				{
 					const QString name = variable.attributes.value(QStringLiteral("name"));
 					if (!name.isEmpty())
-						QMudVariableMapUtils::insertOrAssign(m_luaAudioVariables, name, variable.content);
+						m_luaAudioVariables.insert(name, variable.content);
 				}
 			}
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
@@ -28864,8 +28819,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		m_plugins.push_back(rp);
 	}
 	{
-		QMap<QString, QString> luaAudioVariables = m_luaAudioVariables;
-		QString                stateError;
+		QMudVariableMapUtils::Store luaAudioVariables = m_luaAudioVariables;
+		QString                     stateError;
 		if (!loadLuaAudioStateVariables(luaAudioVariables, &stateError))
 			qWarning() << "Plugin state load failed:" << stateError;
 		replaceLuaAudioVariables(std::move(luaAudioVariables));
@@ -30020,7 +29975,7 @@ const QList<WorldRuntime::Variable> &WorldRuntime::variables() const
 	return m_variables;
 }
 
-bool WorldRuntime::findVariable(const QString &name, QString &value) const
+bool WorldRuntime::findVariable(const QMudVariableMapUtils::Name &name, QString &value) const
 {
 	if (QThread::currentThread() != thread())
 	{
@@ -30040,8 +29995,7 @@ bool WorldRuntime::findVariable(const QString &name, QString &value) const
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::findVariable");
 	for (const auto &var : m_variables)
 	{
-		const QString varName = var.attributes.value(QStringLiteral("name"));
-		if (varName.compare(name, Qt::CaseInsensitive) == 0)
+		if (var.key == name.key())
 		{
 			value = var.content;
 			return true;
@@ -30061,7 +30015,7 @@ QStringList WorldRuntime::variableList() const
 	names.reserve(m_variables.size());
 	for (const auto &var : m_variables)
 	{
-		const QString name = var.attributes.value(QStringLiteral("name"));
+		const QString name = var.key;
 		if (!name.isEmpty())
 			names.append(name);
 	}
@@ -30078,7 +30032,7 @@ QMap<QString, QString> WorldRuntime::variableSnapshot() const
 	QMap<QString, QString> snapshot;
 	for (const auto &var : m_variables)
 	{
-		const QString name = var.attributes.value(QStringLiteral("name"));
+		const QString name = var.key;
 		if (name.isEmpty())
 			continue;
 		snapshot.insert(name, var.content);
@@ -30086,7 +30040,7 @@ QMap<QString, QString> WorldRuntime::variableSnapshot() const
 	return snapshot;
 }
 
-void WorldRuntime::setVariable(const QString &name, const QString &value)
+void WorldRuntime::setVariable(const QMudVariableMapUtils::Name &name, const QString &value)
 {
 	if (QThread::currentThread() != thread())
 	{
@@ -30097,10 +30051,10 @@ void WorldRuntime::setVariable(const QString &name, const QString &value)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setVariable");
 	for (auto &var : m_variables)
 	{
-		const QString varName = var.attributes.value(QStringLiteral("name"));
-		if (varName.compare(name, Qt::CaseInsensitive) == 0)
+		if (var.key == name.key())
 		{
 			var.content = value;
+			var.attributes.insert(QStringLiteral("name"), name.label());
 			setVariablesChanged(true);
 			patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
 			return;
@@ -30108,7 +30062,8 @@ void WorldRuntime::setVariable(const QString &name, const QString &value)
 	}
 
 	Variable variable;
-	variable.attributes.insert(QStringLiteral("name"), name);
+	variable.attributes.insert(QStringLiteral("name"), name.label());
+	variable.key     = name.key();
 	variable.content = value;
 	m_variables.push_back(variable);
 	m_variableCount = safeQSizeToInt(m_variables.size());
@@ -31419,11 +31374,11 @@ WorldRuntime::importPluginXml(const QString &xml, const QString &pluginId,
 		return result;
 	}
 
-	const bool             allowOverwrite  = (mask & WorldDocument::XML_OVERWRITE) != 0;
-	QList<Trigger>         mergedTriggers  = plugin->triggers;
-	QList<Alias>           mergedAliases   = plugin->aliases;
-	QList<Timer>           mergedTimers    = plugin->timers;
-	QMap<QString, QString> mergedVariables = plugin->variables;
+	const bool                  allowOverwrite  = (mask & WorldDocument::XML_OVERWRITE) != 0;
+	QList<Trigger>              mergedTriggers  = plugin->triggers;
+	QList<Alias>                mergedAliases   = plugin->aliases;
+	QList<Timer>                mergedTimers    = plugin->timers;
+	QMudVariableMapUtils::Store mergedVariables = plugin->variables;
 
 	if (mask & WorldDocument::XML_TRIGGERS)
 	{
@@ -31682,14 +31637,14 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		QMudNativePluginRegistry::NativePluginMetadata metadata;
 		if (!QMudNativePluginRegistry::metadataForShim(pluginId, metadata))
 			return true;
-		QMap<QString, QString> luaAudioVariables;
+		QMudVariableMapUtils::Store luaAudioVariables;
 		if (pluginId == QMudNativePluginRegistry::luaAudioPluginId())
 		{
 			for (const auto &variable : p.variables)
 			{
 				const QString name = variable.attributes.value(QStringLiteral("name"));
 				if (!name.isEmpty())
-					QMudVariableMapUtils::insertOrAssign(luaAudioVariables, name, variable.content);
+					luaAudioVariables.insert(name, variable.content);
 			}
 			if (!loadLuaAudioStateVariables(luaAudioVariables, error))
 				return false;
@@ -34617,8 +34572,8 @@ QString WorldRuntime::pluginVariableValue(const QString &pluginId, const QString
 	return {};
 }
 
-const QMap<QString, QString> *WorldRuntime::pluginVariableStore(const QString &pluginId,
-                                                                QString       *resolvedPluginId) const
+const QMudVariableMapUtils::Store *WorldRuntime::pluginVariableStore(const QString &pluginId,
+                                                                     QString       *resolvedPluginId) const
 {
 	if (isLuaAudioPluginIdentifier(pluginId))
 	{
@@ -34634,13 +34589,15 @@ const QMap<QString, QString> *WorldRuntime::pluginVariableStore(const QString &p
 	return &m_plugins.at(index).variables;
 }
 
-QMap<QString, QString> *WorldRuntime::pluginVariableStore(const QString &pluginId, QString *resolvedPluginId)
+QMudVariableMapUtils::Store *WorldRuntime::pluginVariableStore(const QString &pluginId,
+                                                               QString       *resolvedPluginId)
 {
-	return const_cast<QMap<QString, QString> *>(
+	return const_cast<QMudVariableMapUtils::Store *>(
 	    std::as_const(*this).pluginVariableStore(pluginId, resolvedPluginId));
 }
 
-bool WorldRuntime::findPluginVariable(const QString &pluginId, const QString &name, QString &value) const
+bool WorldRuntime::findPluginVariable(const QString &pluginId, const QMudVariableMapUtils::Name &name,
+                                      QString &value) const
 {
 	if (QThread::currentThread() != thread())
 	{
@@ -34658,11 +34615,12 @@ bool WorldRuntime::findPluginVariable(const QString &pluginId, const QString &na
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::findPluginVariable");
-	const QMap<QString, QString> *variables = pluginVariableStore(pluginId);
-	return variables && QMudVariableMapUtils::findValue(*variables, name, value);
+	const auto *variables = pluginVariableStore(pluginId);
+	return variables && QMudVariableMapUtils::findValue(variables->values(), name.key(), value);
 }
 
-void WorldRuntime::setPluginVariableValue(const QString &pluginId, const QString &name, const QString &value)
+void WorldRuntime::setPluginVariableValue(const QString &pluginId, const QMudVariableMapUtils::Name &name,
+                                          const QString &value)
 {
 	if (QThread::currentThread() != thread())
 	{
@@ -34672,17 +34630,18 @@ void WorldRuntime::setPluginVariableValue(const QString &pluginId, const QString
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setPluginVariableValue");
-	if (name.isEmpty())
+	if (name.key().isEmpty())
 		return;
-	QString                 resolvedPluginId;
-	QMap<QString, QString> *variables = pluginVariableStore(pluginId, &resolvedPluginId);
+	QString resolvedPluginId;
+	auto   *variables = pluginVariableStore(pluginId, &resolvedPluginId);
 	if (!variables)
 		return;
-	QMudVariableMapUtils::insertOrAssign(*variables, name, value);
+	if (!variables->insert(name, value))
+		return;
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, resolvedPluginId);
 }
 
-int WorldRuntime::deletePluginVariable(const QString &pluginId, const QString &name)
+int WorldRuntime::deletePluginVariable(const QString &pluginId, const QMudVariableMapUtils::Name &name)
 {
 	if (QThread::currentThread() != thread())
 	{
@@ -34691,11 +34650,11 @@ int WorldRuntime::deletePluginVariable(const QString &pluginId, const QString &n
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deletePluginVariable");
-	if (name.isEmpty())
+	if (name.key().isEmpty())
 		return eVariableNotFound;
-	QString                 resolvedPluginId;
-	QMap<QString, QString> *variables = pluginVariableStore(pluginId, &resolvedPluginId);
-	if (!variables || !QMudVariableMapUtils::remove(*variables, name))
+	QString resolvedPluginId;
+	auto   *variables = pluginVariableStore(pluginId, &resolvedPluginId);
+	if (!variables || !variables->remove(name.key()))
 		return eVariableNotFound;
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, resolvedPluginId);
 	return eOK;
@@ -34708,8 +34667,8 @@ QStringList WorldRuntime::pluginVariableList(const QString &pluginId) const
 		                          [this, pluginId] { return pluginVariableList(pluginId); });
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::pluginVariableList");
-	const QMap<QString, QString> *variables = pluginVariableStore(pluginId);
-	return variables ? variables->keys() : QStringList{};
+	const auto *variables = pluginVariableStore(pluginId);
+	return variables ? variables->values().keys() : QStringList{};
 }
 
 bool WorldRuntime::pluginVariableSnapshot(const QString &pluginId, QMap<QString, QString> &values) const
@@ -34731,10 +34690,10 @@ bool WorldRuntime::pluginVariableSnapshot(const QString &pluginId, QMap<QString,
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::pluginVariableSnapshot");
-	const QMap<QString, QString> *variables = pluginVariableStore(pluginId);
+	const auto *variables = pluginVariableStore(pluginId);
 	if (!variables)
 		return false;
-	values = *variables;
+	values = variables->values();
 	return true;
 }
 
@@ -35005,7 +34964,7 @@ const WorldRuntime::Plugin *WorldRuntime::pluginForId(const QString &pluginId) c
 	return findPluginByCanonicalId(m_plugins, pluginId);
 }
 
-bool WorldRuntime::loadLuaAudioStateVariables(QMap<QString, QString> &variables, QString *error) const
+bool WorldRuntime::loadLuaAudioStateVariables(QMudVariableMapUtils::Store &variables, QString *error) const
 {
 	const QString worldId = m_worldAttributes.value(QStringLiteral("id")).trimmed();
 	if (worldId.isEmpty() || m_stateFilesDirectory.isEmpty())
@@ -35031,18 +34990,18 @@ bool WorldRuntime::loadLuaAudioStateVariables(QMap<QString, QString> &variables,
 	{
 		const QString name = variable.attributes.value(QStringLiteral("name"));
 		if (!name.isEmpty())
-			QMudVariableMapUtils::insertOrAssign(variables, name, variable.content);
+			variables.insert(name, variable.content);
 	}
 	return true;
 }
 
-void WorldRuntime::replaceLuaAudioVariables(QMap<QString, QString> variables)
+void WorldRuntime::replaceLuaAudioVariables(QMudVariableMapUtils::Store variables)
 {
 	static_cast<void>(setLuaAudioInitialized(true));
 	QString volumeText;
-	if (!QMudVariableMapUtils::findValue(variables, QStringLiteral("vol"), volumeText))
+	if (!QMudVariableMapUtils::findValue(variables.values(), QStringLiteral("vol"), volumeText))
 	{
-		QMudVariableMapUtils::insertOrAssign(variables, QStringLiteral("vol"), QStringLiteral("100"));
+		variables.insert(QStringLiteral("vol"), QStringLiteral("100"));
 		volumeText = QStringLiteral("100");
 	}
 	m_luaAudioVariables = std::move(variables);
@@ -35241,7 +35200,7 @@ int WorldRuntime::finishPluginStateSave(const QString &resolvedPluginId, const b
 	const int currentIndex = findPluginIndex(m_plugins, resolvedPluginId);
 	if (currentIndex < 0 && !nativeLuaAudio)
 		return scripted ? ePluginCouldNotSaveState : eOK;
-	QMap<QString, QString> variables;
+	QMudVariableMapUtils::Store variables;
 	if (nativeLuaAudio)
 	{
 		variables = m_luaAudioVariables;
@@ -35271,24 +35230,25 @@ int WorldRuntime::finishPluginStateSave(const QString &resolvedPluginId, const b
 	const QDateTime now     = QDateTime::currentDateTime();
 	const QString   savedOn = QLocale::system().toString(now, QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
 
-	out << R"(<?xml version="1.0" encoding="utf-8"?>)" << nl;
-	out << "<!DOCTYPE qmud>" << nl;
-	out << "<!-- Saved on " << fixHtmlString(savedOn) << " -->" << nl;
-	out << "<!-- QMud version " << kVersionString << " -->" << nl;
-	out << "<!-- Written by Panagiotis Kalogiratos -->" << nl;
-	out << "<!-- Home Page: https://github.com/Nodens-/QMud -->" << nl;
-	out << "<qmud>" << nl;
-	out << nl << "<!-- variables -->" << nl;
-	out << "<variables>" << nl;
+	out << QStringLiteral(R"(<?xml version="1.0" encoding="utf-8"?>)") << nl;
+	out << QStringLiteral("<!DOCTYPE qmud>") << nl;
+	out << QStringLiteral("<!-- Saved on ") << fixHtmlString(savedOn) << QStringLiteral(" -->") << nl;
+	out << QStringLiteral("<!-- QMud version ") << kVersionString << QStringLiteral(" -->") << nl;
+	out << QStringLiteral("<!-- Written by Panagiotis Kalogiratos -->") << nl;
+	out << QStringLiteral("<!-- Home Page: https://github.com/Nodens-/QMud -->") << nl;
+	out << QStringLiteral("<qmud>") << nl;
+	out << nl << QStringLiteral("<!-- variables -->") << nl;
+	out << QStringLiteral("<variables>") << nl;
 
-	for (auto it = variables.constBegin(); it != variables.constEnd(); ++it)
-	{
-		out << "  <variable name=\"" << fixHtmlString(it.key()) << "\">" << fixHtmlMultilineString(it.value())
-		    << "</variable>" << nl;
-	}
+	variables.forEachVariable(
+	    [&out, &nl](const QString &label, const QString &value)
+	    {
+		    out << QStringLiteral("  <variable name=\"") << fixHtmlString(label) << QStringLiteral("\">")
+		        << fixHtmlMultilineString(value) << QStringLiteral("</variable>") << nl;
+	    });
 
-	out << "</variables>" << nl;
-	out << "</qmud>" << nl;
+	out << QStringLiteral("</variables>") << nl;
+	out << QStringLiteral("</qmud>") << nl;
 
 	if (!file.commit())
 	{

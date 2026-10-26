@@ -759,12 +759,12 @@ void PluginWizardDialog::fillVariableTable(const QVector<int> &order, const QSet
 	{
 		if (idx < 0 || idx >= vars.size())
 			continue;
-		const auto &[attributes, content] = vars.at(idx);
+		const auto &variable = vars.at(idx);
 		m_variableTable->insertRow(row);
-		auto name = std::make_unique<QTableWidgetItem>(attributes.value(QStringLiteral("name")));
+		auto name = std::make_unique<QTableWidgetItem>(variable.attributes.value(QStringLiteral("name")));
 		name->setData(Qt::UserRole, idx);
 		setOwnedItem(m_variableTable, row, 0, std::move(name));
-		setOwnedItem(m_variableTable, row, 1, std::make_unique<QTableWidgetItem>(content));
+		setOwnedItem(m_variableTable, row, 1, std::make_unique<QTableWidgetItem>(variable.content));
 		if (selected.contains(idx))
 			m_variableTable->selectRow(row);
 		++row;
@@ -981,12 +981,12 @@ void PluginWizardDialog::sortVariables(const int column)
 		order.push_back(i);
 	auto cmp = [&](const int a, const int b)
 	{
-		const auto &[attributes1, content1] = vars.at(a);
-		const auto &[attributes2, content2] = vars.at(b);
-		const QString name1                 = attributes1.value(QStringLiteral("name"));
-		const QString name2                 = attributes2.value(QStringLiteral("name"));
-		const QString c1                    = content1;
-		const QString c2                    = content2;
+		const auto   &first  = vars.at(a);
+		const auto   &second = vars.at(b);
+		const QString name1  = first.attributes.value(QStringLiteral("name"));
+		const QString name2  = second.attributes.value(QStringLiteral("name"));
+		const QString c1     = first.content;
+		const QString c2     = second.content;
 
 		int           result = 0;
 		switch (column)

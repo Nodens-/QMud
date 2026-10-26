@@ -5064,14 +5064,15 @@ QString WorldCommandProcessor::fixWildcard(const QString &wildcard, const bool m
 
 bool WorldCommandProcessor::findVariable(const QString &name, QString &value, const QString &pluginId) const
 {
+	const QMudVariableMapUtils::Name variableName(name);
 	if (!pluginId.isEmpty())
 	{
 		const WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
 		if (!plugin)
 			return false;
-		return QMudVariableMapUtils::findValue(plugin->variables, name, value);
+		return QMudVariableMapUtils::findValue(plugin->variables.values(), variableName.key(), value);
 	}
-	return m_runtime && m_runtime->findVariable(name, value);
+	return m_runtime && m_runtime->findVariable(variableName, value);
 }
 
 QString WorldCommandProcessor::fixSendText(const QString &source, int sendTo, const QStringList &wildcards,
@@ -5158,7 +5159,6 @@ QString WorldCommandProcessor::fixSendText(const QString &source, int sendTo, co
 			} // end of no variable name
 			else
 			{
-				strVariableName = strVariableName.toLower();
 				QString strVariableContents;
 				if (findVariable(strVariableName, strVariableContents, pluginId))
 				{

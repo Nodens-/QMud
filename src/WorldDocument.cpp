@@ -7,6 +7,7 @@
  */
 
 #include "WorldDocument.h"
+#include "helpers/VariableMapUtils.h"
 
 #include "NativePluginRegistry.h"
 #include "Version.h"
@@ -19,6 +20,7 @@
 #include <QHash>
 #include <QXmlStreamReader>
 #include <algorithm>
+#include <type_traits>
 
 static bool makeVirtualNativePlugin(const QString &rawName, WorldDocument::Plugin &plugin)
 {
@@ -364,6 +366,14 @@ static QString withLine(const QXmlStreamReader &reader, const QString &message)
 	return message;
 }
 
+/**
+ * @brief Adds an XML item using its domain's input-name and duplicate policies.
+ * @tparam Item XML rule or variable record type.
+ * @param items Destination records.
+ * @param indexByName Lookup of names already seen in this XML input.
+ * @param item Parsed input record retaining its original attributes.
+ * @param duplicatePolicy Whether a later named record replaces an earlier one.
+ */
 template <typename Item>
 static void appendNamedItem(QList<Item> &items, QHash<QString, qsizetype> &indexByName, Item item,
                             const WorldDocument::NamedDuplicatePolicy duplicatePolicy)
@@ -371,7 +381,13 @@ static void appendNamedItem(QList<Item> &items, QHash<QString, qsizetype> &index
 	const QString name = item.attributes.value(QStringLiteral("name")).trimmed();
 	if (!name.isEmpty() && duplicatePolicy == WorldDocument::NamedDuplicatePolicy::KeepLast)
 	{
-		const QString key = name.toCaseFolded();
+		const QString key = [&name]
+		{
+			if constexpr (std::is_same_v<Item, WorldDocument::Variable>)
+				return QMudVariableMapUtils::Name(name).key();
+			else
+				return name.toCaseFolded();
+		}();
 		if (const auto existing = indexByName.constFind(key); existing != indexByName.cend())
 		{
 			items[existing.value()] = std::move(item);
@@ -1219,7 +1235,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 
 		const QString pluginFlag = include.attributes.value(QStringLiteral("plugin")).toLower();
 		const bool    isPlugin   = (pluginFlag == QStringLiteral("y") || pluginFlag == QStringLiteral("1") ||
-                               pluginFlag == QStringLiteral("true"));
+		                            pluginFlag == QStringLiteral("true"));
 		if (isPlugin != wantPlugins)
 			continue;
 		if (isPlugin)
@@ -1530,15 +1546,15 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 
 	const QString explicitRelativeLower      = explicitRelativeWithoutCurrentDir.toLower();
 	const bool    explicitStartsPortableRoot = explicitRelativeLower == QStringLiteral("worlds") ||
-	                                        explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
-	                                        explicitRelativeLower == QStringLiteral("logs") ||
-	                                        explicitRelativeLower.startsWith(QStringLiteral("logs/"));
+	                                           explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
+	                                           explicitRelativeLower == QStringLiteral("logs") ||
+	                                           explicitRelativeLower.startsWith(QStringLiteral("logs/"));
 
 	const QString normalizedLower    = nativeName.toLower();
 	const bool    startsPortableRoot = normalizedLower == QStringLiteral("worlds") ||
-	                                normalizedLower.startsWith(QStringLiteral("worlds/")) ||
-	                                normalizedLower == QStringLiteral("logs") ||
-	                                normalizedLower.startsWith(QStringLiteral("logs/"));
+	                                   normalizedLower.startsWith(QStringLiteral("worlds/")) ||
+	                                   normalizedLower == QStringLiteral("logs") ||
+	                                   normalizedLower.startsWith(QStringLiteral("logs/"));
 
 	if (isExplicitRelative)
 	{
@@ -1670,7 +1686,8 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 		QMap<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+			const QString name =
+			    QMudVariableMapUtils::Name(dest[i].attributes.value(QStringLiteral("name"))).key();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
@@ -1678,7 +1695,7 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 		for (const auto &item : src)
 		{
 			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toCaseFolded();
+			const QString key     = QMudVariableMapUtils::Name(rawName).key();
 			if (key.isEmpty() || !indexByName.contains(key))
 			{
 				dest.push_back(item);
@@ -1759,15 +1776,15 @@ void WorldDocument::mergePluginVariablesFrom(Plugin &plugin, const QList<Variabl
 	QMap<QString, qsizetype> indexByName;
 	for (qsizetype i = 0; i < plugin.variables.size(); ++i)
 	{
-		const QString name = plugin.variables[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
+		const QString name =
+		    QMudVariableMapUtils::Name(plugin.variables[i].attributes.value(QStringLiteral("name"))).key();
 		if (!name.isEmpty())
 			indexByName.insert(name, i);
 	}
 
 	for (const auto &v : vars)
 	{
-		const QString name = v.attributes.value(QStringLiteral("name")).trimmed();
-		const QString key  = name.toLower();
+		const QString key = QMudVariableMapUtils::Name(v.attributes.value(QStringLiteral("name"))).key();
 		if (!key.isEmpty() && indexByName.contains(key))
 		{
 			plugin.variables[indexByName.value(key)] = v;

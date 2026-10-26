@@ -587,6 +587,20 @@ struct LuaCallbackAttributeContentSnapshot
 		bool                   operator==(const LuaCallbackAttributeContentSnapshot &) const = default;
 };
 
+/** @brief World variable snapshot retaining its canonical key and original XML attributes. */
+struct LuaCallbackVariableSnapshot
+{
+		QMap<QString, QString> attributes;
+		QString                content;
+		QString                key{};
+		/**
+		 * @brief Compares complete variable rows, including canonical identity and XML metadata.
+		 * @param other Row to compare.
+		 * @return Whether all row fields match.
+		 */
+		bool                   operator==(const LuaCallbackVariableSnapshot &other) const = default;
+};
+
 /**
  * @brief Trigger payload used by callback-scope rule-list snapshots.
  */
@@ -2638,10 +2652,10 @@ luaCallbackStableSnapshotDomainBit(const LuaCallbackStableSnapshotDomain domain)
 
 struct LuaCallbackWorldVariablesSnapshotState
 {
-		bool                                       hasWorldVariablesSnapshot{false};
-		QMap<QString, QString>                     worldVariablesSnapshot;
-		bool                                       hasVariableEntriesSnapshot{false};
-		QList<LuaCallbackAttributeContentSnapshot> variableEntriesSnapshot;
+		bool                               hasWorldVariablesSnapshot{false};
+		QMap<QString, QString>             worldVariablesSnapshot;
+		bool                               hasVariableEntriesSnapshot{false};
+		QList<LuaCallbackVariableSnapshot> variableEntriesSnapshot;
 		bool operator==(const LuaCallbackWorldVariablesSnapshotState &) const = default;
 };
 

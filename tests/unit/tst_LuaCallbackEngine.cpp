@@ -450,6 +450,15 @@ class tst_LuaCallbackEngine final : public QObject
 		void emptyPluginVariableIdReadsWorldVariables();
 		void deleteVariableIsReflectedInNextCallbackSnapshot();
 		void pluginDeleteVariableUsesPluginScopeAndPatchedSnapshot();
+		/** @brief Verifies ordered writes survive equality against a stale callback snapshot. */
+		void unchangedPluginWriteStillAppliesToNewerRuntimeState();
+		/** @brief Verifies full and sparse variable overlays survive nested calls and deletion. */
+		void nestedPluginVariablesUseCanonicalFullAndSparseOverlays();
+		/** @brief Verifies state saving retains original names and the established XML escaping rules. */
+		void pluginStateSaveEscapesXmlAndPreservesVariableLabels();
+		/** @brief Verifies world/plugin XML ingestion and differently cased persisted state use canonical keys. */
+		void variableXmlIngressNormalizesKeysAndAppliesStateOverrides();
+
 		void worldVariableCountTracksIndividualMutations();
 		void duplicateWorldVariablesPreserveCallbackEntrySemantics();
 		void worldCollectionMutationsUpdateDerivedCallbackState();
@@ -678,6 +687,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void causalSnapshotNormalizesTransientMiniWindowExecution();
 		void causalSnapshotDeltaPreservesEventTimeRuleFields();
 		void causalScopedWorldRuleMutationsRebaseCounts();
+		/** @brief Verifies a label-only causal variable delta retains the event's unrelated older value. */
+		void causalVariableLabelDeltaPreservesEventValue();
 		void causalSnapshotDeltaMatchesVariableNamesCaseInsensitively();
 		void causalSnapshotDeltaReplacesCaseInsensitiveVariableAddition();
 		void causalSnapshotRebasesDerivedVariableState();
@@ -3681,7 +3692,7 @@ end
 	QVERIFY(completedSnapshot);
 	QVERIFY(completedSnapshot->hasVariableEntriesSnapshot);
 	const auto variable = std::ranges::find_if(
-	    completedSnapshot->variableEntriesSnapshot, [](const LuaCallbackAttributeContentSnapshot &entry)
+	    completedSnapshot->variableEntriesSnapshot, [](const LuaCallbackVariableSnapshot &entry)
 	    { return entry.attributes.value(QStringLiteral("name")) == QStringLiteral("same_thread_value"); });
 	QVERIFY(variable != completedSnapshot->variableEntriesSnapshot.cend());
 	QCOMPARE(variable->content, QStringLiteral("committed"));
@@ -8066,13 +8077,13 @@ function OnPluginEnable()
   local variables = GetPluginVariableList("")
   empty_plugin_variable_list_ok = variables ~= nil and
                                   variables.hour_offset == "1" and
-                                  variables.MixedCaseMode == "active"
+                                  variables.mixedcasemode == "active"
   empty_plugin_variable_status = table.concat({
     tostring(hour_offset),
     tostring(mixed_case_mode),
     tostring(variables ~= nil),
     variables ~= nil and tostring(variables.hour_offset) or "no-table",
-    variables ~= nil and tostring(variables.MixedCaseMode) or "no-table"
+    variables ~= nil and tostring(variables.mixedcasemode) or "no-table"
   }, "|")
   return empty_plugin_variable_ok and
          empty_plugin_variable_case_ok and
@@ -8192,7 +8203,7 @@ end
 
 	const auto before = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(before);
-	QCOMPARE(before->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("Victim")),
+	QCOMPARE(before->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("victim")),
 	         QStringLiteral("plugin-value"));
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
@@ -8215,13 +8226,13 @@ end
 
 	const auto after = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(after);
-	QVERIFY(!after->pluginVariablesSnapshotById.value(firstId).contains(QStringLiteral("Victim")));
-	QVERIFY(before->pluginVariablesSnapshotById.value(firstId).contains(QStringLiteral("Victim")));
+	QVERIFY(!after->pluginVariablesSnapshotById.value(firstId).contains(QStringLiteral("victim")));
+	QVERIFY(before->pluginVariablesSnapshotById.value(firstId).contains(QStringLiteral("victim")));
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
 	runtime.setVariable(QStringLiteral("WorldVictim"), QStringLiteral("world-delete-value"));
 	const auto worldBefore = captureVariableDispatchSnapshotForTest(runtime);
-	QCOMPARE(worldBefore->worldVariablesSnapshot.value(QStringLiteral("WorldVictim")),
+	QCOMPARE(worldBefore->worldVariablesSnapshot.value(QStringLiteral("worldvictim")),
 	         QStringLiteral("world-delete-value"));
 	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), QStringLiteral(R"lua(
 local before = GetVariable("worldvictim")
@@ -8238,10 +8249,246 @@ return true
 	QVERIFY(runtime.findVariable(QStringLiteral("world_delete_report"), value));
 	QCOMPARE(value, QStringLiteral("world-delete-value|0|nil"));
 	const auto worldAfter = captureVariableDispatchSnapshotForTest(runtime);
-	QVERIFY(!worldAfter->worldVariablesSnapshot.contains(QStringLiteral("WorldVictim")));
-	QVERIFY(worldBefore->worldVariablesSnapshot.contains(QStringLiteral("WorldVictim")));
+	QVERIFY(!worldAfter->worldVariablesSnapshot.contains(QStringLiteral("worldvictim")));
+	QVERIFY(worldBefore->worldVariablesSnapshot.contains(QStringLiteral("worldvictim")));
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 	runtime.dispatchTeardownLuaEngines({first, second}, true);
+}
+
+void tst_LuaCallbackEngine::unchangedPluginWriteStillAppliesToNewerRuntimeState()
+{
+	WorldRuntime         runtime;
+	const QString        id     = QStringLiteral("abcdefabcdefabcdefabcdef");
+	auto                 engine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), id);
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	plugin.variables.insert(QStringLiteral("MixedCase"), QStringLiteral("captured"));
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	const ILuaExecutor *executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function write_captured_value()
+  assert(GetVariable(" MIXEDCASE ") == "captured")
+  assert(GetVariableList().mixedcase == "captured")
+  assert(GetVariableList().MixedCase == nil)
+  assert(SetVariable(" MiXeDcAsE ", "captured") == 0)
+  assert(GetVariable("mixedcase") == "captured")
+end
+)lua"),
+	                               &runtime, id, id, QDir::currentPath()));
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("write_captured_value");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	runtime.setPluginVariableValue(id, QStringLiteral("mixedcase"), QStringLiteral("newer runtime"));
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(*executor, request, result));
+	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
+	QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("mixedcase")), QStringLiteral("newer runtime"));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("MIXEDCASE")), QStringLiteral("captured"));
+	QCOMPARE(runtime.pluginForId(id)->variables.label(QStringLiteral("mixedcase")),
+	         QStringLiteral(" MiXeDcAsE "));
+	QCOMPARE(
+	    request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id).value(QStringLiteral("mixedcase")),
+	    QStringLiteral("captured"));
+	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
+void tst_LuaCallbackEngine::nestedPluginVariablesUseCanonicalFullAndSparseOverlays()
+{
+	for (const bool fullMap : {true, false})
+	{
+		WorldRuntime  runtime;
+		const QString callerId   = QStringLiteral("abcdefabcdefabcdefabcdea");
+		const QString targetId   = QStringLiteral("abcdefabcdefabcdefabcdeb");
+		auto          caller     = QSharedPointer<LuaCallbackEngine>::create();
+		auto          target     = QSharedPointer<LuaCallbackEngine>::create();
+		const auto    makePlugin = [](const QString &id, const QSharedPointer<LuaCallbackEngine> &engine)
+		{
+			WorldRuntime::Plugin plugin;
+			plugin.attributes.insert(QStringLiteral("id"), id);
+			plugin.attributes.insert(QStringLiteral("name"), id);
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			plugin.enabled = true;
+			plugin.lua     = engine;
+			return plugin;
+		};
+		WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, caller),
+		                                            makePlugin(targetId, target)};
+		WorldRuntimeTestAccess::commitPluginStructure(runtime);
+		runtime.setPluginVariableValue(callerId, QStringLiteral("Before"), QStringLiteral("prior"));
+		runtime.setPluginVariableValue(targetId, QStringLiteral("Before"), QStringLiteral("target"));
+		LuaEngineObservedInitializationRequest first;
+		first.engine              = caller.data();
+		first.workerLifetimeOwner = caller;
+		first.runtime             = &runtime;
+		first.pluginId            = callerId;
+		first.pluginName          = callerId;
+		first.scriptText          = QStringLiteral(R"lua(
+function mutate_and_observe(_)
+  assert(GetVariable("receipt") == nil)
+  assert(GetPluginVariable("abcdefabcdefabcdefabcdeb", "receipt") == nil)
+  assert(SetVariable("Receipt", "caller") == 0)
+  assert(SetVariable(" BeFoRe ", "local") == 0)
+  local code, value = CallPlugin("abcdefabcdefabcdefabcdeb", "observe")
+  assert(code == 0)
+  local receipt = GetPluginVariable("abcdefabcdefabcdefabcdeb", " RECEIPT ")
+  assert(GetVariable("receipt") == "caller")
+  assert(GetVariable("receipt") == "caller")
+  assert(GetPluginVariable("abcdefabcdefabcdefabcdeb", "before") == "target")
+  assert(GetVariable("before") == "local")
+  assert(DeleteVariable(" BEFORE ") == 0)
+  local deleted_code, deleted = CallPlugin("abcdefabcdefabcdefabcdeb", "observe")
+  assert(deleted_code == 0)
+  return value .. "|" .. tostring(receipt) .. "|" .. deleted
+end
+)lua");
+		LuaEngineObservedInitializationRequest second;
+		second.engine              = target.data();
+		second.workerLifetimeOwner = target;
+		second.runtime             = &runtime;
+		second.pluginId            = targetId;
+		second.pluginName          = targetId;
+		second.scriptText          = QStringLiteral(R"lua(
+function observe()
+  assert(GetVariable("before") == "target")
+  local value = GetPluginVariable("abcdefabcdefabcdefabcdea", " BEFORE ")
+  assert(SetVariable("Receipt", "nested") == 0)
+  return tostring(value)
+end
+)lua");
+		runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({first, second}, true);
+		LuaBatchDispatchRequest request;
+		request.engines      = {caller};
+		request.kind         = LuaBatchDispatchKind::StringInOut;
+		request.functionName = QStringLiteral("mutate_and_observe");
+		request.stringArg    = QString();
+		auto snapshot        = captureMutableDispatchSnapshotForTest(runtime);
+		QVERIFY(snapshot);
+		if (!fullMap)
+			snapshot->pluginVariablesSnapshotById.remove(callerId);
+		request.callbackSnapshotArg = snapshot;
+		const auto result           = runtime.queuePluginCallbackDispatch(
+		    request, WorldRuntime::PluginCallbackCompletionPolicy::ResultRequired);
+		QCOMPARE(result.stringResult, QStringLiteral("local|nested|nil"));
+		QString value;
+		QVERIFY(!runtime.findPluginVariable(callerId, QStringLiteral("before"), value));
+		QCOMPARE(runtime.pluginVariableValue(targetId, QStringLiteral("receipt")), QStringLiteral("nested"));
+		if (fullMap)
+			QCOMPARE(snapshot->pluginVariablesSnapshotById.value(callerId).value(QStringLiteral("before")),
+			         QStringLiteral("prior"));
+	}
+}
+
+void tst_LuaCallbackEngine::pluginStateSaveEscapesXmlAndPreservesVariableLabels()
+{
+	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("variable-state-XXXXXX")));
+	QVERIFY(directory.isValid());
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(QDir::currentPath());
+	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("variable-save-world"));
+	runtime.setStateFilesDirectory(directory.path());
+	const QString        id = QStringLiteral("abcdefabcdefabcdefabcdef");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), id);
+	plugin.enabled = true;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	QString text = QStringLiteral("&<>\"\t\r\n\\é");
+	text += QChar(0);
+	text += QChar(1);
+	runtime.setPluginVariableValue(id, QStringLiteral("Escaped<&>\"Name"), text);
+	runtime.setPluginVariableValue(id, QStringLiteral("MixedCase"), QStringLiteral("initial"));
+	const QString ordinary =
+	    QStringLiteral("ordinary ") + QString(128, QChar(u'é')) + QStringLiteral(" \"tail");
+	runtime.setPluginVariableValue(id, QStringLiteral("Plain"), ordinary);
+	runtime.setPluginVariableValue(id, QStringLiteral("Empty"), QString());
+	QString controls;
+	for (ushort code = 0; code < 0x20; ++code)
+		controls += QChar(code);
+	runtime.setPluginVariableValue(id, QStringLiteral("Controls"), controls);
+	const QString run(128, QChar(u'x'));
+	runtime.setPluginVariableValue(id, QStringLiteral("Runs"), run + QChar(u'&') + run + QChar(u'<'));
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	runtime.setPluginVariableValue(id, QStringLiteral("MIXEDCASE"), QStringLiteral("initial"));
+	QCOMPARE(
+	    runtime.pluginVariableList(id),
+	    QStringList({QStringLiteral("controls"), QStringLiteral("empty"), QStringLiteral("escaped<&>\"name"),
+	                 QStringLiteral("mixedcase"), QStringLiteral("plain"), QStringLiteral("runs")}));
+	QString error;
+	QCOMPARE(runtime.savePluginState(id, true, &error), eOK);
+	QFile state(QDir(directory.path())
+	                .filePath(QStringLiteral("variable-save-world-") + id + QStringLiteral("-state.xml")));
+	QVERIFY(state.open(QIODevice::ReadOnly));
+	const auto xml = QString::fromUtf8(state.readAll());
+	state.close();
+	QVERIFY(xml.contains(QStringLiteral("name=\"Escaped&lt;&amp;&gt;&quot;Name\"")));
+	QVERIFY(xml.contains(QStringLiteral("&amp;&lt;&gt;\"&#9;\r\n\\é")));
+	QVERIFY(xml.contains(QStringLiteral("name=\"MIXEDCASE\">initial</variable>")));
+	QVERIFY(xml.contains(QStringLiteral("name=\"Plain\">") + ordinary + QStringLiteral("</variable>")));
+	QVERIFY(xml.contains(QStringLiteral("name=\"Empty\"></variable>")));
+	QVERIFY(xml.contains(QStringLiteral("name=\"Controls\">&#9;\n\r</variable>")));
+	QVERIFY(xml.contains(QStringLiteral("name=\"Runs\">") + run + QStringLiteral("&amp;") + run +
+	                     QStringLiteral("&lt;</variable>")));
+	QVERIFY(!xml.contains(QChar(0)));
+	QVERIFY(!xml.contains(QChar(1)));
+	WorldDocument saved;
+	QVERIFY2(saved.loadFromXml(xml), qPrintable(saved.errorString()));
+	QCOMPARE(saved.variables().size(), 6);
+	QCOMPARE(snapshot->pluginVariablesSnapshotById.value(id).size(), 6);
+	QCOMPARE(runtime.savePluginState(id, true, &error), eOK);
+}
+
+void tst_LuaCallbackEngine::variableXmlIngressNormalizesKeysAndAppliesStateOverrides()
+{
+	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("variable-ingress-XXXXXX")));
+	QVERIFY(directory.isValid());
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(QDir::currentPath());
+	WorldDocument document;
+	QVERIFY(document.loadFromXml(QStringLiteral(R"xml(<qmud><variables>
+<variable name="WorldMixed">world value</variable>
+</variables></qmud>)xml")));
+	runtime.applyFromDocument(document);
+	QString value;
+	QVERIFY(runtime.findVariable(QStringLiteral(" WORLDMIXED "), value));
+	QCOMPARE(value, QStringLiteral("world value"));
+	QCOMPARE(runtime.variableList(), QStringList{QStringLiteral("worldmixed")});
+	QCOMPARE(runtime.variables().constFirst().attributes.value(QStringLiteral("name")),
+	         QStringLiteral("WorldMixed"));
+	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("variable-load-world"));
+	runtime.setStateFilesDirectory(directory.path());
+	const QString id = QStringLiteral("abcdefabcdefabcdefabcdef");
+	QFile         pluginFile(QDir(directory.path()).filePath(QStringLiteral("variables.xml")));
+	QVERIFY(pluginFile.open(QIODevice::WriteOnly));
+	const QByteArray pluginXml = QByteArrayLiteral(R"xml(<qmud>
+<plugin name="Variable_ingress" id="abcdefabcdefabcdefabcdef" language="Lua" save_state="y"/>
+<variables><variable name="MiXeD">default</variable><variable name="MIXED">later default</variable></variables>
+</qmud>)xml");
+	QCOMPARE(pluginFile.write(pluginXml), pluginXml.size());
+	pluginFile.close();
+	QFile stateFile(
+	    QDir(directory.path())
+	        .filePath(QStringLiteral("variable-load-world-") + id + QStringLiteral("-state.xml")));
+	QVERIFY(stateFile.open(QIODevice::WriteOnly));
+	const QByteArray stateXml = QByteArrayLiteral(R"xml(<qmud><variables>
+<variable name="mixed">persisted override</variable>
+</variables></qmud>)xml");
+	QCOMPARE(stateFile.write(stateXml), stateXml.size());
+	stateFile.close();
+	QString error;
+	QVERIFY2(runtime.loadPluginFile(pluginFile.fileName(), &error), qPrintable(error));
+	QVERIFY(runtime.findPluginVariable(id, QStringLiteral(" MIXED "), value));
+	QCOMPARE(value, QStringLiteral("persisted override"));
+	QCOMPARE(runtime.pluginVariableList(id), QStringList{QStringLiteral("mixed")});
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QCOMPARE(snapshot->pluginVariablesSnapshotById.value(id).size(), 1);
+	QCOMPARE(runtime.pluginForId(id)->variables.label(QStringLiteral("mixed")), QStringLiteral("mixed"));
 }
 
 void tst_LuaCallbackEngine::worldVariableCountTracksIndividualMutations()
@@ -23493,6 +23740,33 @@ end
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
+void tst_LuaCallbackEngine::causalVariableLabelDeltaPreservesEventValue()
+{
+	WorldRuntime runtime;
+	runtime.setVariable(QStringLiteral("mixed"), QStringLiteral("event value"));
+	LuaBatchDispatchRequest request;
+	request.kind = LuaBatchDispatchKind::NoArgs;
+	WorldRuntime::PluginCallbackDispatchCommand command;
+	command.request.callbackSnapshotArg = runtime.captureLuaCallbackSnapshotForRequest(request);
+	command.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
+	runtime.setVariable(QStringLiteral("mixed"), QStringLiteral("later runtime value"));
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime] { runtime.setVariable(QStringLiteral("MIXED"), QStringLiteral("later runtime value")); });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(command);
+	const auto snapshot = command.request.callbackSnapshotArg;
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("mixed")), QStringLiteral("event value"));
+	QCOMPARE(snapshot->variableEntriesSnapshot.size(), 1);
+	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().content, QStringLiteral("event value"));
+	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().key, QStringLiteral("mixed"));
+	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().attributes.value(QStringLiteral("name")),
+	         QStringLiteral("MIXED"));
+}
+
 void tst_LuaCallbackEngine::causalSnapshotDeltaMatchesVariableNamesCaseInsensitively()
 {
 	WorldRuntime           runtime;
@@ -23563,9 +23837,9 @@ void tst_LuaCallbackEngine::causalSnapshotDeltaReplacesCaseInsensitiveVariableAd
 	const auto snapshot = command.request.callbackSnapshotArg;
 	QVERIFY(snapshot);
 	QCOMPARE(snapshot->worldVariablesSnapshot.size(), 1);
-	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("CAUSAL_VARIABLE")),
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("causal_variable")),
 	         QStringLiteral("causal-value"));
-	QVERIFY(!snapshot->worldVariablesSnapshot.contains(QStringLiteral("causal_variable")));
+	QVERIFY(!snapshot->worldVariablesSnapshot.contains(QStringLiteral("CAUSAL_VARIABLE")));
 	QCOMPARE(snapshot->variableEntriesSnapshot.size(), 1);
 	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().attributes.value(QStringLiteral("name")),
 	         QStringLiteral("CAUSAL_VARIABLE"));

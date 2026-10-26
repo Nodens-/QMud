@@ -786,8 +786,7 @@ namespace
 				QVERIFY(runtime.findPluginVariable(audioId,
 				                                   QMudNativePluginRegistry::luaAudioPpiReturnVariableName(),
 				                                   serializedPpiReturns));
-				QVERIFY(runtime.pluginVariableList(audioId).contains(
-				    QMudNativePluginRegistry::luaAudioPpiReturnVariableName()));
+				QVERIFY(runtime.pluginVariableList(audioId).contains(QStringLiteral("ppi__returns__ppi_")));
 				QCOMPARE(runtime.pluginInfo(audioId, 12).toInt(), 2);
 				QVector<QVariant> decodedPpiReturns;
 				QString           decodeError;

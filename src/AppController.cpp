@@ -12354,11 +12354,11 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				                         return a.attributes.value(QStringLiteral("name")) <
 				                                b.attributes.value(QStringLiteral("name"));
 			                         });
-			for (const auto &[attributes, content] : vars)
+			for (const auto &variable : vars)
 			{
-				const QString name = attributes.value(QStringLiteral("name"));
+				const QString name = variable.attributes.value(QStringLiteral("name"));
 				out << "  <variable name=\"" << fixHtmlString(name) << "\">"
-				    << fixHtmlMultilineString(content) << "</variable>" << nl;
+				    << fixHtmlMultilineString(variable.content) << "</variable>" << nl;
 			}
 			out << "</variables>" << nl;
 		};

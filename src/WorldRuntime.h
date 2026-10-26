@@ -22,6 +22,7 @@
 #include "TelnetProcessor.h"
 #include "WorldOptions.h"
 #include "XmlImportResult.h"
+#include "helpers/VariableMapUtils.h"
 
 #include <QByteArray>
 #include <QColor>
@@ -543,6 +544,7 @@ class WorldRuntime : public QObject
 		{
 				QMap<QString, QString> attributes;
 				QString                content;
+				QString                key{};
 		};
 		/**
 		 * @brief Color-group customization payload loaded into runtime.
@@ -610,7 +612,7 @@ class WorldRuntime : public QObject
 				QMap<QString, QMap<QString, QString>> triggerNamedWildcards;
 				QMap<QString, QStringList>            aliasWildcards;
 				QMap<QString, QMap<QString, QString>> aliasNamedWildcards;
-				QMap<QString, QString>                variables;
+				QMudVariableMapUtils::Store           variables;
 				bool                                  asyncResultFilterAll{true};
 				QSet<QString>                         asyncResultFilterApis;
 		};
@@ -1290,16 +1292,16 @@ class WorldRuntime : public QObject
 		[[nodiscard]] const QList<Variable> &variables() const;
 		/**
 		 * @brief Finds variable by name.
-		 * @param name Variable name.
+		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
 		 * @param value Output value when found.
 		 * @return `true` when variable exists.
 		 */
-		bool                                 findVariable(const QString &name, QString &value) const;
+		bool                      findVariable(const QMudVariableMapUtils::Name &name, QString &value) const;
 		/**
 		 * @brief Returns variable names in runtime storage order.
 		 * @return Variable names.
 		 */
-		[[nodiscard]] QStringList            variableList() const;
+		[[nodiscard]] QStringList variableList() const;
 		/**
 		 * @brief Builds a name/value snapshot of world variables.
 		 * @return Variable map keyed by variable name.
@@ -1307,15 +1309,15 @@ class WorldRuntime : public QObject
 		[[nodiscard]] QMap<QString, QString> variableSnapshot() const;
 		/**
 		 * @brief Sets or creates variable value.
-		 * @param name Variable name.
+		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
 		 * @param value Variable value.
 		 */
-		void                                 setVariable(const QString &name, const QString &value);
+		void               setVariable(const QMudVariableMapUtils::Name &name, const QString &value);
 		/**
 		 * @brief Replaces variable list.
 		 * @param variables New variable list.
 		 */
-		void                                 setVariables(const QList<Variable> &variables);
+		void               setVariables(const QList<Variable> &variables);
 		/**
 		 * @brief Lua-style associative array APIs.
 		 */
@@ -1324,43 +1326,43 @@ class WorldRuntime : public QObject
 		 * @param name Array name.
 		 * @return Error/status code.
 		 */
-		int                                  arrayCreate(const QString &name);
+		int                arrayCreate(const QString &name);
 		/**
 		 * @brief Deletes named associative array.
 		 * @param name Array name.
 		 * @return Error/status code.
 		 */
-		int                                  arrayDelete(const QString &name);
+		int                arrayDelete(const QString &name);
 		/**
 		 * @brief Clears all key/value pairs in array.
 		 * @param name Array name.
 		 * @return Error/status code.
 		 */
-		int                                  arrayClear(const QString &name);
+		int                arrayClear(const QString &name);
 		/**
 		 * @brief Returns true when named array exists.
 		 * @param name Array name.
 		 * @return `true` when the array exists.
 		 */
-		[[nodiscard]] bool                   arrayExists(const QString &name) const;
+		[[nodiscard]] bool arrayExists(const QString &name) const;
 		/**
 		 * @brief Returns number of named arrays.
 		 * @return Total array count.
 		 */
-		[[nodiscard]] int                    arrayCount() const;
+		[[nodiscard]] int  arrayCount() const;
 		/**
 		 * @brief Returns key/value count for named array.
 		 * @param name Array name.
 		 * @return Number of entries in the array.
 		 */
-		[[nodiscard]] int                    arraySize(const QString &name) const;
+		[[nodiscard]] int  arraySize(const QString &name) const;
 		/**
 		 * @brief Returns true when key exists in named array.
 		 * @param name Array name.
 		 * @param key Entry key.
 		 * @return `true` when the key exists.
 		 */
-		[[nodiscard]] bool                   arrayKeyExists(const QString &name, const QString &key) const;
+		[[nodiscard]] bool arrayKeyExists(const QString &name, const QString &key) const;
 		/**
 		 * @brief Captures one array and its runtime identity atomically on the owner thread.
 		 * @param name Array name.
@@ -1986,25 +1988,27 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Looks up plugin variable into output parameter.
 		 * @param pluginId Plugin id to query.
-		 * @param name Plugin variable name.
+		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
 		 * @param value Output variable value.
 		 * @return `true` when the variable exists.
 		 */
-		bool findPluginVariable(const QString &pluginId, const QString &name, QString &value) const;
+		bool findPluginVariable(const QString &pluginId, const QMudVariableMapUtils::Name &name,
+		                        QString &value) const;
 		/**
 		 * @brief Sets plugin variable value.
 		 * @param pluginId Plugin id to update.
-		 * @param name Plugin variable name.
+		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
 		 * @param value New variable value.
 		 */
-		void setPluginVariableValue(const QString &pluginId, const QString &name, const QString &value);
+		void setPluginVariableValue(const QString &pluginId, const QMudVariableMapUtils::Name &name,
+		                            const QString &value);
 		/**
 		 * @brief Deletes a plugin variable using the same case-insensitive scope as GetVariable/SetVariable.
 		 * @param pluginId Plugin id to update.
-		 * @param name Variable name.
+		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
 		 * @return API status code.
 		 */
-		int  deletePluginVariable(const QString &pluginId, const QString &name);
+		int  deletePluginVariable(const QString &pluginId, const QMudVariableMapUtils::Name &name);
 		/**
 		 * @brief Lists variable names for plugin.
 		 * @param pluginId Plugin id to query.
@@ -3611,10 +3615,10 @@ class WorldRuntime : public QObject
 		void                         deleteOutput();
 		/**
 		 * @brief Deletes world variable by name.
-		 * @param name Variable name.
+		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
 		 * @return API status code.
 		 */
-		int                          deleteVariable(const QString &name);
+		int                          deleteVariable(const QMudVariableMapUtils::Name &name);
 		/**
 		 * @brief Clears queued commands and returns discarded count.
 		 * @return Number of discarded commands.
@@ -8456,7 +8460,7 @@ class WorldRuntime : public QObject
 		 * @param resolvedPluginId Optional output canonical plugin identifier.
 		 * @return Variable map, or `nullptr` when the plugin is unavailable.
 		 */
-		[[nodiscard]] const QMap<QString, QString> *
+		[[nodiscard]] const QMudVariableMapUtils::Store *
 		pluginVariableStore(const QString &pluginId, QString *resolvedPluginId = nullptr) const;
 		/**
 		 * @brief Resolves the mutable authoritative variable map for a plugin or native shim.
@@ -8464,21 +8468,21 @@ class WorldRuntime : public QObject
 		 * @param resolvedPluginId Optional output canonical plugin identifier.
 		 * @return Variable map, or `nullptr` when the plugin is unavailable.
 		 */
-		[[nodiscard]] QMap<QString, QString> *pluginVariableStore(const QString &pluginId,
-		                                                          QString       *resolvedPluginId = nullptr);
+		[[nodiscard]] QMudVariableMapUtils::Store *pluginVariableStore(const QString &pluginId,
+		                                                               QString *resolvedPluginId = nullptr);
 		/**
 		 * @brief Merges LuaAudio's persisted plugin variables into a variable map.
 		 * @param variables Variable map receiving persisted values.
 		 * @param error Optional output parse error.
 		 * @return `true` when no state file exists or its variables were loaded successfully.
 		 */
-		[[nodiscard]] bool                    loadLuaAudioStateVariables(QMap<QString, QString> &variables,
-		                                                                 QString                *error = nullptr) const;
+		[[nodiscard]] bool loadLuaAudioStateVariables(QMudVariableMapUtils::Store &variables,
+		                                              QString                     *error = nullptr) const;
 		/**
 		 * @brief Replaces LuaAudio's authoritative variables and restores variable-backed runtime settings.
 		 * @param variables Replacement variables.
 		 */
-		void                                  replaceLuaAudioVariables(QMap<QString, QString> variables);
+		void               replaceLuaAudioVariables(QMudVariableMapUtils::Store variables);
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
 		                            QSharedPointer<LuaCallbackEngine> &callbackEngine);
@@ -8745,7 +8749,7 @@ class WorldRuntime : public QObject
 		QDateTime                                                  m_lastChatMessageTime;
 		QDateTime                                                  m_lastChatGroupMessageTime;
 		QList<Plugin>                                              m_plugins;
-		QMap<QString, QString>                                     m_luaAudioVariables;
+		QMudVariableMapUtils::Store                                m_luaAudioVariables;
 		QSet<QString>                                              m_observedPluginCallbacks;
 		QHash<QString, quint64>                                    m_observedPluginCallbackQueryGeneration;
 		quint64                                                    m_observedPluginCallbackGeneration{1};
