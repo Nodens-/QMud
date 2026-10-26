@@ -13,12 +13,29 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <array>
+#include <chrono>
 #include <functional>
 #include <memory>
 
 class SoundEngineSession;
 class SoundEngineTestAccess;
+
+/** @brief Independently controlled LuaAudio playback attribute. */
+enum class QMudSoundAttribute : quint8
+{
+	Volume,
+	Pan,
+	Pitch
+};
+
+/** @brief Whether a control target replaces or offsets the current sample-clock value. */
+enum class QMudSoundAttributeTarget : quint8
+{
+	Absolute,
+	Relative
+};
 
 /** @brief Native protocol that originated a sound-engine request. */
 enum class QMudNativeSoundProtocol : quint8
@@ -109,21 +126,27 @@ class SoundEngine final : public QObject
 		/** @brief Stops a responsive worker or retires initialization that is still blocked during destruction. */
 		~SoundEngine() override;
 
-		SoundEngine(const SoundEngine &)            = delete;
-		SoundEngine &operator=(const SoundEngine &) = delete;
+		SoundEngine(const SoundEngine &)                         = delete;
+		SoundEngine              &operator=(const SoundEngine &) = delete;
+
+		/**
+		 * @brief Reports the immutable physical output policy supplied by the application or test executable.
+		 * @return `true` for test executables and `false` for the QMud application.
+		 */
+		[[nodiscard]] static bool isOutputMuted() noexcept;
 
 		/** @brief Queues process-wide device and playback-backend initialization during application startup. */
-		void         initializePlayback();
+		void                      initializePlayback();
 		/**
 		 * @brief Configures the QMud home whose sounds tree is indexed lazily by the sound worker.
 		 * @param qmudHomeDirectory Resolved QMud home directory.
 		 */
-		void         configureSoundDirectory(const QString &qmudHomeDirectory) const;
+		void                      configureSoundDirectory(const QString &qmudHomeDirectory) const;
 		/**
 		 * @brief Configures the global plugins directory accepted for explicit plugin-bundled sounds.
 		 * @param pluginsDirectory Resolved plugins directory contained beneath QMud home.
 		 */
-		void         configurePluginDirectory(const QString &pluginsDirectory) const;
+		void                      configurePluginDirectory(const QString &pluginsDirectory) const;
 
 		/**
 		 * @brief Creates a sound session rooted at the process-wide configured sounds tree.
@@ -172,10 +195,11 @@ class SoundEngine final : public QObject
 				CacheStateForTest firstStep;
 				CacheStateForTest secondStep;
 		};
-		/** @brief Test-only source-free media-player readiness. */
+		/** @brief Test-only source-free playback readiness and physical sink gain. */
 		struct PlaybackInitializationStateForTest
 		{
-				bool mediaPlayerReady{false};
+				bool   mediaPlayerReady{false};
+				double outputVolume{-1.0};
 		};
 		/** @brief Test-only view of the worker-owned sound-file catalog. */
 		struct FileCatalogStateForTest
@@ -227,6 +251,18 @@ class SoundEngine final : public QObject
 		[[nodiscard]] bool fileRequestIsCachedForTest(const std::shared_ptr<SoundEngineSession> &session,
 		                                              const QString &request) const;
 		/**
+		 * @brief Removes fixtures and resolves a request before queued watcher notifications can execute.
+		 * @param session Session supplying the world scope and request cache.
+		 * @param request Request to resolve through production selection.
+		 * @param files Absolute indexed sound fixtures to remove in the same worker turn.
+		 * @param allowPatterns Whether to return the native candidate pool instead of one file source.
+		 * @return Selected canonical files, or an empty list after a miss or invalid test setup.
+		 */
+		[[nodiscard]] QStringList
+		selectFilesAfterRemovalForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                               const QString &request, const QStringList &files,
+		                               bool allowPatterns) const;
+		/**
 		 * @brief Applies a policy, simulates one timer tick, and delivers its incremental maintenance events.
 		 * @param policy Cache policy to apply.
 		 * @return Worker cache state after configuration and each consecutive maintenance event.
@@ -238,6 +274,11 @@ class SoundEngine final : public QObject
 		 * @return `true` when the worker incorrectly indexes the canceled resource.
 		 */
 		[[nodiscard]] bool canceledMemoryResourceIsIndexedForTest() const;
+		/**
+		 * @brief Queues a test synchronization task on the ordered memory-preparation pool.
+		 * @param task Task whose captured synchronization objects outlive its execution.
+		 */
+		void               queueMemoryPreparationTaskForTest(std::function<void()> task) const;
 		/**
 		 * @brief Completes one reserved channel through the worker's production completion transition.
 		 * @param session Session owning the reserved channel.
@@ -255,6 +296,15 @@ class SoundEngine final : public QObject
 		[[nodiscard]] bool completeActiveChannelForTest(const std::shared_ptr<SoundEngineSession> &session,
 		                                                int buffer) const;
 		/**
+		 * @brief Checks ordered decoder continuation and lifecycle transitions on the worker.
+		 * @param session Session receiving an isolated decoder fixture.
+		 * @param ordering Placement of the loop update relative to terminal notifications.
+		 * @param transition Subsequent repeat, ownership, failure, or backpressure transition.
+		 * @return Whether the production transitions preserve the expected assignment and PCM state.
+		 */
+		[[nodiscard]] bool decoderContinuationForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                              int ordering, int transition) const;
+		/**
 		 * @brief Expires one active assignment through the production playback-progress watchdog.
 		 * @param session Session owning the active channel.
 		 * @param buffer One-based active channel to expire.
@@ -269,8 +319,37 @@ class SoundEngine final : public QObject
 		 * @param buffer One-based channel to inspect.
 		 * @return Absolute file identity, or an empty string when no file backend is assigned.
 		 */
-		[[nodiscard]] QString activeFileIdentityForTest(const std::shared_ptr<SoundEngineSession> &session,
-		                                                int buffer) const;
+		[[nodiscard]] QString   activeFileIdentityForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                  int buffer) const;
+		/** @brief Applies the output-device reset transition on the worker for deterministic tests. */
+		void                    resetAudioDeviceForTest() const;
+
+		/**
+		 * @brief Counts unresolved file requests on the sound worker for deterministic lifecycle tests.
+		 * @param session Owning session.
+		 * @param commitsOnly Whether only requests retaining a waiting commit are counted.
+		 * @return Number of unresolved occurrences.
+		 */
+		[[nodiscard]] qsizetype pendingFileCountForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                bool commitsOnly) const;
+
+		/**
+		 * @brief Samples an active PCM control through the worker for deterministic integration tests.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel.
+		 * @param attribute Control to sample.
+		 * @return Current control in LuaAudio units, or zero without an active transport.
+		 */
+		[[nodiscard]] double    activeAttributeForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                               int buffer, QMudSoundAttribute attribute) const;
+		/**
+		 * @brief Reads an assigned sink's physical gain without changing logical playback controls.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel to inspect.
+		 * @return Linear sink gain, or minus one when the channel has no sink.
+		 */
+		[[nodiscard]] double    activeOutputVolumeForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                  int buffer) const;
 		/**
 		 * @brief Creates a prepared occurrence and fails it through the production backend-error transition.
 		 * @param session Session receiving the prepared occurrence.
@@ -278,17 +357,17 @@ class SoundEngine final : public QObject
 		 * @param initializationFailure Whether to fail during backend initialization rather than preparation.
 		 * @return Preparation token accepted by commitPrepared() or cancelPrepared(), or zero on failure.
 		 */
-		[[nodiscard]] quint64 failedPreparedSoundForTest(const std::shared_ptr<SoundEngineSession> &session,
-		                                                 const QString                             &message,
-		                                                 bool initializationFailure) const;
+		[[nodiscard]] quint64   failedPreparedSoundForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                   const QString                             &message,
+		                                                   bool initializationFailure) const;
 		/**
 		 * @brief Reads cache accounting and maintenance state on the worker thread.
 		 * @return Coherent test-only cache state.
 		 */
 		[[nodiscard]] CacheStateForTest                  cacheStateForTest() const;
 		/**
-		 * @brief Reads startup playback backend readiness on the worker thread.
-		 * @return Availability of the source-free media-player backend.
+		 * @brief Reads startup playback readiness and physical sink gain on the worker thread.
+		 * @return Source-free backend availability and sink gain, or minus one without a sink.
 		 */
 		[[nodiscard]] PlaybackInitializationStateForTest playbackInitializationStateForTest() const;
 		/**
@@ -389,8 +468,10 @@ class SoundEngineSession final
 		/** @brief Immutable callback-visible state for all channels in one sound session. */
 		struct Snapshot
 		{
-				quint64                        revision{1};
-				std::array<int, kChannelCount> status{};
+				quint64                           sessionId{0};
+				quint64                           revision{1};
+				std::array<int, kChannelCount>    status{};
+				std::array<double, kChannelCount> volume{};
 
 				/** @brief Initializes every channel as unallocated. */
 				Snapshot()
@@ -410,62 +491,101 @@ class SoundEngineSession final
 		 * @param buffer Fixed channel, or zero for automatic selection.
 		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
 		 * @param loop Whether playback repeats indefinitely.
-		 * @param volume MUSHclient volume in the range -100 through 0.
-		 * @param pan Compatibility pan value retained for callers.
+		 * @param volume Finite MUSHclient volume in the range -100 through 0.
+		 * @param pan Finite compatibility pan value retained for callers.
 		 * @param luaAudioGeneration Optional LuaAudio owner generation released on natural completion.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
 		 * @param requireReservation Require a matching delayed-play reservation on the fixed channel.
+		 * @param pitch Finite initial LuaAudio frequency offset in units of 100 Hz.
+		 * @param postState Optional destination receiving the immutable post-command channel state.
 		 * @return MUSHclient-compatible status code after the worker accepts or rejects the operation.
 		 */
 		int               playFile(int buffer, const QString &fileName, bool loop, double volume, double pan,
 		                           quint64 luaAudioGeneration = 0, int *selectedBuffer = nullptr,
-		                           bool requireReservation = false) const;
+		                           bool requireReservation = false, double pitch = 0.0,
+		                           std::shared_ptr<const Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Plays encoded sound bytes without plugin interception.
 		 * @param buffer Fixed channel, or zero for automatic selection.
 		 * @param data Encoded sound payload.
 		 * @param loop Whether playback repeats indefinitely.
-		 * @param volume MUSHclient volume in the range -100 through 0.
-		 * @param pan Compatibility pan value retained for callers.
+		 * @param volume Finite MUSHclient volume in the range -100 through 0.
+		 * @param pan Finite compatibility pan value retained for callers.
 		 * @param luaAudioGeneration Optional LuaAudio owner generation released on natural completion.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
+		 * @param postState Optional destination receiving the immutable post-command channel state.
 		 * @return MUSHclient-compatible status code after the worker accepts or rejects the operation.
 		 */
 		int               playMemory(int buffer, const QByteArray &data, bool loop, double volume, double pan,
-		                             quint64 luaAudioGeneration = 0, int *selectedBuffer = nullptr) const;
+		                             quint64 luaAudioGeneration = 0, int *selectedBuffer = nullptr,
+		                             std::shared_ptr<const Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Validates a delayed LuaAudio file and reserves the first reusable channel.
 		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
 		 * @param luaAudioGeneration Ownership generation attached to the reservation.
+		 * @param volume Finite captured initial LuaAudio volume from zero through 100.
+		 * @param pan Finite captured initial balance.
+		 * @param pitch Finite captured initial frequency offset in units of 100 Hz.
+		 * @param postState Optional immutable post-command state destination.
 		 * @return Selected one-based channel, or zero when none is reusable.
 		 */
-		[[nodiscard]] int reserveLuaAudioChannel(const QString &fileName, quint64 luaAudioGeneration) const;
+		[[nodiscard]] int reserveLuaAudioChannel(const QString &fileName, quint64 luaAudioGeneration,
+		                                         double volume = 100.0, double pan = 0.0, double pitch = 0.0,
+		                                         std::shared_ptr<const Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Synchronously confirms that runtime ownership exists for a submitted LuaAudio generation.
 		 * @param buffer One-based channel returned by play or reservation.
 		 * @param luaAudioGeneration Ownership generation to confirm.
 		 * @return `true` when the active or already-completed generation was reconciled.
 		 */
-		[[nodiscard]] bool    confirmLuaAudioOwnership(int buffer, quint64 luaAudioGeneration) const;
+		[[nodiscard]] bool confirmLuaAudioOwnership(int buffer, quint64 luaAudioGeneration) const;
+		/**
+		 * @brief Changes one LuaAudio attribute without replacing unrelated controls or ownership.
+		 * @param buffer One-based live or reserved channel, or zero for all active LuaAudio volumes.
+		 * @param luaAudioGeneration Expected ownership generation, or zero for a global volume command.
+		 * @param attribute Attribute to change.
+		 * @param value Target in LuaAudio units.
+		 * @param duration Nonnegative slide duration in milliseconds.
+		 * @param stopAtEnd Whether completing the volume slide stops playback.
+		 * @param targetMode Whether a pitch target offsets its current sample-clock value.
+		 * @param postState Optional immutable post-command state destination.
+		 * @return MUSHclient-compatible status code.
+		 */
+		[[nodiscard]] int
+		setLuaAudioAttribute(int buffer, quint64 luaAudioGeneration, QMudSoundAttribute attribute,
+		                     double value, std::chrono::milliseconds duration = {}, bool stopAtEnd = false,
+		                     QMudSoundAttributeTarget         targetMode = QMudSoundAttributeTarget::Absolute,
+		                     std::shared_ptr<const Snapshot> *postState  = nullptr) const;
+		/**
+		 * @brief Initializes or frees this world's LuaAudio playback without shutting down other sound entry paths.
+		 * @param initialized Whether later LuaAudio plays are enabled.
+		 * @param postState Optional immutable post-command state destination.
+		 * @return MUSHclient-compatible status code.
+		 */
+		[[nodiscard]] int  setLuaAudioInitialized(bool                             initialized,
+		                                          std::shared_ptr<const Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Stops one LuaAudio channel only while its ownership generation remains current.
 		 * @param buffer Fixed one-based channel.
 		 * @param luaAudioGeneration Expected LuaAudio ownership generation.
+		 * @param postState Optional immutable post-command state destination.
 		 * @return MUSHclient-compatible status code.
 		 */
-		[[nodiscard]] int     stopLuaAudioChannel(int buffer, quint64 luaAudioGeneration) const;
+		[[nodiscard]] int  stopLuaAudioChannel(int buffer, quint64 luaAudioGeneration,
+		                                       std::shared_ptr<const Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Queues one parsed native protocol sound request without waiting for worker execution.
 		 * @param request Validated protocol-independent playback request.
 		 * @return `true` when the worker queue accepted the request.
 		 */
-		[[nodiscard]] bool    submitNativeSound(QMudNativeSoundRequest request) const;
+		[[nodiscard]] bool submitNativeSound(QMudNativeSoundRequest request) const;
 		/**
 		 * @brief Stops one logical channel or all channels immediately.
 		 * @param buffer Fixed channel, or zero for all channels.
+		 * @param postState Optional destination receiving the immutable post-command channel state.
 		 * @return MUSHclient-compatible status code.
 		 */
-		[[nodiscard]] int     stop(int buffer) const;
+		[[nodiscard]] int  stop(int buffer, std::shared_ptr<const Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Begins loading an interceptable sound without making it audible.
 		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
@@ -477,8 +597,8 @@ class SoundEngineSession final
 		 * @param token Preparation token returned by prepareFile().
 		 * @param buffer Fixed channel, or zero for automatic selection.
 		 * @param loop Whether playback repeats indefinitely.
-		 * @param volume MUSHclient volume in the range -100 through 0.
-		 * @param pan Compatibility pan value retained for callers.
+		 * @param volume Finite MUSHclient volume in the range -100 through 0.
+		 * @param pan Finite compatibility pan value retained for callers.
 		 * @return MUSHclient-compatible status code.
 		 */
 		[[nodiscard]] int     commitPrepared(quint64 token, int buffer, bool loop, double volume,

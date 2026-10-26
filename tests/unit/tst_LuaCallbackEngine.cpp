@@ -16,6 +16,8 @@
 #include "MainFrame.h"
 #include "MiniWindow.h"
 #include "NativePluginRegistry.h"
+#include "SoundEngine.h"
+#include "SoundEngineTestAccess.h"
 #include "TestSoundData.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
@@ -542,6 +544,13 @@ class tst_LuaCallbackEngine final : public QObject
 		void nativeMushReaderCallPluginDefersSpeechToRuntimeThread();
 		void nativeMushReaderDeferredCallPluginUsesRuntimeSpeechState();
 		void nativeLuaAudioSharedRuntimeStateCoversDirectAndCallPlugin();
+		/** @brief Supplies native and ordinary sound entry paths for queued playback regression coverage. */
+		void queuedSoundMutationsPreventDuplicatePlayback_data();
+		/** @brief Verifies prequeued callbacks observe preceding play, control, and stop results. */
+		void queuedSoundMutationsPreventDuplicatePlayback();
+		/** @brief Verifies partial sound merges preserve newer channels and isolate sound sessions. */
+		void soundCausalMergesRespectSessionAndChannelRevisions();
+
 		void disabledNativeLuaAudioShadowBlocksCallbackCallPluginFastPath();
 		void blacklistedPluginsAreHiddenFromPluginApis();
 		void triggerAnchoredColourOutputFollowsNativePromptText();
@@ -746,6 +755,34 @@ class tst_LuaCallbackEngine final : public QObject
 		 * @brief Verifies that rejected socket writes commit no command, notification, or spam state.
 		 */
 		void rejectedPhysicalWritesDoNotCommitCommandOrSpamState();
+		/** @brief Defines raw/command and fragmented/coalesced Telnet callback output cases. */
+		void telnetCallbackOutputFollowsProtocolReplies_data();
+		/** @brief Verifies real Lua negotiation callbacks cannot send their output ahead of queued replies. */
+		void telnetCallbackOutputFollowsProtocolReplies();
+		/** @brief Verifies protocol prerequisites preserve causal priority and command notification barriers. */
+		void telnetOutputPreservesCausalSegments();
+		/** @brief Verifies late protocol output preserves a graceful close and rejects dependent payloads. */
+		void telnetOutputPreservesGracefulDisconnect();
+		/** @brief Defines closing input with MXP tags, MXP mode changes, and ANSI styles. */
+		void gracefulDisconnectConsumesIncomingPayload_data();
+		/** @brief Verifies closing input retains text, event ownership, styles, and split UTF-8 decoding. */
+		void gracefulDisconnectConsumesIncomingPayload();
+		/** @brief Defines STARTTLS upgrade and rejection input with and without pending protocol output. */
+		void gracefulDisconnectDoesNotAdvanceTls_data();
+		/** @brief Verifies closing input cannot advance TLS or dependent writes through an empty output queue. */
+		void gracefulDisconnectDoesNotAdvanceTls();
+		/** @brief Defines successful and failed writes while causal output defers transport closure. */
+		void telnetOutputDuringDeferredDisconnect_data();
+		/** @brief Verifies disconnecting runtimes still flush or fail protocol prerequisites on writable transports. */
+		void telnetOutputDuringDeferredDisconnect();
+		/** @brief Defines failed, empty, and truncated protocol-write cases, including reconnect during error delivery. */
+		void failedTelnetPrerequisiteRejectsDependentOutput_data();
+		/** @brief Verifies protocol failure cancels dependent transactions without contaminating a replacement session. */
+		void failedTelnetPrerequisiteRejectsDependentOutput();
+		/** @brief Verifies startup/adoption failure does not announce a successful connection or TLS upgrade. */
+		void failedTelnetOutputStopsConnectionSetup();
+		/** @brief Verifies protocol packet accounting and asynchronous nested debug output retain physical write order. */
+		void telnetOutputRetainsPacketDebugAccounting();
 		/**
 		 * @brief Verifies that disconnect after an accepted write retains accepted host effects.
 		 */
@@ -764,6 +801,9 @@ class tst_LuaCallbackEngine final : public QObject
 		void runtimeDestructionDiscardsPreexistingCallbackWork();
 		void runtimeDestructionCancelsSuspendedDeferredMutationPlayback();
 		void destructorCancelsResultOperationsBeforePluginClose();
+		/** @brief Defines cancellation during connected input and incoming graceful-close draining. */
+		void staleNetworkIngressIsCancelledAtConnectionGenerationBoundary_data();
+		/** @brief Verifies generation changes cancel suspended incoming callbacks and their remaining payload. */
 		void staleNetworkIngressIsCancelledAtConnectionGenerationBoundary();
 		void stackedCommandWaitsForSuspendedSendDecision();
 		void triggerExecuteStackWaitsForNestedSuspendedSendDecision();
@@ -777,6 +817,8 @@ class tst_LuaCallbackEngine final : public QObject
 #if QMUD_ENABLE_SOUND
 		void directPlaySoundBypassesInterceptionFromCallbackLane();
 		void interceptedSoundCallbacksAreSerializedAndAllowNonrecursiveReplacement();
+		/** @brief Verifies plugin interception can cancel an original whose filename lookup is still pending. */
+		void interceptedSoundCancelsPendingFilePreparation();
 #endif
 		void crossWorldCompletedMutationCallbacksQueueOnTargetCausalLane();
 		void workerQueuedRetainedScreendrawAppendDoesNotDeadlock();
@@ -12198,7 +12240,7 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	QCOMPARE(initial->mappingEntriesSnapshot, QStringList({QStringLiteral("north/south")}));
 	QCOMPARE(macroSend(*initial, QStringLiteral("F1")), QStringLiteral("macro-before"));
 	QCOMPARE(keypadSend(*initial, QStringLiteral("1")), QStringLiteral("keypad-before"));
-	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
+	QCOMPARE(initial->soundState.statusByBuffer.value(1), -2);
 
 	WorldRuntime::Trigger &mutableTrigger = WorldRuntimeTestAccess::triggers(runtime).first();
 	mutableTrigger.matched                = 7;
@@ -12308,9 +12350,9 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	soundStatus             = 2;
 	const auto soundChanged = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(soundChanged);
-	QCOMPARE(soundChanged->soundStatusByBuffer.value(1), 2);
-	QCOMPARE(acceleratorChanged->soundStatusByBuffer.value(1), -2);
-	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
+	QCOMPARE(soundChanged->soundState.statusByBuffer.value(1), 2);
+	QCOMPARE(acceleratorChanged->soundState.statusByBuffer.value(1), -2);
+	QCOMPARE(initial->soundState.statusByBuffer.value(1), -2);
 }
 
 void tst_LuaCallbackEngine::aliasRuntimeItemPatchUsesStableIdentity()
@@ -12536,8 +12578,8 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsAreIndependent()
 	QCOMPARE(secondPresentation->lastMousePosition.x(), 47);
 	QCOMPARE(firstPresentation->mouseOverHotspot, QStringLiteral("over"));
 	QCOMPARE(secondPresentation->mouseOverHotspot, QStringLiteral("new-over"));
-	QCOMPARE(first->soundStatusByBuffer.value(1), 2);
-	QCOMPARE(second->soundStatusByBuffer.value(1), -2);
+	QCOMPARE(first->soundState.statusByBuffer.value(1), 2);
+	QCOMPARE(second->soundState.statusByBuffer.value(1), -2);
 	QCOMPARE(first->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")), QStringLiteral("first"));
 	QCOMPARE(second->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")),
 	         QStringLiteral("second"));
@@ -14992,8 +15034,8 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 	  local id = "925cdd0331023d9f0b8f05a7"
 	  local audio_id = "aedf0cb0be5bf045860d54b7"
 	  audio.volume(75)
-	  local delay_id = audio.playDelay("coin.wav", 10)
-	  local delayed_playing = audio.isPlaying(delay_id)
+	  local delay_id = audio.playDelay("coin.wav", 60000)
+	  local delayed_playing = audio.isPlaying(1)
 	  audio.free()
 	  shim_info = table.concat({
 	    tostring(IsPluginInstalled(id)),
@@ -15018,8 +15060,8 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 
 	auto snapshot = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	snapshot->soundStatusByBuffer.insert(1, -2);
-	snapshot->soundStatusByBuffer.insert(9, 1);
+	snapshot->soundState.statusByBuffer.insert(1, -2);
+	snapshot->soundState.statusByBuffer.insert(9, 1);
 
 	LuaBatchDispatchRequest request;
 	request.engines             = {engine};
@@ -15035,7 +15077,7 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 	LuaBatchDispatchResult result;
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
 	QCOMPARE(result.stringResult,
-	         QStringLiteral("false|false||false|%1|%1|LuaAudio|true|100|1|false").arg(eNoSuchPlugin));
+	         QStringLiteral("false|false||false|%1|%1|LuaAudio|true|75|nil|0").arg(eNoSuchPlugin));
 	QVERIFY(!runtime.pluginIdList().contains(shimId));
 	QVERIFY(runtime.pluginIdList().contains(QMudNativePluginRegistry::luaAudioPluginId()));
 	QVERIFY(!runtime.isPluginInstalled(shimId));
@@ -15319,471 +15361,558 @@ void tst_LuaCallbackEngine::nativeMushReaderDeferredCallPluginUsesRuntimeSpeechS
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
+/** @brief Verifies the original DLL and PPI contracts share controls and callback-local visibility. */
 void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallPlugin()
 {
-	QSet<int>                      activeSoundBuffers;
-	QSet<int>                      reservedSoundBuffers;
-	QStringList                    reservedFileNames;
+	QMutex             mutex;
+	QHash<int, int>    statuses;
+	QHash<int, double> volumes;
+	QSet<int>          reserved;
+	struct Control
+	{
+			int                       buffer;
+			QMudSoundAttribute        attribute;
+			double                    value;
+			std::chrono::milliseconds duration;
+			bool                      fade;
+			QMudSoundAttributeTarget  targetMode;
+	};
+	QList<Control>                 controls;
 	WorldRuntime                   runtime;
-	WorldRuntime::TestSoundBackend soundBackend;
-	soundBackend.play = [&activeSoundBuffers, &reservedSoundBuffers](
-	                        const int buffer, const QString &fileName, const bool, const double, const double)
+	WorldRuntime::TestSoundBackend backend;
+	backend.play = [&](const int buffer, const QString &, const bool loop, const double volume, double)
 	{
-		if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
-			return eBadParameter;
-		if (fileName.isEmpty())
-			return activeSoundBuffers.contains(buffer) ? eOK : eCannotPlaySound;
-		activeSoundBuffers.insert(buffer);
-		reservedSoundBuffers.remove(buffer);
+		QMutexLocker locker(&mutex);
+		reserved.remove(buffer);
+		statuses.insert(buffer, loop ? 2 : 1);
+		volumes.insert(buffer, volume + 100.0);
 		return eOK;
 	};
-	soundBackend.stop = [&activeSoundBuffers, &reservedSoundBuffers](const int buffer)
+	backend.reserve = [&](const QString &, quint64)
 	{
-		if (buffer == 0)
-		{
-			activeSoundBuffers.clear();
-			reservedSoundBuffers.clear();
-			return eOK;
-		}
-		if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
-			return eBadParameter;
-		activeSoundBuffers.remove(buffer);
-		reservedSoundBuffers.remove(buffer);
-		return eOK;
-	};
-	soundBackend.status = [&activeSoundBuffers](const int buffer)
-	{
-		if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
-			return -1;
-		return activeSoundBuffers.contains(buffer) ? 1 : -2;
-	};
-	soundBackend.reusable = [&activeSoundBuffers, &reservedSoundBuffers](const int buffer)
-	{
-		return buffer >= 1 && buffer <= WorldRuntime::kMaxSoundBuffers &&
-		       !activeSoundBuffers.contains(buffer) && !reservedSoundBuffers.contains(buffer);
-	};
-	soundBackend.reserve = [&activeSoundBuffers, &reservedSoundBuffers,
-	                        &reservedFileNames](const QString &fileName, const quint64)
-	{
-		reservedFileNames.push_back(fileName);
+		QMutexLocker locker(&mutex);
 		for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
-		{
-			if (!activeSoundBuffers.contains(buffer) && !reservedSoundBuffers.contains(buffer))
+			if (!statuses.contains(buffer) && !reserved.contains(buffer))
 			{
-				reservedSoundBuffers.insert(buffer);
+				reserved.insert(buffer);
 				return buffer;
 			}
-		}
 		return 0;
 	};
-	runtime.setSoundBackendForTest(std::move(soundBackend));
-
-	QTemporaryDir soundRoot;
-	QVERIFY(soundRoot.isValid());
-	QVERIFY(QDir(soundRoot.path()).mkpath(QStringLiteral("sounds")));
-	QFile soundFile(QDir(soundRoot.path()).filePath(QStringLiteral("sounds/coin.wav")));
-	QVERIFY(soundFile.open(QIODevice::WriteOnly));
-	const QByteArray soundData = QMudTestSoundData::silentPcmWave();
-	QCOMPARE(soundFile.write(soundData), static_cast<qint64>(soundData.size()));
-	soundFile.close();
-	runtime.setStartupDirectory(soundRoot.path());
-
-	QMudNativePluginRegistry::NativeCallContext audioContext;
-	audioContext.installed                                         = true;
-	audioContext.pluginEnabled                                     = true;
-	audioContext.pluginName                                        = QStringLiteral("LuaAudio");
-	const QMudNativePluginRegistry::NativeCallResult nativeDelayed = QMudNativePluginRegistry::callRoutine(
-	    &runtime, QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("playDelay"),
-	    {QStringLiteral("coin.wav"), 10.0, 0.0, 100.0}, audioContext);
-	QCOMPARE(nativeDelayed.errorCode, eOK);
-	QCOMPARE(nativeDelayed.returnValues.size(), 1);
-	QCOMPARE(nativeDelayed.returnValues.constFirst().toInt(), 1);
-	QCOMPARE(reservedFileNames, QStringList{QStringLiteral("coin.wav")});
-
+	backend.reusable = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		return !statuses.contains(buffer) && !reserved.contains(buffer);
+	};
+	backend.stop = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		statuses.remove(buffer);
+		volumes.remove(buffer);
+		reserved.remove(buffer);
+		return eOK;
+	};
+	backend.status = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		return statuses.value(buffer, reserved.contains(buffer) ? 0 : -2);
+	};
+	backend.volume = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		return volumes.value(buffer, 0.0);
+	};
+	backend.attribute = [&](const int buffer, quint64, const QMudSoundAttribute attribute, const double value,
+	                        const std::chrono::milliseconds duration, const bool fade,
+	                        const QMudSoundAttributeTarget targetMode)
+	{
+		QMutexLocker locker(&mutex);
+		controls.push_back({buffer, attribute, value, duration, fade, targetMode});
+		if (attribute == QMudSoundAttribute::Volume && duration.count() == 0)
+			volumes.insert(buffer, value);
+		return eOK;
+	};
+	runtime.setSoundBackendForTest(std::move(backend));
+	runtime.setPluginVariableValue(QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("vol"),
+	                               QStringLiteral("42"));
+	QString luaPath =
+	    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("../lua/?.lua"));
+	luaPath = QDir::fromNativeSeparators(luaPath);
+	luaPath.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+	luaPath.replace(QLatin1Char('"'), QStringLiteral("\\\""));
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
-	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+	QVERIFY(initializeWorkerEngine(executor, engine,
+	                               QStringLiteral(R"lua(
+	package.path = package.path .. ";%1"
+	local PPI = require "ppi"
+	local audio_id = "aedf0cb0be5bf045860d54b7"
+	local ppi = assert(PPI.Load(audio_id))
+	local function none(...) assert(select("#", ...) == 0) end
 	function OnPluginEnable()
-	  audio.volume(75)
-	  local delay_id = audio.playDelay("coin.wav", 10)
-	  audio.volume(25, delay_id)
-	  local delayed_volume = audio.getVolume(delay_id)
+	  assert(select("#", audio.freq(3)) == 1)
+	  assert(audio.freq("3") == "3")
+	  local id = audio.play("coin.wav", 0, 20, 70)
+	  assert(id == 1)
+	  assert(type(audio.isPlaying(id)) == "number" and audio.isPlaying(id) == 1)
+	  assert(audio.getVolume(id) == 70)
+	  assert(PlaySound(id, "", false, -80, 0) == eOK)
+	  assert(audio.getVolume(id) == 20 and ppi.getVolume(id) == 20)
+	  local read_code, read_volume = CallPlugin(audio_id, "getVolume", id)
+	  assert(read_code == eOK and read_volume == 20)
+	  assert(audio.volume(60, id) == id)
+	  assert(audio.getVolume(id) == 60)
+	  assert(audio.pan(-30, id) == id)
+	  assert(audio.pitch(3, id) == id)
+	  assert(audio.slideVol(40, id) == id)
+	  assert(audio.slidePan(20, id, 200) == 200)
+	  assert(audio.slidePitch(4, id, 300) == 300)
+	  assert(audio.fadeout(id) == id)
+	  assert(audio.getVolume(id) == 60)
+	  none(audio.stop(id))
+	  assert(audio.isPlaying(id) == 0)
+	  none(audio.playDelay("coin.wav", 60000))
+	  none(audio.playDelayLooped("coin.wav", 60000))
+	  audio.stop(0)
 	  audio.free()
-	  lua_audio_shared_info = table.concat({
-	    tostring(delay_id),
-	    string.format("%.0f", delayed_volume),
-	    string.format("%.0f", audio.getVolume())
-	  }, "|")
+	  assert(audio.getVolume() == 100)
+	  assert(not pcall(audio.play, "coin.wav"))
+	  assert(not pcall(audio.play, "coin.wav", false))
+	  assert(not pcall(audio.playDelay, "coin.wav"))
+	  assert(not pcall(audio.stop))
+	  assert(not pcall(audio.isPlaying))
+	  assert(not pcall(audio.volume))
+	  assert(not pcall(audio.freq))
+	  assert(not pcall(audio.freq, nil))
+	  assert(not pcall(audio.freq, true))
+	  assert(not pcall(audio.freq, {}))
+	  assert(not pcall(audio.freq, 0/0))
+	  assert(not pcall(audio.freq, math.huge))
+	  assert(not pcall(audio.pitch, 3))
+	  assert(not pcall(audio.slideVol, 40))
+	  assert(not pcall(audio.slidePan, 20))
+	  assert(not pcall(audio.slidePitch, 2))
+	  assert(not pcall(audio.fadeout))
+	  assert(not pcall(audio.fadeout, 1, 0/0))
+	  assert(not pcall(audio.slideVol, 20, 1, math.huge))
+	  assert(not pcall(audio.pan, {}))
+	  for _, name in ipairs({"init", "unload", "setPitch", "slidePitch", "isPlaying", "getVolume",
+	      "stop", "setPan", "play", "playDelay", "playDelayLooped", "setVol", "slideVol", "fadeout", "slidePan", "playLooped"}) do
+	    assert(PluginSupports(audio_id, "PPI_" .. name .. "_PPI_") == eOK)
+	  end
+	  none(ppi.init())
+	  assert(audio.getVolume() == 42)
+	  id = ppi.play("coin.wav", 0, 4, 70)
+	  assert(id == 1 and ppi.isPlaying(id) == 1)
+	  none(ppi.setVol(35, id))
+	  assert(ppi.getVolume(id) == 35)
+	  none(ppi.setPan(50, id))
+	  none(ppi.setPitch(2, id))
+	  none(ppi.slideVol(20, id))
+	  none(ppi.slidePan(40, id))
+	  none(ppi.slidePitch(3, id))
+	  none(ppi.fadeout(id))
+	  none(ppi.stop(id))
+	  assert(ppi.isPlaying(id) == 0)
+	  id = ppi.playLooped("coin.wav")
+	  assert(ppi.isPlaying(id) == 1)
+	  none(ppi.stop(id))
+	  none(ppi.playDelay("coin.wav", 60000))
+	  none(ppi.playDelayLooped("coin.wav"))
+	  none(ppi.unload())
+	  assert(audio.play("coin.wav", 0) == 0)
+	  assert(CallPlugin(audio_id, "init") == eOK)
+	  assert(audio.getVolume() == 42)
+	  local function delayed_result(...)
+	    assert(select("#", ...) == 2)
+	    local code, value = ...
+	    assert(code == eOK and value == nil)
+	  end
+	  for _, name in ipairs({"playDelay", "playDelayLooped"}) do
+	    for _, delay in ipairs({0, 60000}) do
+	      for _, file in ipairs({"coin.wav", ""}) do
+	        none(audio[name](file, delay))
+	        audio.stop(0)
+	        delayed_result(CallPlugin(audio_id, name, file, delay))
+	        audio.stop(0)
+	        none(ppi[name](file, delay))
+	        assert(GetPluginVariable(audio_id, "PPI__returns__PPI_") == "{}")
+	        audio.stop(0)
+	      end
+	    end
+	  end
+	  for _ = 1, 10 do assert(audio.play("coin.wav", 0) ~= 0) end
+	  for _, name in ipairs({"playDelay", "playDelayLooped"}) do
+	    for _, delay in ipairs({0, 60000}) do
+	      none(audio[name]("coin.wav", delay))
+	      delayed_result(CallPlugin(audio_id, name, "coin.wav", delay))
+	      none(ppi[name]("coin.wav", delay))
+	    end
+	  end
+	  audio.free()
+	  for _, name in ipairs({"playDelay", "playDelayLooped"}) do
+	    none(audio[name]("coin.wav", 60000))
+	    delayed_result(CallPlugin(audio_id, name, "coin.wav", 60000))
+	    none(ppi[name]("coin.wav", 60000))
+	    local failure = table.pack(CallPlugin(audio_id, name, "coin.wav", -1))
+	    assert(failure.n == 2 and failure[1] == eErrorCallingPluginRoutine and type(failure[2]) == "string")
+	  end
+	  none(ppi.init())
+	  local code = CallPlugin(audio_id, "play", "coin.wav", "0", 0, 80)
+	  assert(code == eOK)
+	  local status, playing = CallPlugin(audio_id, "isPlaying", 1)
+	  assert(status == eOK and playing == 1 and type(playing) == "number")
+	  assert(CallPlugin(audio_id, "play", "coin.wav") == eErrorCallingPluginRoutine)
+	  local bad, message = CallPlugin(audio_id, "play", {})
+	  assert(bad == eBadParameter and message:find("table type", 1, true))
+	  assert(CallPlugin(audio_id, "PPI_play_PPI_", "not a table") == eErrorCallingPluginRoutine)
+	  assert(CallPlugin(audio_id, "stop", 1) == eOK)
+	  assert(type(GetPluginVariable(audio_id, "PPI__returns__PPI_")) == "string")
+	  audio_info = "all contracts passed"
 	end
-	function lua_audio_shared_status(value)
-	  return lua_audio_shared_info
+	function audio_status(value) return audio_info end
+	function LeavePending()
+	  none(audio.playDelay("coin.wav", 60000))
 	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-
-	auto snapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	snapshot->soundStatusByBuffer.insert(1, -2);
-	snapshot->soundStatusByBuffer.insert(2, -2);
-
+	function VolumeChanged()
+	  local id = audio.play("coin.wav", 0)
+	  assert(PlaySound(id, "", false, -75, 0) == eOK)
+	end
+	)lua")
+	                                   .arg(luaPath),
+	                               &runtime));
+	const auto snapshot = captureMutableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
 	LuaBatchDispatchRequest request;
 	request.engines             = {engine};
 	request.kind                = LuaBatchDispatchKind::NoArgs;
 	request.functionName        = QStringLiteral("OnPluginEnable");
 	request.callbackSnapshotArg = snapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
-	QCOMPARE(reservedFileNames, (QStringList{QStringLiteral("coin.wav"), QStringLiteral("coin.wav")}));
-
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("lua_audio_shared_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("2|25|100"));
+	executeDeferredMutations(result);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-
-	QString bundledLuaPattern = QDir::fromNativeSeparators(
-	    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("../lua/?.lua")));
-	bundledLuaPattern.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
-	bundledLuaPattern.replace(QLatin1Char('"'), QStringLiteral("\\\""));
-	auto ppiEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, ppiEngine,
-	                            QStringLiteral(R"lua(
-	package.path = package.path .. ";%1"
-	local audio_id = "aedf0cb0be5bf045860d54b7"
-	local PPI = require "ppi"
-	local audio = assert(PPI.Load(audio_id))
-	function OnPluginEnable()
-	  local id = audio.play("coin.wav", nil, 4, 70)
-	  local initial_volume = audio.getVolume(id)
-	  audio.setVol(35, id)
-	  local volume = audio.getVolume(id)
-	  local playing = audio.isPlaying(id)
-	  local variables = GetPluginVariableList(audio_id)
-	  local malformed_code = CallPlugin(audio_id, "PPI_play_PPI_", "not a serialized table")
-	  lua_audio_ppi_info = table.concat({
-	    tostring(PluginSupports(audio_id, "PPI_play_PPI_")),
-	    tostring(id), string.format("%.0f", initial_volume), string.format("%.0f", volume), tostring(playing),
-	    tostring(variables["PPI__returns__PPI_"] ~= nil),
-	    tostring(GetPluginVariable(audio_id, "ppi__returns__ppi_") ~= nil),
-	    string.format("%.0f", GetPluginInfo(audio_id, 12)),
-	    string.format("%.0f", malformed_code)
-	  }, "|")
-	end
-	function lua_audio_ppi_status(value)
-	  return lua_audio_ppi_info
-	end
-	)lua")
-	                                .arg(bundledLuaPattern),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	auto ppiSnapshot = captureMutableDispatchSnapshotForTest(runtime);
-	QVERIFY(ppiSnapshot);
-	ppiSnapshot->soundStatusByBuffer.insert(1, -2);
-	ppiSnapshot->soundStatusByBuffer.insert(2, -2);
-	request.engines             = {ppiEngine};
-	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = ppiSnapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
+	QCOMPARE(snapshot->soundState.volumeByBuffer.value(1), 0.0);
+	QVERIFY(std::ranges::any_of(controls,
+	                            [](const Control &control)
+	                            {
+		                            return control.attribute == QMudSoundAttribute::Volume &&
+		                                   control.duration.count() == 1000 && !control.fade;
+	                            }));
+	QVERIFY(std::ranges::any_of(
+	    controls, [](const Control &control)
+	    { return control.attribute == QMudSoundAttribute::Pan && control.duration.count() == 200; }));
+	QVERIFY(std::ranges::any_of(controls,
+	                            [](const Control &control)
+	                            {
+		                            return control.attribute == QMudSoundAttribute::Pitch &&
+		                                   control.duration.count() == 300 &&
+		                                   control.targetMode == QMudSoundAttributeTarget::Relative;
+	                            }));
+	QVERIFY(std::ranges::any_of(controls, [](const Control &control)
+	                            { return control.fade && control.duration.count() == 1000; }));
 	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("lua_audio_ppi_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
+	request.functionName        = QStringLiteral("audio_status");
+	request.stringArg           = QStringLiteral("unused");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult,
-	         QStringLiteral("0.0|1|70|35|true|true|true|2|%1").arg(eErrorCallingPluginRoutine));
-	QMudNativePluginRegistry::LuaAudioRuntimeBufferState sparsePpiState;
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, sparsePpiState));
-	QCOMPARE(sparsePpiState.loop, false);
-	QCOMPARE(sparsePpiState.pan, 4.0);
-	QCOMPARE(sparsePpiState.volume, 35.0);
-	QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, QMudNativePluginRegistry::luaAudioPluginId(),
-	                                               QStringLiteral("stop"), {1}, audioContext)
-	             .errorCode,
-	         eOK);
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-	QVERIFY(teardownWorkerEngine(executor, ppiEngine));
-
-	auto preStartEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, preStartEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  prestart_id = audio.play("coin.wav")
-	end
-	function prestart_audio_status(value)
-	  return tostring(prestart_id)
-	end
+	QCOMPARE(result.stringResult, QStringLiteral("all contracts passed"));
+	auto observer = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(executor, observer, QStringLiteral(R"lua(
+	function VolumeChanged() observed_volume = audio.getVolume(1) end
+	function observed_status(value) return tostring(observed_volume) end
 	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	auto preStartSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	activeSoundBuffers.insert(1);
-	preStartSnapshot->soundStatusByBuffer.insert(1, 0);
-	preStartSnapshot->soundStatusByBuffer.insert(2, -2);
-	request.engines             = {preStartEngine};
+	                               &runtime));
 	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = preStartSnapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
-
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("prestart_audio_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
+	request.engines             = {engine, observer};
+	request.functionName        = QStringLiteral("VolumeChanged");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	const auto beforeControl    = request.callbackSnapshotArg;
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("2"));
-	QVERIFY(teardownWorkerEngine(executor, preStartEngine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-	activeSoundBuffers.remove(1);
-
-	auto callPluginPreStartEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, callPluginPreStartEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  local code, id = CallPlugin("aedf0cb0be5bf045860d54b7", "play", "coin.wav")
-	  callplugin_prestart_info = tostring(code) .. "|" .. tostring(id)
-	end
-	function callplugin_prestart_audio_status(value)
-	  return callplugin_prestart_info
-	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	auto callPluginPreStartSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	activeSoundBuffers.insert(1);
-	callPluginPreStartSnapshot->soundStatusByBuffer.insert(1, 0);
-	callPluginPreStartSnapshot->soundStatusByBuffer.insert(2, -2);
-	request.engines             = {callPluginPreStartEngine};
-	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = callPluginPreStartSnapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
-
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("callplugin_prestart_audio_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
+	QVERIFY(result.recipientMutationBoundary);
+	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
+	QVERIFY(result.callbackSnapshotAfterMutations);
+	QCOMPARE(result.callbackSnapshotAfterMutations->soundState.volumeByBuffer.value(1), 25.0);
+	QCOMPARE(beforeControl->soundState.volumeByBuffer.value(1), 0.0);
+	runtime.applyCompletedPluginCallbackMutations(result);
+	request.firstEngineIndex    = result.nextEngineIndex;
+	request.callbackSnapshotArg = result.callbackSnapshotAfterMutations;
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("0.0|2"));
-	QVERIFY(teardownWorkerEngine(executor, callPluginPreStartEngine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-	activeSoundBuffers.remove(1);
-
-	auto callPluginStringBoolEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, callPluginStringBoolEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  local code, id = CallPlugin("aedf0cb0be5bf045860d54b7", "play", "coin.wav", "1")
-	  callplugin_string_bool_info = tostring(code) .. "|" .. tostring(id) .. "|" .. tostring(audio.isPlaying(id))
-	end
-	function callplugin_string_bool_status(value)
-	  return callplugin_string_bool_info
-	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	auto callPluginStringBoolSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	callPluginStringBoolSnapshot->soundStatusByBuffer.insert(1, -2);
-	request.engines             = {callPluginStringBoolEngine};
-	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = callPluginStringBoolSnapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
-
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("callplugin_string_bool_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
+	request.firstEngineIndex = 0;
+	request.engines          = {observer};
+	request.kind             = LuaBatchDispatchKind::StringInOut;
+	request.functionName     = QStringLiteral("observed_status");
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("0.0|1|true"));
-	QVERIFY(teardownWorkerEngine(executor, callPluginStringBoolEngine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-
-	auto callPluginBadArgumentEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, callPluginBadArgumentEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  local code, message = CallPlugin("aedf0cb0be5bf045860d54b7", "play", {})
-	  callplugin_bad_argument_info = tostring(code == eBadParameter) .. "|" .. tostring(message)
-	end
-	function callplugin_bad_argument_status(value)
-	  return callplugin_bad_argument_info
-	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	auto callPluginBadArgumentSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	callPluginBadArgumentSnapshot->soundStatusByBuffer.insert(1, -2);
-	request.engines             = {callPluginBadArgumentEngine};
-	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = callPluginBadArgumentSnapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
-
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("callplugin_bad_argument_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
-	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("true|Cannot pass argument #3 (table type) to CallPlugin"));
-	QVERIFY(teardownWorkerEngine(executor, callPluginBadArgumentEngine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-
-	auto callPluginBranchEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, callPluginBranchEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  local audio_id = "aedf0cb0be5bf045860d54b7"
-	  local delay_code, delayed_id = CallPlugin(audio_id, "playDelayLooped", "coin.wav", 10, 4, 60)
-	  local set_code = CallPlugin(audio_id, "setVol", 44, 1)
-	  local slide_vol_code = CallPlugin(audio_id, "slideVol", 35, 1, 0.02)
-	  local slide_pan_code = CallPlugin(audio_id, "slidePan", 6, 1, 0.02)
-	  local slide_pitch_code = CallPlugin(audio_id, "slidePitch", 7, 1, 0.02)
-	  local fade_code = CallPlugin(audio_id, "fadeout", 2, 0.02)
-	  local stop_code = CallPlugin(audio_id, "stop", 3)
-	  local playing_code, stopped_playing = CallPlugin(audio_id, "isPlaying", 3)
-	  local get_code, volume_before = CallPlugin(audio_id, "getVolume", 1)
-	  callplugin_branch_info = table.concat({
-	    tostring(delay_code),
-	    tostring(delayed_id),
-	    string.format("%.0f", volume_before),
-	    tostring(set_code),
-	    tostring(slide_vol_code),
-	    tostring(slide_pan_code),
-	    tostring(slide_pitch_code),
-	    tostring(fade_code),
-	    tostring(stop_code),
-	    tostring(playing_code),
-	    tostring(stopped_playing)
-	  }, "|")
-	end
-	function callplugin_branch_status(value)
-	  return callplugin_branch_info
-	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	QMudNativePluginRegistry::LuaAudioRuntimeBufferState callPluginBranchState;
-	callPluginBranchState.volume   = 100.0;
-	callPluginBranchState.ownerKey = callPluginBranchEngine.data();
-	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, callPluginBranchState);
-	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, callPluginBranchState);
-	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 3, callPluginBranchState);
-	activeSoundBuffers.insert(1);
-	activeSoundBuffers.insert(2);
-	activeSoundBuffers.insert(3);
-	auto callPluginBranchSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	callPluginBranchSnapshot->soundStatusByBuffer.insert(1, 1);
-	callPluginBranchSnapshot->soundStatusByBuffer.insert(2, 1);
-	callPluginBranchSnapshot->soundStatusByBuffer.insert(3, 1);
-	callPluginBranchSnapshot->soundStatusByBuffer.insert(4, -2);
-	request.engines             = {callPluginBranchEngine};
-	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = callPluginBranchSnapshot;
-	LuaBatchDispatchResult callPluginBranchResult;
-	QVERIFY(dispatchWorkerAndWait(executor, request, callPluginBranchResult));
-	executeDeferredMutations(callPluginBranchResult);
-
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("callplugin_branch_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
-	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("0.0|4|44|0.0|0.0|0.0|0.0|0.0|0.0|0.0|false"));
-	QTRY_VERIFY_WITH_TIMEOUT(
-	    (
-	        [&]
-	        {
-		        if (!QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, callPluginBranchState))
-			        return false;
-		        QMudNativePluginRegistry::LuaAudioRuntimeBufferState stoppedState;
-		        return callPluginBranchState.volume == 35.0 && callPluginBranchState.pan == 6.0 &&
-		               callPluginBranchState.pitch == 7.0 &&
-		               !QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 2, stoppedState) &&
-		               !QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 3, stoppedState);
-	        })(),
-	    3000);
-	QVERIFY(teardownWorkerEngine(executor, callPluginBranchEngine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-
-	QVERIFY(teardownWorkerEngine(executor, engine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-
-	auto pendingEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, pendingEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  audio.playDelay("coin.wav", 10)
-	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	auto pendingSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	pendingSnapshot->soundStatusByBuffer.insert(1, -2);
-	request.engines             = {pendingEngine};
-	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = pendingSnapshot;
+	QCOMPARE(result.stringResult.toDouble(), 25.0);
+	QVERIFY(teardownWorkerEngine(executor, observer));
+	QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("stop"), {0}).errorCode, eOK);
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.engines      = {engine};
+	request.functionName = QStringLiteral("LeavePending");
 	QVERIFY(dispatchWorkerAndWait(executor, request));
 	QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
-
-	QVERIFY(teardownWorkerEngine(executor, pendingEngine));
+	QVERIFY(teardownWorkerEngine(executor, engine));
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+	QVERIFY(reserved.isEmpty());
+}
 
-	auto timedEngine = QSharedPointer<LuaCallbackEngine>::create();
-	if (!initializeWorkerEngine(executor, timedEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	  timed_id = 1
-	  fade_id = 2
-	  audio.slideVol(40, timed_id, 0.02)
-	  audio.slidePan(7, timed_id, 0.02)
-	  audio.slidePitch(5, timed_id, 0.02)
-	  audio.fadeout(fade_id, 0.02)
-	  timed_before = audio.getVolume(timed_id)
-	end
-	function timed_audio_status(value)
-	  return table.concat({
-	    tostring(timed_id),
-	    tostring(fade_id),
-	    string.format("%.0f", timed_before),
-	    string.format("%.0f", audio.getVolume(timed_id)),
-	    tostring(audio.isPlaying(fade_id))
-	  }, "|")
-	end
-	)lua"),
-	                            &runtime))
-		QFAIL("Worker engine initialization failed");
-	QMudNativePluginRegistry::LuaAudioRuntimeBufferState timedState;
-	timedState.volume   = 100.0;
-	timedState.ownerKey = timedEngine.data();
-	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, timedState);
-	QMudNativePluginRegistry::LuaAudioRuntimeBufferState fadeState;
-	fadeState.volume   = 100.0;
-	fadeState.ownerKey = timedEngine.data();
-	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, fadeState);
-	activeSoundBuffers.insert(1);
-	activeSoundBuffers.insert(2);
-	auto timedSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
-	timedSnapshot->soundStatusByBuffer.insert(1, 1);
-	timedSnapshot->soundStatusByBuffer.insert(2, 1);
-	request.engines             = {timedEngine};
+void tst_LuaCallbackEngine::queuedSoundMutationsPreventDuplicatePlayback_data()
+{
+	QTest::addColumn<int>("entryPath");
+	QTest::newRow("audio") << 0;
+	QTest::newRow("CallPlugin") << 1;
+	QTest::newRow("PPI") << 2;
+	QTest::newRow("PlaySound") << 3;
+	QTest::newRow("PlaySoundMemory") << 4;
+}
+
+void tst_LuaCallbackEngine::queuedSoundMutationsPreventDuplicatePlayback()
+{
+	QFETCH(int, entryPath);
+	QMutex                         mutex;
+	QHash<int, int>                statuses;
+	QHash<int, double>             volumes;
+	QSemaphore                     permitPlay;
+	std::atomic_bool               firstPlay{true};
+	std::atomic_int                playCount{0};
+	std::atomic_int                selectedBuffer{0};
+	WorldRuntime                   runtime;
+	WorldRuntime::TestSoundBackend backend;
+	backend.play = [&](int buffer, const QString &file, const bool loop, const double volume, double)
+	{
+		if (firstPlay.exchange(false))
+		{
+			permitPlay.acquire();
+		}
+		QMutexLocker locker(&mutex);
+		if (!file.isEmpty())
+			++playCount;
+		if (buffer == 0)
+			for (int candidate = 1; candidate <= WorldRuntime::kMaxSoundBuffers; ++candidate)
+				if (!statuses.contains(candidate))
+				{
+					buffer = candidate;
+					break;
+				}
+		if (buffer == 0)
+			return static_cast<int>(eCannotPlaySound);
+		selectedBuffer.store(buffer);
+		statuses.insert(buffer, loop ? 2 : 1);
+		volumes.insert(buffer, volume + 100.0);
+		return static_cast<int>(eOK);
+	};
+	backend.automaticBuffer = [&] { return selectedBuffer.load(); };
+	backend.reusable        = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		return !statuses.contains(buffer);
+	};
+	backend.status = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		return statuses.value(buffer, -2);
+	};
+	backend.volume = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		return volumes.value(buffer, 0.0);
+	};
+	backend.stop = [&](const int buffer)
+	{
+		QMutexLocker locker(&mutex);
+		if (buffer == 0)
+		{
+			statuses.clear();
+			volumes.clear();
+		}
+		else
+		{
+			statuses.remove(buffer);
+			volumes.remove(buffer);
+		}
+		return static_cast<int>(eOK);
+	};
+	backend.attribute = [&](const int buffer, quint64, QMudSoundAttribute attribute, const double value,
+	                        std::chrono::milliseconds, bool, QMudSoundAttributeTarget)
+	{
+		QMutexLocker locker(&mutex);
+		if (attribute == QMudSoundAttribute::Volume)
+			volumes.insert(buffer, value);
+		return static_cast<int>(eOK);
+	};
+	runtime.setSoundBackendForTest(std::move(backend));
+	const auto releaseBlockedPlay = qScopeGuard([&] { permitPlay.release(); });
+	QString    luaPath =
+	    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("../lua/?.lua"));
+	luaPath = QDir::fromNativeSeparators(luaPath);
+	luaPath.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+	luaPath.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+	const QString pluginId = QStringLiteral("sound.causal.queue.plugin");
+	auto          engine   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine,
+	                               QStringLiteral(R"lua(
+package.path = package.path .. ";%1"
+local audio_id = "aedf0cb0be5bf045860d54b7"
+local ppi = require("ppi").Load(audio_id)
+local mode = %2
+local function playing(id)
+    if mode < 3 then return audio.isPlaying(id) == 1 end
+    return GetSoundStatus(id) == 2
+end
+function EnsureMusic()
+    local id = tonumber(GetVariable("music")) or 0
+    if id == 0 or not playing(id) then
+        if mode == 0 then id = audio.play("cue.wav", 1, 0, 60)
+        elseif mode == 1 then
+            local code
+            code, id = CallPlugin(audio_id, "play", "cue.wav", 1, 0, 60)
+            assert(code == eOK)
+        elseif mode == 2 then id = ppi.play("cue.wav", 1, 0, 60)
+        elseif mode == 3 then assert(PlaySound(0, "cue.wav", true, -40, 0) == eOK); id = 1
+        else assert(PlaySoundMemory(0, "encoded sound", true, -40, 0) == eOK); id = 1 end
+        assert(id > 0)
+        SetVariable("music", id)
+        local code, nested_status = CallPlugin("sound.causal.observer.plugin", "CheckMusic", id)
+        assert(code == eOK and nested_status == 2)
+    end
+    SetVariable("observed", GetSoundStatus(id))
+end
+function ChangeSound()
+    local id = tonumber(GetVariable("music"))
+    if mode == 0 then audio.volume(25, id)
+    elseif mode == 1 then assert(CallPlugin(audio_id, "setVol", 25, id) == eOK)
+    elseif mode == 2 then ppi.setVol(25, id)
+    else assert(PlaySound(id, "", false, -75, 0) == eOK) end
+end
+function ObserveControl()
+    local id = tonumber(GetVariable("music"))
+    if mode < 3 then SetVariable("controlled", audio.getVolume(id))
+    else SetVariable("controlled", GetSoundStatus(id)) end
+end
+function StopMusic()
+    assert(StopSound(tonumber(GetVariable("music"))) == eOK)
+end
+function ObserveStop()
+    SetVariable("stopped", GetSoundStatus(tonumber(GetVariable("music"))))
+end
+)lua")
+	                                   .arg(luaPath)
+	                                   .arg(entryPath),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Sound causal queue"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled           = true;
+	plugin.lua               = engine;
+	const QString observerId = QStringLiteral("sound.causal.observer.plugin");
+	auto          observer   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), observer, QStringLiteral(R"lua(
+function CheckMusic(id)
+  assert(GetSoundStatus(id) == 2)
+  return GetSoundStatus(id)
+end
+)lua"),
+	                               &runtime, observerId));
+	WorldRuntime::Plugin observerPlugin;
+	observerPlugin.attributes.insert(QStringLiteral("id"), observerId);
+	observerPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Nested sound observer"));
+	observerPlugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	observerPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	observerPlugin.enabled                   = true;
+	observerPlugin.lua                       = observer;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin, observerPlugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+
+	int                     completed = 0;
+	LuaBatchDispatchRequest request;
 	request.kind                = LuaBatchDispatchKind::NoArgs;
-	request.functionName        = QStringLiteral("OnPluginEnable");
-	request.callbackSnapshotArg = timedSnapshot;
-	QVERIFY(dispatchWorkerAndWait(executor, request));
+	request.engines             = {engine};
+	request.functionName        = QStringLiteral("EnsureMusic");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	const auto beforePlay       = request.callbackSnapshotArg;
+	runtime.queuePluginCallbackDispatchAsync(request, [&](const LuaBatchDispatchResult &) { ++completed; });
+	QTRY_VERIFY_WITH_TIMEOUT(!firstPlay.load(), 5000);
+	for (int i = 0; i < 8; ++i)
+		runtime.queuePluginCallbackDispatchAsync(request,
+		                                         [&](const LuaBatchDispatchResult &) { ++completed; });
+	permitPlay.release();
+	QTRY_COMPARE_WITH_TIMEOUT(completed, 9, 5000);
+	QCOMPARE(playCount.load(), 1);
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime)
+	             .constFirst()
+	             .variables.value(QStringLiteral("observed"))
+	             .toDouble(),
+	         2.0);
+	QCOMPARE(beforePlay->soundState.statusByBuffer.value(1), -2);
 
-	QTest::qWait(60);
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("timed_audio_status");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = {};
-	QVERIFY(dispatchWorkerAndWait(executor, request, result));
-	QCOMPARE(result.stringResult, QStringLiteral("1|2|100|40|false"));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, timedState));
-	QCOMPARE(timedState.volume, 40.0);
-	QCOMPARE(timedState.pan, 7.0);
-	QCOMPARE(timedState.pitch, 5.0);
-	QVERIFY(!activeSoundBuffers.contains(2));
-	QVERIFY(teardownWorkerEngine(executor, timedEngine));
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-	QVERIFY(activeSoundBuffers.isEmpty());
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	request.functionName        = QStringLiteral("ChangeSound");
+	runtime.queuePluginCallbackDispatchAsync(request, [&](const LuaBatchDispatchResult &) { ++completed; });
+	request.functionName = QStringLiteral("ObserveControl");
+	runtime.queuePluginCallbackDispatchAsync(request, [&](const LuaBatchDispatchResult &) { ++completed; });
+	QTRY_COMPARE_WITH_TIMEOUT(completed, 11, 5000);
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime)
+	             .constFirst()
+	             .variables.value(QStringLiteral("controlled"))
+	             .toDouble(),
+	         entryPath < 3 ? 25.0 : 1.0);
+
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	request.functionName        = QStringLiteral("StopMusic");
+	runtime.queuePluginCallbackDispatchAsync(request, [&](const LuaBatchDispatchResult &) { ++completed; });
+	request.functionName = QStringLiteral("ObserveStop");
+	runtime.queuePluginCallbackDispatchAsync(request, [&](const LuaBatchDispatchResult &) { ++completed; });
+	QTRY_COMPARE_WITH_TIMEOUT(completed, 13, 5000);
+	QCOMPARE(WorldRuntimeTestAccess::plugins(runtime)
+	             .constFirst()
+	             .variables.value(QStringLiteral("stopped"))
+	             .toDouble(),
+	         -2.0);
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), observer));
+}
+
+void tst_LuaCallbackEngine::soundCausalMergesRespectSessionAndChannelRevisions()
+{
+	SoundEngineSession::Snapshot initial;
+	initial.sessionId           = 7;
+	initial.revision            = 10;
+	auto       target           = LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(initial, 0);
+	const auto immutableInitial = target;
+	auto       first            = initial;
+	first.revision              = 11;
+	first.status[0]             = 2;
+	first.volume[0]             = 60.0;
+	auto second                 = first;
+	second.revision             = 12;
+	second.status[1]            = 1;
+	second.volume[1]            = 25.0;
+	target.merge(LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(second, 2));
+	target.merge(LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(first, 1));
+	QCOMPARE(target.statusByBuffer.value(1), 2);
+	QCOMPARE(target.volumeByBuffer.value(1), 60.0);
+	QCOMPARE(target.statusByBuffer.value(2), 1);
+	QCOMPARE(target.statusByBuffer.value(3), -2);
+	QCOMPARE(immutableInitial.statusByBuffer.value(1), -2);
+	target.merge(LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(initial, 1));
+	QCOMPARE(target.statusByBuffer.value(1), 2);
+	auto stopped      = second;
+	stopped.revision  = 13;
+	stopped.status[0] = -2;
+	stopped.volume[0] = 0.0;
+	target.merge(LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(stopped, 1));
+	target.merge(LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(first, 1));
+	QCOMPARE(target.statusByBuffer.value(1), -2);
+	QCOMPARE(target.volumeByBuffer.value(1), 0.0);
+	auto otherSession      = second;
+	otherSession.sessionId = 8;
+	otherSession.revision  = 100;
+	target.merge(LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(otherSession, 1));
+	QCOMPARE(target.sessionId, quint64{7});
+	QCOMPARE(target.statusByBuffer.value(1), -2);
 }
 
 void tst_LuaCallbackEngine::disabledNativeLuaAudioShadowBlocksCallbackCallPluginFastPath()
@@ -26626,6 +26755,639 @@ end
 	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
 }
 
+void tst_LuaCallbackEngine::telnetCallbackOutputFollowsProtocolReplies_data()
+{
+	QTest::addColumn<int>("sendMode");
+	QTest::addColumn<bool>("fragmented");
+	QTest::addColumn<bool>("clientOption");
+	for (int mode = 0; mode < 3; ++mode)
+		for (const bool fragmented : {false, true})
+			for (const bool clientOption : {false, true})
+				QTest::newRow(qPrintable(QStringLiteral("mode-%1-%2-%3")
+				                             .arg(mode)
+				                             .arg(fragmented ? "fragmented" : "coalesced")
+				                             .arg(clientOption ? "client" : "server")))
+				    << mode << fragmented << clientOption;
+}
+
+void tst_LuaCallbackEngine::telnetCallbackOutputFollowsProtocolReplies()
+{
+	QFETCH(int, sendMode);
+	QFETCH(bool, fragmented);
+	QFETCH(bool, clientOption);
+	const int    option = clientOption ? 202 : 69;
+	WorldRuntime runtime;
+	auto        *processor = new WorldCommandProcessor(&runtime);
+	processor->setRuntime(&runtime);
+	runtime.setCommandProcessor(processor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	const QString pluginId = QStringLiteral("ab0123456789abcdef012345");
+	auto          engine   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine,
+	                               QStringLiteral(R"lua(
+local send_mode = %1
+function OnPluginTelnetRequest(option, action)
+  SetVariable("requests", (GetVariable("requests") or "") .. option .. ":" .. action .. "|")
+  if action == "WILL" then return option == 69 end
+  if action == "DO" then return option == 202 end
+  if action == "SENT_DO" or action == "SENT_WILL" then
+    if send_mode == 0 then
+      for i = 1, 630 do
+        assert(SendPkt(string.char(255, 250, option, 1) .. "REPORT" .. string.char(2) .. i .. string.char(255, 240)) == eOK)
+      end
+    else
+      local send = send_mode == 1 and Send or SendImmediate
+      assert(send("report-" .. option) == eOK)
+    end
+    SetVariable("last_sent", tostring(option))
+  end
+  return false
+end
+)lua")
+	                                   .arg(sendMode),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes = {
+	    {QStringLiteral("id"),       pluginId                             },
+	    {QStringLiteral("name"),     QStringLiteral("Telnet output order")},
+	    {QStringLiteral("language"), QStringLiteral("lua")                },
+	    {QStringLiteral("enabled"),  QStringLiteral("1")                  }
+    };
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	const QString requestCallback = luaCallbackEventFunctionName(LuaCallbackEvent::TelnetRequest);
+	runtime.m_observedPluginCallbacks.insert(requestCallback);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {requestCallback}, {requestCallback});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	const QByteArray input = (clientOption ? QByteArray::fromHex("fffdca") : QByteArray::fromHex("fffb45")) +
+	                         QByteArray::fromHex("fffb44fffdcc");
+	if (fragmented)
+		for (const char byte : input)
+			runtime.receiveRawData(QByteArray(1, byte));
+	else
+		runtime.receiveRawData(input);
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.pluginVariableValue(pluginId, QStringLiteral("last_sent")),
+	                          QString::number(option), 5000);
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands() &&
+	                             !runtime.m_pluginCallbackDispatchWorkerInFlight,
+	                         5000);
+
+	const QByteArray reply = clientOption ? QByteArray::fromHex("fffbca") : QByteArray::fromHex("fffd45");
+	QByteArray       application;
+	if (sendMode == 0)
+		for (int i = 1; i <= 630; ++i)
+		{
+			application += QByteArray::fromHex("fffa");
+			application += static_cast<char>(option);
+			application +=
+			    QByteArrayLiteral("\x01REPORT\x02") + QByteArray::number(i) + QByteArray::fromHex("fff0");
+		}
+	else
+		application += QByteArrayLiteral("report-") + QByteArray::number(option) + QByteArrayLiteral("\r\n");
+	const QByteArray protocol = reply + QByteArray::fromHex("fffe44fffccc");
+	QByteArray       actual;
+	for (const QByteArray &packet : std::as_const(socket->packets))
+		actual += packet;
+	QCOMPARE(actual.count(application), 1);
+	const qsizetype applicationOffset = actual.indexOf(application);
+	QVERIFY(applicationOffset >= reply.size());
+	QCOMPARE(actual.first(reply.size()), reply);
+	// Later replies may precede a command that is still awaiting its existing send pipeline.
+	actual.remove(applicationOffset, application.size());
+	QCOMPARE(actual, protocol);
+	QCOMPARE(runtime.bytesOut(), protocol.size() + application.size());
+	QCOMPARE(runtime.outputPacketCount(), socket->packets.size());
+	QCOMPARE(runtime.totalLinesSent(), sendMode == 0 ? 0 : 1);
+	QCOMPARE(runtime.pluginVariableValue(pluginId, QStringLiteral("requests")),
+	         clientOption ? QStringLiteral("202:DO|202:SENT_WILL|68:WILL|204:DO|")
+	                      : QStringLiteral("69:WILL|69:SENT_DO|68:WILL|204:DO|"));
+	runtime.m_socketReadyForWorld = false;
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::telnetOutputPreservesCausalSegments()
+{
+	WorldRuntime runtime;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	auto *socket = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	const auto scope           = runtime.createCausalOutboundScope(false);
+	auto       context         = runtime.captureRuntimeCallerContext(scope);
+	auto       transaction     = QSharedPointer<OutboundCommandTransaction>::create();
+	transaction->callerContext = context;
+	int accepted               = 0;
+	transaction->accepted      = [&] { ++accepted; };
+	runtime.m_telnet.queueInitialNegotiation(true, false);
+	QCOMPARE(runtime.sendToWorld({}), qint64{0});
+	QVERIFY(socket->packets.isEmpty());
+	context.run(
+	    [&]
+	    {
+		    QByteArray ordinary = QByteArrayLiteral("ordinary");
+		    QByteArray priority = QByteArrayLiteral("priority");
+		    QByteArray command  = QByteArrayLiteral("command");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(ordinary, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(priority, true),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+		    QVERIFY(socket->packets.isEmpty());
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(command, false, transaction),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+		    QByteArray tail = QByteArrayLiteral("tail");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(tail, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+	QCOMPARE(socket->packets,
+	         (QVector<QByteArray>{QByteArray::fromHex("fffd03"), QByteArrayLiteral("priority"),
+	                              QByteArrayLiteral("ordinary"), QByteArrayLiteral("command")}));
+	QCOMPARE(accepted, 1);
+	QVERIFY(transaction->preWriteObservation.valid);
+	QCOMPARE(transaction->preWriteObservation.outputPacketCount, 3);
+	QCOMPARE(transaction->preWriteObservation.bytesOut, qint64{19});
+	runtime.m_telnet.queueInitialNegotiation(true, true);
+	runtime.releaseCausalOutboundScope(scope);
+	QCOMPARE(socket->packets.size(), 4);
+	runtime.finishOutboundCommandNotification(transaction);
+	QCOMPARE(socket->packets,
+	         (QVector<QByteArray>{QByteArray::fromHex("fffd03"), QByteArrayLiteral("priority"),
+	                              QByteArrayLiteral("ordinary"), QByteArrayLiteral("command"),
+	                              QByteArray::fromHex("fffd19"), QByteArrayLiteral("tail")}));
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+	QCOMPARE(accepted, 1);
+	transaction->accepted = {};
+}
+
+void tst_LuaCallbackEngine::telnetOutputPreservesGracefulDisconnect()
+{
+	WorldRuntime runtime;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	connect(socket, &WorldSocketService::disconnected, &runtime, &WorldRuntime::handleSocketDisconnected);
+	QSignalSpy       disconnected(&runtime, &WorldRuntime::disconnected);
+	QSignalSpy       errors(&runtime, &WorldRuntime::socketError);
+	const quint64    connectionEpoch = runtime.m_connectionEpoch;
+	const QByteArray accepted        = QByteArrayLiteral("accepted-before-close");
+	QCOMPARE(runtime.sendToWorld(accepted), accepted.size());
+
+	// The in-memory transport leaves ConnectedState without delivering disconnected() yet,
+	// representing the native socket's graceful drain of already accepted buffered bytes.
+	runtime.disconnectFromWorld();
+	QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectDisconnecting);
+	QVERIFY(!socket->isConnected());
+	runtime.receiveRawData(QByteArray::fromHex("fffb03"));
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation, 5000);
+	QCOMPARE(runtime.m_connectionEpoch, connectionEpoch);
+	QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectDisconnecting);
+	QCOMPARE(socket->abortAttempts, 0);
+	QCOMPARE(disconnected.count(), 0);
+	QCOMPARE(errors.count(), 0);
+	QCOMPARE(socket->packets, QVector<QByteArray>{accepted});
+	QCOMPARE(runtime.outputPacketCount(), 1);
+	QCOMPARE(runtime.bytesOut(), accepted.size());
+
+	// A skipped prerequisite must still reject its dependent command, without aborting closure.
+	auto transaction      = QSharedPointer<OutboundCommandTransaction>::create();
+	int  rejected         = 0;
+	transaction->rejected = [&] { ++rejected; };
+	runtime.m_telnet.queueInitialNegotiation(true, false);
+	QCOMPARE(runtime.sendToWorld(QByteArrayLiteral("dependent-command"), transaction), qint64{-1});
+	QCOMPARE(transaction->outcome, OutboundCommandTransaction::Outcome::Rejected);
+	QCOMPARE(rejected, 1);
+
+	// Reload preparation must also fail rather than interpreting the skipped output as success.
+	runtime.m_telnet.processBytes(QByteArray::fromHex("fffa56fff0"));
+	QVERIFY(runtime.isCompressing());
+	QVERIFY(!runtime.requestMccpDisableForReload(0));
+	QCOMPARE(runtime.m_connectionEpoch, connectionEpoch);
+	QCOMPARE(socket->abortAttempts, 0);
+	QCOMPARE(disconnected.count(), 0);
+	QCOMPARE(errors.count(), 0);
+	QCOMPARE(socket->packets, QVector<QByteArray>{accepted});
+	QCOMPARE(runtime.outputPacketCount(), 1);
+	QCOMPARE(runtime.bytesOut(), accepted.size());
+
+	socket->disconnected();
+	QCOMPARE(disconnected.count(), 1);
+	QVERIFY(runtime.m_connectionEpoch != connectionEpoch);
+	QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectNotConnected);
+	QVERIFY(!runtime.m_socketReadyForWorld);
+	QCOMPARE(socket->abortAttempts, 0);
+	QCOMPARE(errors.count(), 0);
+}
+
+void tst_LuaCallbackEngine::gracefulDisconnectConsumesIncomingPayload_data()
+{
+	QTest::addColumn<QByteArray>("payload");
+	QTest::addColumn<QString>("expectedText");
+	QTest::addColumn<bool>("mxp");
+	QTest::addColumn<bool>("bold");
+	QTest::newRow("mxp-tag") << QByteArrayLiteral("closing text \x1b[1z<B>bold</B>")
+	                         << QStringLiteral("closing text bold") << true << true;
+	QTest::newRow("mxp-mode") << QByteArrayLiteral("closing text \x1b[1zsecure")
+	                          << QStringLiteral("closing text secure") << true << false;
+	QTest::newRow("ansi") << QByteArrayLiteral("closing text \x1b[1mbold\x1b[0m")
+	                      << QStringLiteral("closing text bold") << false << true;
+}
+
+void tst_LuaCallbackEngine::gracefulDisconnectConsumesIncomingPayload()
+{
+	QFETCH(QByteArray, payload);
+	QFETCH(QString, expectedText);
+	QFETCH(bool, mxp);
+	QFETCH(bool, bold);
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("use_mxp"), mxp ? QStringLiteral("2") : QStringLiteral("0"));
+	runtime.setWorldAttribute(QStringLiteral("utf_8"), QStringLiteral("y"));
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	connect(socket, &WorldSocketService::disconnected, &runtime, &WorldRuntime::handleSocketDisconnected);
+	QSignalSpy                                errors(&runtime, &WorldRuntime::socketError);
+	QStringList                               lines;
+	QVector<QVector<WorldRuntime::StyleSpan>> styles;
+	QVERIFY(connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+	                [&](const QString &line, const QVector<WorldRuntime::StyleSpan> &spans)
+	                {
+		                lines.push_back(line);
+		                styles.push_back(spans);
+	                }));
+	const QByteArray accepted = QByteArrayLiteral("accepted-before-close");
+	QCOMPARE(runtime.sendToWorld(accepted), accepted.size());
+	runtime.disconnectFromWorld();
+	const quint64 connectionEpoch = runtime.m_connectionEpoch;
+
+	// This reply cannot be written, but its packet still owns its text and MXP offsets.
+	payload += QByteArray::fromHex("fffb03e2");
+	runtime.receiveRawData(payload);
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation, 5000);
+	QCOMPARE(runtime.m_partialLineText, expectedText);
+	QCOMPARE(runtime.m_streamUtf8Carry, QByteArray::fromHex("e2"));
+	QVERIFY(runtime.m_telnet.takeMxpEvents().isEmpty());
+	QVERIFY(runtime.m_telnet.takeMxpModeChanges().isEmpty());
+	QVERIFY(runtime.m_telnet.takeTelnetStreamEvents().isEmpty());
+	QVERIFY(lines.isEmpty());
+
+	// A shorter following chunk completes the character and line without inheriting stale offsets.
+	runtime.receiveRawData(QByteArray::fromHex("82ac0d0a780d0a"));
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation, 5000);
+	QCOMPARE(lines, (QStringList{expectedText + QChar(0x20ac), QStringLiteral("x")}));
+	QCOMPARE(styles.size(), 2);
+	QCOMPARE(std::ranges::any_of(styles.constFirst(), &WorldRuntime::StyleSpan::bold), bold);
+	QVERIFY(std::ranges::none_of(styles.constLast(), &WorldRuntime::StyleSpan::bold));
+	QVERIFY(runtime.m_streamUtf8Carry.isEmpty());
+	QCOMPARE(runtime.m_connectionEpoch, connectionEpoch);
+	QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectDisconnecting);
+	QCOMPARE(socket->abortAttempts, 0);
+	QCOMPARE(errors.count(), 0);
+	QCOMPARE(socket->packets, QVector<QByteArray>{accepted});
+	QCOMPARE(runtime.outputPacketCount(), 1);
+	QCOMPARE(runtime.bytesOut(), accepted.size());
+	socket->disconnected();
+}
+
+void tst_LuaCallbackEngine::gracefulDisconnectDoesNotAdvanceTls_data()
+{
+	QTest::addColumn<QByteArray>("negotiation");
+	QTest::addColumn<bool>("rejected");
+	QTest::newRow("will-with-output") << QByteArray::fromHex("fffb2e") << false;
+	QTest::newRow("follows-without-output") << QByteArray::fromHex("fffa2e01fff0") << false;
+	QTest::newRow("wont-with-output") << QByteArray::fromHex("fffc2e") << true;
+}
+
+void tst_LuaCallbackEngine::gracefulDisconnectDoesNotAdvanceTls()
+{
+	QFETCH(QByteArray, negotiation);
+	QFETCH(bool, rejected);
+	WorldRuntime runtime;
+	auto        *socket = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	connect(socket, &WorldSocketService::disconnected, &runtime, &WorldRuntime::handleSocketDisconnected);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectingToMud);
+	runtime.m_tlsEncryptionEnabled = true;
+	runtime.m_tlsMethod            = eTlsStartTls;
+	runtime.m_telnet.setStartTlsEnabled(true);
+	runtime.m_telnet.queueStartTlsNegotiation();
+	QVERIFY(runtime.flushTelnetOutput());
+	QSignalSpy connected(&runtime, &WorldRuntime::connected);
+	QSignalSpy errors(&runtime, &WorldRuntime::socketError);
+	runtime.disconnectFromWorld();
+	const quint64 connectionEpoch = runtime.m_connectionEpoch;
+	QVERIFY(!runtime.flushTelnetOutput());
+
+	runtime.receiveRawData(negotiation);
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation, 5000);
+	QStringList lines;
+	QVERIFY(connect(&runtime, &WorldRuntime::incomingLineReceived, &runtime,
+	                [&](const QString &line) { lines.push_back(line); }));
+	runtime.receiveRawData(QByteArrayLiteral("closing input\r\n"));
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation, 5000);
+	QCOMPARE(lines, QStringList{QStringLiteral("closing input")});
+	QCOMPARE(runtime.sendToWorld(QByteArrayLiteral("dependent-command")), qint64{-1});
+	QCOMPARE(socket->tlsUpgradeAttempts, 0);
+	QCOMPARE(connected.count(), 0);
+	QCOMPARE(errors.count(), 0);
+	QCOMPARE(socket->abortAttempts, 0);
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArray::fromHex("fffd2e")});
+	QCOMPARE(runtime.m_connectionEpoch, connectionEpoch);
+	QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectDisconnecting);
+	QVERIFY(!runtime.m_socketReadyForWorld);
+	QCOMPARE(runtime.m_telnet.takeStartTlsNegotiationRejected(), rejected);
+	QCOMPARE(runtime.m_telnet.takeStartTlsUpgradeRequest(), !rejected);
+	socket->disconnected();
+}
+
+void tst_LuaCallbackEngine::telnetOutputDuringDeferredDisconnect_data()
+{
+	QTest::addColumn<bool>("rejectWrites");
+	QTest::newRow("accepted") << false;
+	QTest::newRow("failed") << true;
+}
+
+void tst_LuaCallbackEngine::telnetOutputDuringDeferredDisconnect()
+{
+	QFETCH(bool, rejectWrites);
+	WorldRuntime runtime;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	connect(socket, &WorldSocketService::disconnected, &runtime, &WorldRuntime::handleSocketDisconnected);
+	QSignalSpy       disconnected(&runtime, &WorldRuntime::disconnected);
+	QSignalSpy       errors(&runtime, &WorldRuntime::socketError);
+	const quint64    connectionEpoch = runtime.m_connectionEpoch;
+	const auto       scope           = runtime.createCausalOutboundScope(false);
+	const auto       context         = runtime.captureRuntimeCallerContext(scope);
+	const QByteArray accepted        = QByteArrayLiteral("final-causal-output");
+	context.run(
+	    [&]
+	    {
+		    QByteArray payload = accepted;
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(payload, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+	runtime.disconnectFromWorld();
+	QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectDisconnecting);
+	QVERIFY(socket->isConnected());
+	QVERIFY(socket->packets.isEmpty());
+	runtime.m_telnet.queueInitialNegotiation(true, false);
+	socket->rejectWrites = rejectWrites;
+	runtime.releaseCausalOutboundScope(scope);
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+	if (rejectWrites)
+	{
+		QVERIFY(socket->packets.isEmpty());
+		QCOMPARE(socket->abortAttempts, 1);
+		QCOMPARE(disconnected.count(), 1);
+		QCOMPARE(errors.count(), 1);
+		QVERIFY(runtime.m_connectionEpoch != connectionEpoch);
+		QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectNotConnected);
+	}
+	else
+	{
+		QCOMPARE(socket->packets, (QVector<QByteArray>{QByteArray::fromHex("fffd03"), accepted}));
+		QCOMPARE(runtime.outputPacketCount(), 2);
+		QCOMPARE(runtime.bytesOut(), accepted.size() + 3);
+		QCOMPARE(socket->abortAttempts, 0);
+		QCOMPARE(disconnected.count(), 0);
+		QCOMPARE(errors.count(), 0);
+		QCOMPARE(runtime.m_connectionEpoch, connectionEpoch);
+		QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectDisconnecting);
+		QVERIFY(!socket->isConnected());
+		socket->disconnected();
+		QCOMPARE(disconnected.count(), 1);
+		QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectNotConnected);
+		QCOMPARE(socket->abortAttempts, 0);
+	}
+}
+
+void tst_LuaCallbackEngine::failedTelnetPrerequisiteRejectsDependentOutput_data()
+{
+	QTest::addColumn<qint64>("writeResult");
+	QTest::addColumn<bool>("reconnect");
+	QTest::addColumn<bool>("causal");
+	for (const qint64 result : {-1, 0, 2})
+		for (const bool reconnect : {false, true})
+			for (const bool causal : {false, true})
+				QTest::newRow(qPrintable(
+				    QStringLiteral("write-%1-reconnect-%2-causal-%3").arg(result).arg(reconnect).arg(causal)))
+				    << result << reconnect << causal;
+}
+
+void tst_LuaCallbackEngine::failedTelnetPrerequisiteRejectsDependentOutput()
+{
+	QFETCH(qint64, writeResult);
+	QFETCH(bool, reconnect);
+	QFETCH(bool, causal);
+	WorldRuntime runtime;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	socket->rejectWrites          = writeResult < 0;
+	socket->writeLimit            = writeResult;
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	const auto scope           = runtime.createCausalOutboundScope(false);
+	auto       context         = runtime.captureRuntimeCallerContext(scope);
+	auto       transaction     = QSharedPointer<OutboundCommandTransaction>::create();
+	transaction->callerContext = context;
+	int rejected               = 0;
+	transaction->rejected      = [&] { ++rejected; };
+	QSignalSpy disconnected(&runtime, &WorldRuntime::disconnected);
+	QSignalSpy errors(&runtime, &WorldRuntime::socketError);
+	bool       adopted = false;
+	QString    adoptionError;
+	if (reconnect)
+		connect(&runtime, &WorldRuntime::socketError, &runtime,
+		        [&]
+		        {
+			        socket->rejectWrites = false;
+			        socket->writeLimit   = -1;
+			        adopted = runtime.adoptConnectedSocketDescriptor(1, false, false, {}, {}, &adoptionError);
+			        runtime.m_telnet.queueInitialNegotiation(true, false);
+		        });
+
+	runtime.m_telnet.queueInitialNegotiation(true, false);
+	context.run(
+	    [&]
+	    {
+		    if (!causal)
+		    {
+			    QCOMPARE(runtime.sendToWorld(QByteArrayLiteral("stale-command"), transaction), qint64{-1});
+			    return;
+		    }
+		    QByteArray raw     = QByteArrayLiteral("stale-raw");
+		    QByteArray command = QByteArrayLiteral("stale-command");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(raw, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(command, false, transaction),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+	QCOMPARE(transaction->outcome, OutboundCommandTransaction::Outcome::Rejected);
+	QCOMPARE(rejected, 1);
+	QCOMPARE(disconnected.count(), 1);
+	QCOMPARE(errors.count(), 1);
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+	QCOMPARE(socket->packets,
+	         writeResult > 0 ? QVector<QByteArray>{QByteArray::fromHex("fffd")} : QVector<QByteArray>{});
+	context.run(
+	    [&]
+	    {
+		    QVERIFY(!runtime.sendRawPacketFromCurrentContext(QByteArrayLiteral("old-callback")));
+		    QCOMPARE(runtime.sendToWorld(QByteArrayLiteral("old-direct")), qint64{-1});
+	    });
+	runtime.releaseCausalOutboundScope(scope);
+	if (reconnect)
+	{
+		QVERIFY2(adopted, qPrintable(adoptionError));
+		QCOMPARE(runtime.sendToWorld(QByteArrayLiteral("fresh")), qint64{5});
+		QCOMPARE(socket->packets.at(socket->packets.size() - 2), QByteArray::fromHex("fffd03"));
+		QCOMPARE(socket->packets.constLast(), QByteArrayLiteral("fresh"));
+		QVERIFY(runtime.m_socketReadyForWorld);
+	}
+	else
+	{
+		QVERIFY(!socket->isConnected());
+		QVERIFY(!runtime.m_socketReadyForWorld);
+		QVERIFY(!runtime.isConnected());
+	}
+	QCOMPARE(rejected, 1);
+	transaction->rejected         = {};
+	runtime.m_socketReadyForWorld = false;
+}
+
+void tst_LuaCallbackEngine::failedTelnetOutputStopsConnectionSetup()
+{
+	WorldRuntime runtime;
+	auto        *socket  = new AcceptingWorldSocketService(&runtime);
+	socket->rejectWrites = true;
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	QSignalSpy connected(&runtime, &WorldRuntime::connected);
+	runtime.finalizeSocketConnectedState();
+	QCOMPARE(connected.count(), 0);
+	QVERIFY(!runtime.m_socketReadyForWorld);
+	QVERIFY(!runtime.isConnected());
+
+	// Restoring a negotiated NAWS session must also propagate a failed protocol write.
+	runtime.setWorldAttribute(QStringLiteral("naws"), QStringLiteral("y"));
+	QString error;
+	QVERIFY(!runtime.adoptConnectedSocketDescriptor(1, true, false, {}, {}, &error));
+	QVERIFY(!error.isEmpty());
+	QCOMPARE(connected.count(), 0);
+	QVERIFY(!runtime.m_socketReadyForWorld);
+	QVERIFY(!runtime.isConnected());
+
+	// A failed START-TLS prerequisite cannot be followed by upgrade or world-ready publication.
+	socket->connected = true;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectingToMud);
+	runtime.m_tlsEncryptionEnabled = true;
+	runtime.m_tlsMethod            = eTlsStartTls;
+	runtime.m_telnet.setStartTlsEnabled(true);
+	runtime.receiveRawData(QByteArray::fromHex("fffb2e"));
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_activeRawIngressOperation, 5000);
+	QCOMPARE(socket->tlsUpgradeAttempts, 0);
+	QVERIFY(!socket->isConnected());
+	QCOMPARE(connected.count(), 0);
+	QVERIFY(!runtime.m_socketReadyForWorld);
+
+	// Reload must not confuse parser reset after a failed disable request with successful shutdown.
+	socket->connected = true;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_telnet.processBytes(QByteArray::fromHex("fffa56fff0"));
+	QVERIFY(runtime.isCompressing());
+	QVERIFY(!runtime.requestMccpDisableForReload(0));
+	QVERIFY(!socket->isConnected());
+
+	// The transport can deliver disconnection synchronously before its failed write returns.
+	connect(socket, &WorldSocketService::disconnected, &runtime, &WorldRuntime::handleSocketDisconnected);
+	socket->connected         = true;
+	socket->rejectWrites      = false;
+	socket->disconnectOnWrite = true;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_telnet.processBytes(QByteArray::fromHex("fffa56fff0"));
+	QVERIFY(runtime.isCompressing());
+	QVERIFY(!runtime.requestMccpDisableForReload(0));
+	QVERIFY(!socket->isConnected());
+}
+
+void tst_LuaCallbackEngine::telnetOutputRetainsPacketDebugAccounting()
+{
+	WorldRuntime runtime;
+	auto        *processor = new WorldCommandProcessor(&runtime);
+	processor->setRuntime(&runtime);
+	runtime.setCommandProcessor(processor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	const QString pluginId = QStringLiteral("ab0123456789abcdef012346");
+	auto          engine   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginSent(command)
+  SetVariable("sent_counters", string.format("%.0f:%.0f:%.0f", GetInfo(203), GetInfo(205), GetInfo(217)))
+end
+local nested = false
+function OnPluginPacketDebug(text)
+  if string.find(text, "Sent  packet:", 1, true) then
+    SetVariable("debug_counters", (GetVariable("debug_counters") or "") .. string.format("%.0f:%.0f|", GetInfo(205), GetInfo(217)))
+    if not nested then
+      nested = true
+      assert(SendPkt("nested-debug") == eOK)
+    end
+  end
+  return true
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes = {
+	    {QStringLiteral("id"),       pluginId                      },
+	    {QStringLiteral("name"),     QStringLiteral("Telnet debug")},
+	    {QStringLiteral("language"), QStringLiteral("lua")         },
+	    {QStringLiteral("enabled"),  QStringLiteral("1")           }
+    };
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	const QSet<QString> callbacks{luaCallbackEventFunctionName(LuaCallbackEvent::Sent),
+	                              luaCallbackEventFunctionName(LuaCallbackEvent::PacketDebug)};
+	runtime.m_observedPluginCallbacks.unite(callbacks);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, callbacks, callbacks);
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+	runtime.setDebugIncomingPackets(true);
+	runtime.m_telnet.queueInitialNegotiation(true, false);
+	processor->sendRawText(QStringLiteral("north"), false, false, false, false);
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.pluginVariableValue(pluginId, QStringLiteral("debug_counters")),
+	                          QStringLiteral("1:3|2:10|3:22|"), 5000);
+	QCOMPARE(socket->packets,
+	         (QVector<QByteArray>{QByteArray::fromHex("fffd03"), QByteArrayLiteral("north\r\n"),
+	                              QByteArrayLiteral("nested-debug")}));
+	QCOMPARE(runtime.pluginVariableValue(pluginId, QStringLiteral("sent_counters")), QStringLiteral("0:1:3"));
+	QCOMPARE(runtime.totalLinesSent(), 1);
+	QCOMPARE(runtime.outputPacketCount(), 3);
+	QCOMPARE(runtime.bytesOut(), qint64{22});
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands() &&
+	                             !runtime.m_outgoingPacketDebugPublication &&
+	                             runtime.m_outgoingPacketDebugRecords.isEmpty(),
+	                         5000);
+	runtime.m_socketReadyForWorld = false;
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
 void tst_LuaCallbackEngine::disconnectAfterAcceptedWriteCompletesCommandEffects()
 {
 	WorldRuntime runtime;
@@ -27344,13 +28106,26 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	runtime.m_socketReadyForWorld = false;
 }
 
+void tst_LuaCallbackEngine::staleNetworkIngressIsCancelledAtConnectionGenerationBoundary_data()
+{
+	QTest::addColumn<bool>("gracefulClose");
+	QTest::newRow("connected") << false;
+	QTest::newRow("graceful-close") << true;
+}
+
 void tst_LuaCallbackEngine::staleNetworkIngressIsCancelledAtConnectionGenerationBoundary()
 {
+	QFETCH(bool, gracefulClose);
 	WorldRuntime runtime;
 	runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	connect(socket, &WorldSocketService::disconnected, &runtime, &WorldRuntime::handleSocketDisconnected);
+	QStringList lines;
+	QVERIFY(connect(&runtime, &WorldRuntime::incomingLineReceived, &runtime,
+	                [&](const QString &line) { lines.push_back(line); }));
 	auto *commandProcessor = new WorldCommandProcessor(&runtime);
 	commandProcessor->setRuntime(&runtime);
 	runtime.setCommandProcessor(commandProcessor);
@@ -27386,6 +28161,14 @@ end
 	                                                     {callbackName, packetCallbackName});
 	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
 	runtime.invalidatePluginCallbackPresenceCache();
+	// Discover shutdown callback presence on the real worker before deliberately holding completion.
+	// Otherwise a first-use discovery barrier would itself wait behind the withheld result.
+	const QString stopCallbackName = luaCallbackEventFunctionName(LuaCallbackEvent::MxpStop);
+	static_cast<void>(runtime.hasPluginCallbackRecipient(stopCallbackName));
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_observedPluginCallbackPropagationInFlight &&
+	                             runtime.m_observedPluginCallbacksPendingWarmup.isEmpty(),
+	                         5000);
+	QVERIFY(!runtime.hasPluginCallbackRecipient(stopCallbackName));
 
 	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
 	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
@@ -27393,7 +28176,14 @@ end
 	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
 	heldExecutorPointer->holdNextCompletion(callbackName);
 
-	runtime.receiveRawData(QByteArrayLiteral("\x1b[1z<!ENTITY old_connection 'stale'>"));
+	QByteArray payload = QByteArrayLiteral("\x1b[1z<!ENTITY old_connection 'stale'>stale-tail\r\n");
+	if (gracefulClose)
+	{
+		QCOMPARE(runtime.sendToWorld(QByteArrayLiteral("accepted-before-close")), qint64{21});
+		runtime.disconnectFromWorld();
+		payload.prepend(QByteArray::fromHex("fffb03"));
+	}
+	runtime.receiveRawData(payload);
 	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
 	QVERIFY(runtime.m_activeRawIngressOperation);
 	QVERIFY(runtime.m_activeRawIngressOperation->continuationTicket != 0);
@@ -27404,7 +28194,10 @@ end
 	QCOMPARE(runtime.m_pendingRawIngressPayloads.size(), qsizetype{1});
 	QCOMPARE(runtime.m_pendingRawIngressPayloads.constFirst().connectionEpoch, quint64{0});
 
-	runtime.invalidateConnectionGeneration();
+	if (gracefulClose)
+		socket->disconnected();
+	else
+		runtime.invalidateConnectionGeneration();
 	QVERIFY(!runtime.m_activeRawIngressOperation);
 	QVERIFY(!runtime.m_pendingPluginCallbackResultContinuations.contains(staleTicket));
 	QVERIFY(std::ranges::none_of(runtime.m_pendingRawIngressPayloads,
@@ -27415,6 +28208,11 @@ end
 	QCoreApplication::sendPostedEvents(&runtime, QEvent::MetaCall);
 	QVERIFY(runtime.m_pendingRawIngressPayloadDrainQueued);
 	QCOMPARE(runtime.m_pendingRawIngressPayloads.size(), qsizetype{1});
+	if (gracefulClose)
+	{
+		QString error;
+		QVERIFY2(runtime.adoptConnectedSocketDescriptor(1, false, false, {}, {}, &error), qPrintable(error));
+	}
 	heldExecutorPointer->releaseHeldCompletion();
 	QTRY_VERIFY_WITH_TIMEOUT(
 	    !runtime.m_activeRawIngressOperation && runtime.m_pendingRawIngressPayloads.isEmpty(), 5000);
@@ -27428,6 +28226,9 @@ end
 	                         5000);
 	QString staleCallbackValue;
 	QVERIFY(!runtime.findVariable(QStringLiteral("stale_callback_applied"), staleCallbackValue));
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("stale_callback_applied")).isEmpty());
+	QVERIFY(!lines.contains(QStringLiteral("stale-tail")));
+	QVERIFY(lines.contains(QStringLiteral("new-connection")));
 
 	QStringList replayLines;
 	QVERIFY(QObject::connect(&runtime, &WorldRuntime::incomingLineReceived, &runtime,
@@ -28654,7 +29455,7 @@ void tst_LuaCallbackEngine::directPlaySoundBypassesInterceptionFromCallbackLane(
 function run_deferred_sound()
   PlaySound(1, "continuation.wav")
   SetVariable("direct_sound_status", tostring(GetSoundStatus(1)))
-  SetVariable("direct_audio_buffer", tostring(audio.play("second.wav")))
+  SetVariable("direct_audio_buffer", tostring(audio.play("second.wav", 0)))
 end
 function OnPluginPlaySound(sound)
   SetVariable("observed_sound", sound)
@@ -28791,6 +29592,74 @@ end
 	WorldRuntimeTestAccess::plugins(runtime).clear();
 	QVERIFY(teardownWorkerEngine(*executor, engine));
 }
+/** @brief Verifies a handler runs and cancels pending preparation without waiting for catalog completion. */
+void tst_LuaCallbackEngine::interceptedSoundCancelsPendingFilePreparation()
+{
+	QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-intercept-XXXXXX")));
+	QVERIFY(root.isValid());
+	QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds/Erion/relocated")));
+	QFile original(QDir(root.path()).filePath(QStringLiteral("sounds/Erion/relocated/cue.wav")));
+	QVERIFY(original.open(QIODevice::WriteOnly));
+	QVERIFY(original.write(QMudTestSoundData::silentPcmWave(300)) > 0);
+	original.close();
+	SoundEngine sound;
+	sound.initializePlayback();
+	SoundEngineTestAccess::setCatalogPaused(sound, true);
+	sound.configureSoundDirectory(root.path());
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(root.path());
+	runtime.applyDefaultWorldOptions();
+	runtime.setWorldAttribute(QStringLiteral("default_world_sound_directory"),
+	                          QStringLiteral("sounds/Erion"));
+	runtime.attachSoundEngine(&sound);
+	const auto session = WorldRuntimeTestAccess::soundSession(runtime);
+	QVERIFY(session);
+	const auto *executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	const QString pluginId = QStringLiteral("111111111111111111111108");
+	auto          engine   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function run_pending_sound() Sound("legacy/cue.wav") end
+function OnPluginPlaySound(sound)
+  SetVariable("pending_sound_handled", sound)
+  return false
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Pending sound interception"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::PlaySound);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+	LuaBatchDispatchRequest request;
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.engines      = {engine};
+	request.functionName = QStringLiteral("run_pending_sound");
+	runtime.queuePluginCallbackDispatchAsync(request);
+	QTRY_COMPARE(WorldRuntimeTestAccess::plugins(runtime).constFirst().variables.value(
+	                 QStringLiteral("pending_sound_handled")),
+	             QStringLiteral("legacy/cue.wav"));
+	QTRY_VERIFY(runtime.m_pendingPluginCallbackResultContinuations.isEmpty() &&
+	            !runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	            !runtime.hasQueuedPluginCallbackDispatchCommands());
+	QCOMPARE(SoundEngineTestAccess::pendingFileCount(sound, session), 0);
+	QVERIFY(!SoundEngineTestAccess::fileCatalogState(sound).ready);
+	SoundEngineTestAccess::setCatalogPaused(sound, false);
+	QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(sound).ready);
+	QCOMPARE(runtime.soundStatus(1), -2);
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
 #endif
 
 void tst_LuaCallbackEngine::crossWorldCompletedMutationCallbacksQueueOnTargetCausalLane()

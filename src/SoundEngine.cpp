@@ -7,6 +7,7 @@
  */
 
 #include "SoundEngine.h"
+#include "SoundPcmStream.h"
 
 #include "AtomicSharedPtrCompat.h"
 #include "helpers/PluginPathUtils.h"
@@ -26,6 +27,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QMap>
 #include <QMetaObject>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QNetworkAccessManager>
@@ -37,6 +39,7 @@
 #include <QMutexLocker>
 #include <QRandomGenerator>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSet>
 #include <QSignalBlocker>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -48,14 +51,19 @@
 #include <QThreadPool>
 #include <QVector>
 #include <QWaitCondition>
+#include <algorithm>
 #include <atomic>
 #include <deque>
+#include <limits>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 #if QMUD_ENABLE_SOUND
+#include <QAudioBufferOutput>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QAudioDevice>
-#include <QAudioOutput>
+#include <QAudioSink>
 #include <QFileSystemWatcher>
 #include <QMediaDevices>
 #include <QMediaPlayer>
@@ -73,6 +81,27 @@ namespace
 	constexpr auto      kSoundCatalogIndexPath                 = "worlds/state/sound-index.qss";
 
 #if QMUD_ENABLE_SOUND
+	struct SoundSourceKey
+	{
+			QString       identity;
+			qint64        size{0};
+			qint64        modifiedMsecs{0};
+			QByteArray    deviceId;
+
+			bool          operator==(const SoundSourceKey &) const = default;
+
+			/**
+			 * @brief Hashes one loaded-source identity for process-wide cache accounting.
+			 * @param key Source identity to hash.
+			 * @param seed Caller-provided hash seed.
+			 * @return Hash value for the source identity.
+			 */
+			friend size_t qHash(const SoundSourceKey &key, const size_t seed = 0) noexcept
+			{
+				return qHashMulti(seed, key.identity, key.size, key.modifiedMsecs, key.deviceId);
+			}
+	};
+
 	struct SoundMemoryResource;
 #endif
 
@@ -84,28 +113,49 @@ namespace
 
 	struct SoundCommandCompletion
 	{
-			QMutex         mutex;
-			QWaitCondition changed;
-			int            result{eCannotPlaySound};
-			int            selectedBuffer{0};
-			bool           finished{false};
+			QMutex                                              mutex;
+			QWaitCondition                                      changed;
+			int                                                 result{eCannotPlaySound};
+			int                                                 selectedBuffer{0};
+			bool                                                finished{false};
+			bool                                                captureSnapshot{false};
+			std::shared_ptr<const SoundEngineSession::Snapshot> snapshot;
 
-			void           complete(const int value, const int buffer = 0)
+			/**
+			 * @brief Delivers one command result and its causally associated sound state.
+			 * @param value Operation status.
+			 * @param buffer Selected channel, or zero.
+			 * @param state Immutable post-command channel state.
+			 */
+			void complete(const int value, const int buffer = 0,
+			              std::shared_ptr<const SoundEngineSession::Snapshot> state = {})
 			{
 				QMutexLocker locker(&mutex);
+				if (finished)
+					return;
+				snapshot       = std::move(state);
 				result         = value;
 				selectedBuffer = buffer;
 				finished       = true;
 				changed.wakeAll();
 			}
 
-			int wait(int *buffer = nullptr)
+			/**
+			 * @brief Waits on the submitting thread for the final command result.
+			 * @param buffer Optional selected-channel destination.
+			 * @param state Optional post-command snapshot destination.
+			 * @return Operation status.
+			 */
+			int wait(int                                                 *buffer = nullptr,
+			         std::shared_ptr<const SoundEngineSession::Snapshot> *state  = nullptr)
 			{
 				QMutexLocker locker(&mutex);
 				while (!finished)
 					changed.wait(&mutex);
 				if (buffer)
 					*buffer = selectedBuffer;
+				if (state)
+					*state = snapshot;
 				return result;
 			}
 	};
@@ -133,6 +183,8 @@ namespace
 		CatalogWatchState,
 		DownloadFinished,
 		ReserveLuaAudioChannel,
+		SetLuaAudioAttribute,
+		SetLuaAudioInitialized,
 		ConfirmLuaAudioOwnership,
 		NativeSoundRequest,
 		Stop,
@@ -148,6 +200,31 @@ namespace
 		None,
 		LuaAudio,
 		NativeSound
+	};
+
+	/** @brief Distinguishes unresolved requests from already selected immutable file identities. */
+	enum class SoundFileResolution : quint8
+	{
+		Request,
+		SelectedSource
+	};
+
+	/** @brief Normalized cold-lookup input and its ordered search scopes. */
+	struct SoundFileRequest
+	{
+			QString     relative;
+			QString     pluginRelative;
+			QStringList prefixes;
+
+			bool        operator==(const SoundFileRequest &) const = default;
+	};
+
+	/** @brief Candidates selected under one precedence policy, or an unresolved catalog dependency. */
+	struct SoundFileSelection
+	{
+			QStringList files;
+			bool        pending{false};
+			bool        filesystemChecked{false};
 	};
 
 	struct SoundCommand
@@ -176,6 +253,12 @@ namespace
 			int                                         priority{50};
 			double                                      volume{0.0};
 			double                                      pan{0.0};
+			double                                      pitch{0.0};
+			QMudSoundAttribute                          attribute{QMudSoundAttribute::Volume};
+			QMudSoundAttributeTarget                    targetMode{QMudSoundAttributeTarget::Absolute};
+			std::chrono::milliseconds                   duration{0};
+			bool                                        stopAtEnd{false};
+			bool                                        enabled{true};
 			QMudNativeSoundProtocol                     nativeProtocol{QMudNativeSoundProtocol::Msp};
 			quint64                                     ownershipGeneration{0};
 			SoundOwnershipKind                          ownershipKind{SoundOwnershipKind::None};
@@ -191,6 +274,8 @@ namespace
 			std::function<void(int, quint64)>           luaAudioOwnershipReleased;
 #if QMUD_ENABLE_SOUND
 			std::shared_ptr<SoundMemoryResource> memoryResource;
+			std::optional<SoundSourceKey>        fileSource;
+			bool                                 fileResolutionComplete{false};
 #endif
 	};
 
@@ -213,12 +298,29 @@ namespace
 		Abandoned
 	};
 
+	/**
+	 * @brief Checks playback controls before accepting work or changing channel ownership.
+	 * @param volume Requested gain or MUSHclient volume before normalization.
+	 * @param pan Requested balance.
+	 * @param pitch Requested frequency offset, or zero for entry paths without pitch.
+	 * @return Whether all controls are finite.
+	 */
+	[[nodiscard]] bool soundControlsAreFinite(const double volume, const double pan, const double pitch = 0.0)
+	{
+		return qIsFinite(volume) && qIsFinite(pan) && qIsFinite(pitch);
+	}
+
 #if QMUD_ENABLE_SOUND
+	/**
+	 * @brief Converts validated MUSHclient volume units to linear playback gain.
+	 * @param volume Volume from minus one hundred (muted) through zero (full gain).
+	 * @return Linear gain, using full gain for an out-of-range input.
+	 */
 	double normalizeSoundVolume(double volume)
 	{
 		if (volume > 0.0 || volume < -100.0)
 			volume = 0.0;
-		return qBound(0.0, 1.0 + (volume / 100.0), 1.0);
+		return qBound(0.0, (volume + 100.0) / 100.0, 1.0);
 	}
 #endif
 } // namespace
@@ -232,33 +334,22 @@ struct SoundEngineSession::State
 		std::atomic<quint64> nextPreparationToken{1};
 		quint64              sessionId{0};
 
-		bool                 submit(SoundCommand command, bool wait, int *result = nullptr,
-		                            int *selectedBuffer = nullptr) const;
+		/**
+		 * @brief Submits one value command through the session FIFO and optionally waits for its result.
+		 * @param command Command to transfer to the worker.
+		 * @param wait Whether the submitting thread waits for final execution or cancellation.
+		 * @param result Optional result-code destination.
+		 * @param selectedBuffer Optional selected-channel destination.
+		 * @param postState Optional immutable post-command state destination.
+		 * @return Whether the command was accepted by the ingress.
+		 */
+		bool submit(SoundCommand command, bool wait, int *result = nullptr, int *selectedBuffer = nullptr,
+		            std::shared_ptr<const Snapshot> *postState = nullptr) const;
 };
 
 #if QMUD_ENABLE_SOUND
 namespace
 {
-	struct SoundSourceKey
-	{
-			QString       identity;
-			qint64        size{0};
-			qint64        modifiedMsecs{0};
-			QByteArray    deviceId;
-
-			bool          operator==(const SoundSourceKey &) const = default;
-
-			/**
-			 * @brief Hashes one loaded-source identity for process-wide cache accounting.
-			 * @param key Source identity to hash.
-			 * @param seed Caller-provided hash seed.
-			 * @return Hash value for the source identity.
-			 */
-			friend size_t qHash(const SoundSourceKey &key, const size_t seed = 0) noexcept
-			{
-				return qHashMulti(seed, key.identity, key.size, key.modifiedMsecs, key.deviceId);
-			}
-	};
 
 	struct SoundMemoryResource
 	{
@@ -280,7 +371,16 @@ namespace
 			quint64                              backendId{0};
 			std::shared_ptr<SoundMemoryResource> memoryResource;
 			std::unique_ptr<QMediaPlayer>        player;
-			QAudioOutput                        *audioOutput{nullptr};
+			QAudioBufferOutput                  *bufferOutput{nullptr};
+			std::unique_ptr<QAudioSink>          sink;
+			std::shared_ptr<SoundPcmStream>      stream;
+			QMetaObject::Connection              bufferConnection;
+			QMetaObject::Connection              stateConnection;
+			QMetaObject::Connection              positionConnection;
+			bool                                 flowPaused{false};
+			bool                                 decodingFinished{false};
+			bool                                 decoderEndBufferReceived{false};
+			qint64                               lastPcmFrame{0};
 			quint64                              sessionId{0};
 			quint64                              assignmentGeneration{0};
 			quint64                              preparationToken{0};
@@ -290,13 +390,58 @@ namespace
 			bool                                 failed{false};
 			bool                                 retiring{false};
 			QString                              failureMessage;
+
+			/** @brief Disconnects decoder delivery and stops audio callbacks before member teardown. */
+			~SoundBackend()
+			{
+				retiring = true;
+				disconnectPlaybackSignals();
+				if (player)
+					static_cast<void>(player->disconnect());
+				if (sink)
+					sink->reset();
+				stream.reset();
+			}
+
+			/** @brief Disconnects assignment-scoped delivery before releasing or replacing its transport. */
+			void disconnectPlaybackSignals() const
+			{
+				QObject::disconnect(bufferConnection);
+				QObject::disconnect(stateConnection);
+				QObject::disconnect(positionConnection);
+			}
 	};
+
+	/**
+	 * @brief Renders a current assignment without retaining its PCM after the backend releases it.
+	 * @tparam Sample Negotiated sink sample representation.
+	 * @param weak Weak assignment transport captured by Qt's audio callback.
+	 * @param samples Interleaved sink samples to fill.
+	 */
+	template <typename Sample>
+	void renderSoundPcm(const std::weak_ptr<SoundPcmStream> &weak, const QSpan<Sample> samples)
+	{
+		if (const auto stream = weak.lock())
+			stream->render(samples);
+		else
+			std::fill(samples.begin(), samples.end(),
+			          std::is_same_v<Sample, quint8> ? Sample{128} : Sample{0});
+	}
 
 	struct SoundBackendLease
 	{
 			SoundBackend *backend{nullptr};
 			QString       failureMessage;
 			qint64        retainedAtMsecs{0};
+	};
+
+	/** @brief Validated request selection retained while its backend remains resident. */
+	struct CachedSoundFileRequest
+	{
+			SoundSourceKey source;
+			QStringList    exactCatalogKeys;
+			QString        pluginRelative;
+			bool           exact{false};
 	};
 
 	struct SoundChannel
@@ -313,6 +458,7 @@ namespace
 			QString            nativeDownloadDestination;
 			QString            nativeSoundCatalogPrefix;
 			quint64            pendingMemoryOperationId{0};
+			quint64            pendingFileOperationId{0};
 			bool               allocated{false};
 			bool               playing{false};
 			bool               playbackStarted{false};
@@ -325,6 +471,7 @@ namespace
 			qint64             lastPlaybackPosition{-1};
 			double             volume{1.0};
 			double             pan{0.0};
+			double             pitch{0.0};
 	};
 
 	/** @brief One supported regular file indexed below the configured sounds root. */
@@ -381,9 +528,6 @@ namespace
 			quint64                                 operationId{0};
 			quint64                                 assignmentGeneration{0};
 			int                                     channelIndex{-1};
-			bool                                    loop{false};
-			double                                  volume{0.0};
-			double                                  pan{0.0};
 			quint64                                 luaAudioGeneration{0};
 			QByteArray                              payload;
 			std::shared_ptr<SoundCommandCompletion> completion;
@@ -395,6 +539,16 @@ namespace
 			int           result{eOK};
 			QString       failureMessage;
 			qint64        retainedAtMsecs{0};
+			quint64       pendingLookupId{0};
+	};
+
+	/** @brief One unresolved file occurrence, with an optional commit waiting on preparation. */
+	struct PendingFileCommand
+	{
+			SoundCommand                command;
+			std::optional<SoundCommand> commit;
+			SoundFileRequest            request;
+			int                         channelIndex{-1};
 	};
 
 	struct WorkerSession
@@ -410,16 +564,19 @@ namespace
 			quint64                                                     sessionId{0};
 			QString                                                     worldSoundDirectorySetting;
 			QString                                                     worldSoundCatalogPrefix;
-			QHash<QString, SoundSourceKey>                              cachedFileRequestKeys;
+			QHash<QString, CachedSoundFileRequest>                      cachedFileRequestKeys;
 			QMultiHash<QString, QString>                                cachedFileRequestsBySource;
 			std::shared_ptr<SoundSessionPublishedState>                 publishedState;
 			std::array<SoundChannel, SoundEngineSession::kChannelCount> channels{};
 			std::array<NativePlayback, 4>                               nativePlayback{};
 			QHash<quint64, PreparedSound>                               prepared;
+			QMap<quint64, PendingFileCommand>                           pendingFiles;
+			std::array<quint64, SoundEngineSession::kChannelCount>      pendingFileByChannel{};
 			QVector<QPair<int, quint64>>                                pendingLuaAudioCompletions;
 			std::function<void(int, quint64)>                           luaAudioOwnershipReleased;
 			quint64                                                     nextAssignmentGeneration{1};
 			quint64                                                     nextNativeSoundGeneration{1};
+			bool                                                        luaAudioInitialized{true};
 	};
 
 	/** @brief Cache accounting and deferred-maintenance state sampled on the sound worker thread. */
@@ -439,10 +596,11 @@ namespace
 			SoundWorkerCacheState secondStep;
 	};
 
-	/** @brief Source-free media-player readiness before the first sound request. */
+	/** @brief Source-free playback readiness and physical output gain before the first request. */
 	struct SoundWorkerPlaybackInitializationState
 	{
-			bool mediaPlayerReady{false};
+			bool   mediaPlayerReady{false};
+			double outputVolume{-1.0};
 	};
 
 	/** @brief Worker sound-file catalog state sampled by tests. */
@@ -2540,6 +2698,10 @@ namespace
 				m_playbackWatchdogTimer->setTimerType(Qt::PreciseTimer);
 				connect(m_playbackWatchdogTimer.get(), &QTimer::timeout, this,
 				        [this] { expireStalledPlaybacks(currentTimeMsecs()); });
+				m_pcmControlTimer = std::make_unique<QTimer>();
+				m_pcmControlTimer->setTimerType(Qt::PreciseTimer);
+				m_pcmControlTimer->setInterval(20);
+				connect(m_pcmControlTimer.get(), &QTimer::timeout, this, [this] { updatePcmPlayback(); });
 				ensureMemoryPreparationPool();
 			}
 
@@ -2598,6 +2760,7 @@ namespace
 				m_trackedPluginDirectories.clear();
 				m_pendingPluginDirectories.clear();
 				m_playbackWatchdogTimer.reset();
+				m_pcmControlTimer.reset();
 				m_maintenanceTimer.reset();
 				m_memoryPreparationPool.reset();
 				m_mediaDevices.reset();
@@ -2708,8 +2871,44 @@ namespace
 					return false;
 				const auto requestKey = session->cachedFileRequestKeys.constFind(request);
 				return requestKey != session->cachedFileRequestKeys.cend() &&
-				       m_cachedFileSourceKeys.contains(soundCatalogComparisonKey(requestKey->identity)) &&
-				       m_cache.backendCount(*requestKey) > 0;
+				       m_cachedFileSourceKeys.contains(
+				           soundCatalogComparisonKey(requestKey->source.identity)) &&
+				       m_cache.backendCount(requestKey->source) > 0;
+			}
+
+			/**
+			 * @brief Removes indexed fixtures and selects before their watcher notifications can execute.
+			 * @param sessionId Session supplying the world scope and request cache.
+			 * @param request Request to resolve through production selection.
+			 * @param files Absolute indexed sound fixtures to remove in this worker turn.
+			 * @param allowPatterns Whether to return the native candidate pool instead of one file source.
+			 * @return Selected canonical files, or an empty list after a miss or invalid test setup.
+			 */
+			[[nodiscard]] QStringList selectFilesAfterRemovalForTest(const quint64      sessionId,
+			                                                         const QString     &request,
+			                                                         const QStringList &files,
+			                                                         const bool         allowPatterns)
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				auto session = m_sessions.find(sessionId);
+				if (session == m_sessions.end() || !m_catalogReady)
+					return {};
+				for (const QString &file : files)
+				{
+					const QString canonical = QFileInfo(file).canonicalFilePath();
+					if (!m_catalogFiles.contains(canonical) ||
+					    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonical, m_soundsRoot) ||
+					    !QFile::remove(file))
+						return {};
+				}
+				if (allowPatterns)
+					return selectSoundFiles(normalizedFileRequest(session->worldSoundCatalogPrefix, request,
+					                                              false, SoundFileResolution::Request),
+					                        true)
+					    .files;
+				QString    resolved;
+				const auto source = resolveFile(*session, request, resolved);
+				return source ? QStringList{source->identity} : QStringList{};
 			}
 
 			/**
@@ -2748,6 +2947,17 @@ namespace
 				m_pendingMemoryMaterializations.insert(command.text, {m_nextMemoryOperationId++});
 				handleMemoryFileReady(command);
 				return m_memoryResources.contains(command.text);
+			}
+
+			/**
+			 * @brief Queues test synchronization independently of worker control-command execution.
+			 * @param task Task executed on the ordered memory-preparation pool.
+			 */
+			void queueMemoryPreparationTaskForTest(std::function<void()> task)
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				ensureMemoryPreparationPool();
+				m_memoryPreparationPool->start(QRunnable::create(std::move(task)));
 			}
 
 			/**
@@ -2863,6 +3073,250 @@ namespace
 				return channel.backend ? channel.backend->key.identity : QString();
 			}
 
+			/** @brief Applies the production output-device reset transition for deterministic cancellation tests. */
+			void resetAudioDeviceForTest()
+			{
+				resetForAudioDeviceChange();
+			}
+
+			/**
+			 * @brief Counts unresolved file requests without altering their ordering or execution.
+			 * @param sessionId Owning session identity.
+			 * @param commitsOnly Whether only requests retaining a waiting commit are counted.
+			 * @return Number of matching unresolved occurrences.
+			 */
+			[[nodiscard]] qsizetype pendingFileCountForTest(const quint64 sessionId,
+			                                                const bool    commitsOnly) const
+			{
+				const auto session = m_sessions.constFind(sessionId);
+				if (session == m_sessions.cend())
+					return 0;
+				if (!commitsOnly)
+					return session->pendingFiles.size();
+				return std::ranges::count_if(session->pendingFiles, [](const PendingFileCommand &pending)
+				                             { return pending.commit.has_value(); });
+			}
+
+			/**
+			 * @brief Exercises ordered decoder-end transitions with a device-independent PCM clock on a real worker assignment.
+			 * @param sessionId Session receiving the isolated decoder fixture.
+			 * @param ordering Placement of the loop update before, between, or after the two terminal notifications.
+			 * @param transition Later repeat, ownership, failure, or backpressure transition.
+			 * @return Whether continuation preserves the assignment and obeys the accepted controls and lifecycle transition.
+			 */
+			[[nodiscard]] bool decoderContinuationForTest(const quint64 sessionId, const int ordering,
+			                                              const int transition)
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				auto sessionIt = m_sessions.find(sessionId);
+				if (sessionIt == m_sessions.end() || ordering < 0 || ordering > 4 || transition < 0 ||
+				    transition > 13)
+					return false;
+				auto owned = takePreinitializedBackend();
+				if (!owned)
+					return false;
+				owned->key.identity      = QStringLiteral("test:decoder-continuation:%1").arg(sessionId);
+				owned->key.size          = 1;
+				owned->key.deviceId      = m_deviceId;
+				owned->backendId         = m_nextBackendId++;
+				const SoundSourceKey key = owned->key;
+				const quint64        backendId = owned->backendId;
+				const auto           inserted =
+				    m_cache.insertActive(key, 1, backendId, std::move(owned), currentTimeMsecs());
+				SoundBackend *backend = inserted.backend;
+				if (!backend)
+					return false;
+				WorkerSession &session = *sessionIt;
+				releaseChannel(session, 0);
+				SoundChannel &channel        = session.channels[0];
+				channel.backend              = backend;
+				channel.assignmentGeneration = session.nextAssignmentGeneration++;
+				channel.ownershipGeneration  = 91;
+				channel.ownershipKind =
+				    transition == 7 ? SoundOwnershipKind::NativeSound : SoundOwnershipKind::LuaAudio;
+				channel.luaAudioOwnershipConfirmed = true;
+				channel.allocated = channel.playing = channel.playbackStarted = true;
+				channel.volume                                                = 0.5;
+				channel.pan                                                   = -20.0;
+				channel.pitch                                                 = 2.0;
+				backend->sessionId                                            = sessionId;
+				backend->channel                                              = 0;
+				backend->assignmentGeneration                                 = channel.assignmentGeneration;
+				QAudioFormat format;
+				format.setSampleRate(1000);
+				format.setChannelCount(2);
+				format.setSampleFormat(QAudioFormat::Float);
+				const auto stream = std::make_shared<SoundPcmStream>(format, 0.5, -20.0, 2.0);
+				backend->stream   = stream;
+				QAudioBuffer pcm(transition == 11 ? 500 : transition == 13 ? 100 : 2000, format);
+				std::fill_n(pcm.data<float>(), pcm.sampleCount(), 0.5F);
+				if (!stream->append(pcm))
+					return false;
+				stream->setAttribute(QMudSoundAttribute::Pitch, 6.0, std::chrono::milliseconds{1000});
+				std::array<float, 200> rendered{};
+				stream->render(QSpan<float>(rendered));
+				const auto    before     = stream->state();
+				const quint64 generation = channel.assignmentGeneration;
+				backend->flowPaused      = transition == 11;
+				const auto cleanup       = qScopeGuard(
+				    [this, sessionId]
+				    {
+					    if (auto remaining = m_sessions.find(sessionId); remaining != m_sessions.end())
+					    {
+						    releaseChannel(*remaining, 0);
+						    publishSnapshotIfChanged(*remaining);
+					    }
+				    });
+				const auto terminal = [this, backend](const bool stopped)
+				{
+					if (stopped)
+						handlePlayerState(*backend, QMediaPlayer::StoppedState);
+					else
+						handleDecoderBuffer(*backend, {});
+				};
+				const bool stopFirst = ordering == 2 || ordering == 4;
+				if (ordering > 0)
+					terminal(stopFirst);
+				if (ordering > 2)
+					terminal(!stopFirst);
+				SoundCommand update;
+				update.kind                        = SoundCommandKind::PlayFile;
+				update.sessionId                   = sessionId;
+				update.buffer                      = 1;
+				update.repeatCount                 = -1;
+				update.volume                      = -50.0;
+				update.pan                         = -20.0;
+				update.completion                  = std::make_shared<SoundCommandCompletion>();
+				update.completion->captureSnapshot = true;
+				execute(update);
+				if (update.completion->result != eOK || !update.completion->snapshot ||
+				    update.completion->snapshot->status[0] != 2)
+					return false;
+				if (transition == 1 || transition == 12)
+				{
+					update.repeatCount = 1;
+					update.completion  = std::make_shared<SoundCommandCompletion>();
+					execute(update);
+					if (update.completion->result != eOK)
+						return false;
+					if (transition == 12)
+					{
+						update.repeatCount = -1;
+						update.completion  = std::make_shared<SoundCommandCompletion>();
+						execute(update);
+						if (update.completion->result != eOK)
+							return false;
+					}
+				}
+				else if (transition == 2 || transition == 3)
+				{
+					static_cast<void>(stop(sessionId, 1, SoundOwnershipKind::LuaAudio, 91));
+					if (transition == 3)
+					{
+						channel.allocated           = true;
+						channel.ownershipKind       = SoundOwnershipKind::LuaAudio;
+						channel.ownershipGeneration = 92;
+					}
+				}
+				else if (transition == 4)
+				{
+					SoundCommand unload;
+					unload.kind      = SoundCommandKind::SetLuaAudioInitialized;
+					unload.sessionId = sessionId;
+					unload.enabled   = false;
+					execute(unload);
+				}
+				else if (transition == 5)
+					handleBackendError(*backend, QStringLiteral("decoder-continuation test failure"));
+				else if (transition == 6)
+					stream->setAttribute(QMudSoundAttribute::Volume, 0.0, {}, true);
+				else if (transition == 8)
+					static_cast<void>(closeSession(sessionId, true));
+				else if (transition == 9)
+				{
+					resetForAudioDeviceChange();
+					return !channel.allocated && !channel.backend;
+				}
+				quint64 pendingId = 0;
+				if (transition == 10)
+				{
+					pendingId                       = m_nextFileOperationId++;
+					auto &pending                   = session.pendingFiles[pendingId];
+					pending.command.sessionId       = sessionId;
+					pending.command.completion      = std::make_shared<SoundCommandCompletion>();
+					pending.channelIndex            = 0;
+					session.pendingFileByChannel[0] = pendingId;
+				}
+				if (ordering == 0)
+					terminal(stopFirst);
+				if (ordering <= 2 || transition == 1 || transition == 6)
+					terminal(!stopFirst);
+				if (transition == 1 || transition == 6)
+					terminal(stopFirst);
+				if (transition == 8)
+					return !m_sessions.contains(sessionId) && !backend->stream;
+				if (transition >= 2 && transition <= 5)
+				{
+					terminal(stopFirst);
+					terminal(!stopFirst);
+					return !channel.backend && channel.allocated == (transition == 3) &&
+					       channel.ownershipGeneration == (transition == 3 ? 92 : 0) && !backend->stream;
+				}
+				if (channel.backend != backend || backend->stream != stream ||
+				    channel.assignmentGeneration != generation || channel.ownershipGeneration != 91 ||
+				    stream->state().renderedFrames != before.renderedFrames ||
+				    stream->state().pitch != before.pitch)
+					return false;
+				if (transition == 1 || transition == 6 || transition == 7)
+					return backend->decodingFinished && backend->decoderEndBufferReceived &&
+					       (transition != 6 || stream->state().faded);
+				if (backend->decodingFinished || backend->decoderEndBufferReceived ||
+				    backend->flowPaused != (transition != 13) || stream->state().volume != 0.5 ||
+				    stream->state().pan != -20.0)
+					return false;
+				if (transition == 10)
+					return session.pendingFileByChannel[0] == pendingId &&
+					       session.pendingFiles.contains(pendingId) &&
+					       !session.pendingFiles[pendingId].command.completion->finished;
+				if (transition == 11)
+				{
+					std::array<float, 1000> drain{};
+					stream->render(QSpan<float>(drain));
+					updatePcmPlayback();
+					return !backend->flowPaused && channel.backend == backend;
+				}
+				return true;
+			}
+
+			/**
+			 * @brief Samples current PCM processing state on the owning worker.
+			 * @param sessionId Worker session identity.
+			 * @param buffer One-based channel to inspect.
+			 * @param attribute Control to sample.
+			 * @return Current control in LuaAudio units, or zero without a live stream.
+			 */
+			[[nodiscard]] double activeAttributeForTest(const quint64 sessionId, const int buffer,
+			                                            const QMudSoundAttribute attribute) const
+			{
+				const auto session = m_sessions.constFind(sessionId);
+				if (session == m_sessions.cend() || buffer < 1 || buffer > SoundEngineSession::kChannelCount)
+					return 0.0;
+				const auto *backend = session->channels[static_cast<std::size_t>(buffer - 1)].backend;
+				if (!backend || !backend->stream)
+					return 0.0;
+				const auto state = backend->stream->state();
+				switch (attribute)
+				{
+				case QMudSoundAttribute::Volume:
+					return state.volume * 100.0;
+				case QMudSoundAttribute::Pan:
+					return state.pan;
+				case QMudSoundAttribute::Pitch:
+					return state.pitch;
+				}
+				Q_UNREACHABLE();
+			}
+
 			/**
 			 * @brief Creates a lightweight prepared occurrence and runs its production failure transition.
 			 * @param sessionId Session receiving the prepared occurrence.
@@ -2924,13 +3378,32 @@ namespace
 			}
 
 			/**
-			 * @brief Reports whether both real playback backend types were initialized at worker startup.
-			 * @return Source-free backend availability for each playback implementation.
+			 * @brief Reports source-free playback readiness and physical output gain at worker startup.
+			 * @return Source-free backend availability and sink gain, or minus one without a sink.
 			 */
 			[[nodiscard]] SoundWorkerPlaybackInitializationState playbackInitializationStateForTest() const
 			{
 				Q_ASSERT(QThread::currentThread() == thread());
-				return {m_preinitializedMediaBackend != nullptr};
+				return {m_preinitializedMediaBackend != nullptr,
+				        m_preinitializedMediaBackend && m_preinitializedMediaBackend->sink
+				            ? m_preinitializedMediaBackend->sink->volume()
+				            : -1.0};
+			}
+
+			/**
+			 * @brief Samples an assigned sink's physical output gain on its owning worker.
+			 * @param sessionId Worker session identity.
+			 * @param buffer One-based channel to inspect.
+			 * @return Linear sink gain, or minus one when no sink is assigned.
+			 */
+			[[nodiscard]] double activeOutputVolumeForTest(const quint64 sessionId, const int buffer) const
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				const auto session = m_sessions.constFind(sessionId);
+				if (session == m_sessions.cend() || buffer < 1 || buffer > SoundEngineSession::kChannelCount)
+					return -1.0;
+				const auto *backend = session->channels[static_cast<std::size_t>(buffer - 1)].backend;
+				return backend && backend->sink ? backend->sink->volume() : -1.0;
 			}
 
 			/**
@@ -3127,8 +3600,268 @@ namespace
 			}
 
 		private:
+			/**
+			 * @brief Completes a command with the immutable state published at its execution boundary.
+			 * @param command Command retaining its submitting caller.
+			 * @param result Final operation status.
+			 * @param buffer Selected channel, or zero.
+			 */
+			void completeSoundCommand(const SoundCommand &command, const int result,
+			                          const int buffer = 0) const
+			{
+				if (!command.completion)
+					return;
+				if (!command.completion->captureSnapshot)
+				{
+					command.completion->complete(result, buffer);
+					return;
+				}
+				const auto session = m_sessions.constFind(command.sessionId);
+				command.completion->complete(
+				    result, buffer,
+				    session == m_sessions.cend()
+				        ? nullptr
+				        : session->publishedState->snapshot.load(std::memory_order_acquire));
+			}
+
+			/**
+			 * @brief Detaches only the channel references belonging to one retained file occurrence.
+			 * @param session Session owning the channel references.
+			 * @param pending Occurrence whose channel may retain its lookup or replacement claim.
+			 * @param operationId Identity to detach without disturbing another occurrence.
+			 */
+			static void detachPendingFile(WorkerSession &session, const PendingFileCommand &pending,
+			                              const quint64 operationId)
+			{
+				if (pending.channelIndex < 0)
+					return;
+				const auto index = static_cast<std::size_t>(pending.channelIndex);
+				if (session.pendingFileByChannel[index] == operationId)
+					session.pendingFileByChannel[index] = 0;
+				if (session.channels[index].pendingFileOperationId == operationId)
+					session.channels[index].pendingFileOperationId = 0;
+			}
+
+			/**
+			 * @brief Retires one file occurrence and wakes its waiting play or commit exactly once.
+			 * @param session Session owning the occurrence.
+			 * @param operationId Pending file identity.
+			 */
+			void cancelPendingFile(WorkerSession &session, const quint64 operationId)
+			{
+				auto it = session.pendingFiles.find(operationId);
+				if (it == session.pendingFiles.end())
+					return;
+				PendingFileCommand pending = std::move(*it);
+				session.pendingFiles.erase(it);
+				detachPendingFile(session, pending, operationId);
+				if (pending.command.kind == SoundCommandKind::PrepareFile)
+					session.prepared.remove(pending.command.token);
+				if (pending.command.requireReservation && pending.channelIndex >= 0)
+				{
+					const SoundChannel &channel =
+					    session.channels[static_cast<std::size_t>(pending.channelIndex)];
+					if (channel.allocated && channel.ownershipKind == pending.command.ownershipKind &&
+					    channel.ownershipGeneration == pending.command.ownershipGeneration)
+						static_cast<void>(stop(session.sessionId, pending.channelIndex + 1,
+						                       pending.command.ownershipKind,
+						                       pending.command.ownershipGeneration));
+				}
+				completeSoundCommand(pending.command, eCannotPlaySound);
+				if (pending.commit)
+					completeSoundCommand(*pending.commit, eCannotPlaySound);
+			}
+
+			/**
+			 * @brief Cancels unresolved file work before its session or routing context disappears.
+			 * @param session Session whose file work is canceled.
+			 * @param applies Optional predicate identifying occurrences affected by the transition.
+			 */
+			void cancelPendingFiles(WorkerSession                                         &session,
+			                        const std::function<bool(const PendingFileCommand &)> &applies = {})
+			{
+				const auto ids = session.pendingFiles.keys();
+				for (const quint64 id : ids)
+				{
+					const auto pending = session.pendingFiles.constFind(id);
+					if (pending != session.pendingFiles.cend() && (!applies || applies(*pending)))
+						cancelPendingFile(session, id);
+				}
+			}
+
+			/**
+			 * @brief Selects a reusable LuaAudio reservation without stealing active or pending channels.
+			 * @param session Session whose channel availability is inspected.
+			 * @return Zero-based channel, or minus one.
+			 */
+			[[nodiscard]] static int selectLuaAudioChannel(const WorkerSession &session)
+			{
+				for (int index = 0; index < SoundEngineSession::kChannelCount; ++index)
+				{
+					const SoundChannel &channel = session.channels[static_cast<std::size_t>(index)];
+					if (session.pendingFileByChannel[static_cast<std::size_t>(index)] == 0 &&
+					    (!channel.allocated ||
+					     (channel.playbackStarted && !channel.looping && !channel.playing)))
+						return index;
+				}
+				return -1;
+			}
+
+			/**
+			 * @brief Resolves file commands or retains their original FIFO occurrence until the catalog is definitive.
+			 * @param command Command whose completion transfers to pending state when required.
+			 * @return Whether execution has been deferred or completed by this function.
+			 */
+			bool deferFileCommand(SoundCommand &command)
+			{
+				auto sessionIt = m_sessions.find(command.sessionId);
+				if (sessionIt == m_sessions.end())
+					return false;
+				WorkerSession &session = *sessionIt;
+				if (command.kind == SoundCommandKind::CommitPrepared)
+				{
+					const auto prepared = session.prepared.constFind(command.token);
+					if (prepared == session.prepared.cend() || prepared->pendingLookupId == 0)
+						return false;
+					auto pending = session.pendingFiles.find(prepared->pendingLookupId);
+					if (pending == session.pendingFiles.end() || pending->commit)
+					{
+						completeSoundCommand(command, eCannotPlaySound);
+						return true;
+					}
+					const int index = selectChannel(session, command.buffer);
+					if (index < 0)
+					{
+						cancelPendingFile(session, pending.key());
+						completeSoundCommand(command, eCannotPlaySound);
+						return true;
+					}
+					const quint64 id = pending.key();
+					cancelPendingFile(session, session.pendingFileByChannel[static_cast<std::size_t>(index)]);
+					pending               = session.pendingFiles.find(id);
+					pending->channelIndex = index;
+					command.buffer        = index + 1;
+					pending->commit.emplace(std::move(command));
+					session.pendingFileByChannel[static_cast<std::size_t>(index)] = id;
+					return true;
+				}
+				if (command.fileResolutionComplete || command.text.isEmpty() ||
+				    (command.kind != SoundCommandKind::PlayFile &&
+				     command.kind != SoundCommandKind::PrepareFile &&
+				     command.kind != SoundCommandKind::ReserveLuaAudioChannel) ||
+				    command.ownershipKind == SoundOwnershipKind::NativeSound ||
+				    (command.ownershipKind == SoundOwnershipKind::LuaAudio && !session.luaAudioInitialized))
+					return false;
+				if (command.requireReservation)
+				{
+					if (command.buffer < 1 || command.buffer > SoundEngineSession::kChannelCount)
+						return false;
+					const SoundChannel &channel =
+					    session.channels[static_cast<std::size_t>(command.buffer - 1)];
+					if (!channel.allocated || channel.backend || channel.pendingFileOperationId != 0 ||
+					    channel.ownershipKind != command.ownershipKind ||
+					    channel.ownershipGeneration != command.ownershipGeneration)
+					{
+						completeSoundCommand(command, eCannotPlaySound);
+						return true;
+					}
+				}
+				QString resolved;
+				bool    pending = false;
+				command.fileSource =
+				    resolveFile(session, command.text, resolved, SoundFileResolution::Request, &pending);
+				command.fileResolutionComplete = !pending;
+				if (!pending)
+					return false;
+				if (m_shuttingDown || !m_ioWorker || !m_ioThread.isRunning())
+				{
+					completeSoundCommand(command, eCannotPlaySound);
+					return true;
+				}
+				int index = -1;
+				if (command.kind != SoundCommandKind::PrepareFile)
+				{
+					index = command.kind == SoundCommandKind::ReserveLuaAudioChannel
+					            ? selectLuaAudioChannel(session)
+					            : selectChannel(session, command.buffer);
+					if (index < 0)
+					{
+						completeSoundCommand(command, eCannotPlaySound);
+						return true;
+					}
+					if (!command.requireReservation)
+						cancelPendingFile(session,
+						                  session.pendingFileByChannel[static_cast<std::size_t>(index)]);
+					command.buffer = index + 1;
+				}
+				const quint64 id = m_nextFileOperationId++;
+				if (command.kind == SoundCommandKind::PrepareFile)
+				{
+					PreparedSound prepared;
+					prepared.pendingLookupId = id;
+					session.prepared.insert(command.token, std::move(prepared));
+				}
+				auto &occurrence        = session.pendingFiles[id];
+				occurrence.request      = normalizedFileRequest(session.worldSoundCatalogPrefix, command.text,
+				                                                true, SoundFileResolution::Request);
+				occurrence.command      = std::move(command);
+				occurrence.channelIndex = index;
+				if (index >= 0)
+				{
+					if (occurrence.command.requireReservation)
+						session.channels[static_cast<std::size_t>(index)].pendingFileOperationId = id;
+					else
+						session.pendingFileByChannel[static_cast<std::size_t>(index)] = id;
+				}
+				return true;
+			}
+
+			/** @brief Resumes retained file occurrences in their accepted order after catalog reconciliation. */
+			void resumePendingFiles()
+			{
+				for (WorkerSession &session : m_sessions)
+				{
+					const auto ids = session.pendingFiles.keys();
+					for (const quint64 id : ids)
+					{
+						auto it = session.pendingFiles.find(id);
+						if (it == session.pendingFiles.end())
+							continue;
+						if (it->command.requireReservation)
+						{
+							const SoundChannel &channel =
+							    session.channels[static_cast<std::size_t>(it->channelIndex)];
+							if (!channel.allocated || channel.backend ||
+							    channel.pendingFileOperationId != id ||
+							    channel.ownershipKind != it->command.ownershipKind ||
+							    channel.ownershipGeneration != it->command.ownershipGeneration)
+							{
+								cancelPendingFile(session, id);
+								continue;
+							}
+						}
+						QString    resolved;
+						bool       waiting = false;
+						const auto source = resolveFile(session, it->command.text, resolved,
+						                                SoundFileResolution::Request, &waiting, &it->request);
+						if (waiting)
+							continue;
+						PendingFileCommand pending = std::move(*it);
+						session.pendingFiles.erase(it);
+						detachPendingFile(session, pending, id);
+						pending.command.fileSource             = source;
+						pending.command.fileResolutionComplete = true;
+						execute(pending.command);
+						if (pending.commit)
+							execute(*pending.commit);
+					}
+				}
+			}
+
 			void execute(SoundCommand &command)
 			{
+				if (deferFileCommand(command))
+					return;
 				int result         = eCannotPlaySound;
 				int selectedBuffer = 0;
 				switch (command.kind)
@@ -3177,12 +3910,35 @@ namespace
 					session.publishedState            = command.publishedState;
 					session.luaAudioOwnershipReleased = std::move(command.luaAudioOwnershipReleased);
 					m_sessions.insert(command.sessionId, std::move(session));
+					publishSnapshotIfChanged(m_sessions[command.sessionId]);
 					result = eOK;
 					break;
 				}
 				case SoundCommandKind::PlayFile:
 					result = playFile(command, selectedBuffer);
 					break;
+				case SoundCommandKind::SetLuaAudioAttribute:
+					result = setLuaAudioAttribute(command);
+					break;
+				case SoundCommandKind::SetLuaAudioInitialized:
+				{
+					auto session = m_sessions.find(command.sessionId);
+					if (session == m_sessions.end())
+						break;
+					session->luaAudioInitialized = command.enabled;
+					if (!command.enabled)
+						cancelPendingFiles(
+						    *session, [](const PendingFileCommand &pending)
+						    { return pending.command.ownershipKind == SoundOwnershipKind::LuaAudio; });
+					if (!command.enabled)
+						for (int index = 0; index < SoundEngineSession::kChannelCount; ++index)
+							if (session->channels[static_cast<std::size_t>(index)].ownershipKind ==
+							    SoundOwnershipKind::LuaAudio)
+								releaseChannel(*session, index, true, false);
+					publishSnapshotIfChanged(*session);
+					result = eOK;
+					break;
+				}
 				case SoundCommandKind::UpdateWorldSoundDirectory:
 				{
 					auto sessionIt = m_sessions.find(command.sessionId);
@@ -3251,11 +4007,11 @@ namespace
 				case SoundCommandKind::CatalogReady:
 					if (command.token == m_catalogGeneration)
 					{
-						m_catalogAvailable = true;
-						m_catalogReady     = true;
+						m_catalogReady = true;
 						m_maximumReconciliationStepSize =
 						    qMax(m_maximumReconciliationStepSize, command.maximumReconciliationStepSize);
 						m_publishedCatalogRevision = command.catalogRevision;
+						resumePendingFiles();
 						resumePendingNativeResolutions();
 					}
 					result = eOK;
@@ -3306,8 +4062,7 @@ namespace
 					result        = eOK;
 					break;
 				}
-				if (command.completion)
-					command.completion->complete(result, selectedBuffer);
+				completeSoundCommand(command, result, selectedBuffer);
 			}
 
 			/**
@@ -3362,11 +4117,9 @@ namespace
 			/**
 			 * @brief Converts one request to a path relative to the configured sounds tree.
 			 * @param fileName Native, portable, or legacy sound path.
-			 * @param explicitlyRooted Optional destination reporting whether the request named `sounds`.
 			 * @return Portable sounds-tree-relative path, or an empty string when invalid.
 			 */
-			[[nodiscard]] QString soundRequestRelativePath(const QString &fileName,
-			                                               bool          *explicitlyRooted = nullptr) const
+			[[nodiscard]] QString soundRequestRelativePath(const QString &fileName) const
 			{
 				QString       portableInput = fileName;
 				const QString normalized    = QMudPluginPathUtils::normalizeSeparators(fileName);
@@ -3390,17 +4143,19 @@ namespace
 					portableInput =
 					    QMudPluginPathUtils::qmudHomeRelativePath(m_qmudHome, resolvedSoundPath, false);
 				}
-				return soundTreeRelativePath(std::move(portableInput), explicitlyRooted);
+				return soundTreeRelativePath(std::move(portableInput));
 			}
 
 			/**
 			 * @brief Recognizes an explicit plugin-bundled sound path without widening ordinary sound lookup.
 			 * @param fileName Portable, native, or legacy path supplied by a compatibility API.
-			 * @return Path relative to the configured plugins directory, or an empty string otherwise.
+			 * @param pluginsRoot Canonical plugin root whose request namespace is being examined.
+			 * @return Path relative to that plugins directory, or an empty string otherwise.
 			 */
-			[[nodiscard]] QString pluginSoundRequestRelativePath(const QString &fileName) const
+			[[nodiscard]] QString pluginSoundRequestRelativePath(const QString &fileName,
+			                                                     const QString &pluginsRoot) const
 			{
-				if (m_pluginsRoot.isEmpty() || !soundPlaybackSupportsFile(fileName))
+				if (pluginsRoot.isEmpty() || !soundPlaybackSupportsFile(fileName))
 					return {};
 				QString       portable;
 				const QString normalized = QMudPluginPathUtils::normalizeSeparators(fileName);
@@ -3417,7 +4172,7 @@ namespace
 				}
 
 				const QString configuredRelative =
-				    QMudPluginPathUtils::qmudHomeRelativePath(m_qmudHome, m_pluginsRoot, false);
+				    QMudPluginPathUtils::qmudHomeRelativePath(m_qmudHome, pluginsRoot, false);
 				QStringList configuredParts =
 				    configuredRelative == QLatin1String(".")
 				        ? QStringList()
@@ -3471,33 +4226,81 @@ namespace
 			}
 
 			/**
-			 * @brief Resolves one request through the in-memory sound catalog without filesystem access.
-			 * @param session Session supplying world-first lookup precedence.
-			 * @param fileName Relative sound-tree path or an absolute indexed sound path.
-			 * @return Canonical indexed file path, or an empty string when the catalog has no match.
+			 * @brief Returns world-first lookup scopes, with the shared tree as the final fallback.
+			 * @param prefix Configured sounds-relative world directory.
+			 * @return Nonduplicated ordered scope prefixes.
 			 */
-			[[nodiscard]] QString resolveCatalogFile(const WorkerSession &session,
-			                                         const QString       &fileName) const
+			[[nodiscard]] static QStringList soundSearchPrefixes(const QString &prefix)
 			{
-				if (!m_catalogConfigured)
-					return {};
-				bool    explicitlyRooted = false;
-				QString relative         = soundRequestRelativePath(fileName, &explicitlyRooted);
-				if (relative.isEmpty())
-					return {};
-				if (!explicitlyRooted && !session.worldSoundCatalogPrefix.isEmpty())
-				{
-					const QString preferred = QMudPluginPathUtils::normalizeSeparators(
-					    QDir(session.worldSoundCatalogPrefix).filePath(relative));
-					const auto preferredFile =
-					    m_catalogFileByRelativePath.constFind(soundCatalogComparisonKey(preferred));
-					if (preferredFile != m_catalogFileByRelativePath.cend())
-						return *preferredFile;
-				}
+				return prefix.isEmpty() ? QStringList{QString()} : QStringList{prefix, QString()};
+			}
 
-				const auto sharedFile =
-				    m_catalogFileByRelativePath.constFind(soundCatalogComparisonKey(relative));
-				return sharedFile == m_catalogFileByRelativePath.cend() ? QString() : *sharedFile;
+			/**
+			 * @brief Places a request beneath one search scope without duplicating an existing scope prefix.
+			 * @param relative Normalized sounds-relative request.
+			 * @param prefix Search scope, or empty for the shared tree.
+			 * @return Sounds-relative exact candidate.
+			 */
+			[[nodiscard]] static QString scopedSoundPath(const QString &relative, const QString &prefix)
+			{
+				return prefix.isEmpty() || relative.startsWith(prefix + QLatin1Char('/'), Qt::CaseInsensitive)
+				           ? relative
+				           : QDir(prefix).filePath(relative);
+			}
+
+			/**
+			 * @brief Tests membership in a normalized catalog subtree without filesystem work.
+			 * @param relative Catalog-relative file or directory.
+			 * @param prefix Search scope, or empty for the shared tree.
+			 * @return Whether the path belongs to the scope.
+			 */
+			[[nodiscard]] static bool soundPathInScope(const QString &relative, const QString &prefix)
+			{
+				return prefix.isEmpty() || sameSoundFilesystemPath(relative, prefix) ||
+				       relative.startsWith(prefix + QLatin1Char('/'), Qt::CaseInsensitive);
+			}
+
+			/**
+			 * @brief Normalizes one cold file request and assigns the common world-first search order.
+			 * @param worldPrefix Captured configured world directory.
+			 * @param fileName Original file request or selected canonical source.
+			 * @param allowPluginSounds Whether explicit plugin paths may supply the final fallback.
+			 * @param mode Whether to select a request or validate a selected source.
+			 * @return Normalized request with ordered scopes, or an empty relative path for invalid input.
+			 */
+			[[nodiscard]] SoundFileRequest normalizedFileRequest(const QString            &worldPrefix,
+			                                                     const QString            &fileName,
+			                                                     const bool                allowPluginSounds,
+			                                                     const SoundFileResolution mode) const
+			{
+				SoundFileRequest request;
+				if (allowPluginSounds && mode != SoundFileResolution::SelectedSource)
+					request.pluginRelative = pluginSoundRequestRelativePath(fileName, m_pluginsRoot);
+				request.relative = request.pluginRelative.isEmpty() ? soundRequestRelativePath(fileName)
+				                                                    : request.pluginRelative;
+				if (mode == SoundFileResolution::SelectedSource)
+					request.prefixes = {QString()};
+				else if (!request.pluginRelative.isEmpty())
+					request.prefixes = {worldPrefix};
+				else
+					request.prefixes = soundSearchPrefixes(worldPrefix);
+				return request;
+			}
+
+			/**
+			 * @brief Looks up already normalized exact keys without filesystem access or fallback work.
+			 * @param keys Catalog-relative comparison keys in precedence order.
+			 * @return Canonical indexed exact match, or an empty string.
+			 */
+			[[nodiscard]] QString exactCatalogFile(const QStringList &keys) const
+			{
+				for (const QString &key : keys)
+				{
+					const auto found = m_catalogFileByRelativePath.constFind(key);
+					if (found != m_catalogFileByRelativePath.cend())
+						return *found;
+				}
+				return {};
 			}
 
 			/**
@@ -3505,250 +4308,243 @@ namespace
 			 * @param session Session supplying world-first lookup precedence.
 			 * @param fileName Requested sound path.
 			 * @param resolved Destination receiving the cached canonical file identity.
+			 * @param mode Whether to select a request or reuse an already selected canonical source.
 			 * @return Cached source key while at least one backend for it remains resident.
 			 */
-			std::optional<SoundSourceKey> cachedFileSourceKey(WorkerSession &session, const QString &fileName,
-			                                                  QString &resolved)
+			std::optional<SoundSourceKey>
+			cachedFileSourceKey(WorkerSession &session, const QString &fileName, QString &resolved,
+			                    const SoundFileResolution mode = SoundFileResolution::Request) const
 			{
+				if (mode == SoundFileResolution::SelectedSource)
+				{
+					const auto cached = m_cachedFileSourceKeys.constFind(soundCatalogComparisonKey(fileName));
+					if (cached != m_cachedFileSourceKeys.cend() && cached->deviceId == m_deviceId &&
+					    m_cache.backendCount(*cached) > 0)
+					{
+						resolved = cached->identity;
+						return *cached;
+					}
+					return std::nullopt;
+				}
 				auto cachedRequest = session.cachedFileRequestKeys.find(fileName);
 				if (cachedRequest != session.cachedFileRequestKeys.end())
 				{
-					if (cachedRequest->deviceId == m_deviceId && m_cache.backendCount(*cachedRequest) > 0)
+					if (cachedRequest->source.deviceId == m_deviceId &&
+					    m_cache.backendCount(cachedRequest->source) > 0)
 					{
-						resolved = cachedRequest->identity;
-						return *cachedRequest;
+						const QString exact = cachedRequest->exact
+						                          ? QString()
+						                          : exactCatalogFile(cachedRequest->exactCatalogKeys);
+						if (exact.isEmpty() || sameSoundFilesystemPath(exact, cachedRequest->source.identity))
+						{
+							cachedRequest->exact = cachedRequest->exact || !exact.isEmpty();
+							if (cachedRequest->exact)
+								cachedRequest->exactCatalogKeys.clear();
+							resolved = cachedRequest->source.identity;
+							return cachedRequest->source;
+						}
 					}
 					removeCachedFileRequest(session, fileName);
 				}
 
-				QString catalogFile = resolveCatalogFile(session, fileName);
-				if (catalogFile.isEmpty())
-				{
-					const QString pluginRelative = pluginSoundRequestRelativePath(fileName);
-					if (!pluginRelative.isEmpty())
-					{
-						const auto pluginFile =
-						    m_pluginFileByRelativePath.constFind(soundCatalogComparisonKey(pluginRelative));
-						if (pluginFile != m_pluginFileByRelativePath.cend())
-							catalogFile = *pluginFile;
-					}
-				}
-				if (!catalogFile.isEmpty())
-				{
-					const QString cacheKey = soundCatalogComparisonKey(catalogFile);
-					auto          cached   = m_cachedFileSourceKeys.find(cacheKey);
-					if (cached != m_cachedFileSourceKeys.end())
-					{
-						if (cached->deviceId == m_deviceId && m_cache.backendCount(*cached) > 0)
-						{
-							cacheFileRequest(session, fileName, *cached);
-							resolved = catalogFile;
-							return *cached;
-						}
-						m_cachedFileSourceKeys.erase(cached);
-					}
-				}
 				return std::nullopt;
 			}
 
 			/**
-			 * @brief Resolves and validates a file-backed sound without initializing multimedia state.
-			 * @param session Session providing the QMud-home root.
-			 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
-			 * @param resolved Destination receiving the contained absolute file path.
-			 * @param allowPluginSounds Whether explicit paths beneath the configured plugins directory are accepted.
-			 * @return Existing regular-file metadata, or no value when resolution fails.
+			 * @brief Validates one exact source without searching another filename or scope.
+			 * @param root Containment root.
+			 * @param relative Source path relative to that root.
+			 * @return Canonical readable regular file, or an empty string.
 			 */
-			std::optional<QFileInfo> resolveFileInfo(const WorkerSession &session, const QString &fileName,
-			                                         QString &resolved, const bool allowPluginSounds)
+			[[nodiscard]] static QString validatedSoundFile(const QString &root, const QString &relative)
 			{
-				const QString pluginRelative =
-				    allowPluginSounds ? pluginSoundRequestRelativePath(fileName) : QString();
-				if (!pluginRelative.isEmpty())
-				{
-					QString candidate = pluginRelative;
-					bool    indexedFile{false};
-					if (const auto indexed =
-					        m_pluginFileByRelativePath.constFind(soundCatalogComparisonKey(pluginRelative));
-					    indexed != m_pluginFileByRelativePath.cend())
-					{
-						indexedFile = true;
-						candidate   = QMudPluginPathUtils::normalizeSeparators(
-						    QDir(m_pluginsRoot).relativeFilePath(*indexed));
-					}
-					if (!resolveSoundFileCaseInsensitively(m_pluginsRoot, candidate, &resolved))
-					{
-						if (indexedFile)
-						{
-							requestPluginDirectoryTracking(
-							    QMudPluginPathUtils::normalizeSeparators(
-							        QFileInfo(QDir(m_pluginsRoot).filePath(candidate)).absolutePath()),
-							    true);
-						}
-						return std::nullopt;
-					}
-					indexPluginSoundFile(resolved);
-					requestPluginDirectoryTracking(
-					    QMudPluginPathUtils::normalizeSeparators(QFileInfo(resolved).absolutePath()),
-					    !indexedFile);
-					return QFileInfo(resolved);
-				}
-
-				auto resolveCandidate = [this,
-				                         &resolved](const QString &candidate) -> std::optional<QFileInfo>
-				{
-					QString normalized;
-					QString error;
-					if (m_soundsRoot.isEmpty() || !QMudPluginPathUtils::resolveInsideDirectory(
-					                                  m_soundsRoot, candidate, &normalized, &error))
-						return std::nullopt;
-					if (soundPathContainsSymlink(m_soundsRoot, normalized))
-						return std::nullopt;
-					QFileInfo info(normalized);
-					if (!info.exists() || !info.isFile())
-						return std::nullopt;
-					const QString canonical =
-					    QMudPluginPathUtils::normalizeSeparators(info.canonicalFilePath());
-					if (canonical.isEmpty())
-						return std::nullopt;
-					resolved = canonical;
-					return QFileInfo(canonical);
-				};
-				auto resolveCatalogCandidate =
-				    [this, &resolveCandidate](const QString &candidate) -> std::optional<QFileInfo>
-				{
-					if (!m_catalogConfigured)
-						return std::nullopt;
-					QString normalized;
-					QString error;
-					if (m_soundsRoot.isEmpty() || !QMudPluginPathUtils::resolveInsideDirectory(
-					                                  m_soundsRoot, candidate, &normalized, &error))
-					{
-						return std::nullopt;
-					}
-					const QString relative = QMudPluginPathUtils::normalizeSeparators(
-					    QDir(m_soundsRoot).relativeFilePath(normalized));
-					const auto catalogFile =
-					    m_catalogFileByRelativePath.constFind(soundCatalogComparisonKey(relative));
-					if (catalogFile == m_catalogFileByRelativePath.cend())
-						return std::nullopt;
-					return resolveCandidate(QDir(m_soundsRoot).relativeFilePath(*catalogFile));
-				};
-				auto resolveCaseInsensitiveCandidate =
-				    [this, &resolved](const QString &candidate) -> std::optional<QFileInfo>
-				{
-					return resolveSoundFileCaseInsensitively(m_soundsRoot, candidate, &resolved)
-					           ? std::optional<QFileInfo>(QFileInfo(resolved))
-					           : std::nullopt;
-				};
-				auto resolveWithCatalogFallback =
-				    [this, &resolveCandidate, &resolveCatalogCandidate,
-				     &resolveCaseInsensitiveCandidate](const QString &candidate) -> std::optional<QFileInfo>
-				{
-					if (auto info = resolveCandidate(candidate))
-						return info;
-					if (auto info = resolveCatalogCandidate(candidate))
-						return info;
-					if (!m_catalogReady)
-						return resolveCaseInsensitiveCandidate(candidate);
-					return std::nullopt;
-				};
-
-				bool          explicitlyRooted = false;
-				const QString relative         = soundRequestRelativePath(fileName, &explicitlyRooted);
-				if (relative.isEmpty())
-					return std::nullopt;
-				if (!explicitlyRooted)
-				{
-					if (!session.worldSoundCatalogPrefix.isEmpty())
-					{
-						if (auto info = resolveWithCatalogFallback(
-						        QDir(session.worldSoundCatalogPrefix).filePath(relative)))
-						{
-							return info;
-						}
-					}
-					return resolveWithCatalogFallback(relative);
-				}
-				return resolveWithCatalogFallback(relative);
+				QString absolute;
+				QString error;
+				if (root.isEmpty() ||
+				    !QMudPluginPathUtils::resolveInsideDirectory(root, relative, &absolute, &error) ||
+				    soundPathContainsSymlink(root, absolute))
+					return {};
+				const QFileInfo info(absolute);
+				if (!info.isFile() || !info.isReadable())
+					return {};
+				return QMudPluginPathUtils::normalizeSeparators(info.canonicalFilePath());
 			}
 
 			/**
-			 * @brief Resolves a sound and builds its device-specific backend cache identity.
-			 * @param session Session providing the QMud-home root.
-			 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
-			 * @param resolved Destination receiving the contained absolute file path.
-			 * @return Playback source key, or no value when resolution fails.
+			 * @brief Selects sound candidates under the sole world-first precedence and completeness policy.
+			 * @param request Normalized request with captured ordered search scopes.
+			 * @param allowPatterns Whether native wildcard and extensionless matching is permitted.
+			 * @param mode Whether to select a request or validate an immutable selected source.
+			 * @return Selected canonical candidates, a definitive miss, or a pending catalog dependency.
 			 */
-			std::optional<SoundSourceKey> resolveFile(WorkerSession &session, const QString &fileName,
-			                                          QString &resolved)
+			[[nodiscard]] SoundFileSelection
+			selectSoundFiles(const SoundFileRequest &request, const bool allowPatterns,
+			                 const SoundFileResolution mode = SoundFileResolution::Request)
 			{
-				ensureMediaDevices();
-				if (auto cached = cachedFileSourceKey(session, fileName, resolved))
-					return cached;
-				++m_slowFileResolutionCount;
-				const auto info = resolveFileInfo(session, fileName, resolved, true);
-				if (!info)
-					return std::nullopt;
-				SoundSourceKey key;
-				key.identity      = resolved;
-				key.size          = info->size();
-				key.modifiedMsecs = info->lastModified().toMSecsSinceEpoch();
-				key.deviceId      = m_deviceId;
-				const QString sourceDirectory =
-				    QMudPluginPathUtils::normalizeSeparators(QFileInfo(resolved).path());
-				const bool watchedSoundDirectory =
-				    m_catalogConfigured &&
-				    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(sourceDirectory, m_soundsRoot) &&
-				    m_watchedCatalogDirectories.contains(sourceDirectory);
-				const bool watchedPluginDirectory =
-				    !m_pluginsRoot.isEmpty() &&
-				    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(sourceDirectory, m_pluginsRoot) &&
-				    m_watchedPluginDirectories.contains(sourceDirectory);
-				if (watchedSoundDirectory || watchedPluginDirectory)
+				bool       filesystemChecked = false;
+				const auto selectionResult =
+				    [&filesystemChecked](QStringList files = {}, const bool pending = false)
+				{ return SoundFileSelection{std::move(files), pending, filesystemChecked}; };
+				const auto validate = [&filesystemChecked](const QString &root, const QString &relative)
 				{
-					const QString sourceCacheKey = soundCatalogComparisonKey(resolved);
-					m_cachedFileSourceKeys.insert(sourceCacheKey, key);
-					cacheFileRequest(session, fileName, key);
+					filesystemChecked = true;
+					return validatedSoundFile(root, relative);
+				};
+				const bool pattern = request.relative.contains(QLatin1Char('*')) ||
+				                     request.relative.contains(QLatin1Char('?'));
+				if (request.relative.isEmpty() || (!allowPatterns && pattern) || m_soundsRoot.isEmpty())
+					return selectionResult();
+				if (mode == SoundFileResolution::SelectedSource)
+				{
+					const QString selected = validate(m_soundsRoot, request.relative);
+					return selectionResult(selected.isEmpty() ? QStringList{} : QStringList{selected});
+				}
+				for (const QString &prefix : request.prefixes)
+				{
+					const QString exactPath = scopedSoundPath(request.relative, prefix);
+					if (!pattern && (!allowPatterns || !QFileInfo(request.relative).suffix().isEmpty()))
+					{
+						const QString indexedExact = exactCatalogFile({soundCatalogComparisonKey(exactPath)});
+						const auto    resident =
+						    m_cachedFileSourceKeys.constFind(soundCatalogComparisonKey(indexedExact));
+						if (resident != m_cachedFileSourceKeys.cend() && resident->deviceId == m_deviceId &&
+						    m_cache.backendCount(*resident) > 0)
+							return selectionResult({resident->identity});
+						QString exact = validate(m_soundsRoot, exactPath);
+						if (exact.isEmpty())
+						{
+							const QString indexed = exactCatalogFile({soundCatalogComparisonKey(exactPath)});
+							if (!indexed.isEmpty())
+								exact = validate(m_soundsRoot, QDir(m_soundsRoot).relativeFilePath(indexed));
+						}
+						if (exact.isEmpty() && !m_catalogReady)
+							static_cast<void>(
+							    resolveSoundFileCaseInsensitively(m_soundsRoot, exactPath, &exact));
+						if (!exact.isEmpty() && (!allowPatterns || soundPlaybackSupportsFile(exact)))
+							return selectionResult({exact});
+					}
+					// A partial or historical index cannot prove absence, ranking, or a complete wildcard pool.
+					if (!m_catalogReady)
+						return selectionResult({}, true);
+					for (;;)
+					{
+						QStringList candidates = resolveCatalogSoundFilesInScope(request.relative, prefix);
+						if (candidates.isEmpty())
+							break;
+						while (!candidates.isEmpty())
+						{
+							const QString first = candidates.front();
+							const auto    resident =
+							    m_cachedFileSourceKeys.constFind(soundCatalogComparisonKey(first));
+							if (resident != m_cachedFileSourceKeys.cend() &&
+							    resident->deviceId == m_deviceId && m_cache.backendCount(*resident) > 0)
+								return selectionResult(std::move(candidates));
+							if (!validate(m_soundsRoot, QDir(m_soundsRoot).relativeFilePath(first)).isEmpty())
+								return selectionResult(std::move(candidates));
+							removeCatalogFile(first);
+							candidates.removeFirst();
+						}
+						// Exhausting a stale group exposes the next rank in this same scope. Every
+						// repeated match follows removal of at least one catalog record.
+					}
+				}
+				if (!request.pluginRelative.isEmpty())
+				{
+					QString    resolved;
+					const bool indexed = m_pluginFileByRelativePath.contains(
+					    soundCatalogComparisonKey(request.pluginRelative));
+					if (!resolveSoundFileCaseInsensitively(m_pluginsRoot, request.pluginRelative, &resolved))
+					{
+						if (indexed)
+							requestPluginDirectoryTracking(
+							    QFileInfo(QDir(m_pluginsRoot).filePath(request.pluginRelative))
+							        .absolutePath(),
+							    true);
+						return selectionResult();
+					}
+					indexPluginSoundFile(resolved);
+					requestPluginDirectoryTracking(QFileInfo(resolved).absolutePath(), !indexed);
+					return selectionResult({resolved});
+				}
+				return selectionResult();
+			}
+
+			/**
+			 * @brief Resolves or reuses a file source through the common selection policy.
+			 * @param session Session owning resident request associations.
+			 * @param fileName Original request or selected canonical source.
+			 * @param resolved Destination receiving its canonical source.
+			 * @param mode Whether to select a request or validate a selected source.
+			 * @param pending Optional destination reporting a catalog dependency.
+			 * @param capturedRequest Optional complete normalized input for an earlier occurrence.
+			 * @return Device-specific source key, or no value for a miss or pending lookup.
+			 */
+			std::optional<SoundSourceKey>
+			resolveFile(WorkerSession &session, const QString &fileName, QString &resolved,
+			            const SoundFileResolution mode = SoundFileResolution::Request,
+			            bool *pending = nullptr, const SoundFileRequest *capturedRequest = nullptr)
+			{
+				if (pending)
+					*pending = false;
+				ensureMediaDevices();
+				const auto currentRequest =
+				    capturedRequest
+				        ? normalizedFileRequest(session.worldSoundCatalogPrefix, fileName, true, mode)
+				        : SoundFileRequest{};
+				const bool currentContext = !capturedRequest || currentRequest == *capturedRequest;
+				if (currentContext || mode == SoundFileResolution::SelectedSource)
+					if (auto cached = cachedFileSourceKey(session, fileName, resolved, mode))
+						return cached;
+				const auto request = capturedRequest ? *capturedRequest
+				                                     : normalizedFileRequest(session.worldSoundCatalogPrefix,
+				                                                             fileName, true, mode);
+				const auto selection = selectSoundFiles(request, false, mode);
+				if (selection.filesystemChecked)
+					++m_slowFileResolutionCount;
+				if (pending)
+					*pending = selection.pending;
+				if (selection.files.isEmpty())
+					return std::nullopt;
+				// The selector has already established the winning scope. Resident ties may reuse a backend.
+				for (const QString &candidate : selection.files)
+				{
+					const auto cached =
+					    m_cachedFileSourceKeys.constFind(soundCatalogComparisonKey(candidate));
+					if (cached != m_cachedFileSourceKeys.cend() && cached->deviceId == m_deviceId &&
+					    m_cache.backendCount(*cached) > 0)
+					{
+						resolved = cached->identity;
+						if (currentContext && mode == SoundFileResolution::Request)
+							cacheFileRequest(session, fileName, *cached);
+						return *cached;
+					}
+				}
+				resolved = selection.files.front();
+				const QFileInfo info(resolved);
+				SoundSourceKey  key;
+				key.identity            = resolved;
+				key.size                = info.size();
+				key.modifiedMsecs       = info.lastModified().toMSecsSinceEpoch();
+				key.deviceId            = m_deviceId;
+				const QString directory = QMudPluginPathUtils::normalizeSeparators(info.path());
+				if (m_watchedCatalogDirectories.contains(directory) ||
+				    m_watchedPluginDirectories.contains(directory))
+				{
+					m_cachedFileSourceKeys.insert(soundCatalogComparisonKey(resolved), key);
+					if (currentContext && mode == SoundFileResolution::Request)
+						cacheFileRequest(session, fileName, key);
 				}
 				return key;
 			}
 
 			/**
-			 * @brief Normalizes a protocol sound pattern without permitting an absolute or escaping path.
+			 * @brief Normalizes a native request through the shared sound path authority.
 			 * @param filePattern Protocol-provided file pattern.
-			 * @return Safe relative pattern, or an empty string when invalid.
+			 * @return Contained relative pattern, or an empty string.
 			 */
 			[[nodiscard]] QString normalizeNativeSoundPattern(const QString &filePattern) const
 			{
 				return soundRequestRelativePath(filePattern);
-			}
-
-			/**
-			 * @brief Resolves one exact native filename before the background catalog is complete.
-			 * @param session Session supplying world-first lookup precedence.
-			 * @param filePattern Protocol-provided exact filename.
-			 * @return Indexed canonical file path, or no value for a pattern, miss, or completed catalog.
-			 */
-			std::optional<QString> resolveNativeExactFileBeforeCatalog(const WorkerSession &session,
-			                                                           const QString       &filePattern)
-			{
-				if (m_catalogReady)
-					return std::nullopt;
-				const QString requested = normalizeNativeSoundPattern(filePattern);
-				if (requested.isEmpty() || requested.contains(QLatin1Char('*')) ||
-				    requested.contains(QLatin1Char('?')) || QFileInfo(requested).suffix().isEmpty() ||
-				    !soundPlaybackSupportsFile(requested))
-				{
-					return std::nullopt;
-				}
-
-				QString    resolved;
-				const auto info = resolveFileInfo(session, requested, resolved, false);
-				if (!info)
-					return std::nullopt;
-				const QString indexed = indexCatalogFile(*info);
-				return indexed.isEmpty() ? std::nullopt : std::optional<QString>(indexed);
 			}
 
 			/**
@@ -3790,7 +4586,7 @@ namespace
 				const auto cached = session.cachedFileRequestKeys.find(request);
 				if (cached == session.cachedFileRequestKeys.end())
 					return;
-				session.cachedFileRequestsBySource.remove(soundCatalogComparisonKey(cached->identity),
+				session.cachedFileRequestsBySource.remove(soundCatalogComparisonKey(cached->source.identity),
 				                                          request);
 				session.cachedFileRequestKeys.erase(cached);
 			}
@@ -3801,11 +4597,37 @@ namespace
 			 * @param request Original request text.
 			 * @param key Resolved source identity.
 			 */
-			static void cacheFileRequest(WorkerSession &session, const QString &request,
-			                             const SoundSourceKey &key)
+			void cacheFileRequest(WorkerSession &session, const QString &request,
+			                      const SoundSourceKey &key) const
 			{
 				removeCachedFileRequest(session, request);
-				session.cachedFileRequestKeys.insert(request, key);
+				CachedSoundFileRequest cached;
+				cached.source         = key;
+				const auto paths      = normalizedFileRequest(session.worldSoundCatalogPrefix, request, true,
+				                                              SoundFileResolution::Request);
+				cached.pluginRelative = paths.pluginRelative;
+				const QString sourceRelative =
+				    soundCatalogComparisonKey(QDir(m_soundsRoot).relativeFilePath(key.identity));
+				if (!paths.relative.isEmpty())
+				{
+					for (const QString &prefix : paths.prefixes)
+					{
+						cached.exactCatalogKeys.push_back(
+						    soundCatalogComparisonKey(scopedSoundPath(paths.relative, prefix)));
+						// A resident world selection never yields to a match in the shared fallback scope.
+						if (!prefix.isEmpty() &&
+						    soundPathInScope(sourceRelative, soundCatalogComparisonKey(prefix)))
+							break;
+					}
+					cached.exact = cached.exactCatalogKeys.contains(sourceRelative);
+				}
+				if (!paths.pluginRelative.isEmpty() &&
+				    QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(key.identity, m_pluginsRoot))
+					cached.exact = true;
+
+				if (cached.exact)
+					cached.exactCatalogKeys.clear();
+				session.cachedFileRequestKeys.insert(request, std::move(cached));
 				session.cachedFileRequestsBySource.insert(soundCatalogComparisonKey(key.identity), request);
 			}
 
@@ -3825,7 +4647,7 @@ namespace
 					{
 						const auto cached = session.cachedFileRequestKeys.find(request);
 						if (cached != session.cachedFileRequestKeys.end() &&
-						    soundCatalogComparisonKey(cached->identity) == sourceKey)
+						    soundCatalogComparisonKey(cached->source.identity) == sourceKey)
 						{
 							session.cachedFileRequestKeys.erase(cached);
 						}
@@ -3871,27 +4693,6 @@ namespace
 					return;
 				invalidateCachedFileSource(absolutePath);
 				eraseCatalogFileRecord(absolutePath);
-			}
-
-			/**
-			 * @brief Adds or replaces one supported regular file in the worker catalog.
-			 * @param info Existing file metadata.
-			 * @return Canonical indexed path, or an empty string when the file is not indexable.
-			 */
-			[[nodiscard]] QString indexCatalogFile(const QFileInfo &info)
-			{
-				if (!info.exists() || !info.isFile() || info.isSymLink() || !info.isReadable() ||
-				    !soundPlaybackSupportsFile(info.fileName()))
-				{
-					return {};
-				}
-				const QString absolute = QMudPluginPathUtils::normalizeSeparators(info.canonicalFilePath());
-				if (absolute.isEmpty() ||
-				    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(absolute, m_soundsRoot))
-				{
-					return {};
-				}
-				return indexCatalogPath(absolute);
 			}
 
 			/**
@@ -3993,8 +4794,7 @@ namespace
 					m_catalogDirectories.clear();
 					invalidateCachedFileSources();
 				}
-				m_catalogAvailable = command.success;
-				if (m_catalogAvailable)
+				if (command.success)
 					resumePendingNativeResolutions();
 			}
 
@@ -4135,10 +4935,12 @@ namespace
 				m_catalogDirectories.clear();
 				m_watchedCatalogDirectories.clear();
 				invalidateCachedFileSources();
-				m_catalogAvailable = true;
-				m_catalogReady     = command.success;
+				m_catalogReady = command.success;
 				if (m_catalogReady)
+				{
+					resumePendingFiles();
 					resumePendingNativeResolutions();
+				}
 			}
 
 			/**
@@ -4155,6 +4957,14 @@ namespace
 					return;
 				}
 
+				for (WorkerSession &session : m_sessions)
+				{
+					cancelPendingFiles(session);
+					for (int index = 0; index < SoundEngineSession::kChannelCount; ++index)
+						if (session.channels[static_cast<std::size_t>(index)].nativeResolutionPending)
+							releaseChannel(session, index);
+					publishSnapshotIfChanged(session);
+				}
 				++m_catalogGeneration;
 				if (m_catalogGeneration == 0)
 					++m_catalogGeneration;
@@ -4175,7 +4985,6 @@ namespace
 				m_soundsRoot.clear();
 				m_pluginsRoot.clear();
 				m_catalogConfigured             = true;
-				m_catalogAvailable              = false;
 				m_catalogReady                  = false;
 				m_watchedDirectoryCount         = 0;
 				m_failedWatchCount              = 0;
@@ -4258,6 +5067,19 @@ namespace
 				if (sameSoundFilesystemPath(canonicalPlugins, m_pluginsRoot))
 					return;
 
+				for (WorkerSession &session : m_sessions)
+				{
+					cancelPendingFiles(session, [](const PendingFileCommand &pending)
+					                   { return !pending.request.pluginRelative.isEmpty(); });
+					QStringList affectedRequests;
+					for (auto cached = session.cachedFileRequestKeys.cbegin();
+					     cached != session.cachedFileRequestKeys.cend(); ++cached)
+						if (!cached->pluginRelative.isEmpty() ||
+						    !pluginSoundRequestRelativePath(cached.key(), canonicalPlugins).isEmpty())
+							affectedRequests.push_back(cached.key());
+					for (const QString &request : affectedRequests)
+						removeCachedFileRequest(session, request);
+				}
 				for (const QString &file : std::as_const(m_pluginFileByRelativePath))
 					invalidateCachedFileSource(file);
 				m_pluginFileByRelativePath.clear();
@@ -4278,29 +5100,22 @@ namespace
 			}
 
 			/**
-			 * @brief Resolves one protocol pattern with a preferred per-world catalog prefix.
-			 * @param filePattern Protocol-provided file name or wildcard pattern.
-			 * @param worldSoundCatalogPrefix Directory below sounds searched before the shared root.
-			 * @return Stable sorted absolute candidates, or an empty list.
+			 * @brief Matches eligible filenames and ranks their trailing directories within one catalog scope.
+			 * @param requested Validated sounds-relative file name or protocol wildcard pattern.
+			 * @param prefix Sounds-relative subtree, or empty for the shared tree.
+			 * @return Exact candidates or the best filename-plus-directory-suffix group, sorted by absolute path.
 			 */
-			[[nodiscard]] QStringList resolveNativeSoundFiles(const QString &filePattern,
-			                                                  const QString &worldSoundCatalogPrefix) const
+			[[nodiscard]] QStringList resolveCatalogSoundFilesInScope(const QString &requested,
+			                                                          const QString &prefix) const
 			{
-				const QString requested = normalizeNativeSoundPattern(filePattern);
 				if (requested.isEmpty())
 					return {};
-				const QString   preferredRequest   = worldSoundCatalogPrefix.isEmpty()
-				                                         ? requested
-				                                         : QDir(worldSoundCatalogPrefix).filePath(requested);
-				const qsizetype leafStart          = requested.lastIndexOf(QLatin1Char('/')) + 1;
-				const QString   requestedDirectory = requested.left(qMax<qsizetype>(0, leafStart - 1));
-				const QString   preferredDirectory =
-				    QFileInfo(preferredRequest).path() == QLatin1String(".")
-				        ? QString()
-				        : QMudPluginPathUtils::normalizeSeparators(QFileInfo(preferredRequest).path());
-				const QString leaf   = requested.mid(leafStart);
-				const QString suffix = QFileInfo(leaf).suffix();
-				const bool    wildcardSuffix =
+				const QString   scoped             = scopedSoundPath(requested, prefix);
+				const qsizetype leafStart          = scoped.lastIndexOf(QLatin1Char('/')) + 1;
+				const QString   requestedDirectory = scoped.left(qMax<qsizetype>(0, leafStart - 1));
+				const QString   leaf               = scoped.mid(leafStart);
+				const QString   suffix             = QFileInfo(leaf).suffix();
+				const bool      wildcardSuffix =
 				    suffix.contains(QLatin1Char('*')) || suffix.contains(QLatin1Char('?'));
 				if (!suffix.isEmpty() && !wildcardSuffix && !soundPlaybackSupportsFile(leaf))
 					return {};
@@ -4311,14 +5126,9 @@ namespace
 				QStringList candidates;
 				if (!wildcard && !suffix.isEmpty())
 				{
-					const auto preferred =
-					    m_catalogFileByRelativePath.constFind(soundCatalogComparisonKey(preferredRequest));
-					if (preferred != m_catalogFileByRelativePath.cend())
-						return {*preferred};
-					const auto direct =
-					    m_catalogFileByRelativePath.constFind(soundCatalogComparisonKey(requested));
-					if (direct != m_catalogFileByRelativePath.cend())
-						return {*direct};
+					if (const QString exact = exactCatalogFile({soundCatalogComparisonKey(scoped)});
+					    !exact.isEmpty())
+						return {exact};
 					candidates = m_catalogFilesByName.values(soundCatalogComparisonKey(leaf));
 				}
 				else if (!wildcard)
@@ -4332,9 +5142,11 @@ namespace
 						candidates.push_back(it.key());
 				}
 
-				QStringList preferredMatches;
-				QStringList directMatches;
-				QStringList fallbackMatches;
+				QStringList       directMatches;
+				QStringList       fallbackMatches;
+				qsizetype         bestScore = 0;
+				const QStringList requestParts =
+				    requestedDirectory.split(QLatin1Char('/'), Qt::SkipEmptyParts);
 				for (const QString &candidate : std::as_const(candidates))
 				{
 					const auto fileIt = m_catalogFiles.constFind(candidate);
@@ -4343,18 +5155,31 @@ namespace
 					const SoundCatalogFile &file = fileIt.value();
 					if (!QDir::match(pattern, file.fileName.toCaseFolded()))
 						continue;
-					fallbackMatches.push_back(file.absolutePath);
 					const QString fileDirectory = QFileInfo(file.relativePath).path();
 					const QString normalizedDirectory =
 					    fileDirectory == QLatin1String(".") ? QString() : fileDirectory;
-					if (sameSoundFilesystemPath(normalizedDirectory, preferredDirectory))
-						preferredMatches.push_back(file.absolutePath);
+					if (!soundPathInScope(normalizedDirectory, prefix))
+						continue;
 					if (sameSoundFilesystemPath(normalizedDirectory, requestedDirectory))
 						directMatches.push_back(file.absolutePath);
+					const QStringList candidateParts =
+					    normalizedDirectory.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+					qsizetype matchedSuffix = 0;
+					while (
+					    matchedSuffix < requestParts.size() && matchedSuffix < candidateParts.size() &&
+					    sameSoundFilesystemPath(requestParts.at(requestParts.size() - matchedSuffix - 1),
+					                            candidateParts.at(candidateParts.size() - matchedSuffix - 1)))
+						++matchedSuffix;
+					const qsizetype score = 1 + matchedSuffix;
+					if (score > bestScore)
+					{
+						fallbackMatches.clear();
+						bestScore = score;
+					}
+					if (score == bestScore)
+						fallbackMatches.push_back(file.absolutePath);
 				}
-				QStringList &matches = !preferredMatches.isEmpty() ? preferredMatches
-				                       : !directMatches.isEmpty()  ? directMatches
-				                                                   : fallbackMatches;
+				QStringList &matches = !directMatches.isEmpty() ? directMatches : fallbackMatches;
 				std::ranges::sort(matches);
 				return matches;
 			}
@@ -4367,11 +5192,14 @@ namespace
 					return requestedBuffer - 1;
 				for (int i = 0; i < SoundEngineSession::kChannelCount / 2; ++i)
 				{
-					if (!session.channels[static_cast<std::size_t>(i)].allocated)
+					if (session.pendingFileByChannel[static_cast<std::size_t>(i)] == 0 &&
+					    !session.channels[static_cast<std::size_t>(i)].allocated)
 						return i;
 				}
 				for (int i = 0; i < SoundEngineSession::kChannelCount; ++i)
 				{
+					if (session.pendingFileByChannel[static_cast<std::size_t>(i)] != 0)
+						continue;
 					const SoundChannel &channel = session.channels[static_cast<std::size_t>(i)];
 					if (!channel.allocated ||
 					    (channel.playbackStarted && !channel.looping && !channel.playing))
@@ -4379,6 +5207,8 @@ namespace
 				}
 				for (int i = 0; i < SoundEngineSession::kChannelCount; ++i)
 				{
+					if (session.pendingFileByChannel[static_cast<std::size_t>(i)] != 0)
+						continue;
 					const SoundChannel &channel = session.channels[static_cast<std::size_t>(i)];
 					if (channel.backend && channel.playbackStarted)
 						return i;
@@ -4470,9 +5300,7 @@ namespace
 				}
 
 				QString       error;
-				const QString destinationRelative = worldSoundCatalogPrefix.isEmpty()
-				                                        ? relative
-				                                        : QDir(worldSoundCatalogPrefix).filePath(relative);
+				const QString destinationRelative = scopedSoundPath(relative, worldSoundCatalogPrefix);
 				if (!QMudPluginPathUtils::resolveInsideDirectory(m_soundsRoot, destinationRelative,
 				                                                 &destination, &error))
 				{
@@ -4550,8 +5378,9 @@ namespace
 								resumePendingNativeResolution(session, channelIndex);
 							else
 							{
-								releaseChannel(session, channelIndex);
-								publishSnapshotIfChanged(session);
+								static_cast<void>(stop(session.sessionId, channelIndex + 1,
+								                       SoundOwnershipKind::NativeSound,
+								                       channel.ownershipGeneration));
 							}
 						}
 					}
@@ -4569,8 +5398,13 @@ namespace
 				if (!channel.nativeResolutionPending ||
 				    channel.ownershipKind != SoundOwnershipKind::NativeSound)
 					return;
-				QStringList files =
-				    resolveNativeSoundFiles(channel.nativeFilePattern, channel.nativeSoundCatalogPrefix);
+				auto selection = selectSoundFiles(normalizedFileRequest(channel.nativeSoundCatalogPrefix,
+				                                                        channel.nativeFilePattern, false,
+				                                                        SoundFileResolution::Request),
+				                                  true);
+				if (selection.pending)
+					return;
+				QStringList files = std::move(selection.files);
 				if (files.isEmpty())
 				{
 					if (!m_catalogReady)
@@ -4581,15 +5415,15 @@ namespace
 					                           channel.nativeMusic, channel.nativeSoundCatalogPrefix,
 					                           destination, requestUrl))
 					{
-						releaseChannel(session, channelIndex);
-						publishSnapshotIfChanged(session);
+						static_cast<void>(stop(session.sessionId, channelIndex + 1,
+						                       SoundOwnershipKind::NativeSound, channel.ownershipGeneration));
 						return;
 					}
 					channel.nativeDownloadDestination = destination;
 					if (!startNativeSoundDownload(destination, requestUrl))
 					{
-						releaseChannel(session, channelIndex);
-						publishSnapshotIfChanged(session);
+						static_cast<void>(stop(session.sessionId, channelIndex + 1,
+						                       SoundOwnershipKind::NativeSound, channel.ownershipGeneration));
 					}
 					return;
 				}
@@ -4600,7 +5434,6 @@ namespace
 				command.buffer              = channelIndex + 1;
 				command.files               = std::move(files);
 				command.repeatCount         = channel.repeatCount;
-				command.volume              = (channel.volume - 1.0) * 100.0;
 				command.pan                 = channel.pan;
 				command.ownershipGeneration = channel.ownershipGeneration;
 				command.ownershipKind       = SoundOwnershipKind::NativeSound;
@@ -4658,12 +5491,12 @@ namespace
 			 * @param session Worker session owning the playback.
 			 * @param playback Logical playback state to stop and clear.
 			 */
-			void stopNativePlayback(WorkerSession &session, WorkerSession::NativePlayback &playback)
+			void stopNativePlayback(const WorkerSession &session, WorkerSession::NativePlayback &playback)
 			{
 				if (nativePlaybackCurrent(session, playback))
 				{
-					releaseChannel(session, playback.buffer - 1);
-					publishSnapshotIfChanged(session);
+					static_cast<void>(stop(session.sessionId, playback.buffer,
+					                       SoundOwnershipKind::NativeSound, playback.generation));
 				}
 				playback = {};
 			}
@@ -4702,7 +5535,8 @@ namespace
 				    playback.buffer > 0 &&
 				    playback.filePattern.compare(command.text, Qt::CaseInsensitive) == 0)
 				{
-					if (updateChannel(session, playback.buffer - 1, command.repeatCount, volume, 0.0) == eOK)
+					if (updateChannel(session, playback.buffer - 1, command.repeatCount, volume, 0.0,
+					                  SoundOwnershipKind::NativeSound, playback.generation) == eOK)
 						return;
 					stopNativePlayback(session, playback);
 				}
@@ -4747,15 +5581,11 @@ namespace
 					return eBadParameter;
 				if (!m_catalogConfigured)
 					return eFileNotFound;
-				QStringList files;
-				if (m_catalogAvailable)
-					files = resolveNativeSoundFiles(command.text, sessionIt->worldSoundCatalogPrefix);
-				if (files.isEmpty())
-				{
-					if (const auto exact =
-					        resolveNativeExactFileBeforeCatalog(sessionIt.value(), command.text))
-						files.push_back(*exact);
-				}
+				auto selection =
+				    selectSoundFiles(normalizedFileRequest(sessionIt->worldSoundCatalogPrefix, command.text,
+				                                           false, SoundFileResolution::Request),
+				                     true);
+				QStringList files = std::move(selection.files);
 				if (!files.isEmpty())
 				{
 					SoundCommand resolved = command;
@@ -4776,32 +5606,40 @@ namespace
 				const bool canDownload =
 				    prepareNativeDownload(command.text, command.url, command.music,
 				                          sessionIt->worldSoundCatalogPrefix, destination, requestUrl);
-				if (m_catalogReady && !canDownload)
+				if (!selection.pending && !canDownload)
 					return eFileNotFound;
 				const int channelIndex = selectChannel(sessionIt.value(), command.buffer);
 				if (channelIndex < 0)
 					return eCannotPlaySound;
 				reserveNativeResolution(sessionIt.value(), channelIndex, command);
 				selectedBuffer = channelIndex + 1;
-				if (!m_catalogReady)
+				if (selection.pending)
 					return eOK;
 
 				SoundChannel &channel = sessionIt->channels[static_cast<std::size_t>(channelIndex)];
 				channel.nativeDownloadDestination = destination;
 				if (startNativeSoundDownload(destination, requestUrl))
 					return eOK;
-				releaseChannel(sessionIt.value(), channelIndex);
-				publishSnapshotIfChanged(sessionIt.value());
+				static_cast<void>(stop(command.sessionId, channelIndex + 1, command.ownershipKind,
+				                       command.ownershipGeneration));
 				selectedBuffer = 0;
 				return eFileNotFound;
 			}
 
+			/**
+			 * @brief Resolves or reuses a source and assigns playback without recapturing reserved controls.
+			 * @param command Accepted file, native-candidate, or existing-buffer update command.
+			 * @param selectedBuffer Destination receiving the selected one-based channel.
+			 * @return MUSHclient-compatible playback status.
+			 */
 			int playFile(const SoundCommand &command, int &selectedBuffer)
 			{
 				auto sessionIt = m_sessions.find(command.sessionId);
 				if (sessionIt == m_sessions.end())
 					return eCannotPlaySound;
 				WorkerSession &session = sessionIt.value();
+				if (command.ownershipKind == SoundOwnershipKind::LuaAudio && !session.luaAudioInitialized)
+					return eCannotPlaySound;
 				if (command.buffer >= 1 && command.buffer <= SoundEngineSession::kChannelCount &&
 				    command.text.isEmpty() && command.files.isEmpty())
 				{
@@ -4813,8 +5651,9 @@ namespace
 					{
 						return eCannotPlaySound;
 					}
-					const int result = updateChannel(session, command.buffer - 1, command.repeatCount,
-					                                 command.volume, command.pan);
+					const int result =
+					    updateChannel(session, command.buffer - 1, command.repeatCount, command.volume,
+					                  command.pan, command.ownershipKind, command.ownershipGeneration);
 					if (result == eOK)
 						selectedBuffer = command.buffer;
 					return result;
@@ -4837,6 +5676,16 @@ namespace
 				    consumesReservation && channel.luaAudioOwnershipConfirmed;
 				if (command.requireReservation && !consumesReservation)
 					return eCannotPlaySound;
+				std::optional<SoundCommand> reservedCommand;
+				if (consumesReservation)
+				{
+					reservedCommand        = command;
+					reservedCommand->pan   = channel.pan;
+					reservedCommand->pitch = channel.pitch;
+				}
+				const SoundCommand &playbackCommand = reservedCommand ? *reservedCommand : command;
+				const double        playbackGain =
+				    consumesReservation ? channel.volume : normalizeSoundVolume(command.volume);
 
 				QString                       resolved;
 				std::optional<SoundSourceKey> key;
@@ -4846,7 +5695,7 @@ namespace
 					for (qsizetype offset = 0; offset < command.files.size(); ++offset)
 					{
 						const QString &candidate = command.files.at((start + offset) % command.files.size());
-						key                      = resolveFile(session, candidate, resolved);
+						key = resolveFile(session, candidate, resolved, SoundFileResolution::SelectedSource);
 						if (key)
 						{
 							break;
@@ -4854,7 +5703,8 @@ namespace
 					}
 				}
 				else
-					key = resolveFile(session, command.text, resolved);
+					key = command.fileResolutionComplete ? command.fileSource
+					                                     : resolveFile(session, command.text, resolved);
 				if (!key)
 				{
 					const bool retainPendingNativeResolution = consumesReservation && nativeSound &&
@@ -4862,13 +5712,15 @@ namespace
 					                                           channel.nativeResolutionPending;
 					if (consumesReservation && !retainPendingNativeResolution)
 					{
-						releaseChannel(session, channelIndex);
-						publishSnapshotIfChanged(session);
+						static_cast<void>(stop(command.sessionId, channelIndex + 1, command.ownershipKind,
+						                       command.ownershipGeneration));
 					}
 					return eFileNotFound;
 				}
 				if (channel.backend && channel.backend->key == *key)
 				{
+					cancelPendingFile(session,
+					                  session.pendingFileByChannel[static_cast<std::size_t>(channelIndex)]);
 					if (channel.ownershipKind == SoundOwnershipKind::LuaAudio)
 						finishLuaAudioOwnership(session, channelIndex, channel.ownershipGeneration,
 						                        channel.luaAudioOwnershipConfirmed);
@@ -4878,7 +5730,8 @@ namespace
 					backend->channel              = -1;
 					backend->assignmentGeneration = 0;
 					stopBackend(*backend);
-					assignAndPlay(session, channelIndex, *backend, command, command.ownershipGeneration);
+					assignAndPlay(session, channelIndex, *backend, playbackCommand, playbackGain,
+					              command.ownershipGeneration);
 					selectedBuffer = channelIndex + 1;
 					return eOK;
 				}
@@ -4888,8 +5741,8 @@ namespace
 				{
 					if (consumesReservation)
 					{
-						releaseChannel(session, channelIndex);
-						publishSnapshotIfChanged(session);
+						static_cast<void>(stop(command.sessionId, channelIndex + 1, command.ownershipKind,
+						                       command.ownershipGeneration));
 					}
 					reportPlaybackError(command.sessionId, lease.failureMessage);
 					return eCannotPlaySound;
@@ -4898,8 +5751,8 @@ namespace
 					channel = {};
 				else
 					releaseChannel(session, channelIndex);
-				assignAndPlay(session, channelIndex, *lease.backend, command, command.ownershipGeneration,
-				              reservationOwnershipConfirmed);
+				assignAndPlay(session, channelIndex, *lease.backend, playbackCommand, playbackGain,
+				              command.ownershipGeneration, reservationOwnershipConfirmed);
 				selectedBuffer = channelIndex + 1;
 				return eOK;
 			}
@@ -4918,8 +5771,10 @@ namespace
 				if (command.bytes.isEmpty() || command.buffer < 0 ||
 				    command.buffer > SoundEngineSession::kChannelCount)
 					return eBadParameter;
-				WorkerSession &session      = sessionIt.value();
-				const int      channelIndex = selectChannel(session, command.buffer);
+				WorkerSession &session = sessionIt.value();
+				if (command.ownershipKind == SoundOwnershipKind::LuaAudio && !session.luaAudioInitialized)
+					return eCannotPlaySound;
+				const int channelIndex = selectChannel(session, command.buffer);
 				if (channelIndex < 0)
 					return eCannotPlaySound;
 				ensureMemoryPreparationPool();
@@ -4932,15 +5787,14 @@ namespace
 				channel.ownershipGeneration      = command.ownershipGeneration;
 				channel.ownershipKind            = command.ownershipKind;
 				channel.pendingMemoryOperationId = operationId;
+				assignChannelControls(channel, command.repeatCount, normalizeSoundVolume(command.volume),
+				                      command.pan);
 
 				PendingMemoryPlay pending;
 				pending.sessionId            = command.sessionId;
 				pending.operationId          = operationId;
 				pending.assignmentGeneration = channel.assignmentGeneration;
 				pending.channelIndex         = channelIndex;
-				pending.loop                 = command.loop;
-				pending.volume               = command.volume;
-				pending.pan                  = command.pan;
 				pending.luaAudioGeneration   = command.ownershipGeneration;
 				pending.payload              = std::move(command.bytes);
 				pending.completion           = std::move(command.completion);
@@ -5084,9 +5938,11 @@ namespace
 				}
 				if (!resource)
 				{
-					channel = {};
+					const bool ownershipConfirmed = channel.luaAudioOwnershipConfirmed;
+					channel                       = {};
 					publishSnapshotIfChanged(session);
-					finishLuaAudioOwnership(session, pending.channelIndex, pending.luaAudioGeneration, false);
+					finishLuaAudioOwnership(session, pending.channelIndex, pending.luaAudioGeneration,
+					                        ownershipConfirmed);
 					if (pending.completion)
 						pending.completion->complete(eCannotPlaySound);
 					return;
@@ -5100,9 +5956,11 @@ namespace
 				SoundBackendLease lease = leaseMemoryBackend(key, resource);
 				if (!lease.backend)
 				{
-					channel = {};
+					const bool ownershipConfirmed = channel.luaAudioOwnershipConfirmed;
+					channel                       = {};
 					publishSnapshotIfChanged(session);
-					finishLuaAudioOwnership(session, pending.channelIndex, pending.luaAudioGeneration, false);
+					finishLuaAudioOwnership(session, pending.channelIndex, pending.luaAudioGeneration,
+					                        ownershipConfirmed);
 					reportPlaybackError(pending.sessionId, lease.failureMessage);
 					if (pending.completion)
 						pending.completion->complete(eCannotPlaySound);
@@ -5110,35 +5968,48 @@ namespace
 				}
 
 				SoundCommand play;
-				play.sessionId   = pending.sessionId;
-				play.loop        = pending.loop;
-				play.repeatCount = pending.loop ? -1 : 1;
-				play.volume      = pending.volume;
-				play.pan         = pending.pan;
-				play.ownershipKind =
-				    pending.luaAudioGeneration == 0 ? SoundOwnershipKind::None : SoundOwnershipKind::LuaAudio;
-				channel = {};
-				assignAndPlay(session, pending.channelIndex, *lease.backend, play,
-				              pending.luaAudioGeneration);
+				play.sessionId                  = pending.sessionId;
+				play.loop                       = channel.looping;
+				play.repeatCount                = channel.repeatCount;
+				play.pan                        = channel.pan;
+				play.pitch                      = channel.pitch;
+				play.ownershipKind              = channel.ownershipKind;
+				const double gain               = channel.volume;
+				const bool   ownershipConfirmed = channel.luaAudioOwnershipConfirmed;
+				channel                         = {};
+				assignAndPlay(session, pending.channelIndex, *lease.backend, play, gain,
+				              pending.luaAudioGeneration, ownershipConfirmed);
 				if (pending.completion)
-					pending.completion->complete(eOK, pending.channelIndex + 1);
+					pending.completion->complete(
+					    eOK, pending.channelIndex + 1,
+					    pending.completion->captureSnapshot
+					        ? session.publishedState->snapshot.load(std::memory_order_acquire)
+					        : nullptr);
 			}
 
+			/**
+			 * @brief Reserves a validated source request and its captured initial controls.
+			 * @param command Generation-scoped delayed-play reservation.
+			 * @param selectedBuffer Destination receiving the reserved one-based channel.
+			 * @return MUSHclient-compatible reservation status.
+			 */
 			int reserveLuaAudioChannel(const SoundCommand &command, int &selectedBuffer)
 			{
 				auto sessionIt = m_sessions.find(command.sessionId);
 				if (sessionIt == m_sessions.end() || command.text.isEmpty() ||
-				    command.ownershipGeneration == 0)
+				    command.ownershipGeneration == 0 || !sessionIt->luaAudioInitialized)
 					return eCannotPlaySound;
 				WorkerSession &session = sessionIt.value();
-				QString        resolved;
-				if (!resolveFileInfo(session, command.text, resolved, true))
+				if (!command.fileSource)
 					return eFileNotFound;
 				for (int channelIndex = 0; channelIndex < SoundEngineSession::kChannelCount; ++channelIndex)
 				{
 					const SoundChannel &candidate = session.channels[static_cast<std::size_t>(channelIndex)];
-					const bool reusable = !candidate.allocated || (candidate.playbackStarted &&
-					                                               !candidate.looping && !candidate.playing);
+					const bool          reusable =
+					    (command.buffer == 0 || command.buffer == channelIndex + 1) &&
+					    session.pendingFileByChannel[static_cast<std::size_t>(channelIndex)] == 0 &&
+					    (!candidate.allocated ||
+					     (candidate.playbackStarted && !candidate.looping && !candidate.playing));
 					if (!reusable)
 						continue;
 					releaseChannel(session, channelIndex);
@@ -5146,6 +6017,9 @@ namespace
 					reserved.allocated           = true;
 					reserved.ownershipGeneration = command.ownershipGeneration;
 					reserved.ownershipKind       = SoundOwnershipKind::LuaAudio;
+					reserved.volume              = normalizeSoundVolume(command.volume);
+					reserved.pan                 = command.pan;
+					reserved.pitch               = command.pitch;
 					publishSnapshotIfChanged(session);
 					selectedBuffer = channelIndex + 1;
 					return eOK;
@@ -5174,40 +6048,167 @@ namespace
 				return eOK;
 			}
 
-			static int updateChannel(WorkerSession &session, const int channelIndex, const int repeatCount,
-			                         const double volume, const double pan)
+			/**
+			 * @brief Changes one live or reserved LuaAudio attribute under its captured ownership generation.
+			 * @param command Typed control command accepted through the session FIFO.
+			 * @return MUSHclient status code for the current assignment.
+			 */
+			int setLuaAudioAttribute(const SoundCommand &command)
 			{
-				SoundChannel &channel = session.channels[static_cast<std::size_t>(channelIndex)];
-				if (!channel.backend)
+				auto session = m_sessions.find(command.sessionId);
+				if (session == m_sessions.end() || command.buffer < 0 ||
+				    command.buffer > SoundEngineSession::kChannelCount)
+					return eCannotPlaySound;
+				if (command.buffer == 0)
 				{
-					if (!channel.nativeResolutionPending ||
-					    channel.ownershipKind != SoundOwnershipKind::NativeSound)
+					if (command.attribute != QMudSoundAttribute::Volume || command.ownershipGeneration != 0 ||
+					    command.duration.count() != 0 || command.stopAtEnd)
+						return eBadParameter;
+					for (SoundChannel &channel : session->channels)
 					{
-						return channel.allocated && channel.playbackStarted ? eCannotPlaySound
-						                                                    : eBadParameter;
+						if (channel.ownershipKind != SoundOwnershipKind::LuaAudio || !channel.playing ||
+						    !channel.backend || !channel.backend->stream)
+							continue;
+						channel.backend->stream->setGlobalVolume(qBound(0.0, command.volume / 100.0, 1.0));
+						updatePcmChannelParameters(channel);
 					}
-					channel.repeatCount    = repeatCount;
-					channel.remainingPlays = repeatCount < 0 ? -1 : repeatCount - 1;
-					channel.looping        = repeatCount < 0;
-					channel.volume         = normalizeSoundVolume(volume);
-					channel.pan            = pan;
-					publishSnapshotIfChanged(session);
+					publishSnapshotIfChanged(*session);
 					return eOK;
 				}
-				if (!channel.playing)
+				SoundChannel &channel = session->channels[static_cast<std::size_t>(command.buffer - 1)];
+				if (channel.ownershipKind != SoundOwnershipKind::LuaAudio ||
+				    channel.ownershipGeneration != command.ownershipGeneration)
 					return eCannotPlaySound;
+				if (command.stopAtEnd && command.duration.count() == 0)
+					return stop(command.sessionId, command.buffer, SoundOwnershipKind::LuaAudio,
+					            command.ownershipGeneration);
+				const double value = command.attribute == QMudSoundAttribute::Volume
+				                         ? qBound(0.0, command.volume / 100.0, 1.0)
+				                         : command.volume;
+				if (channel.backend && channel.backend->stream)
+					channel.backend->stream->setAttribute(command.attribute, value, command.duration,
+					                                      command.stopAtEnd, command.targetMode);
+				else
+				{
+					if (command.stopAtEnd)
+						return eCannotPlaySound;
+					switch (command.attribute)
+					{
+					case QMudSoundAttribute::Volume:
+						channel.volume = value;
+						break;
+					case QMudSoundAttribute::Pan:
+						channel.pan = value;
+						break;
+					case QMudSoundAttribute::Pitch:
+					{
+						const double target = command.targetMode == QMudSoundAttributeTarget::Relative
+						                          ? channel.pitch + value
+						                          : value;
+						if (!qIsFinite(target))
+							return eBadParameter;
+						channel.pitch = target;
+						break;
+					}
+					}
+				}
+				updatePcmChannelParameters(channel);
+				publishSnapshotIfChanged(*session);
+				return eOK;
+			}
+
+			/**
+			 * @brief Assigns complete logical playback controls using an already normalized gain.
+			 * @param channel Current or reserved assignment whose ownership kind determines repeat routing.
+			 * @param repeatCount Total iterations, or minus one for indefinite playback.
+			 * @param gain Linear playback gain.
+			 * @param pan Compatibility balance.
+			 */
+			static void assignChannelControls(SoundChannel &channel, const int repeatCount, const double gain,
+			                                  const double pan)
+			{
 				channel.repeatCount = repeatCount;
 				channel.looping     = repeatCount < 0;
+				channel.backendLooping =
+				    channel.ownershipKind != SoundOwnershipKind::NativeSound && repeatCount < 0;
 				if (channel.ownershipKind == SoundOwnershipKind::NativeSound)
-				{
 					channel.remainingPlays = repeatCount < 0 ? -1 : repeatCount - 1;
-					channel.backendLooping = false;
-				}
-				else
-					channel.backendLooping = repeatCount < 0;
-				channel.volume = normalizeSoundVolume(volume);
+				channel.volume = gain;
 				channel.pan    = pan;
-				applyBackendParameters(*channel.backend, channel);
+			}
+
+			/**
+			 * @brief Updates ordered playback parameters for the current assignment and its pending replacement.
+			 * @param session Owning session.
+			 * @param channelIndex Zero-based channel.
+			 * @param repeatCount Requested total iterations, or minus one for looping.
+			 * @param volume MUSHclient volume.
+			 * @param pan Requested balance.
+			 * @param owner Optional ownership guard on the update.
+			 * @param generation Guarded ownership generation.
+			 * @return Compatible status for the accepted update.
+			 */
+			int updateChannel(WorkerSession &session, const int channelIndex, const int repeatCount,
+			                  const double volume, const double pan,
+			                  const SoundOwnershipKind owner      = SoundOwnershipKind::None,
+			                  const quint64            generation = 0)
+			{
+				SoundChannel &channel       = session.channels[static_cast<std::size_t>(channelIndex)];
+				bool          memoryPending = false;
+				if (channel.pendingMemoryOperationId != 0)
+				{
+					const auto memory = m_pendingMemoryPlays.constFind(channel.pendingMemoryOperationId);
+					memoryPending     = channel.allocated && memory != m_pendingMemoryPlays.cend() &&
+					                    memory->sessionId == session.sessionId &&
+					                    memory->channelIndex == channelIndex &&
+					                    memory->assignmentGeneration == channel.assignmentGeneration;
+				}
+				bool fileUpdated = false;
+				auto pending     = session.pendingFiles.find(
+				    session.pendingFileByChannel[static_cast<std::size_t>(channelIndex)]);
+				if (pending == session.pendingFiles.end() ||
+				    (owner != SoundOwnershipKind::None &&
+				     (pending->command.ownershipKind != owner ||
+				      pending->command.ownershipGeneration != generation)))
+					pending = session.pendingFiles.find(channel.pendingFileOperationId);
+				if (pending != session.pendingFiles.end() &&
+				    (owner == SoundOwnershipKind::None ||
+				     (pending->command.ownershipKind == owner &&
+				      pending->command.ownershipGeneration == generation)))
+				{
+					SoundCommand &target = pending->commit ? *pending->commit : pending->command;
+					target.loop          = repeatCount < 0;
+					target.repeatCount   = repeatCount;
+					target.volume        = volume;
+					target.pan           = pan;
+					fileUpdated          = true;
+				}
+				const bool nativePending = channel.nativeResolutionPending &&
+				                           channel.ownershipKind == SoundOwnershipKind::NativeSound;
+				if (!memoryPending && !nativePending && (!channel.backend || !channel.playing))
+				{
+					if (fileUpdated)
+					{
+						if (channel.allocated)
+						{
+							channel.volume = normalizeSoundVolume(volume);
+							channel.pan    = pan;
+							publishSnapshotIfChanged(session);
+						}
+						return eOK;
+					}
+					return channel.backend || (channel.allocated && channel.playbackStarted)
+					           ? eCannotPlaySound
+					           : eBadParameter;
+				}
+				assignChannelControls(channel, repeatCount, normalizeSoundVolume(volume), pan);
+				if (channel.backend)
+				{
+					SoundBackend &backend = *channel.backend;
+					applyBackendParameters(backend, channel);
+					if (!reconcileDecoderEnd(backend))
+						return eCannotPlaySound;
+				}
 				publishSnapshotIfChanged(session);
 				return eOK;
 			}
@@ -5218,8 +6219,7 @@ namespace
 				if (sessionIt == m_sessions.end())
 					return;
 				WorkerSession &session = sessionIt.value();
-				QString        resolved;
-				const auto     key = resolveFile(session, command.text, resolved);
+				const auto     key     = command.fileSource;
 				if (!key)
 				{
 					session.prepared.insert(command.token, {nullptr, eFileNotFound, {}});
@@ -5263,7 +6263,8 @@ namespace
 				}
 				prepared.backend->preparationToken = 0;
 				releaseChannel(session, channelIndex);
-				assignAndPlay(session, channelIndex, *prepared.backend, command, 0);
+				assignAndPlay(session, channelIndex, *prepared.backend, command,
+				              normalizeSoundVolume(command.volume), 0);
 				return eOK;
 			}
 
@@ -5275,6 +6276,11 @@ namespace
 				auto preparedIt = sessionIt->prepared.find(token);
 				if (preparedIt == sessionIt->prepared.end())
 					return;
+				if (preparedIt->pendingLookupId != 0)
+				{
+					cancelPendingFile(sessionIt.value(), preparedIt->pendingLookupId);
+					return;
+				}
 				SoundBackend *backend         = preparedIt->backend;
 				const qint64  retainedAtMsecs = preparedIt->retainedAtMsecs;
 				sessionIt->prepared.erase(preparedIt);
@@ -5314,7 +6320,16 @@ namespace
 				if (ownershipKind != SoundOwnershipKind::None &&
 				    (channel.ownershipKind != ownershipKind || channel.ownershipGeneration != generation))
 					return eCannotPlaySound;
-				releaseChannel(sessionIt.value(), buffer - 1);
+				bool cancelLookup = true;
+				if (ownershipKind != SoundOwnershipKind::None)
+				{
+					const auto pending = sessionIt->pendingFiles.constFind(
+					    sessionIt->pendingFileByChannel[static_cast<std::size_t>(buffer - 1)]);
+					cancelLookup = pending == sessionIt->pendingFiles.cend() ||
+					               (pending->command.ownershipKind == ownershipKind &&
+					                pending->command.ownershipGeneration == generation);
+				}
+				releaseChannel(sessionIt.value(), buffer - 1, true, cancelLookup);
 				publishSnapshotIfChanged(sessionIt.value());
 				return eOK;
 			}
@@ -5325,6 +6340,7 @@ namespace
 				if (sessionIt == m_sessions.end())
 					return false;
 				WorkerSession &session = sessionIt.value();
+				cancelPendingFiles(session);
 				for (PreparedSound &prepared : session.prepared)
 				{
 					if (prepared.backend)
@@ -5445,16 +6461,10 @@ namespace
 			SoundBackendLease initializeBackendSource(SoundBackend &backend, const QString &fileName)
 			{
 				Q_ASSERT(backend.player);
-				Q_ASSERT(backend.audioOutput);
-				connect(backend.player.get(), &QMediaPlayer::errorOccurred, this,
+				Q_ASSERT(backend.bufferOutput);
+				connect(backend.player.get(), &QMediaPlayer::errorOccurred, backend.player.get(),
 				        [this, raw = &backend](const QMediaPlayer::Error error, const QString &text)
 				        { handlePlayerError(*raw, error, text); });
-				connect(backend.player.get(), &QMediaPlayer::playbackStateChanged, this,
-				        [this, raw = &backend](const QMediaPlayer::PlaybackState state)
-				        { handlePlayerState(*raw, state); });
-				connect(backend.player.get(), &QMediaPlayer::positionChanged, this,
-				        [this, raw = &backend](const qint64 position)
-				        { handlePlayerPosition(*raw, position); });
 				backend.player->setSource(QUrl::fromLocalFile(fileName));
 				return finishBackendInitialization(backend);
 			}
@@ -5496,12 +6506,14 @@ namespace
 			 * @param channelIndex Zero-based destination channel.
 			 * @param backend Prepared backend to attach.
 			 * @param command Playback parameters and ownership kind.
+			 * @param gain Linear playback gain retained from the reservation or normalized at command entry.
 			 * @param ownershipGeneration Generation associated with the native owner.
 			 * @param luaAudioOwnershipConfirmed Whether LuaAudio has confirmed its reserved ownership.
 			 */
 			void assignAndPlay(WorkerSession &session, const int channelIndex, SoundBackend &backend,
-			                   const SoundCommand &command, const quint64 ownershipGeneration,
-			                   const bool luaAudioOwnershipConfirmed = false)
+			                   const SoundCommand &command, const double gain,
+			                   const quint64 ownershipGeneration,
+			                   const bool    luaAudioOwnershipConfirmed = false)
 			{
 				SoundChannel &channel              = session.channels[static_cast<std::size_t>(channelIndex)];
 				channel.backend                    = &backend;
@@ -5512,17 +6524,12 @@ namespace
 				channel.allocated                  = true;
 				channel.playing                    = true;
 				channel.playbackStarted            = false;
-				channel.repeatCount                = command.repeatCount;
-				channel.looping                    = command.repeatCount < 0;
-				channel.backendLooping =
-				    command.ownershipKind != SoundOwnershipKind::NativeSound && command.repeatCount < 0;
+				assignChannelControls(channel, command.repeatCount, gain, command.pan);
 				if (command.ownershipKind == SoundOwnershipKind::NativeSound)
 				{
-					channel.playbackFiles  = command.files;
-					channel.remainingPlays = command.repeatCount < 0 ? -1 : command.repeatCount - 1;
+					channel.playbackFiles = command.files;
 				}
-				channel.volume               = normalizeSoundVolume(command.volume);
-				channel.pan                  = command.pan;
+				channel.pitch                = command.pitch;
 				backend.sessionId            = command.sessionId;
 				backend.channel              = channelIndex;
 				backend.assignmentGeneration = channel.assignmentGeneration;
@@ -5548,41 +6555,118 @@ namespace
 				if (backend.player)
 				{
 					backend.player->setPosition(0);
+					backend.player->setPlaybackRate(1.0);
+					backend.lastPcmFrame             = 0;
+					backend.decodingFinished         = false;
+					backend.decoderEndBufferReceived = false;
+					backend.flowPaused               = false;
+					backend.stream = std::make_shared<SoundPcmStream>(backend.sink->format(), channel.volume,
+					                                                  channel.pan, channel.pitch);
+					const std::weak_ptr<SoundPcmStream> weak = backend.stream;
+					backend.stateConnection                  = connect(
+					    backend.player.get(), &QMediaPlayer::playbackStateChanged, backend.player.get(),
+					    [this, raw = &backend, weak](const QMediaPlayer::PlaybackState state)
+					    {
+						    if (const auto stream = weak.lock(); stream && raw->stream == stream)
+							    handlePlayerState(*raw, state);
+					    });
+					backend.positionConnection =
+					    connect(backend.player.get(), &QMediaPlayer::positionChanged, backend.player.get(),
+					            [this, raw = &backend, weak](const qint64 position)
+					            {
+						            if (const auto stream = weak.lock(); stream && raw->stream == stream)
+							            handlePlayerPosition(*raw, position);
+					            });
+					backend.bufferConnection = connect(
+					    backend.bufferOutput, &QAudioBufferOutput::audioBufferReceived, backend.player.get(),
+					    [this, raw = &backend, weak](const QAudioBuffer &buffer)
+					    {
+						    const auto stream = weak.lock();
+						    if (!stream || raw->stream != stream || raw->retiring || raw->channel < 0)
+							    return;
+						    handleDecoderBuffer(*raw, buffer);
+					    });
+					switch (backend.sink->format().sampleFormat())
+					{
+					case QAudioFormat::Float:
+						backend.sink->start([weak](QSpan<float> samples) { renderSoundPcm(weak, samples); });
+						break;
+					case QAudioFormat::Int16:
+						backend.sink->start([weak](QSpan<qint16> samples) { renderSoundPcm(weak, samples); });
+						break;
+					case QAudioFormat::Int32:
+						backend.sink->start([weak](QSpan<qint32> samples) { renderSoundPcm(weak, samples); });
+						break;
+					case QAudioFormat::UInt8:
+						backend.sink->start([weak](QSpan<quint8> samples) { renderSoundPcm(weak, samples); });
+						break;
+					default:
+						Q_UNREACHABLE();
+					}
+					m_pcmControlTimer->start();
 					channel.lastPlaybackPosition = backend.player->position();
 					backend.player->play();
 				}
 				ensurePlaybackWatchdog();
 			}
 
+			/**
+			 * @brief Applies complete MUSHclient buffer parameters while LuaAudio controls remain independent.
+			 * @param backend Assigned decoder and PCM transport.
+			 * @param channel Worker-owned complete buffer parameters.
+			 */
 			static void applyBackendParameters(const SoundBackend &backend, const SoundChannel &channel)
 			{
 				if (backend.player)
 					backend.player->setLoops(channel.backendLooping ? QMediaPlayer::Infinite
 					                                                : QMediaPlayer::Once);
-				if (backend.audioOutput)
-					backend.audioOutput->setVolume(static_cast<float>(channel.volume));
+				if (backend.stream)
+				{
+					backend.stream->setAttribute(QMudSoundAttribute::Volume, channel.volume,
+					                             std::chrono::milliseconds{0});
+					backend.stream->setAttribute(QMudSoundAttribute::Pan, channel.pan,
+					                             std::chrono::milliseconds{0});
+				}
 			}
 
+			/**
+			 * @brief Disconnects assignment callbacks, flushes output, and releases bounded PCM storage.
+			 * @param backend Decoder retained for later source-matched reuse.
+			 */
 			static void stopBackend(SoundBackend &backend)
 			{
+				backend.disconnectPlaybackSignals();
+				if (backend.sink)
+					backend.sink->reset();
+				backend.stream.reset();
 				if (backend.player)
 					backend.player->stop();
 				backend.started = false;
 			}
 
+			/**
+			 * @brief Releases one assignment and optionally cancels its pending replacement.
+			 * @param session Owning session.
+			 * @param channelIndex Zero-based channel.
+			 * @param reportLuaAudioCompletion Whether to release LuaAudio ownership.
+			 * @param cancelFileLookup Whether this transition also cancels an independent pending replacement.
+			 */
 			void releaseChannel(WorkerSession &session, const int channelIndex,
-			                    const bool reportLuaAudioCompletion = true)
+			                    const bool reportLuaAudioCompletion = true,
+			                    const bool cancelFileLookup         = true)
 			{
-				SoundChannel &channel      = session.channels[static_cast<std::size_t>(channelIndex)];
-				const bool    stopPlayback = channel.playing;
+				if (cancelFileLookup)
+					cancelPendingFile(session,
+					                  session.pendingFileByChannel[static_cast<std::size_t>(channelIndex)]);
+				const SoundChannel channel =
+				    std::exchange(session.channels[static_cast<std::size_t>(channelIndex)], {});
+				const bool stopPlayback = channel.playing;
 				if (channel.pendingMemoryOperationId != 0)
 					cancelPendingMemoryPlay(channel.pendingMemoryOperationId);
 				if (reportLuaAudioCompletion && channel.ownershipKind == SoundOwnershipKind::LuaAudio)
 					finishLuaAudioOwnership(session, channelIndex, channel.ownershipGeneration,
 					                        channel.luaAudioOwnershipConfirmed);
-				SoundBackend *backend = channel.backend;
-				channel               = {};
-				if (backend)
+				if (SoundBackend *backend = channel.backend)
 				{
 					backend->sessionId            = 0;
 					backend->channel              = -1;
@@ -5590,6 +6674,11 @@ namespace
 					if (stopPlayback)
 						stopBackend(*backend);
 					releaseBackend(*backend);
+				}
+				if (channel.pendingFileOperationId != 0)
+				{
+					publishSnapshotIfChanged(session);
+					cancelPendingFile(session, channel.pendingFileOperationId);
 				}
 			}
 
@@ -5631,6 +6720,7 @@ namespace
 			 */
 			void retainCompletedBackend(SoundBackend &backend, const qint64 completedAtMsecs)
 			{
+				stopBackend(backend);
 				backend.sessionId            = 0;
 				backend.channel              = -1;
 				backend.assignmentGeneration = 0;
@@ -5683,7 +6773,8 @@ namespace
 					const QString &candidate =
 					    channel.playbackFiles.at((start + offset) % channel.playbackFiles.size());
 					QString    resolved;
-					const auto key = resolveFile(session, candidate, resolved);
+					const auto key =
+					    resolveFile(session, candidate, resolved, SoundFileResolution::SelectedSource);
 					if (!key)
 						continue;
 					SoundBackendLease lease = leaseBackend(*key);
@@ -5742,6 +6833,104 @@ namespace
 					finishLuaAudioOwnership(session, channelIndex, ownershipGeneration, ownershipConfirmed);
 			}
 
+			/**
+			 * @brief Reconciles terminal decoder notifications with the current assignment's repeat policy.
+			 * @param backend Decoder whose stopped state and final buffer are independently recorded.
+			 * @return Whether the same assignment remains current after any synchronous Qt callbacks.
+			 */
+			[[nodiscard]] bool reconcileDecoderEnd(SoundBackend &backend)
+			{
+				const quint64 sessionId    = backend.sessionId;
+				const int     channelIndex = backend.channel;
+				const quint64 generation   = backend.assignmentGeneration;
+				const auto    stream       = backend.stream;
+				const auto    current      = [this, &backend, sessionId, channelIndex, generation, &stream]
+				{
+					const auto session = m_sessions.constFind(sessionId);
+					if (backend.retiring || !stream || backend.stream != stream ||
+					    backend.sessionId != sessionId || backend.channel != channelIndex ||
+					    backend.assignmentGeneration != generation || session == m_sessions.cend() ||
+					    channelIndex < 0 || channelIndex >= SoundEngineSession::kChannelCount)
+						return false;
+					const SoundChannel &channel = session->channels[static_cast<std::size_t>(channelIndex)];
+					return channel.backend == &backend && channel.assignmentGeneration == generation &&
+					       channel.playing;
+				};
+				if (!current())
+					return false;
+				if (!backend.decodingFinished || !backend.decoderEndBufferReceived)
+					return true;
+				const auto          state = stream->state();
+				const SoundChannel &channel =
+				    m_sessions.constFind(sessionId)->channels[static_cast<std::size_t>(channelIndex)];
+				if (!channel.backendLooping || state.faded)
+				{
+					stream->finish();
+					return true;
+				}
+				if (backend.player->error() != QMediaPlayer::NoError)
+				{
+					handlePlayerError(backend, backend.player->error(), backend.player->errorString());
+					return false;
+				}
+				if (backend.sink->error() != QtAudio::NoError)
+				{
+					static_cast<void>(
+					    failActiveBackend(backend, QStringLiteral("QMud sound output failed.")));
+					return false;
+				}
+				stream->reopenInput();
+				backend.decodingFinished         = false;
+				backend.decoderEndBufferReceived = false;
+				backend.flowPaused               = state.highWater || (backend.flowPaused && !state.lowWater);
+				backend.player->setPosition(0);
+				if (!current())
+					return false;
+				backend.player->setPlaybackRate(state.playbackRate);
+				if (!current())
+					return false;
+				if (backend.flowPaused)
+					backend.player->pause();
+				else
+					backend.player->play();
+				return current();
+			}
+
+			/**
+			 * @brief Accepts PCM or records the final buffer before reconciling a possible loop continuation.
+			 * @param backend Current assignment's decoder.
+			 * @param buffer Decoded PCM, or the terminal empty buffer.
+			 */
+			void handleDecoderBuffer(SoundBackend &backend, const QAudioBuffer &buffer)
+			{
+				const auto session = m_sessions.constFind(backend.sessionId);
+				if (backend.retiring || !backend.stream || backend.channel < 0 ||
+				    session == m_sessions.cend())
+					return;
+				const SoundChannel &channel = session->channels[static_cast<std::size_t>(backend.channel)];
+				if (channel.backend != &backend ||
+				    channel.assignmentGeneration != backend.assignmentGeneration || !channel.playing)
+					return;
+				if (!buffer.isValid())
+				{
+					backend.decoderEndBufferReceived = true;
+					if (!channel.backendLooping)
+						backend.stream->finish();
+					static_cast<void>(reconcileDecoderEnd(backend));
+					return;
+				}
+				backend.decoderEndBufferReceived = false;
+				if (!backend.stream->append(buffer))
+					handleBackendError(
+					    backend,
+					    QStringLiteral("QMud sound PCM format changed or exceeded its streaming bound."));
+			}
+
+			/**
+			 * @brief Records decoder progress while final playback completion waits for the PCM output to drain.
+			 * @param backend Backend validated against its assignment-scoped callback.
+			 * @param state Decoder playback state.
+			 */
 			void handlePlayerState(SoundBackend &backend, const QMediaPlayer::PlaybackState state)
 			{
 				if (backend.channel < 0 || backend.sessionId == 0)
@@ -5761,10 +6950,10 @@ namespace
 					publishSnapshotIfChanged(sessionIt.value());
 					return;
 				}
-				if (state != QMediaPlayer::StoppedState || !channel.playbackStarted ||
-				    channel.backendLooping || !channel.playing)
+				if (state != QMediaPlayer::StoppedState || !channel.playbackStarted || !channel.playing)
 					return;
-				completeChannelPlayback(sessionIt.value(), backend.channel);
+				backend.decodingFinished = true;
+				static_cast<void>(reconcileDecoderEnd(backend));
 			}
 
 			/**
@@ -5982,7 +7171,7 @@ namespace
 			}
 
 			/**
-			 * @brief Publishes one immutable channel snapshot when callback-visible state changed.
+			 * @brief Publishes one immutable channel snapshot when callback-visible status or volume changes.
 			 * @param session Worker session whose channels are projected.
 			 */
 			static void publishSnapshotIfChanged(const WorkerSession &session)
@@ -5991,9 +7180,12 @@ namespace
 					return;
 				const auto previous = session.publishedState->snapshot.load(std::memory_order_acquire);
 				SoundEngineSession::Snapshot candidate;
+				candidate.sessionId = session.sessionId;
 				for (int i = 0; i < SoundEngineSession::kChannelCount; ++i)
 				{
 					const SoundChannel &channel = session.channels[static_cast<std::size_t>(i)];
+					candidate.volume[static_cast<std::size_t>(i)] =
+					    channel.allocated ? channel.volume * 100.0 : 0.0;
 					if (!channel.allocated)
 						candidate.status[static_cast<std::size_t>(i)] = -2;
 					else if (!channel.playing)
@@ -6001,7 +7193,8 @@ namespace
 					else
 						candidate.status[static_cast<std::size_t>(i)] = channel.looping ? 2 : 1;
 				}
-				if (previous && previous->status == candidate.status)
+				if (previous && previous->sessionId == candidate.sessionId &&
+				    previous->status == candidate.status && previous->volume == candidate.volume)
 					return;
 				candidate.revision = previous ? previous->revision + 1 : 1;
 				auto snapshot      = std::make_shared<SoundEngineSession::Snapshot>(candidate);
@@ -6010,12 +7203,90 @@ namespace
 				    std::memory_order_release);
 			}
 
+			/**
+			 * @brief Samples current PCM controls without accessing the callback's transport internals.
+			 * @param channel Current worker-owned channel.
+			 */
+			static void updatePcmChannelParameters(SoundChannel &channel)
+			{
+				if (!channel.backend || !channel.backend->stream)
+					return;
+				const auto state = channel.backend->stream->state();
+				channel.volume   = state.volume;
+				channel.pan      = state.pan;
+				channel.pitch    = state.pitch;
+			}
+
+			/** @brief Applies streaming backpressure and publishes controls against actual sink progress. */
+			void updatePcmPlayback()
+			{
+				bool active = false;
+				for (WorkerSession &session : m_sessions)
+				{
+					for (int index = 0; index < SoundEngineSession::kChannelCount; ++index)
+					{
+						SoundChannel &channel = session.channels[static_cast<std::size_t>(index)];
+						SoundBackend *backend = channel.backend;
+						if (!backend || !backend->stream || !channel.playing)
+							continue;
+						active           = true;
+						const auto state = backend->stream->state();
+						channel.volume   = state.volume;
+						channel.pan      = state.pan;
+						channel.pitch    = state.pitch;
+						if (state.lastOutputFrame != backend->lastPcmFrame)
+						{
+							backend->lastPcmFrame             = state.lastOutputFrame;
+							channel.lastPlaybackProgressMsecs = currentTimeMsecs();
+						}
+						if (backend->sink->error() != QtAudio::NoError)
+						{
+							static_cast<void>(
+							    failActiveBackend(*backend, QStringLiteral("QMud sound output failed.")));
+							continue;
+						}
+						const bool outputDrained =
+						    state.renderedFrames >=
+						    state.lastOutputFrame + qMax<qsizetype>(0, backend->sink->bufferFrameCount());
+						if (state.faded && outputDrained)
+						{
+							releaseChannel(session, index, true, false);
+							continue;
+						}
+						if (backend->decodingFinished && state.drained && outputDrained)
+						{
+							completeChannelPlayback(session, index);
+							continue;
+						}
+						if (!qFuzzyCompare(backend->player->playbackRate(), state.playbackRate))
+							backend->player->setPlaybackRate(state.playbackRate);
+						if (!backend->decodingFinished)
+						{
+							if (state.highWater && !backend->flowPaused)
+							{
+								backend->flowPaused = true;
+								backend->player->pause();
+							}
+							else if (state.lowWater && backend->flowPaused)
+							{
+								backend->flowPaused = false;
+								backend->player->play();
+							}
+						}
+					}
+					publishSnapshotIfChanged(session);
+				}
+				if (!active)
+					m_pcmControlTimer->stop();
+			}
+
 			void resetForAudioDeviceChange()
 			{
 				invalidateCachedFileSources();
 				for (auto sessionIt = m_sessions.begin(); sessionIt != m_sessions.end(); ++sessionIt)
 				{
 					WorkerSession &session = sessionIt.value();
+					cancelPendingFiles(session);
 					for (PreparedSound &prepared : session.prepared)
 					{
 						prepared.backend = nullptr;
@@ -6041,11 +7312,20 @@ namespace
 			createPlaybackBackend(const QAudioDevice &device)
 			{
 				Q_ASSERT(!device.isNull());
-				auto backend         = std::make_unique<SoundBackend>();
-				backend->player      = std::make_unique<QMediaPlayer>();
-				backend->audioOutput = new QAudioOutput(backend->player.get());
-				backend->audioOutput->setDevice(device);
-				backend->player->setAudioOutput(backend->audioOutput);
+				auto backend    = std::make_unique<SoundBackend>();
+				backend->player = std::make_unique<QMediaPlayer>();
+				backend->player->setPitchCompensation(false);
+				backend->bufferOutput = new QAudioBufferOutput(backend->player.get());
+				backend->player->setAudioBufferOutput(backend->bufferOutput);
+				QAudioFormat format = device.preferredFormat();
+				QAudioFormat stereo = format;
+				stereo.setChannelConfig(QAudioFormat::ChannelConfigStereo);
+				stereo.setSampleFormat(QAudioFormat::Float);
+				if (device.isFormatSupported(stereo))
+					format = stereo;
+				backend->sink = std::make_unique<QAudioSink>(device, format);
+				backend->sink->setVolume(SoundEngine::isOutputMuted() ? 0.0 : 1.0);
+				backend->sink->setBufferFrameCount(format.sampleRate() / 50);
 				return backend;
 			}
 
@@ -6270,6 +7550,7 @@ namespace
 			std::unique_ptr<SoundBackend>                      m_preinitializedMediaBackend;
 			std::unique_ptr<QTimer>                            m_maintenanceTimer;
 			std::unique_ptr<QTimer>                            m_playbackWatchdogTimer;
+			std::unique_ptr<QTimer>                            m_pcmControlTimer;
 			std::unique_ptr<QThreadPool>                       m_memoryPreparationPool;
 			QElapsedTimer                                      m_clock;
 			QThread                                            m_ioThread;
@@ -6288,13 +7569,13 @@ namespace
 			SoundEngine::CachePolicy                           m_cachePolicy;
 			quint64                                            m_nextBackendId{1};
 			quint64                                            m_nextMemoryOperationId{1};
+			quint64                                            m_nextFileOperationId{1};
 			quint64                                            m_slowFileResolutionCount{0};
 			quint64                                            m_catalogGeneration{0};
 			quint64                                            m_pluginDirectoryGeneration{0};
 			quint64                                            m_publishedCatalogRevision{0};
 			bool                                               m_maintenancePending{false};
 			bool                                               m_catalogConfigured{false};
-			bool                                               m_catalogAvailable{false};
 			bool                                               m_catalogReady{false};
 			bool                                               m_releaseCompletedPending{false};
 			bool                                               m_failedWatchRetryPending{false};
@@ -6306,12 +7587,14 @@ namespace
 #endif
 
 bool SoundEngineSession::State::submit(SoundCommand command, const bool wait, int *result,
-                                       int *selectedBuffer) const
+                                       int *selectedBuffer, std::shared_ptr<const Snapshot> *postState) const
 {
 	if (closed.load(std::memory_order_acquire))
 		return false;
-	command.sessionId  = sessionId;
-	auto completion    = wait ? std::make_shared<SoundCommandCompletion>() : nullptr;
+	command.sessionId = sessionId;
+	auto completion   = wait ? std::make_shared<SoundCommandCompletion>() : nullptr;
+	if (completion)
+		completion->captureSnapshot = postState != nullptr;
 	command.completion = completion;
 	{
 		QMutexLocker locker(&ingress->mutex);
@@ -6333,7 +7616,7 @@ bool SoundEngineSession::State::submit(SoundCommand command, const bool wait, in
 	}
 	if (completion)
 	{
-		const int value = completion->wait(selectedBuffer);
+		const int value = completion->wait(selectedBuffer, postState);
 		if (result)
 			*result = value;
 	}
@@ -6810,6 +8093,30 @@ bool SoundEngine::fileRequestIsCachedForTest(const std::shared_ptr<SoundEngineSe
 #endif
 }
 
+QStringList SoundEngine::selectFilesAfterRemovalForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                                        const QString &request, const QStringList &files,
+                                                        const bool allowPatterns) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return {};
+	QStringList selected;
+	QMetaObject::invokeMethod(
+	    m_private->worker,
+	    [worker = m_private->worker, sessionId = session->id(), request, files, allowPatterns, &selected]
+	    { selected = worker->selectFilesAfterRemovalForTest(sessionId, request, files, allowPatterns); },
+	    Qt::BlockingQueuedConnection);
+	return selected;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(request);
+	Q_UNUSED(files);
+	Q_UNUSED(allowPatterns);
+	return {};
+#endif
+}
+
 SoundEngine::CacheMaintenanceRunForTest
 SoundEngine::configureCacheAndRunMaintenanceForTest(CachePolicy policy) const
 {
@@ -6836,6 +8143,17 @@ SoundEngine::configureCacheAndRunMaintenanceForTest(CachePolicy policy) const
 #else
 	Q_UNUSED(policy);
 	return {};
+#endif
+}
+
+void SoundEngine::queueMemoryPreparationTaskForTest(std::function<void()> task) const
+{
+#if QMUD_ENABLE_SOUND
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, task = std::move(task)]() mutable
+	    { worker->queueMemoryPreparationTaskForTest(std::move(task)); }, Qt::BlockingQueuedConnection);
+#else
+	Q_UNUSED(task);
 #endif
 }
 
@@ -6896,6 +8214,28 @@ bool SoundEngine::completeActiveChannelForTest(const std::shared_ptr<SoundEngine
 #endif
 }
 
+bool SoundEngine::decoderContinuationForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                             const int ordering, const int transition) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return false;
+	bool verified = false;
+	QMetaObject::invokeMethod(
+	    m_private->worker,
+	    [worker = m_private->worker, sessionId = session->id(), ordering, transition, &verified]
+	    { verified = worker->decoderContinuationForTest(sessionId, ordering, transition); },
+	    Qt::BlockingQueuedConnection);
+	return verified;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(ordering);
+	Q_UNUSED(transition);
+	return false;
+#endif
+}
+
 bool SoundEngine::expireActivePlaybackWatchdogForTest(const std::shared_ptr<SoundEngineSession> &session,
                                                       const int                                  buffer) const
 {
@@ -6941,6 +8281,55 @@ QString SoundEngine::activeFileIdentityForTest(const std::shared_ptr<SoundEngine
 #endif
 }
 
+void SoundEngine::resetAudioDeviceForTest() const
+{
+#if QMUD_ENABLE_SOUND
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker] { worker->resetAudioDeviceForTest(); },
+	    Qt::BlockingQueuedConnection);
+#endif
+}
+
+qsizetype SoundEngine::pendingFileCountForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                               const bool                                 commitsOnly) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return 0;
+	qsizetype count = 0;
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, sessionId = session->id(), commitsOnly, &count]
+	    { count = worker->pendingFileCountForTest(sessionId, commitsOnly); }, Qt::BlockingQueuedConnection);
+	return count;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(commitsOnly);
+	return 0;
+#endif
+}
+
+double SoundEngine::activeAttributeForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                           const int buffer, const QMudSoundAttribute attribute) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return 0.0;
+	double value = 0.0;
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, sessionId = session->id(), buffer, attribute, &value]
+	    { value = worker->activeAttributeForTest(sessionId, buffer, attribute); },
+	    Qt::BlockingQueuedConnection);
+	return value;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(buffer);
+	Q_UNUSED(attribute);
+	return 0.0;
+#endif
+}
+
 quint64 SoundEngine::failedPreparedSoundForTest(const std::shared_ptr<SoundEngineSession> &session,
                                                 const QString                             &message,
                                                 const bool initializationFailure) const
@@ -6965,6 +8354,25 @@ quint64 SoundEngine::failedPreparedSoundForTest(const std::shared_ptr<SoundEngin
 	Q_UNUSED(message);
 	Q_UNUSED(initializationFailure);
 	return 0;
+#endif
+}
+
+double SoundEngine::activeOutputVolumeForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                              const int                                  buffer) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return -1.0;
+	double value = -1.0;
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, sessionId = session->id(), buffer, &value]
+	    { value = worker->activeOutputVolumeForTest(sessionId, buffer); }, Qt::BlockingQueuedConnection);
+	return value;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(buffer);
+	return -1.0;
 #endif
 }
 
@@ -6997,7 +8405,7 @@ SoundEngine::PlaybackInitializationStateForTest SoundEngine::playbackInitializat
 	    {
 		    const SoundWorkerPlaybackInitializationState workerState =
 		        worker->playbackInitializationStateForTest();
-		    state = {workerState.mediaPlayerReady};
+		    state = {workerState.mediaPlayerReady, workerState.outputVolume};
 	    },
 	    Qt::BlockingQueuedConnection);
 	return state;
@@ -7214,9 +8622,11 @@ SoundEngineSession::SoundEngineSession(std::shared_ptr<State> state) : m_state(s
 
 int SoundEngineSession::playFile(const int buffer, const QString &fileName, const bool loop,
                                  const double volume, const double pan, const quint64 luaAudioGeneration,
-                                 int *selectedBuffer, const bool requireReservation) const
+                                 int *selectedBuffer, const bool requireReservation, const double pitch,
+                                 std::shared_ptr<const Snapshot> *postState) const
 {
-	if (buffer < 0 || buffer > kChannelCount || (buffer == 0 && fileName.isEmpty()))
+	if (buffer < 0 || buffer > kChannelCount || (buffer == 0 && fileName.isEmpty()) ||
+	    !soundControlsAreFinite(volume, pan, pitch))
 		return eBadParameter;
 	SoundCommand command;
 	command.kind                = SoundCommandKind::PlayFile;
@@ -7229,24 +8639,31 @@ int SoundEngineSession::playFile(const int buffer, const QString &fileName, cons
 	command.ownershipGeneration = luaAudioGeneration;
 	command.ownershipKind = luaAudioGeneration == 0 ? SoundOwnershipKind::None : SoundOwnershipKind::LuaAudio;
 	command.requireReservation = requireReservation;
+	command.pitch              = pitch;
 	int result                 = eCannotPlaySound;
-	return m_state && m_state->submit(std::move(command), true, &result, selectedBuffer) ? result
-	                                                                                     : eCannotPlaySound;
+	return m_state && m_state->submit(std::move(command), true, &result, selectedBuffer, postState)
+	           ? result
+	           : eCannotPlaySound;
 }
 
-int SoundEngineSession::reserveLuaAudioChannel(const QString &fileName,
-                                               const quint64  luaAudioGeneration) const
+int SoundEngineSession::reserveLuaAudioChannel(const QString &fileName, const quint64 luaAudioGeneration,
+                                               const double volume, const double pan, const double pitch,
+                                               std::shared_ptr<const Snapshot> *postState) const
 {
-	if (fileName.isEmpty() || luaAudioGeneration == 0)
+	if (fileName.isEmpty() || luaAudioGeneration == 0 || !soundControlsAreFinite(volume, pan, pitch))
 		return 0;
 	SoundCommand command;
 	command.kind                = SoundCommandKind::ReserveLuaAudioChannel;
 	command.text                = fileName;
 	command.ownershipGeneration = luaAudioGeneration;
 	command.ownershipKind       = SoundOwnershipKind::LuaAudio;
+	command.volume              = qBound(0.0, volume, 100.0) - 100.0;
+	command.pan                 = pan;
+	command.pitch               = pitch;
 	int result                  = eCannotPlaySound;
 	int selectedBuffer          = 0;
-	if (!m_state || !m_state->submit(std::move(command), true, &result, &selectedBuffer) || result != eOK)
+	if (!m_state || !m_state->submit(std::move(command), true, &result, &selectedBuffer, postState) ||
+	    result != eOK)
 		return 0;
 	return selectedBuffer;
 }
@@ -7264,7 +8681,8 @@ bool SoundEngineSession::confirmLuaAudioOwnership(const int buffer, const quint6
 	return m_state && m_state->submit(std::move(command), true, &result) && result == eOK;
 }
 
-int SoundEngineSession::stopLuaAudioChannel(const int buffer, const quint64 luaAudioGeneration) const
+int SoundEngineSession::stopLuaAudioChannel(const int buffer, const quint64 luaAudioGeneration,
+                                            std::shared_ptr<const Snapshot> *postState) const
 {
 	if (buffer < 1 || buffer > kChannelCount || luaAudioGeneration == 0)
 		return eBadParameter;
@@ -7274,7 +8692,48 @@ int SoundEngineSession::stopLuaAudioChannel(const int buffer, const quint64 luaA
 	command.ownershipGeneration = luaAudioGeneration;
 	command.ownershipKind       = SoundOwnershipKind::LuaAudio;
 	int result                  = eCannotPlaySound;
-	return m_state && m_state->submit(std::move(command), true, &result) ? result : eCannotPlaySound;
+	return m_state && m_state->submit(std::move(command), true, &result, nullptr, postState)
+	           ? result
+	           : eCannotPlaySound;
+}
+
+int SoundEngineSession::setLuaAudioAttribute(const int buffer, const quint64 luaAudioGeneration,
+                                             const QMudSoundAttribute attribute, const double value,
+                                             const std::chrono::milliseconds duration, const bool stopAtEnd,
+                                             const QMudSoundAttributeTarget   targetMode,
+                                             std::shared_ptr<const Snapshot> *postState) const
+{
+	if (buffer < 0 || buffer > kChannelCount || (buffer > 0 && luaAudioGeneration == 0) ||
+	    (buffer == 0 && (luaAudioGeneration != 0 || attribute != QMudSoundAttribute::Volume ||
+	                     duration.count() != 0 || stopAtEnd)) ||
+	    (targetMode == QMudSoundAttributeTarget::Relative && attribute != QMudSoundAttribute::Pitch) ||
+	    !qIsFinite(value) || duration.count() < 0 || duration.count() > std::numeric_limits<int>::max())
+		return eBadParameter;
+	SoundCommand command;
+	command.kind                = SoundCommandKind::SetLuaAudioAttribute;
+	command.buffer              = buffer;
+	command.ownershipGeneration = luaAudioGeneration;
+	command.attribute           = attribute;
+	command.targetMode          = targetMode;
+	command.volume              = value;
+	command.duration            = duration;
+	command.stopAtEnd           = stopAtEnd;
+	int result                  = eCannotPlaySound;
+	return m_state && m_state->submit(std::move(command), true, &result, nullptr, postState)
+	           ? result
+	           : eCannotPlaySound;
+}
+
+int SoundEngineSession::setLuaAudioInitialized(const bool                       initialized,
+                                               std::shared_ptr<const Snapshot> *postState) const
+{
+	SoundCommand command;
+	command.kind    = SoundCommandKind::SetLuaAudioInitialized;
+	command.enabled = initialized;
+	int result      = eCannotPlaySound;
+	return m_state && m_state->submit(std::move(command), true, &result, nullptr, postState)
+	           ? result
+	           : eCannotPlaySound;
 }
 
 void SoundEngineSession::updateWorldSoundDirectory(const QString &worldSoundDirectory) const
@@ -7288,9 +8747,9 @@ void SoundEngineSession::updateWorldSoundDirectory(const QString &worldSoundDire
 
 int SoundEngineSession::playMemory(const int buffer, const QByteArray &data, const bool loop,
                                    const double volume, const double pan, const quint64 luaAudioGeneration,
-                                   int *selectedBuffer) const
+                                   int *selectedBuffer, std::shared_ptr<const Snapshot> *postState) const
 {
-	if (buffer < 0 || buffer > kChannelCount || data.isEmpty())
+	if (buffer < 0 || buffer > kChannelCount || data.isEmpty() || !soundControlsAreFinite(volume, pan))
 		return eBadParameter;
 	SoundCommand command;
 	command.kind                = SoundCommandKind::PlayMemory;
@@ -7303,11 +8762,12 @@ int SoundEngineSession::playMemory(const int buffer, const QByteArray &data, con
 	command.ownershipGeneration = luaAudioGeneration;
 	command.ownershipKind = luaAudioGeneration == 0 ? SoundOwnershipKind::None : SoundOwnershipKind::LuaAudio;
 	int result            = eCannotPlaySound;
-	return m_state && m_state->submit(std::move(command), true, &result, selectedBuffer) ? result
-	                                                                                     : eCannotPlaySound;
+	return m_state && m_state->submit(std::move(command), true, &result, selectedBuffer, postState)
+	           ? result
+	           : eCannotPlaySound;
 }
 
-int SoundEngineSession::stop(const int buffer) const
+int SoundEngineSession::stop(const int buffer, std::shared_ptr<const Snapshot> *postState) const
 {
 	if (buffer < 0 || buffer > kChannelCount)
 		return eBadParameter;
@@ -7315,7 +8775,9 @@ int SoundEngineSession::stop(const int buffer) const
 	command.kind   = SoundCommandKind::Stop;
 	command.buffer = buffer;
 	int result     = eCannotPlaySound;
-	return m_state && m_state->submit(std::move(command), true, &result) ? result : eCannotPlaySound;
+	return m_state && m_state->submit(std::move(command), true, &result, nullptr, postState)
+	           ? result
+	           : eCannotPlaySound;
 }
 
 bool SoundEngineSession::submitNativeSound(QMudNativeSoundRequest request) const
@@ -7355,7 +8817,7 @@ quint64 SoundEngineSession::prepareFile(const QString &fileName) const
 int SoundEngineSession::commitPrepared(const quint64 token, const int buffer, const bool loop,
                                        const double volume, const double pan) const
 {
-	if (token == 0 || buffer < 0 || buffer > kChannelCount)
+	if (token == 0 || buffer < 0 || buffer > kChannelCount || !soundControlsAreFinite(volume, pan))
 		return eBadParameter;
 	SoundCommand command;
 	command.kind        = SoundCommandKind::CommitPrepared;

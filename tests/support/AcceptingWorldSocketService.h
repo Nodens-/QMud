@@ -50,6 +50,7 @@ class AcceptingWorldSocketService final : public WorldSocketService
 		 */
 		bool startClientEncryption(QString * /*errorMessage*/) override
 		{
+			++tlsUpgradeAttempts;
 			return true;
 		}
 		/**
@@ -69,14 +70,22 @@ class AcceptingWorldSocketService final : public WorldSocketService
 		/**
 		 * @brief Records one accepted packet or returns a configured write failure.
 		 * @param payload Packet bytes.
-		 * @return Payload size when accepted, otherwise `-1`.
+		 * @return Accepted byte count subject to writeLimit, otherwise `-1`.
 		 */
 		qint64 sendPacket(const QByteArray &payload) override
 		{
+			if (disconnectOnWrite)
+			{
+				connected = false;
+				emit disconnected();
+				return -1;
+			}
 			if (!connected || rejectWrites)
 				return -1;
-			packets.push_back(payload);
-			return payload.size();
+			const qint64 accepted = writeLimit < 0 ? payload.size() : qMin(writeLimit, payload.size());
+			if (accepted > 0)
+				packets.push_back(payload.first(accepted));
+			return accepted;
 		}
 		/**
 		 * @brief Returns the deterministic loopback peer address.
@@ -114,6 +123,7 @@ class AcceptingWorldSocketService final : public WorldSocketService
 		/** @brief Marks the in-memory transport disconnected immediately. */
 		void abortSocket() override
 		{
+			++abortAttempts;
 			connected = false;
 		}
 		/**
@@ -136,4 +146,8 @@ class AcceptingWorldSocketService final : public WorldSocketService
 		QVector<QByteArray> packets;
 		bool                connected{true};
 		bool                rejectWrites{false};
+		bool   disconnectOnWrite{false}; //!< Emits transport disconnection from the write boundary.
+		qint64 writeLimit{-1};           //!< Maximum accepted bytes per write, or -1 for unlimited writes.
+		int    tlsUpgradeAttempts{0};    //!< Number of requested TLS upgrades.
+		int    abortAttempts{0};         //!< Number of immediate transport aborts.
 };

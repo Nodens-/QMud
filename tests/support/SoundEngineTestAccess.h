@@ -14,6 +14,15 @@
 class SoundEngineTestAccess final
 {
 	public:
+		/**
+		 * @brief Queues deterministic test synchronization on the real memory-preparation pool.
+		 * @param engine Sound engine whose pool receives the task.
+		 * @param task Task retaining its own synchronization objects.
+		 */
+		static void queueMemoryPreparationTask(const SoundEngine &engine, std::function<void()> task)
+		{
+			engine.queueMemoryPreparationTaskForTest(std::move(task));
+		}
 		/** @brief Cache accounting and deferred-maintenance state observed on the worker thread. */
 		struct CacheState
 		{
@@ -29,10 +38,11 @@ class SoundEngineTestAccess final
 				CacheState firstStep;
 				CacheState secondStep;
 		};
-		/** @brief Source-free media-player readiness observed on the worker thread. */
+		/** @brief Source-free playback readiness and physical sink gain observed on the worker thread. */
 		struct PlaybackInitializationState
 		{
-				bool mediaPlayerReady{false};
+				bool   mediaPlayerReady{false};
+				double outputVolume{-1.0};
 		};
 		/** @brief Sound-file catalog state observed on the worker thread. */
 		struct FileCatalogState
@@ -98,6 +108,22 @@ class SoundEngineTestAccess final
 		                                              const QString                             &request)
 		{
 			return engine.fileRequestIsCachedForTest(session, request);
+		}
+
+		/**
+		 * @brief Resolves a request after fixture removal in the same sound-worker turn.
+		 * @param engine Owning sound engine.
+		 * @param session Session supplying the world scope and request cache.
+		 * @param request Request to resolve through production selection.
+		 * @param files Absolute indexed sound fixtures to remove before selection.
+		 * @param allowPatterns Whether to return the native candidate pool instead of one file source.
+		 * @return Selected canonical files, or an empty list after a miss or invalid test setup.
+		 */
+		[[nodiscard]] static QStringList
+		selectFilesAfterRemoval(const SoundEngine &engine, const std::shared_ptr<SoundEngineSession> &session,
+		                        const QString &request, const QStringList &files, const bool allowPatterns)
+		{
+			return engine.selectFilesAfterRemovalForTest(session, request, files, allowPatterns);
 		}
 
 		/**
@@ -186,6 +212,47 @@ class SoundEngineTestAccess final
 		{
 			return engine.activeFileIdentityForTest(session, buffer);
 		}
+		/**
+		 * @brief Exercises the worker's ordered decoder continuation transitions.
+		 * @param engine Engine owning the worker.
+		 * @param session Session receiving the decoder fixture.
+		 * @param ordering Placement of the loop update relative to terminal notifications.
+		 * @param transition Subsequent repeat, ownership, failure, or backpressure transition.
+		 * @return Whether the expected lifecycle and PCM invariants hold.
+		 */
+		[[nodiscard]] static bool decoderContinuation(const SoundEngine                         &engine,
+		                                              const std::shared_ptr<SoundEngineSession> &session,
+		                                              const int ordering, const int transition)
+		{
+			return engine.decoderContinuationForTest(session, ordering, transition);
+		}
+		/**
+		 * @brief Samples the active PCM transport's audible control rather than registry bookkeeping.
+		 * @param engine Sound engine to inspect.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel.
+		 * @param attribute Control to sample.
+		 * @return Current control in LuaAudio units.
+		 */
+		[[nodiscard]] static double activeAttribute(const SoundEngine                         &engine,
+		                                            const std::shared_ptr<SoundEngineSession> &session,
+		                                            int buffer, QMudSoundAttribute attribute)
+		{
+			return engine.activeAttributeForTest(session, buffer, attribute);
+		}
+		/**
+		 * @brief Reads physical sink gain independently of callback-visible and PCM volume.
+		 * @param engine Sound engine owning the sink.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel to inspect.
+		 * @return Linear sink gain, or minus one when the channel has no sink.
+		 */
+		[[nodiscard]] static double activeOutputVolume(const SoundEngine                         &engine,
+		                                               const std::shared_ptr<SoundEngineSession> &session,
+		                                               int                                        buffer)
+		{
+			return engine.activeOutputVolumeForTest(session, buffer);
+		}
 
 		/**
 		 * @brief Fails a prepared occurrence through the sound worker's production error transition.
@@ -228,16 +295,16 @@ class SoundEngineTestAccess final
 		}
 
 		/**
-		 * @brief Reads startup playback backend readiness from the sound worker.
+		 * @brief Reads startup playback readiness and physical sink gain from the sound worker.
 		 * @param engine Sound engine whose initialized playback objects are inspected.
-		 * @return Availability of the source-free media-player backend.
+		 * @return Source-free backend availability and sink gain, or minus one without a sink.
 		 */
 		[[nodiscard]] static PlaybackInitializationState
 		playbackInitializationState(const SoundEngine &engine)
 		{
 			const SoundEngine::PlaybackInitializationStateForTest state =
 			    engine.playbackInitializationStateForTest();
-			return {state.mediaPlayerReady};
+			return {state.mediaPlayerReady, state.outputVolume};
 		}
 
 		/**
@@ -290,6 +357,29 @@ class SoundEngineTestAccess final
 		                                                           const qsizetype    fileCount)
 		{
 			return engine.publishSyntheticCatalogDirectoryForTest(fileCount);
+		}
+
+		/**
+		 * @brief Applies the production output-device reset on the owning worker.
+		 * @param engine Owning sound engine.
+		 */
+		static void resetForAudioDeviceChange(const SoundEngine &engine)
+		{
+			engine.resetAudioDeviceForTest();
+		}
+
+		/**
+		 * @brief Counts pending file occurrences or waiting commits through the worker's ordered test boundary.
+		 * @param engine Owning engine.
+		 * @param session Owning session.
+		 * @param commitsOnly Whether only requests retaining a commit are counted.
+		 * @return Number of unresolved occurrences.
+		 */
+		[[nodiscard]] static qsizetype pendingFileCount(const SoundEngine                         &engine,
+		                                                const std::shared_ptr<SoundEngineSession> &session,
+		                                                const bool commitsOnly = false)
+		{
+			return engine.pendingFileCountForTest(session, commitsOnly);
 		}
 
 		/**

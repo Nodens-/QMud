@@ -3,13 +3,19 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: TestEnvironment.cpp
- * Role: Deterministic test-environment implementation and temporary-directory helpers shared by QTest targets.
+ * Role: Deterministic test environment, enforced silent sound output, and temporary-directory helpers.
  */
 
 #include "TestEnvironment.h"
+#include "SoundEngine.h"
 
 #include <QDebug>
 #include <QDir>
+
+bool SoundEngine::isOutputMuted() noexcept
+{
+	return true;
+}
 
 namespace QMudTest
 {

@@ -8,6 +8,7 @@
 
 #include "LuaSupport.h"
 #include "NativePluginRegistry.h"
+#include "SoundEngine.h"
 #include "WorldDocument.h"
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
@@ -24,6 +25,7 @@
 #include <QUuid>
 #include <QtTest/QTest>
 
+#include <limits>
 #include <utility>
 
 namespace
@@ -33,13 +35,16 @@ namespace
 	 */
 	struct SoundBackendState
 	{
-			QHash<int, int>  statusByBuffer;
-			QHash<int, bool> reusableByBuffer;
-			QSet<int>        reservedBuffers;
-			QStringList      reservedFiles;
-			QStringList      failingPlayFiles;
-			int              playCalls{0};
-			int              stopCalls{0};
+			QHash<int, int>    statusByBuffer;
+			QHash<int, double> volumeByBuffer;
+			QHash<int, double> panByBuffer;
+			QHash<int, double> pitchByBuffer;
+			QHash<int, bool>   reusableByBuffer;
+			QSet<int>          reservedBuffers;
+			QStringList        reservedFiles;
+			QStringList        failingPlayFiles;
+			int                playCalls{0};
+			int                stopCalls{0};
 	};
 
 	/**
@@ -50,7 +55,8 @@ namespace
 	void installSoundBackend(WorldRuntime &runtime, SoundBackendState &state)
 	{
 		WorldRuntime::TestSoundBackend backend;
-		backend.play = [&state](const int buffer, const QString &fileName, const bool loop, double, double)
+		backend.play =
+		    [&state](const int buffer, const QString &fileName, const bool loop, const double volume, double)
 		{
 			++state.playCalls;
 			if (fileName.isEmpty())
@@ -65,6 +71,7 @@ namespace
 			const int targetBuffer = buffer > 0 ? buffer : 1;
 			state.reservedBuffers.remove(targetBuffer);
 			state.statusByBuffer.insert(targetBuffer, loop ? 2 : 1);
+			state.volumeByBuffer.insert(targetBuffer, volume + 100.0);
 			return eOK;
 		};
 		backend.stop = [&state](const int buffer)
@@ -115,6 +122,21 @@ namespace
 				}
 			}
 			return 0;
+		};
+		backend.volume    = [&state](const int buffer) { return state.volumeByBuffer.value(buffer, 0.0); };
+		backend.attribute = [&state](const int buffer, quint64, const QMudSoundAttribute attribute,
+		                             const double value, const std::chrono::milliseconds duration, bool,
+		                             const QMudSoundAttributeTarget targetMode)
+		{
+			if (attribute == QMudSoundAttribute::Volume && duration.count() == 0)
+				state.volumeByBuffer.insert(buffer, value);
+			if (attribute == QMudSoundAttribute::Pan && duration.count() == 0)
+				state.panByBuffer.insert(buffer, value);
+			if (attribute == QMudSoundAttribute::Pitch && duration.count() == 0)
+				state.pitchByBuffer.insert(buffer, targetMode == QMudSoundAttributeTarget::Relative
+				                                       ? state.pitchByBuffer.value(buffer) + value
+				                                       : value);
+			return eOK;
 		};
 		runtime.setSoundBackendForTest(std::move(backend));
 	}
@@ -294,7 +316,8 @@ namespace
 
 			void callPluginRoutesToNativeSpeech() const
 			{
-				WorldRuntime runtime;
+				SoundBackendState soundState;
+				WorldRuntime      runtime;
 				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
 				QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
 				QMudNativePluginRegistry::setTestSpeechSink(
@@ -344,7 +367,6 @@ namespace
 				QVERIFY(!soundRoot.isEmpty());
 				QVERIFY(writeSoundFixture(soundRoot));
 				runtime.setStartupDirectory(soundRoot);
-				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
 				const QMudNativePluginRegistry::NativeCallContext audioContext =
 				    nativeCallContext(runtime, QMudNativePluginRegistry::luaAudioPluginId());
@@ -358,7 +380,7 @@ namespace
 				const QMudNativePluginRegistry::NativeCallResult validationPlay =
 				    QMudNativePluginRegistry::callRoutine(
 				        &runtime, QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("play"),
-				        {QStringLiteral("coin.wav"), false, 0.0, 100.0}, audioContext,
+				        {QStringLiteral("coin.wav"), 0, 0.0, 100.0}, audioContext,
 				        QMudNativePluginRegistry::NativeCallExecutionMode::ValidateOnly);
 				QCOMPARE(validationPlay.errorCode, eOK);
 				QCOMPARE(validationPlay.returnValues.size(), 1);
@@ -367,7 +389,7 @@ namespace
 				const QMudNativePluginRegistry::NativeCallResult audioPlay =
 				    QMudNativePluginRegistry::callRoutine(
 				        &runtime, QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("play"),
-				        {QStringLiteral("coin.wav"), false, 0.0, 100.0}, audioContext);
+				        {QStringLiteral("coin.wav"), 0, 0.0, 100.0}, audioContext);
 				QCOMPARE(audioPlay.errorCode, eOK);
 				QCOMPARE(audioPlay.returnValues.size(), 1);
 				QCOMPARE(audioPlay.returnValues.constFirst().typeId(), QMetaType::Int);
@@ -406,14 +428,312 @@ namespace
 				QVERIFY(events.isEmpty());
 			}
 
+			/** @brief Verifies numeric status, active global volume, and the original delayed-loop default. */
+			void luaAudioOriginalPlaybackContracts() const
+			{
+				SoundBackendState state;
+				WorldRuntime      runtime;
+				installSoundBackend(runtime, state);
+				const auto played = QMudNativePluginRegistry::callLuaAudio(
+				    &runtime, QStringLiteral("play"), {QStringLiteral("coin.wav"), 1, 0, 80});
+				QCOMPARE(played.errorCode, eOK);
+				QCOMPARE(played.returnValues.front().toInt(), 1);
+				const auto playing =
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("isPlaying"), {1});
+				QCOMPARE(playing.returnValues.front().typeId(), QMetaType::Int);
+				QCOMPARE(playing.returnValues.front().toInt(), 1);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("pitch"), {80, 1})
+				             .errorCode,
+				         eOK);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("slidePitch"), {80, 1, 0})
+				        .errorCode,
+				    eOK);
+				QCOMPARE(state.pitchByBuffer.value(1), 160.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("slidePitch"),
+				                                                {-40, 1, 0})
+				             .errorCode,
+				         eOK);
+				QCOMPARE(state.pitchByBuffer.value(1), 120.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("volume"), {35})
+				             .errorCode,
+				         eOK);
+				QCOMPARE(state.volumeByBuffer.value(1), 35.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("getVolume"), {1})
+				             .returnValues.front()
+				             .toDouble(),
+				         35.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("volume"), {0, 1})
+				             .errorCode,
+				         eOK);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("volume"), {70})
+				             .errorCode,
+				         eOK);
+				QCOMPARE(state.volumeByBuffer.value(1), 0.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("getVolume"), {})
+				             .returnValues.front()
+				             .toDouble(),
+				         70.0);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("stop"), {0}).errorCode,
+				    eOK);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("getVolume"), {1})
+				             .returnValues.front()
+				             .toDouble(),
+				         0.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("getVolume"), {0})
+				             .returnValues.front()
+				             .toDouble(),
+				         70.0);
+				const int  before  = state.playCalls;
+				const auto delayed = QMudNativePluginRegistry::callLuaAudio(
+				    &runtime, QStringLiteral("playDelayLooped"), {QStringLiteral("coin.wav")});
+				QCOMPARE(delayed.errorCode, eOK);
+				QCOMPARE(delayed.returnValues.size(), 1);
+				QVERIFY(!delayed.returnValues.front().isValid());
+				QCOMPARE(state.playCalls, before);
+				QCOMPARE(state.reservedBuffers.size(), 1);
+				QTRY_COMPARE(state.playCalls, before + 1);
+				QCOMPARE(state.statusByBuffer.value(1), 2);
+				runtime.setPluginVariableValue(QMudNativePluginRegistry::luaAudioPluginId(),
+				                               QStringLiteral("vol"), QStringLiteral("57"));
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("init"), {}).errorCode,
+				    eOK);
+				QCOMPARE(state.volumeByBuffer.value(1), 57.0);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("free"), {}).errorCode,
+				    eOK);
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeMasterState(&runtime).volume, 57.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("playLooped"),
+				                                                {QStringLiteral("coin.wav")})
+				             .returnValues.front()
+				             .toInt(),
+				         0);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("init"), {}).errorCode,
+				    eOK);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("playLooped"),
+				                                                {QStringLiteral("coin.wav")})
+				             .returnValues.front()
+				             .toInt(),
+				         1);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("free"), {}).errorCode,
+				    eOK);
+			}
+
+			/** @brief Verifies default frequency updates preserve active voices and accepted reservations. */
+			void luaAudioFrequencyControlsFuturePlays() const
+			{
+				using namespace QMudNativePluginRegistry;
+				SoundBackendState state;
+				WorldRuntime      runtime;
+				installSoundBackend(runtime, state);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("freq"), {3.9}).errorCode, eOK);
+				QCOMPARE(luaAudioRuntimeMasterState(&runtime).pitch, 3.0);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("play"), {QStringLiteral("coin.wav"), 0})
+				             .returnValues.front()
+				             .toInt(),
+				         1);
+				QCOMPARE(state.pitchByBuffer.value(1), 3.0);
+				QCOMPARE(
+				    callLuaAudio(&runtime, QStringLiteral("playDelay"), {QStringLiteral("coin.wav"), 60000})
+				        .errorCode,
+				    eOK);
+				QCOMPARE(state.pitchByBuffer.value(2), 3.0);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("pitch"), {8, 2}).errorCode, eOK);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("freq"), {-7.9}).errorCode, eOK);
+				QCOMPARE(luaAudioRuntimeMasterState(&runtime).pitch, -7.0);
+				QCOMPARE(state.pitchByBuffer.value(1), 3.0);
+				QCOMPARE(state.pitchByBuffer.value(2), 8.0);
+				LuaAudioRuntimeBufferState reserved;
+				QVERIFY(luaAudioRuntimeBufferState(&runtime, 2, reserved));
+				QCOMPARE(reserved.pitch, 3.0);
+				QVERIFY(reserved.pendingCancel && !reserved.pendingCancel->load());
+				const auto pitches = state.pitchByBuffer;
+				for (const QVector<QVariant> &arguments : {QVector<QVariant>{},
+				                                           {QVariant{}},
+				                                           {true},
+				                                           {QStringLiteral("bad")},
+				                                           {std::numeric_limits<double>::quiet_NaN()},
+				                                           {std::numeric_limits<double>::infinity()},
+				                                           {-std::numeric_limits<double>::infinity()}})
+				{
+					QCOMPARE(callLuaAudio(&runtime, QStringLiteral("freq"), arguments).errorCode,
+					         eErrorCallingPluginRoutine);
+					QCOMPARE(luaAudioRuntimeMasterState(&runtime).pitch, -7.0);
+					QCOMPARE(state.pitchByBuffer, pitches);
+				}
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("freq"), {20}, {},
+				                      NativeCallExecutionMode::ValidateOnly)
+				             .errorCode,
+				         eOK);
+				QCOMPARE(luaAudioRuntimeMasterState(&runtime).pitch, -7.0);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("pitch"), {20}).errorCode,
+				         eErrorCallingPluginRoutine);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("setPitch"), {20}).errorCode,
+				         eErrorCallingPluginRoutine);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("pitch"), {20, 0}).errorCode, eOK);
+				QCOMPARE(luaAudioRuntimeMasterState(&runtime).pitch, -7.0);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("play"), {QStringLiteral("coin.wav"), 0})
+				             .returnValues.front()
+				             .toInt(),
+				         3);
+				QCOMPARE(state.pitchByBuffer.value(3), -7.0);
+				QCOMPARE(state.pitchByBuffer.value(1), 3.0);
+				QCOMPARE(state.pitchByBuffer.value(2), 8.0);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("stop"), {0}).errorCode, eOK);
+				QVERIFY(reserved.pendingCancel->load());
+			}
+
+			/** @brief Verifies shared primitive marshalling preserves Lua types, precision, and string bytes. */
+			void callPluginPrimitiveValues() const
+			{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+				LuaStateOwner lua(luaL_newstate());
+				QVERIFY(lua.get());
+				for (const QVariant &value : {QVariant{}, QVariant{QMetaType::fromType<QString>()}})
+				{
+					QVERIFY(!value.isValid() || value.isNull());
+					QMudLuaSupport::pushCallPluginValue(lua.get(), value);
+					QCOMPARE(lua_type(lua.get(), -1), LUA_TNIL);
+					lua_pop(lua.get(), 1);
+				}
+				for (const bool value : {false, true})
+				{
+					QMudLuaSupport::pushCallPluginValue(lua.get(), value);
+					QCOMPARE(lua_type(lua.get(), -1), LUA_TBOOLEAN);
+					QCOMPARE(lua_toboolean(lua.get(), -1) != 0, value);
+					lua_pop(lua.get(), 1);
+				}
+				const QVector<QVariant> integers{QVariant::fromValue<char>(12),
+				                                 QVariant::fromValue<signed char>(-12),
+				                                 QVariant::fromValue<short>(-123),
+				                                 QVariant{-1234},
+				                                 QVariant::fromValue<long>(-12345),
+				                                 QVariant::fromValue<qlonglong>(-9007199254740993LL),
+				                                 QVariant::fromValue<unsigned char>(250),
+				                                 QVariant::fromValue<unsigned short>(60000),
+				                                 QVariant::fromValue<unsigned int>(12345),
+				                                 QVariant::fromValue<unsigned long>(123456),
+				                                 QVariant::fromValue<qulonglong>(9007199254740993ULL)};
+				for (const QVariant &value : integers)
+				{
+					QMudLuaSupport::pushCallPluginValue(lua.get(), value);
+					QVERIFY(lua_isinteger(lua.get(), -1));
+					QCOMPARE(lua_tointeger(lua.get(), -1), value.toLongLong());
+					lua_pop(lua.get(), 1);
+				}
+				for (const QVariant &value :
+				     {QVariant::fromValue<float>(1.25f), QVariant{0.0}, QVariant{-4.75}})
+				{
+					QMudLuaSupport::pushCallPluginValue(lua.get(), value);
+					QCOMPARE(lua_type(lua.get(), -1), LUA_TNUMBER);
+					QVERIFY(!lua_isinteger(lua.get(), -1));
+					QCOMPARE(lua_tonumber(lua.get(), -1), value.toDouble());
+					lua_pop(lua.get(), 1);
+				}
+				for (const QByteArray &bytes :
+				     {QByteArray(""), QStringLiteral("ήχος").toUtf8(), QByteArray("a\0b", 3)})
+				{
+					QMudLuaSupport::pushCallPluginValue(lua.get(), QString::fromUtf8(bytes));
+					QCOMPARE(lua_type(lua.get(), -1), LUA_TSTRING);
+					size_t      length = 0;
+					const char *text   = lua_tolstring(lua.get(), -1, &length);
+					QCOMPARE(QByteArray(text, static_cast<qsizetype>(length)), bytes);
+					lua_pop(lua.get(), 1);
+				}
+				QCOMPARE(lua_gettop(lua.get()), 0);
+				QMudLuaSupport::pushCallPluginValue(lua.get(), QString{});
+				QCOMPARE(lua_type(lua.get(), -1), LUA_TSTRING);
+				QCOMPARE(lua_rawlen(lua.get(), -1), 0u);
+#endif
+			}
+
+			/** @brief Supplies delayed wrapper cases across reservation outcomes and validation. */
+			void luaAudioDelayedWrapperResults_data() const
+			{
+				QTest::addColumn<QString>("routine");
+				QTest::addColumn<int>("delay");
+				QTest::addColumn<QString>("outcome");
+				for (const QString &routine :
+				     {QStringLiteral("playDelay"), QStringLiteral("playDelayLooped")})
+					for (const int delay : {0, 60000})
+						for (const QString &outcome :
+						     {QStringLiteral("accepted"), QStringLiteral("full"), QStringLiteral("disabled"),
+						      QStringLiteral("empty"), QStringLiteral("validate")})
+							QTest::newRow(
+							    qPrintable(QStringLiteral("%1-%2-%3").arg(routine).arg(delay).arg(outcome)))
+							    << routine << delay << outcome;
+			}
+
+			/** @brief Verifies canonical nil, runtime CallPlugin nil, and legacy PPI nil omission. */
+			void luaAudioDelayedWrapperResults() const
+			{
+				using namespace QMudNativePluginRegistry;
+				QFETCH(QString, routine);
+				QFETCH(int, delay);
+				QFETCH(QString, outcome);
+				SoundBackendState state;
+				WorldRuntime      runtime;
+				installSoundBackend(runtime, state);
+				if (outcome == QStringLiteral("full"))
+					for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
+						state.statusByBuffer.insert(buffer, 1);
+				if (outcome == QStringLiteral("disabled"))
+					QCOMPARE(callLuaAudio(&runtime, QStringLiteral("free"), {}).errorCode, eOK);
+				const auto    mode = outcome == QStringLiteral("validate")
+				                         ? NativeCallExecutionMode::ValidateOnly
+				                         : NativeCallExecutionMode::ExecuteSideEffects;
+				const QString file =
+				    outcome == QStringLiteral("empty") ? QStringLiteral("") : QStringLiteral("coin.wav");
+				const auto result = callLuaAudio(&runtime, routine, {file, delay}, {}, mode);
+				QCOMPARE(result.errorCode, eOK);
+				QCOMPARE(result.returnValues.size(), 1);
+				QVERIFY(!result.returnValues.front().isValid());
+				const bool accepted = outcome == QStringLiteral("accepted");
+				QCOMPARE(luaAudioRuntimeOwnedBuffers(&runtime).size(), accepted ? 1 : 0);
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("stop"), {0}).errorCode, eOK);
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+				const QString audioId    = luaAudioPluginId();
+				const auto    context    = nativeCallContext(runtime, audioId);
+				const QString serialized = QStringLiteral("{[1]=\"%1\",[2]=%2}").arg(file).arg(delay);
+				const QString sentinel   = QStringLiteral("unchanged");
+				runtime.setPluginVariableValue(audioId, luaAudioPpiReturnVariableName(), sentinel);
+				const auto ppi = callRoutine(&runtime, audioId, QStringLiteral("PPI_%1_PPI_").arg(routine),
+				                             {serialized}, context, mode);
+				QCOMPARE(ppi.errorCode, eOK);
+				QVERIFY(ppi.returnValues.isEmpty());
+				QString stored;
+				QVERIFY(runtime.findPluginVariable(audioId, luaAudioPpiReturnVariableName(), stored));
+				QCOMPARE(stored,
+				         mode == NativeCallExecutionMode::ValidateOnly ? sentinel : QStringLiteral("{}"));
+				QCOMPARE(callLuaAudio(&runtime, QStringLiteral("stop"), {0}).errorCode, eOK);
+				if (mode == NativeCallExecutionMode::ValidateOnly)
+					return;
+				LuaStateOwner lua(luaL_newstate());
+				QVERIFY(lua.get());
+				QMudLuaSupport::pushCallPluginValue(lua.get(), file);
+				lua_pushinteger(lua.get(), delay);
+				const int originalTop = lua_gettop(lua.get());
+				QCOMPARE(runtime.callPluginLua(audioId, routine, lua.get(), 1), 2);
+				QCOMPARE(lua_gettop(lua.get()), originalTop + 2);
+				QCOMPARE(lua_type(lua.get(), -2), LUA_TNUMBER);
+				QCOMPARE(lua_tonumber(lua.get(), -2), eOK);
+				QCOMPARE(lua_type(lua.get(), -1), LUA_TNIL);
+#endif
+			}
+
 			void luaAudioRuntimeStateIsSharedAndMutable() const
 			{
-				WorldRuntime  runtime;
-				const QString soundRoot = testDirectory(QStringLiteral("runtime-state"));
+				SoundBackendState soundState;
+				WorldRuntime      runtime;
+				const QString     soundRoot = testDirectory(QStringLiteral("runtime-state"));
 				QVERIFY(!soundRoot.isEmpty());
 				QVERIFY(writeSoundFixture(soundRoot));
 				runtime.setStartupDirectory(soundRoot);
-				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
 
 				const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
@@ -421,11 +741,11 @@ namespace
 				    nativeCallContext(runtime, audioId);
 				const QMudNativePluginRegistry::NativeCallResult delayedPlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("playDelay"),
-				                                          {QStringLiteral("coin.wav"), 10.0, 0.0, 100.0},
+				                                          {QStringLiteral("coin.wav"), 60000.0, 0.0, 100.0},
 				                                          audioContext);
 				QCOMPARE(delayedPlay.errorCode, eOK);
 				QCOMPARE(delayedPlay.returnValues.size(), 1);
-				QCOMPARE(delayedPlay.returnValues.constFirst().toInt(), 1);
+				QVERIFY(!delayedPlay.returnValues.front().isValid());
 				QCOMPARE(soundState.reservedFiles, QStringList{QStringLiteral("coin.wav")});
 				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
 
@@ -444,9 +764,9 @@ namespace
 
 				QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
 				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, bufferState));
-				QCOMPARE(bufferState.volume, 25.0);
-				QCOMPARE(bufferState.pan, 3.0);
-				QCOMPARE(bufferState.pitch, 7.0);
+				QCOMPARE(soundState.volumeByBuffer.value(1), 25.0);
+				QCOMPARE(soundState.panByBuffer.value(1), 3.0);
+				QCOMPARE(soundState.pitchByBuffer.value(1), 7.0);
 
 				const QMudNativePluginRegistry::NativeCallResult volume =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("getVolume"), {1},
@@ -482,7 +802,7 @@ namespace
 				             .errorCode,
 				         eOK);
 				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, bufferState));
-				QCOMPARE(bufferState.volume, 31.0);
+				QCOMPARE(soundState.volumeByBuffer.value(1), 31.0);
 				QCOMPARE(QMudNativePluginRegistry::callRoutine(
 				             &runtime, audioId, QStringLiteral("PPI_setVol_PPI_"),
 				             {QStringLiteral("not a serialized table")}, audioContext)
@@ -496,7 +816,7 @@ namespace
 				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 				QCOMPARE(QMudNativePluginRegistry::callRoutine(
 				             &runtime, audioId, QStringLiteral("PPI_play_PPI_"),
-				             {QStringLiteral("{[1]=\"coin.wav\",[3]=4,[4]=70}")}, audioContext)
+				             {QStringLiteral("{[1]=\"coin.wav\",[2]=0,[3]=4,[4]=70}")}, audioContext)
 				             .errorCode,
 				         eOK);
 				QVERIFY(runtime.findPluginVariable(audioId,
@@ -531,10 +851,11 @@ namespace
 				         eOK);
 				const QMudNativePluginRegistry::NativeCallResult resetPlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("playDelay"),
-				                                          {QStringLiteral("coin.wav"), 10.0, 0.0, 33.0},
+				                                          {QStringLiteral("coin.wav"), 60000.0, 0.0, 33.0},
 				                                          audioContext);
 				QCOMPARE(resetPlay.errorCode, eOK);
-				QCOMPARE(resetPlay.returnValues.constFirst().toInt(), 1);
+				QCOMPARE(resetPlay.returnValues.size(), 1);
+				QVERIFY(!resetPlay.returnValues.front().isValid());
 				QVERIFY(!QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 				QCOMPARE(QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("slideVol"),
 				                                               {10.0, 1, 0.02}, audioContext)
@@ -550,7 +871,7 @@ namespace
 				const int playCallsBeforePostReset = soundState.playCalls;
 				const QMudNativePluginRegistry::NativeCallResult postResetPlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("play"),
-				                                          {QStringLiteral("coin.wav"), false, 0.0, 33.0},
+				                                          {QStringLiteral("coin.wav"), 0, 0.0, 33.0},
 				                                          audioContext);
 				QCOMPARE(postResetPlay.errorCode, eOK);
 				QCOMPARE(postResetPlay.returnValues.constFirst().toInt(), 1);
@@ -564,7 +885,7 @@ namespace
 				soundState.reusableByBuffer.insert(1, false);
 				const QMudNativePluginRegistry::NativeCallResult transientStoppedPlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("play"),
-				                                          {QStringLiteral("coin.wav"), false, 0.0, 44.0},
+				                                          {QStringLiteral("coin.wav"), 0, 0.0, 44.0},
 				                                          audioContext);
 				QCOMPARE(transientStoppedPlay.errorCode, eOK);
 				QCOMPARE(transientStoppedPlay.returnValues.constFirst().toInt(), 2);
@@ -577,7 +898,7 @@ namespace
 				    &runtime, 1, postResetState.generation));
 				const QMudNativePluginRegistry::NativeCallResult reclaimedPlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("play"),
-				                                          {QStringLiteral("coin.wav"), false, 0.0, 55.0},
+				                                          {QStringLiteral("coin.wav"), 0, 0.0, 55.0},
 				                                          audioContext);
 				QCOMPARE(reclaimedPlay.errorCode, eOK);
 				QCOMPARE(reclaimedPlay.returnValues.constFirst().toInt(), 1);
@@ -591,7 +912,7 @@ namespace
 				static_cast<void>(runtime.stopSoundDirect(1));
 				const QMudNativePluginRegistry::NativeCallResult immediateReleasePlay =
 				    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("play"),
-				                                          {QStringLiteral("coin.wav"), false, 0.0, 65.0},
+				                                          {QStringLiteral("coin.wav"), 0, 0.0, 65.0},
 				                                          audioContext);
 				QCOMPARE(immediateReleasePlay.errorCode, eOK);
 				QCOMPARE(immediateReleasePlay.returnValues.constFirst().toInt(), 1);
@@ -608,8 +929,8 @@ namespace
 			 */
 			void luaAudioGenerationReplacementClearsPriorBufferState() const
 			{
-				WorldRuntime      runtime;
 				SoundBackendState soundState;
+				WorldRuntime      runtime;
 				installSoundBackend(runtime, soundState);
 				WorldRuntime::Plugin audioPlugin;
 				audioPlugin.enabled    = true;
@@ -674,14 +995,94 @@ namespace
 				QVERIFY(!QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, currentState));
 			}
 
+			/** @brief Verifies non-finite legacy commands and master updates preserve defaults and existing voices. */
+			void luaAudioRejectsNonFiniteMasterControls() const
+			{
+				SoundBackendState soundState;
+				WorldRuntime      runtime;
+				installSoundBackend(runtime, soundState);
+				WorldRuntime::Plugin plugin;
+				plugin.enabled    = true;
+				plugin.nativeShim = true;
+				plugin.attributes.insert(QStringLiteral("id"), QMudNativePluginRegistry::luaAudioPluginId());
+				WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+				QVERIFY(
+				    QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QStringLiteral("volume=45")));
+				QVERIFY(
+				    QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QStringLiteral("pan=15")));
+				QVERIFY(
+				    QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QStringLiteral("freq=3")));
+				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime,
+				                                                          QStringLiteral("loop=coin.wav")));
+				const auto volumes = soundState.volumeByBuffer;
+				const auto pitches = soundState.pitchByBuffer;
+				for (const QString &value :
+				     {QStringLiteral("nan"), QStringLiteral("inf"), QStringLiteral("-inf"),
+				      QStringLiteral("1e999"), QStringLiteral("not-a-number")})
+				{
+					for (const QString &key :
+					     {QStringLiteral("volume"), QStringLiteral("pan"), QStringLiteral("freq")})
+						QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(
+						    &runtime, key + QLatin1Char('=') + value));
+				}
+				for (const double invalid :
+				     {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+				      -std::numeric_limits<double>::infinity()})
+				{
+					QMudNativePluginRegistry::luaAudioSetRuntimeMasterVolume(&runtime, invalid);
+					QMudNativePluginRegistry::luaAudioSetRuntimeMasterPan(&runtime, invalid);
+					QMudNativePluginRegistry::luaAudioSetRuntimeMasterPitch(&runtime, invalid);
+					QMudNativePluginRegistry::luaAudioRestorePersistentVolume(&runtime, invalid);
+					for (const bool invalidVolume : {false, true})
+					{
+						int completions = 0;
+						QCOMPARE(runtime.playSoundInterceptedWithCompletion(
+						             1, QStringLiteral("freq=8"), false, invalidVolume ? invalid : 0.0,
+						             invalidVolume ? 0.0 : invalid,
+						             [&](const int result)
+						             {
+							             ++completions;
+							             QCOMPARE(result, eBadParameter);
+						             }),
+						         eBadParameter);
+						QCOMPARE(completions, 1);
+					}
+				}
+				const auto master = QMudNativePluginRegistry::luaAudioRuntimeMasterState(&runtime);
+				QCOMPARE(master.volume, 45.0);
+				QCOMPARE(master.pan, 15.0);
+				QCOMPARE(master.pitch, 3.0);
+				QCOMPARE(soundState.volumeByBuffer, volumes);
+				QCOMPARE(soundState.pitchByBuffer, pitches);
+				QCOMPARE(soundState.playCalls, 1);
+				QCOMPARE(soundState.stopCalls, 0);
+				QVERIFY(QMudNativePluginRegistry::handleLuaAudioCommand(&runtime,
+				                                                        QStringLiteral("sound_toggle")));
+				QVERIFY(QMudNativePluginRegistry::handleLuaAudioCommand(&runtime,
+				                                                        QStringLiteral("sound_toggle")));
+				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeMasterState(&runtime).volume, 45.0);
+				QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QString()));
+				const auto context = nativeCallContext(runtime, QMudNativePluginRegistry::luaAudioPluginId());
+				const auto played  = QMudNativePluginRegistry::callRoutine(
+				    &runtime, QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("playlooped"),
+				    {QStringLiteral("coin.wav")}, context);
+				QCOMPARE(played.errorCode, eOK);
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState voice;
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, voice));
+				QCOMPARE(voice.volume, 45.0);
+				QCOMPARE(voice.pan, 15.0);
+				QCOMPARE(voice.pitch, 3.0);
+				QCOMPARE(soundState.pitchByBuffer.value(1), 3.0);
+			}
+
 			void luaAudioCommandsAndPlaySoundCallbackMirrorLegacyPlugin() const
 			{
-				WorldRuntime  runtime;
-				const QString soundRoot = testDirectory(QStringLiteral("commands-and-play-sound"));
+				SoundBackendState soundState;
+				WorldRuntime      runtime;
+				const QString     soundRoot = testDirectory(QStringLiteral("commands-and-play-sound"));
 				QVERIFY(!soundRoot.isEmpty());
 				QVERIFY(writeSoundFixture(soundRoot));
 				runtime.setStartupDirectory(soundRoot);
-				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
 				QStringList outputLines;
 				captureOutputLines(runtime, outputLines);
@@ -735,7 +1136,7 @@ namespace
 				QCOMPARE(soundState.playCalls, 1);
 				soundState.failingPlayFiles.push_back(QStringLiteral("coin.wav"));
 				QVERIFY(
-				    !QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QStringLiteral("coin.wav")));
+				    QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QStringLiteral("coin.wav")));
 				QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
 				QCOMPARE(runtime.soundStatus(1), 1);
 				QCOMPARE(soundState.playCalls, 2);

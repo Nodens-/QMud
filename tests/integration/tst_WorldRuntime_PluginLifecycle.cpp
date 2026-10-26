@@ -1890,6 +1890,8 @@ end
 		static void reloadMccpCleanEndRecordsSuccess()
 		{
 			WorldRuntime runtime;
+			WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+			WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 			activateMccp2(runtime);
 			QVERIFY(runtime.isCompressing());
 
@@ -1904,6 +1906,8 @@ end
 		static void reloadMccpNoResponseRemainsPendingUntilPreparationClears()
 		{
 			WorldRuntime runtime;
+			WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+			WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 			activateMccp2(runtime);
 			QVERIFY(runtime.isCompressing());
 

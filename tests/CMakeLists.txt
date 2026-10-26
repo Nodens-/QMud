@@ -19,11 +19,13 @@ function(qmud_add_qtest target_name)
     target_compile_definitions(${target_name}
             PRIVATE
             QMUD_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    # Shared support supplies the mandatory silent-output definition even for direct binary launches.
     target_link_libraries(${target_name}
             PRIVATE
             Qt6::Core
             Qt6::Test
-            ${QMUD_QTEST_LIBRARIES})
+            ${QMUD_QTEST_LIBRARIES}
+            qmud_test_support)
     target_include_directories(${target_name}
             PRIVATE
             "${CMAKE_SOURCE_DIR}/src"
@@ -70,8 +72,6 @@ target_include_directories(qmud_test_support
 qmud_add_qtest(tst_QTestSmoke
         SOURCES
         smoke/tst_QTestSmoke.cpp
-        LIBRARIES
-        qmud_test_support
         LABELS
         unit
         smoke
@@ -469,6 +469,10 @@ qmud_add_qtest(tst_SoundCacheUtils
         unit)
 
 if (QMUD_ENABLE_SOUND_VALUE)
+    qmud_add_qtest(tst_SoundPcmStream
+            SOURCES unit/tst_SoundPcmStream.cpp
+            LIBRARIES qmud_app_core
+            LABELS unit)
     qmud_add_qtest(tst_WorldRuntime_SoundLifetime
             GUI
             SOURCES
@@ -476,7 +480,8 @@ if (QMUD_ENABLE_SOUND_VALUE)
             LIBRARIES
             qmud_app_core
             LABELS
-            unit)
+            unit
+            TIMEOUT 60)
     set_property(TEST tst_WorldRuntime_SoundLifetime APPEND PROPERTY ENVIRONMENT
             "QMUD_HOME=${CMAKE_BINARY_DIR}")
 endif ()
@@ -530,7 +535,6 @@ qmud_add_qtest(tst_TelnetProcessor_Options
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
-        qmud_test_support
         ${QMUD_ZLIB_TARGET}
         LABELS
         integration
@@ -541,7 +545,6 @@ qmud_add_qtest(tst_TelnetProcessor_Mxp
         SOURCES
         integration/tst_TelnetProcessor_Mxp.cpp
         LIBRARIES
-        qmud_test_support
         qmud_app_core
         LABELS
         integration
@@ -556,7 +559,6 @@ qmud_add_qtest(tst_TelnetProcessor_Subnegotiation
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
-        qmud_test_support
         ${QMUD_ZLIB_TARGET}
         LABELS
         integration
@@ -571,7 +573,6 @@ qmud_add_qtest(tst_TelnetProcessor_Encoding
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
-        qmud_test_support
         ${QMUD_ZLIB_TARGET}
         LABELS
         integration
@@ -586,7 +587,6 @@ qmud_add_qtest(tst_TelnetProcessor_Compression
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
-        qmud_test_support
         ${QMUD_ZLIB_TARGET}
         LABELS
         integration
@@ -601,7 +601,6 @@ qmud_add_qtest(tst_TelnetProcessor_Malformed
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
-        qmud_test_support
         ${QMUD_ZLIB_TARGET}
         LABELS
         integration
@@ -713,7 +712,6 @@ qmud_add_qtest(tst_WorldDocument_Load
         SOURCES
         integration/tst_WorldDocument_Load.cpp
         LIBRARIES
-        qmud_test_support
         qmud_app_core
         LABELS
         integration
@@ -724,7 +722,6 @@ qmud_add_qtest(tst_WorldDocument_Masks
         SOURCES
         integration/tst_WorldDocument_Masks.cpp
         LIBRARIES
-        qmud_test_support
         qmud_app_core
         LABELS
         integration
@@ -735,7 +732,6 @@ qmud_add_qtest(tst_WorldDocument_Includes
         SOURCES
         integration/tst_WorldDocument_Includes.cpp
         LIBRARIES
-        qmud_test_support
         qmud_app_core
         LABELS
         integration
@@ -746,7 +742,6 @@ qmud_add_qtest(tst_WorldDocument_RoundTrip
         SOURCES
         integration/tst_WorldDocument_RoundTrip.cpp
         LIBRARIES
-        qmud_test_support
         qmud_app_core
         LABELS
         integration

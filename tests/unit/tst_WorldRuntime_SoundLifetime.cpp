@@ -33,9 +33,12 @@
 #include <QtTest/QTest>
 
 #include <atomic>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -132,6 +135,100 @@ namespace
 	}
 
 	/**
+	 * @brief Writes an isolated encoded-audio fixture beneath a build-local test home.
+	 * @param root Isolated QMud home.
+	 * @param relative Home-relative file.
+	 * @return Absolute created filename, or an empty string on failure.
+	 */
+	QString soundFixture(const QString &root, const QString &relative)
+	{
+		const QString path = QDir(root).filePath(relative);
+		if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+			return {};
+		QFile            file(path);
+		const QByteArray bytes = QMudTestSoundData::silentPcmWave(300);
+		return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() ? path : QString();
+	}
+
+	/** @brief Holds one real preparation-pool task without blocking sound-worker commands. */
+	class MemoryPreparationBlocker
+	{
+			Q_DISABLE_COPY_MOVE(MemoryPreparationBlocker)
+			struct Gates
+			{
+					QSemaphore entered;
+					QSemaphore resume;
+			};
+			std::shared_ptr<Gates> m_gates{std::make_shared<Gates>()};
+			bool                   m_released{false};
+
+		public:
+			/**
+			 * @brief Queues a barrier ahead of later hashing or materialization work.
+			 * @param engine Sound engine whose ordered pool is held.
+			 */
+			explicit MemoryPreparationBlocker(const SoundEngine &engine)
+			{
+				SoundEngineTestAccess::queueMemoryPreparationTask(engine,
+				                                                  [gates = m_gates]
+				                                                  {
+					                                                  gates->entered.release();
+					                                                  gates->resume.acquire();
+				                                                  });
+			}
+			/** @brief Releases queued work on every test exit path. */
+			~MemoryPreparationBlocker()
+			{
+				release();
+			}
+			/**
+			 * @brief Waits for entry into the queued synchronization task.
+			 * @return Whether the task entered within the test failure deadline.
+			 */
+			[[nodiscard]] bool waitUntilEntered() const
+			{
+				return m_gates->entered.tryAcquire(1, 5000);
+			}
+			/** @brief Allows the ordered preparation pool to continue exactly once. */
+			void release()
+			{
+				if (!std::exchange(m_released, true))
+					m_gates->resume.release();
+			}
+	};
+
+	/** @brief Owns an isolated synchronous caller and guarantees its cancellation before joining. */
+	struct PendingSoundCall
+	{
+			std::shared_ptr<SoundEngineSession> session;
+			std::atomic_bool                    finished{false};
+			int                                 result{eCannotPlaySound};
+			std::jthread                        caller;
+
+			/**
+			 * @brief Submits an operation from another thread while the test controls catalog progress.
+			 * @param owner Session whose close operation releases a blocked caller on test failure.
+			 * @param operation Synchronous sound operation.
+			 */
+			PendingSoundCall(std::shared_ptr<SoundEngineSession> owner, std::function<int()> operation)
+			    : session(std::move(owner)), caller(
+			                                     [this, operation = std::move(operation)]
+			                                     {
+				                                     result = operation();
+				                                     finished.store(true, std::memory_order_release);
+			                                     })
+			{
+			}
+
+			/** @brief Closes the session before joining so failed assertions cannot strand a waiting caller. */
+			~PendingSoundCall()
+			{
+				session->close();
+				caller.join();
+			}
+	};
+
+	/**
 	 * @brief QTest fixture covering sound-session lifecycle, ordering, snapshots, and cache maintenance.
 	 */
 	class tst_WorldRuntime_SoundLifetime : public QObject
@@ -143,18 +240,57 @@ namespace
 			/** @brief Verifies the media-player backend is initialized before the first request. */
 			void playbackBackendInitializesDuringApplicationStartup()
 			{
+				QVERIFY(SoundEngine::isOutputMuted());
 				SoundEngine engine;
 				QSignalSpy  initializedSpy(&engine, &SoundEngine::playbackInitializationFinished);
 				engine.initializePlayback();
 				const SoundEngineTestAccess::PlaybackInitializationState state =
 				    SoundEngineTestAccess::playbackInitializationState(engine);
 				QVERIFY(state.mediaPlayerReady);
+				QCOMPARE(state.outputVolume, 0.0);
 				QTRY_COMPARE(initializedSpy.count(), 1);
 				QCOMPARE(initializedSpy.first().first().toBool(), true);
 				const SoundEngineTestAccess::CacheState cache = SoundEngineTestAccess::cacheState(engine);
 				QCOMPARE(cache.sourceCount, 0);
 				QCOMPARE(cache.backendCount, 0);
 				QCOMPARE(cache.totalBytes, 0);
+			}
+
+			/** @brief Verifies new, reused, and recreated sinks stay silent while real playback controls operate. */
+			void testOutputMuteSurvivesPlaybackControlsAndDeviceReset()
+			{
+				QVERIFY(SoundEngine::isOutputMuted());
+				SoundEngine engine;
+				const auto  session = registerTestSession(engine);
+				QVERIFY(session);
+				const auto payload = QMudTestSoundData::silentPcmWave();
+				for (const int buffer : {1, 2})
+				{
+					QCOMPARE(session->playMemory(buffer, payload, true, 0.0, 0.0), eOK);
+					QCOMPARE(session->status(buffer), 2);
+					QCOMPARE(session->snapshot()->volume[static_cast<std::size_t>(buffer - 1)], 100.0);
+					QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, buffer,
+					                                                QMudSoundAttribute::Volume),
+					         100.0);
+					QCOMPARE(SoundEngineTestAccess::activeOutputVolume(engine, session, buffer), 0.0);
+				}
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 2);
+				QCOMPARE(session->playFile(1, {}, true, -25.0, 0.0), eOK);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Volume),
+				    75.0);
+				QCOMPARE(SoundEngineTestAccess::activeOutputVolume(engine, session, 1), 0.0);
+				QCOMPARE(session->stop(1), eOK);
+				QCOMPARE(session->playMemory(1, payload, true, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 2);
+				QCOMPARE(SoundEngineTestAccess::activeOutputVolume(engine, session, 1), 0.0);
+				SoundEngineTestAccess::resetForAudioDeviceChange(engine);
+				const auto initialized = SoundEngineTestAccess::playbackInitializationState(engine);
+				QVERIFY(initialized.mediaPlayerReady);
+				QCOMPARE(initialized.outputVolume, 0.0);
+				QCOMPARE(session->playMemory(1, payload, true, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeOutputVolume(engine, session, 1), 0.0);
+				QCOMPARE(session->stop(0), eOK);
 			}
 
 			/** @brief Verifies a stalled startup disables sound and reports completion without waiting for the worker. */
@@ -253,6 +389,94 @@ namespace
 				QVERIFY(QFile::copy(testSoundFileName(), outsideFile));
 				QCOMPARE(session->playFile(0, outsideFile, false, 0.0, 0.0), eFileNotFound);
 				QCOMPARE(session->reserveLuaAudioChannel(outsideFile, 42), 0);
+			}
+
+			/** @brief Supplies each non-finite value for every initial playback control. */
+			void nonFinitePlaybackControlsPreserveOwnership_data()
+			{
+				QTest::addColumn<double>("invalid");
+				QTest::addColumn<int>("control");
+				constexpr std::array values{std::numeric_limits<double>::quiet_NaN(),
+				                            std::numeric_limits<double>::infinity(),
+				                            -std::numeric_limits<double>::infinity()};
+				for (int value = 0; value < 3; ++value)
+					for (int control = 0; control < 3; ++control)
+						QTest::newRow(
+						    qPrintable(QStringLiteral("value-%1-control-%2").arg(value).arg(control)))
+						    << values[static_cast<std::size_t>(value)] << control;
+			}
+
+			/** @brief Verifies rejected plays, updates, reservations, and commits cannot disturb an existing owner. */
+			void nonFinitePlaybackControlsPreserveOwnership()
+			{
+				QFETCH(double, invalid);
+				QFETCH(int, control);
+				SoundEngine engine;
+				const auto  session = registerTestSession(engine);
+				QVERIFY(session);
+				QCOMPARE(
+				    session->playFile(1, testSoundFileName(), true, -55.0, 15.0, 71, nullptr, false, 3.0),
+				    eOK);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 71));
+				QCOMPARE(session->reserveLuaAudioChannel(testSoundFileName(), 72, 45.0, 15.0, 3.0), 2);
+				QVERIFY(session->confirmLuaAudioOwnership(2, 72));
+				const quint64 prepared = session->prepareFile(testSoundFileName());
+				QVERIFY(prepared != 0);
+				const auto   backends  = SoundEngineTestAccess::cacheState(engine).backendCount;
+				const auto   before    = session->snapshot();
+				const double volume    = control == 0 ? invalid : -55.0;
+				const double pan       = control == 1 ? invalid : 15.0;
+				const double pitch     = control == 2 ? invalid : 3.0;
+				int          selected  = -1;
+				auto         postState = before;
+				QCOMPARE(session->playFile(1, testSoundFileName(), false, volume, pan, 73, &selected, false,
+				                           pitch, &postState),
+				         eBadParameter);
+				QCOMPARE(session->playFile(1, QString(), false, volume, pan, 0, &selected, false, pitch,
+				                           &postState),
+				         eBadParameter);
+				QCOMPARE(session->playFile(2, testSoundFileName(), false, volume, pan, 72, &selected, true,
+				                           pitch, &postState),
+				         eBadParameter);
+				QCOMPARE(session->reserveLuaAudioChannel(testSoundFileName(), 73, volume, pan, pitch), 0);
+				QCOMPARE(
+				    session->setLuaAudioAttribute(1, 71, static_cast<QMudSoundAttribute>(control), invalid),
+				    eBadParameter);
+				QCOMPARE(
+				    session->setLuaAudioAttribute(2, 72, static_cast<QMudSoundAttribute>(control), invalid),
+				    eBadParameter);
+				if (control != 2)
+				{
+					QCOMPARE(session->playMemory(1, QMudTestSoundData::silentPcmWave(300), false, volume, pan,
+					                             0, &selected, &postState),
+					         eBadParameter);
+					QCOMPARE(session->commitPrepared(prepared, 1, false, volume, pan), eBadParameter);
+				}
+				QCOMPARE(selected, -1);
+				QVERIFY(postState == before);
+				QVERIFY(session->snapshot() == before);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, backends);
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 0);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Volume),
+				    45.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+				         15.0);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pitch),
+				    3.0);
+				// Invalid commits retain the preparation; invalid reservation plays retain their owner and controls.
+				QCOMPARE(session->commitPrepared(prepared, 1, true, -55.0, 15.0), eOK);
+				QCOMPARE(session->playFile(2, testSoundFileName(), true, 0.0, 0.0, 72, &selected, true), eOK);
+				QCOMPARE(selected, 2);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 2, QMudSoundAttribute::Volume),
+				    45.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 2, QMudSoundAttribute::Pan),
+				         15.0);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 2, QMudSoundAttribute::Pitch),
+				    3.0);
 			}
 
 			/** @brief Verifies an absolute path beneath QMud home cannot alias a file beneath sounds. */
@@ -676,11 +900,14 @@ namespace
 				QVERIFY(
 				    SoundEngineTestAccess::activeFileIdentity(restored, session, playback.buffer).isEmpty());
 				SoundEngineTestAccess::setIndexReadPaused(restored, false);
-				QTRY_COMPARE(SoundEngineTestAccess::activeFileIdentity(restored, session, playback.buffer),
-				             QFileInfo(indexed).canonicalFilePath());
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(restored).fileCount, 1);
+				QVERIFY(
+				    SoundEngineTestAccess::activeFileIdentity(restored, session, playback.buffer).isEmpty());
 				QVERIFY(!SoundEngineTestAccess::fileCatalogState(restored).ready);
 				SoundEngineTestAccess::setCatalogPaused(restored, false);
 				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(restored).ready);
+				QTRY_COMPARE(SoundEngineTestAccess::activeFileIdentity(restored, session, playback.buffer),
+				             QFileInfo(indexed).canonicalFilePath());
 			}
 
 			/** @brief Verifies every indexed hierarchy level is reconciled before a deep file is retained. */
@@ -1154,6 +1381,167 @@ namespace
 				    QDir(root.path()).filePath(QStringLiteral("sounds/world-one/missing.wav"))));
 			}
 
+			/** @brief Supplies protocols, media, pending entry paths, transport failures, and later cancellation. */
+			void failedNativeDownloadPreservesLaterFile_data()
+			{
+				QTest::addColumn<bool>("mxp");
+				QTest::addColumn<bool>("music");
+				QTest::addColumn<bool>("prepared");
+				QTest::addColumn<bool>("disconnect");
+				QTest::addColumn<int>("transition");
+				for (bool mxp : {false, true})
+					for (bool music : {false, true})
+						for (bool prepared : {false, true})
+							for (bool disconnect : {false, true})
+								QTest::newRow(
+								    qPrintable(QStringLiteral("mxp-%1-music-%2-prepared-%3-disconnect-%4")
+								                   .arg(mxp)
+								                   .arg(music)
+								                   .arg(prepared)
+								                   .arg(disconnect)))
+								    << mxp << music << prepared << disconnect << 0;
+				for (int transition = 1; transition <= 5; ++transition)
+					QTest::newRow(qPrintable(QStringLiteral("cancellation-%1").arg(transition)))
+					    << false << false << true << false << transition;
+			}
+
+			/** @brief Verifies a failed shared download releases only its owner and cannot cancel later occurrences. */
+			void failedNativeDownloadPreservesLaterFile()
+			{
+				QFETCH(bool, mxp);
+				QFETCH(bool, music);
+				QFETCH(bool, prepared);
+				QFETCH(bool, disconnect);
+				QFETCH(int, transition);
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-download-owner-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString preferred =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				QVERIFY(!preferred.isEmpty());
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost));
+				SoundEngine engine;
+				engine.initializePlayback();
+				engine.configureSoundDirectory(root.path());
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				const auto first  = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto second = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(first && second);
+				auto request =
+				    nativeSoundRequest(QStringLiteral("download.wav"),
+				                       music ? QMudNativeSoundMedia::Music : QMudNativeSoundMedia::Sound);
+				request.protocol    = mxp ? QMudNativeSoundProtocol::Mxp : QMudNativeSoundProtocol::Msp;
+				request.downloadUrl = QStringLiteral("http://127.0.0.1:%1/").arg(server.serverPort());
+				request.volume      = 0;
+				QVERIFY(first->submitNativeSound(request));
+				QVERIFY(second->submitNativeSound(request));
+				QTRY_VERIFY(server.hasPendingConnections());
+				const std::unique_ptr<QTcpSocket> socket(server.nextPendingConnection());
+				QVERIFY(socket);
+				QTRY_VERIFY(socket->bytesAvailable() > 0);
+				const auto firstNative = SoundEngineTestAccess::nativePlaybackState(
+				    engine, first, request.protocol, request.media);
+				const auto secondNative = SoundEngineTestAccess::nativePlaybackState(
+				    engine, second, request.protocol, request.media);
+				QVERIFY(firstNative.current && secondNative.current);
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/change.wav"))
+				             .isEmpty());
+				QTRY_VERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
+				const QString    file        = QStringLiteral("legacy/cue.wav");
+				const auto       firstToken  = prepared ? first->prepareFile(file) : 0;
+				const auto       secondToken = prepared ? second->prepareFile(file) : 0;
+				PendingSoundCall firstCall(
+				    first,
+				    [&]
+				    {
+					    return prepared
+					               ? first->commitPrepared(firstToken, firstNative.buffer, true, -100.0, 0.0)
+					               : first->playFile(firstNative.buffer, file, true, -100.0, 0.0);
+				    });
+				PendingSoundCall secondCall(
+				    second,
+				    [&]
+				    {
+					    return prepared ? second->commitPrepared(secondToken, secondNative.buffer, true,
+					                                             -100.0, 0.0)
+					                    : second->playFile(secondNative.buffer, file, true, -100.0, 0.0);
+				    });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, first, prepared), 1);
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, second, prepared), 1);
+				QVERIFY(!server.hasPendingConnections());
+				if (disconnect)
+				{
+					socket->write(QByteArrayLiteral(
+					    "HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\nx"));
+					socket->disconnectFromHost();
+				}
+				else
+				{
+					socket->write(QByteArrayLiteral(
+					    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+					socket->disconnectFromHost();
+				}
+				QTRY_VERIFY(!SoundEngineTestAccess::nativePlaybackState(engine, first, request.protocol,
+				                                                        request.media)
+				                 .current);
+				QTRY_VERIFY(!SoundEngineTestAccess::nativePlaybackState(engine, second, request.protocol,
+				                                                        request.media)
+				                 .current);
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, first, prepared), 1);
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, second, prepared), 1);
+				QVERIFY(!firstCall.finished.load(std::memory_order_acquire));
+				QVERIFY(!secondCall.finished.load(std::memory_order_acquire));
+				QCOMPARE(first->status(firstNative.buffer), -2);
+				QCOMPARE(second->status(secondNative.buffer), -2);
+				QTemporaryDir replacement(
+				    QDir::current().filePath(QStringLiteral("sound-download-new-root-XXXXXX")));
+				QVERIFY(replacement.isValid());
+				switch (transition)
+				{
+				case 0:
+					break;
+				case 1:
+					QCOMPARE(first->stop(firstNative.buffer), eOK);
+					QCOMPARE(second->stop(0), eOK);
+					break;
+				case 2:
+					first->close();
+					second->close();
+					break;
+				case 3:
+					engine.configureSoundDirectory(replacement.path());
+					break;
+				case 4:
+					SoundEngineTestAccess::resetForAudioDeviceChange(engine);
+					break;
+				case 5:
+					QCOMPARE(first->playFile(firstNative.buffer, QStringLiteral("relocated/cue.wav"), true,
+					                         -100.0, 0.0),
+					         eOK);
+					QCOMPARE(second->playFile(secondNative.buffer, QStringLiteral("relocated/cue.wav"), true,
+					                          -100.0, 0.0),
+					         eOK);
+					break;
+				default:
+					QFAIL("Unknown pending transition");
+				}
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(firstCall.finished.load(std::memory_order_acquire));
+				QTRY_VERIFY(secondCall.finished.load(std::memory_order_acquire));
+				QCOMPARE(firstCall.result, transition == 0 ? eOK : eCannotPlaySound);
+				QCOMPARE(secondCall.result, transition == 0 ? eOK : eCannotPlaySound);
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, first), 0);
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, second), 0);
+				if (transition == 0 || transition == 5)
+				{
+					QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, first, firstNative.buffer),
+					         preferred);
+					QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, second, secondNative.buffer),
+					         preferred);
+				}
+			}
+
 			/** @brief Verifies a native sound download with no transfer progress times out and releases waiters. */
 			void stalledNativeSoundDownloadTimesOut()
 			{
@@ -1374,6 +1762,1368 @@ namespace
 				         secondFile);
 				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), 2);
 				QCOMPARE(session->stop(selectedBuffer), eOK);
+			}
+
+			/** @brief Verifies caller teardown stops its cross-world voices through opaque sessions only. */
+			void luaAudioOwnerCleanupIncludesOtherWorldSessions()
+			{
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				WorldRuntime first;
+				WorldRuntime second;
+				first.setStartupDirectory(testSoundHome());
+				second.setStartupDirectory(testSoundHome());
+				first.attachSoundEngine(&engine);
+				second.attachSoundEngine(&engine);
+				constexpr int                                 caller    = 0;
+				constexpr int                                 unrelated = 0;
+				QMudNativePluginRegistry::LuaAudioCallContext context;
+				context.ownerKey = &caller;
+				const QVector<QVariant> play{testSoundFileName(), 1};
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&first, QStringLiteral("play"), play, context)
+				             .errorCode,
+				         eOK);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&second, QStringLiteral("play"), play, context)
+				        .errorCode,
+				    eOK);
+				context.ownerKey = &unrelated;
+				const auto other =
+				    QMudNativePluginRegistry::callLuaAudio(&second, QStringLiteral("play"), play, context);
+				QCOMPARE(other.errorCode, eOK);
+				const int otherBuffer = other.returnValues.front().toInt();
+				QCOMPARE(otherBuffer, 2);
+				QMudNativePluginRegistry::luaAudioStopRuntimeOwner(&first, &caller);
+				QCOMPARE(first.soundStatus(1), -2);
+				QCOMPARE(second.soundStatus(1), -2);
+				QCOMPARE(second.soundStatus(otherBuffer), 2);
+				context.ownerKey = &caller;
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&second, QStringLiteral("playDelayLooped"),
+				                                                {testSoundFileName(), 60000}, context)
+				             .errorCode,
+				         eOK);
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState pending;
+				QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&second, 1, pending));
+				QVERIFY(pending.pendingCancel);
+				QMudNativePluginRegistry::luaAudioStopRuntimeOwner(&first, &caller);
+				QVERIFY(pending.pendingCancel->load(std::memory_order_acquire));
+				QCOMPARE(second.soundStatus(1), -2);
+				QCOMPARE(second.soundStatus(otherBuffer), 2);
+			}
+
+			/** @brief Supplies stale ranks, filename-only matches, and native matching forms. */
+			void staleCatalogSelectionPreservesScopeRanking_data()
+			{
+				QTest::addColumn<int>("mode");
+				QTest::addColumn<int>("scenario");
+				for (int mode = 0; mode < 3; ++mode)
+					for (int scenario = 0; scenario < 8; ++scenario)
+						QTest::newRow(
+						    qPrintable(QStringLiteral("mode-%1-scenario-%2").arg(mode).arg(scenario)))
+						    << mode << scenario;
+			}
+
+			/** @brief Verifies stale groups are exhausted within their scope and unrelated names never match. */
+			void staleCatalogSelectionPreservesScopeRanking()
+			{
+				QFETCH(int, mode);
+				QFETCH(int, scenario);
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-stale-ranking-XXXXXX")));
+				QVERIFY(root.isValid());
+				QStringList   removed;
+				QStringList   survivors;
+				QStringList   expected;
+				const QString worldExact  = QStringLiteral("sounds/Erion/legacy/alerts/cue.wav");
+				const QString worldBest   = QStringLiteral("sounds/Erion/a/legacy/alerts/cue.wav");
+				const QString worldTie    = QStringLiteral("sounds/Erion/b/legacy/alerts/cue.wav");
+				const QString worldNext   = QStringLiteral("sounds/Erion/moved/alerts/cue.wav");
+				const QString worldPlain  = QStringLiteral("sounds/Erion/cue.wav");
+				const QString sharedExact = QStringLiteral("sounds/legacy/alerts/cue.wav");
+				const QString sharedBest  = QStringLiteral("sounds/moved/legacy/alerts/cue.wav");
+				const QString sharedNext  = QStringLiteral("sounds/moved/alerts/cue.wav");
+				const QString sharedPlain = QStringLiteral("sounds/cue.wav");
+				switch (scenario)
+				{
+				case 0:
+					removed   = {worldExact};
+					survivors = {worldBest, worldPlain, sharedExact};
+					expected  = {worldBest};
+					break;
+				case 1:
+					removed   = {worldBest, worldTie};
+					survivors = {worldNext, worldPlain, sharedExact};
+					expected  = {worldNext};
+					break;
+				case 2:
+					removed   = {worldExact, worldBest, worldPlain};
+					survivors = {sharedExact, sharedBest};
+					expected  = {sharedExact};
+					break;
+				case 3:
+					removed   = {sharedExact};
+					survivors = {sharedBest, sharedPlain};
+					expected  = {sharedBest};
+					break;
+				case 4:
+					removed = {worldExact, worldBest, worldPlain, sharedExact, sharedBest, sharedPlain};
+					break;
+				case 5:
+					removed   = {worldBest};
+					survivors = {worldTie, QStringLiteral("sounds/Erion/c/legacy/alerts/cue.wav"),
+					             sharedExact};
+					expected  = mode == 0 ? QStringList{survivors.at(1)} : survivors.first(2);
+					break;
+				case 6:
+					survivors = {worldPlain, sharedExact};
+					expected  = {worldPlain};
+					break;
+				case 7:
+					survivors = {sharedBest, sharedNext, sharedPlain};
+					expected  = {sharedBest};
+					break;
+				default:
+					QFAIL("Unknown ranking scenario");
+				}
+				const QString unrelated =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/legacy/alerts/different.wav"));
+				QVERIFY(!unrelated.isEmpty());
+				for (const QString &file : removed + survivors)
+					QVERIFY(!soundFixture(root.path(), file).isEmpty());
+				for (QString &file : removed)
+					file = QDir(root.path()).filePath(file);
+				for (QString &file : expected)
+					file = QDir(root.path()).filePath(file);
+				SoundEngine engine;
+				engine.initializePlayback();
+				engine.configureSoundDirectory(root.path());
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				for (const QString &file : expected)
+					QVERIFY(SoundEngineTestAccess::cacheFileRequest(engine, session, file, file));
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				const QString request = mode == 1   ? QStringLiteral("legacy/alerts/cu*.wav")
+				                        : mode == 2 ? QStringLiteral("legacy/alerts/cue")
+				                                    : QStringLiteral("legacy/alerts/cue.wav");
+				QCOMPARE(SoundEngineTestAccess::selectFilesAfterRemoval(engine, session, request, removed,
+				                                                        mode != 0),
+				         expected);
+				for (const QString &file : removed)
+					QVERIFY(!QFileInfo::exists(file));
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, survivors.size() + 1);
+				if (mode == 0)
+				{
+					QCOMPARE(session->playFile(1, request, true, -100.0, 0.0),
+					         expected.isEmpty() ? eFileNotFound : eOK);
+					if (expected.isEmpty())
+						return;
+					QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), expected.front());
+					const quint64 slow     = SoundEngineTestAccess::slowFileResolutionCount(engine);
+					const auto    backends = SoundEngineTestAccess::cacheState(engine).backendCount;
+					QCOMPARE(session->playFile(1, request, true, -100.0, 0.0), eOK);
+					QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), slow);
+					QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, backends);
+					QCOMPARE(session->stop(1), eOK);
+					const auto token = session->prepareFile(request);
+					QVERIFY(token != 0);
+					QCOMPARE(session->commitPrepared(token, 2, true, -100.0, 0.0), eOK);
+					QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 2), expected.front());
+					QVERIFY(session->reserveLuaAudioChannel(request, 91) > 0);
+				}
+				else
+				{
+					auto native     = nativeSoundRequest(request);
+					native.protocol = mode == 1 ? QMudNativeSoundProtocol::Msp : QMudNativeSoundProtocol::Mxp;
+					native.repeatCount = -1;
+					native.volume      = 0;
+					QVERIFY(session->submitNativeSound(native));
+					const auto playback = SoundEngineTestAccess::nativePlaybackState(
+					    engine, session, native.protocol, QMudNativeSoundMedia::Sound);
+					QCOMPARE(playback.current, !expected.isEmpty());
+					if (expected.isEmpty())
+						return;
+					QVERIFY(expected.contains(
+					    SoundEngineTestAccess::activeFileIdentity(engine, session, playback.buffer)));
+					QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, playback.buffer));
+					QVERIFY(expected.contains(
+					    SoundEngineTestAccess::activeFileIdentity(engine, session, playback.buffer)));
+				}
+			}
+
+			/** @brief Supplies file entry paths and path spellings for incomplete-catalog selection. */
+			void incompleteCatalogPreservesWorldPriority_data()
+			{
+				QTest::addColumn<int>("entry");
+				QTest::addColumn<QString>("request");
+				for (int entry = 0; entry < 5; ++entry)
+				{
+					const QByteArray name = QByteArray::number(entry);
+					QTest::newRow((name + "-relative").constData())
+					    << entry << QStringLiteral("legacy/cue.wav");
+					QTest::newRow((name + "-portable").constData())
+					    << entry << QStringLiteral("sounds/legacy/cue.wav");
+					QTest::newRow((name + "-absolute").constData()) << entry << QStringLiteral("absolute");
+					if (entry < 3)
+						QTest::newRow((name + "-plugin").constData())
+						    << entry << QStringLiteral("worlds/plugins/AddOn/cue.wav");
+					if (entry >= 3)
+					{
+						QTest::newRow((name + "-wildcard").constData())
+						    << entry << QStringLiteral("legacy/cu*.wav");
+						QTest::newRow((name + "-extensionless").constData())
+						    << entry << QStringLiteral("legacy/cue");
+					}
+				}
+			}
+
+			/** @brief Verifies every cold entry waits rather than letting a shared exact beat a world fallback. */
+			void incompleteCatalogPreservesWorldPriority()
+			{
+				QFETCH(int, entry);
+				QFETCH(QString, request);
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-priority-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString preferred =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				const QString shared = soundFixture(root.path(), QStringLiteral("sounds/legacy/cue.wav"));
+				QVERIFY(!preferred.isEmpty() && !shared.isEmpty());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("worlds/plugins/AddOn/cue.wav")).isEmpty());
+				if (request == QStringLiteral("absolute"))
+					request = shared;
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				QVERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
+				if (entry >= 3)
+				{
+					auto requestValue = nativeSoundRequest(request);
+					requestValue.protocol =
+					    entry == 3 ? QMudNativeSoundProtocol::Msp : QMudNativeSoundProtocol::Mxp;
+					requestValue.repeatCount = -1;
+					requestValue.volume      = 0;
+					QVERIFY(session->submitNativeSound(requestValue));
+					const auto state = SoundEngineTestAccess::nativePlaybackState(
+					    engine, session, requestValue.protocol, QMudNativeSoundMedia::Sound);
+					QVERIFY(state.current);
+					QVERIFY(
+					    SoundEngineTestAccess::activeFileIdentity(engine, session, state.buffer).isEmpty());
+					SoundEngineTestAccess::setCatalogPaused(engine, false);
+					QTRY_COMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, state.buffer),
+					             preferred);
+					return;
+				}
+				int              buffer = 0;
+				const quint64    token  = entry == 1 ? session->prepareFile(request) : 0;
+				PendingSoundCall call(
+				    session,
+				    [&]() -> int
+				    {
+					    if (entry == 0)
+						    return session->playFile(1, request, true, -100.0, 0.0, 0, &buffer);
+					    if (entry == 1)
+					    {
+						    buffer = 1;
+						    return session->commitPrepared(token, buffer, true, -100.0, 0.0);
+					    }
+					    buffer = session->reserveLuaAudioChannel(request, 71, 0.0);
+					    return buffer > 0 ? eOK : eCannotPlaySound;
+				    });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session, entry == 1), 1);
+				QVERIFY(!call.finished.load(std::memory_order_acquire));
+				QVERIFY(SoundEngineTestAccess::activeFileIdentity(engine, session, 1).isEmpty());
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				QCOMPARE(call.result, eOK);
+				if (entry == 2)
+					QCOMPARE(session->playFile(buffer, request, true, -100.0, 0.0, 71, &buffer, true), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer), preferred);
+			}
+
+			/** @brief Supplies both acceptance orders and replacement, control, and teardown transitions. */
+			void delayedLookupKeepsIndependentReplacement_data()
+			{
+				QTest::addColumn<bool>("startFirst");
+				QTest::addColumn<int>("transition");
+				const QStringList names{QStringLiteral("replacement-success"),
+				                        QStringLiteral("replacement-missing"),
+				                        QStringLiteral("prepared-cancel"),
+				                        QStringLiteral("guarded-stop"),
+				                        QStringLiteral("stop-all"),
+				                        QStringLiteral("module-free"),
+				                        QStringLiteral("device-change"),
+				                        QStringLiteral("root-change"),
+				                        QStringLiteral("session-close"),
+				                        QStringLiteral("shutdown"),
+				                        QStringLiteral("ordinary-controls"),
+				                        QStringLiteral("owned-controls"),
+				                        QStringLiteral("reserved-source-missing"),
+				                        QStringLiteral("exact-replacement"),
+				                        QStringLiteral("stale-stop"),
+				                        QStringLiteral("attribute-controls"),
+				                        QStringLiteral("duplicate-start"),
+				                        QStringLiteral("prepared-success"),
+				                        QStringLiteral("prepared-missing"),
+				                        QStringLiteral("stop-channel"),
+				                        QStringLiteral("immediate-fade"),
+				                        QStringLiteral("plugin-root-change"),
+				                        QStringLiteral("controls-after-prepared-cancel")};
+				for (const bool first : {false, true})
+					for (int index = 0; index < names.size(); ++index)
+						QTest::newRow(
+						    qPrintable(names[index] + (first ? "-start-first" : "-replacement-first")))
+						    << first << index;
+			}
+
+			/** @brief Verifies a deferred reservation start never steals an independent claim or outlives its owner. */
+			void delayedLookupKeepsIndependentReplacement()
+			{
+				QFETCH(bool, startFirst);
+				QFETCH(int, transition);
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-owned-lookup-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString old = soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/old.wav"));
+				const QString replacement =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/new.wav"));
+				QVERIFY(!old.isEmpty());
+				QVERIFY(!replacement.isEmpty());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("plugins")));
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("other-plugins")));
+				std::atomic_int               released{0};
+				SoundEngine::SessionCallbacks callbacks;
+				callbacks.luaAudioOwnershipReleased = [&released](int, const quint64 generation)
+				{
+					if (generation == 91)
+						released.fetch_add(1, std::memory_order_relaxed);
+				};
+				auto engine = std::make_unique<SoundEngine>();
+				engine->initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(*engine, true);
+				engine->configureSoundDirectory(root.path());
+				engine->configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("plugins")));
+				const auto session =
+				    engine->registerSession(std::move(callbacks), QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				const int buffer = session->reserveLuaAudioChannel(old, 91, 34.0);
+				QCOMPARE(buffer, 1);
+				QVERIFY(session->confirmLuaAudioOwnership(buffer, 91));
+				if (transition == 12)
+					QVERIFY(QFile::remove(old));
+				const bool prepared =
+				    transition == 2 || transition == 17 || transition == 18 || transition == 22;
+				const bool    missing = transition == 1 || transition == 10 || transition == 11 ||
+				                        transition == 15 || transition == 18;
+				const QString startRequest =
+				    transition == 21 ? QDir(root.path()).filePath(QStringLiteral("plugins/old.wav"))
+				                     : QStringLiteral("legacy/old.wav");
+				const QString nextRequest =
+				    missing ? QStringLiteral("legacy/missing.wav") : QStringLiteral("legacy/new.wav");
+				quint64                           token = 0;
+				std::unique_ptr<PendingSoundCall> start;
+				std::unique_ptr<PendingSoundCall> next;
+				// Each first submission is observed in worker state before accepting the second.
+				for (int index = 0; index < 2; ++index)
+				{
+					if ((index == 0) == startFirst)
+						start = std::make_unique<PendingSoundCall>(session,
+						                                           [&]
+						                                           {
+							                                           return session->playFile(
+							                                               buffer, startRequest, true, 0.0,
+							                                               100.0, 91, nullptr, true, 10.0);
+						                                           });
+					else
+					{
+						if (prepared)
+						{
+							token = session->prepareFile(nextRequest);
+							QVERIFY(token != 0);
+						}
+						next = std::make_unique<PendingSoundCall>(
+						    session,
+						    [&]
+						    {
+							    return prepared ? session->commitPrepared(token, buffer, true, -80.0, 0.0)
+							                    : session->playFile(buffer, nextRequest, true, -80.0, 0.0);
+						    });
+					}
+					QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), index + 1);
+				}
+				if (prepared)
+					QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session, true), 1);
+				QVERIFY(!start->finished.load(std::memory_order_acquire));
+				QVERIFY(!next->finished.load(std::memory_order_acquire));
+				switch (transition)
+				{
+				case 2:
+				case 22:
+					session->cancelPrepared(token);
+					QTRY_VERIFY(next->finished.load(std::memory_order_acquire));
+					QVERIFY(!start->finished.load(std::memory_order_acquire));
+					if (transition == 22)
+						QCOMPARE(session->playFile(buffer, {}, true, -39.0, -25.0), eOK);
+					break;
+				case 3:
+					QCOMPARE(session->stopLuaAudioChannel(buffer, 91), eOK);
+					break;
+				case 4:
+					QCOMPARE(session->stop(0), eOK);
+					break;
+				case 5:
+					QCOMPARE(session->setLuaAudioInitialized(false), eOK);
+					break;
+				case 6:
+					SoundEngineTestAccess::resetForAudioDeviceChange(*engine);
+					break;
+				case 7:
+					engine->configureSoundDirectory(testSoundHome());
+					break;
+				case 8:
+					session->close();
+					break;
+				case 9:
+					engine.reset();
+					break;
+				case 10:
+					QCOMPARE(session->playFile(buffer, {}, true, -39.0, -25.0), eOK);
+					break;
+				case 11:
+					QCOMPARE(session->playFile(buffer, {}, true, -59.0, -25.0, 91), eOK);
+					break;
+				case 13:
+					QCOMPARE(session->playFile(buffer, replacement, true, -80.0, 0.0), eOK);
+					break;
+				case 14:
+					QCOMPARE(session->stopLuaAudioChannel(buffer, 92), eCannotPlaySound);
+					break;
+				case 15:
+					QCOMPARE(session->setLuaAudioAttribute(buffer, 91, QMudSoundAttribute::Volume, 35.25),
+					         eOK);
+					QCOMPARE(session->setLuaAudioAttribute(buffer, 91, QMudSoundAttribute::Pan, -50.0), eOK);
+					QCOMPARE(session->setLuaAudioAttribute(buffer, 91, QMudSoundAttribute::Pitch, 8.5), eOK);
+					break;
+				case 16:
+					QCOMPARE(session->playFile(buffer, startRequest, true, 0.0, 0.0, 91, nullptr, true),
+					         eCannotPlaySound);
+					QCOMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), 2);
+					break;
+				case 19:
+					QCOMPARE(session->stop(buffer), eOK);
+					break;
+				case 20:
+					QCOMPARE(
+					    session->setLuaAudioAttribute(buffer, 91, QMudSoundAttribute::Volume, 0.0, {}, true),
+					    eOK);
+					break;
+				case 21:
+					engine->configurePluginDirectory(
+					    QDir(root.path()).filePath(QStringLiteral("other-plugins")));
+					break;
+				default:
+					break;
+				}
+				const bool canceledBoth  = transition == 4 || (transition >= 6 && transition <= 9) ||
+				                           transition == 13 || transition == 19;
+				const bool canceledOwner = canceledBoth || transition == 3 || transition == 5 ||
+				                           transition == 20 || transition == 21;
+				if (canceledOwner)
+				{
+					QTRY_VERIFY(start->finished.load(std::memory_order_acquire));
+					QCOMPARE(start->result, eCannotPlaySound);
+					QCOMPARE(released.load(), 1);
+					if (!canceledBoth)
+					{
+						QVERIFY(!next->finished.load(std::memory_order_acquire));
+						QCOMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), 1);
+					}
+				}
+				if (engine && transition != 8)
+					SoundEngineTestAccess::setCatalogPaused(*engine, false);
+				QTRY_VERIFY(start->finished.load(std::memory_order_acquire));
+				QTRY_VERIFY(next->finished.load(std::memory_order_acquire));
+				const bool canceledPrepared = transition == 2 || transition == 22;
+				QCOMPARE(next->result, canceledBoth || canceledPrepared ? eCannotPlaySound
+				                       : missing                        ? eFileNotFound
+				                                                        : eOK);
+				if (!canceledOwner)
+					QCOMPARE(start->result, !startFirst && !missing && !canceledPrepared ? eCannotPlaySound
+					                        : transition == 12                           ? eFileNotFound
+					                                                                     : eOK);
+				if (engine && transition != 8)
+				{
+					QCOMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), 0);
+					const bool oldActive = missing || canceledPrepared;
+					if (!canceledBoth || transition == 13)
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(*engine, session, buffer),
+						         oldActive ? old : replacement);
+					else
+						QVERIFY(
+						    SoundEngineTestAccess::activeFileIdentity(*engine, session, buffer).isEmpty());
+					if (oldActive)
+					{
+						QCOMPARE(released.load(), 0);
+						const double gain = transition == 10 || transition == 22 ? 61.0
+						                    : transition == 11                   ? 41.0
+						                    : transition == 15                   ? 35.25
+						                                                         : 34.0;
+						QCOMPARE(SoundEngineTestAccess::activeAttribute(*engine, session, buffer,
+						                                                QMudSoundAttribute::Volume),
+						         gain);
+						QCOMPARE(SoundEngineTestAccess::activeAttribute(*engine, session, buffer,
+						                                                QMudSoundAttribute::Pan),
+						         transition == 10 || transition == 11 || transition == 22 ? -25.0
+						         : transition == 15                                       ? -50.0
+						                                                                  : 0.0);
+						QCOMPARE(SoundEngineTestAccess::activeAttribute(*engine, session, buffer,
+						                                                QMudSoundAttribute::Pitch),
+						         transition == 15 ? 8.5 : 0.0);
+					}
+					QCOMPARE(session->stop(buffer), eOK);
+					QCOMPARE(released.load(), 1);
+				}
+			}
+
+			/** @brief Supplies cancellation and failure transitions for a pending replacement. */
+			void pendingFileReplacementLifecycle_data()
+			{
+				QTest::addColumn<int>("transition");
+				QTest::newRow("missing-keeps-old-voice") << 0;
+				QTest::newRow("stop-channel") << 1;
+				QTest::newRow("stop-all") << 2;
+				QTest::newRow("same-source-replacement") << 3;
+				QTest::newRow("session-close") << 4;
+				QTest::newRow("device-change") << 5;
+				QTest::newRow("luaaudio-free") << 6;
+				QTest::newRow("engine-shutdown") << 7;
+				QTest::newRow("root-change") << 8;
+			}
+
+			/** @brief Verifies pending lookup preserves old playback and cannot revive canceled assignments. */
+			void pendingFileReplacementLifecycle()
+			{
+				QFETCH(int, transition);
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-life-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString old = soundFixture(root.path(), QStringLiteral("sounds/Erion/keep.wav"));
+				QVERIFY(!old.isEmpty());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav")).isEmpty());
+				auto engine = std::make_unique<SoundEngine>();
+				engine->initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(*engine, true);
+				engine->configureSoundDirectory(root.path());
+				const auto session = engine->registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				QCOMPARE(session->playFile(1, QStringLiteral("keep.wav"), true, -100.0, 0.0), eOK);
+				const QString request =
+				    transition == 0 ? QStringLiteral("missing.wav") : QStringLiteral("legacy/cue.wav");
+				PendingSoundCall call(
+				    session, [&]
+				    { return session->playFile(1, request, true, -100.0, 0.0, transition == 6 ? 72 : 0); });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), 1);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(*engine, session, 1), old);
+				switch (transition)
+				{
+				case 0:
+					SoundEngineTestAccess::setCatalogPaused(*engine, false);
+					break;
+				case 1:
+					QCOMPARE(session->stop(1), eOK);
+					break;
+				case 2:
+					QCOMPARE(session->stop(0), eOK);
+					break;
+				case 3:
+					QCOMPARE(session->playFile(1, QStringLiteral("keep.wav"), true, -100.0, 0.0), eOK);
+					break;
+				case 4:
+					session->close();
+					break;
+				case 5:
+					SoundEngineTestAccess::resetForAudioDeviceChange(*engine);
+					break;
+				case 6:
+					QCOMPARE(session->setLuaAudioInitialized(false), eOK);
+					break;
+				case 7:
+					engine.reset();
+					break;
+				case 8:
+					engine->configureSoundDirectory(testSoundHome());
+					break;
+				default:
+					QFAIL("Unexpected pending file lifecycle transition");
+				}
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				QCOMPARE(call.result, transition == 0 ? eFileNotFound : eCannotPlaySound);
+				if (engine && transition != 4)
+				{
+					SoundEngineTestAccess::setCatalogPaused(*engine, false);
+					QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(*engine).ready);
+					QCOMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), 0);
+					if (transition == 0 || transition == 3 || transition == 6 || transition == 8)
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(*engine, session, 1), old);
+					else
+						QVERIFY(SoundEngineTestAccess::activeFileIdentity(*engine, session, 1).isEmpty());
+				}
+			}
+
+			/** @brief Supplies older-assignment transitions that must preserve a pending ordinary play. */
+			void pendingFileSurvivesOlderOwnershipTransitions_data()
+			{
+				QTest::addColumn<int>("transition");
+				QTest::newRow("volume-update") << 0;
+				QTest::newRow("generation-stop") << 1;
+				QTest::newRow("natural-completion") << 2;
+				QTest::newRow("immediate-fade") << 3;
+				QTest::newRow("module-free") << 4;
+			}
+
+			/** @brief Verifies old ownership completion and controls cannot cancel or overwrite later accepted file work. */
+			void pendingFileSurvivesOlderOwnershipTransitions()
+			{
+				QFETCH(int, transition);
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-owner-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/keep.wav")).isEmpty());
+				const QString replacement =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				QVERIFY(!replacement.isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				QCOMPARE(session->playFile(1, QStringLiteral("keep.wav"), true, -100.0, 0.0, 73), eOK);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 73));
+				PendingSoundCall call(
+				    session,
+				    [&] { return session->playFile(1, QStringLiteral("cue.wav"), true, -100.0, 0.0); });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
+				switch (transition)
+				{
+				case 0:
+					QCOMPARE(session->playFile(1, QString(), true, -80.0, 0.0), eOK);
+					break;
+				case 1:
+					QCOMPARE(session->stopLuaAudioChannel(1, 73), eOK);
+					break;
+				case 2:
+					QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, 1));
+					break;
+				case 3:
+					QCOMPARE(session->setLuaAudioAttribute(1, 73, QMudSoundAttribute::Volume, 0.0, {}, true),
+					         eOK);
+					break;
+				case 4:
+					QCOMPARE(session->setLuaAudioInitialized(false), eOK);
+					break;
+				default:
+					QFAIL("Unexpected older ownership transition");
+				}
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				QCOMPARE(call.result, eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), replacement);
+				QCOMPARE(session->snapshot()->volume[0], transition == 0 ? 20.0 : 0.0);
+			}
+
+			/** @brief Verifies direct completion snapshots retain accepted values across subsequent commands. */
+			void soundMutationReturnsItsOwnPublishedState()
+			{
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				const auto session = engine.registerSession({});
+				QVERIFY(session);
+				std::shared_ptr<const SoundEngineSession::Snapshot> started;
+				std::shared_ptr<const SoundEngineSession::Snapshot> updated;
+				std::shared_ptr<const SoundEngineSession::Snapshot> stopped;
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, -80.0, 0.0, 0, nullptr, false, 0.0,
+				                           &started),
+				         eOK);
+				QCOMPARE(session->playFile(1, QString(), true, -40.0, 0.0, 0, nullptr, false, 0.0, &updated),
+				         eOK);
+				QCOMPARE(session->stop(1, &stopped), eOK);
+				QVERIFY(started && updated && stopped);
+				QCOMPARE(started->volume[0], 20.0);
+				QCOMPARE(updated->volume[0], 60.0);
+				QCOMPARE(stopped->volume[0], 0.0);
+				QCOMPARE(stopped->status[0], -2);
+				QCOMPARE(session->playMemory(1, QMudTestSoundData::silentPcmWave(300), true, -70.0, 0.0, 0,
+				                             nullptr, &started),
+				         eOK);
+				QVERIFY(started);
+				QCOMPARE(started->volume[0], 30.0);
+			}
+
+			/** @brief Verifies cancellation can retire a prepared token with a commit already waiting on lookup. */
+			void pendingPreparationCanBeCancelled()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-prepare-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav")).isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				const quint64 intercepted = session->prepareFile(QStringLiteral("cue.wav"));
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
+				session->cancelPrepared(intercepted);
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 0);
+				const quint64    token = session->prepareFile(QStringLiteral("cue.wav"));
+				PendingSoundCall call(session,
+				                      [&] { return session->commitPrepared(token, 1, true, -100.0, 0.0); });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session, true), 1);
+				session->cancelPrepared(token);
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				QCOMPARE(call.result, eCannotPlaySound);
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QVERIFY(SoundEngineTestAccess::activeFileIdentity(engine, session, 1).isEmpty());
+			}
+
+			/** @brief Verifies a deferred occurrence keeps its captured world context while later requests use new preferences. */
+			void pendingFileKeepsCapturedWorldContext()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-context-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString first = soundFixture(
+				    root.path(), QStringLiteral("sounds/Erion/z/worlds/pluginsB/alerts/cue.wav"));
+				const QString second =
+				    soundFixture(root.path(), QStringLiteral("sounds/Other/relocated/cue.wav"));
+				QVERIFY(!first.isEmpty() && !second.isEmpty());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/a/alerts/cue.wav")).isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("worlds/plugins")));
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("worlds/pluginsB")));
+				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
+				const auto       session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				PendingSoundCall call(session,
+				                      [&]
+				                      {
+					                      return session->playFile(
+					                          1, QStringLiteral("worlds/pluginsB/alerts/cue.wav"), true,
+					                          -100.0, 0.0);
+				                      });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
+				session->updateWorldSoundDirectory(QStringLiteral("sounds/Other"));
+				engine.configurePluginDirectory(
+				    QDir(root.path()).filePath(QStringLiteral("worlds/pluginsB")));
+				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				QCOMPARE(call.result, eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), first);
+				QCOMPARE(
+				    session->playFile(2, QStringLiteral("worlds/pluginsB/alerts/cue.wav"), true, -100.0, 0.0),
+				    eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 2), second);
+			}
+
+			/** @brief Verifies plugin-root changes invalidate affected request aliases even when the selected file is a world override. */
+			void pluginRootChangesInvalidateWorldOverrideAliases()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-plugin-alias-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString pluginWorld =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/AddOn/prompt.wav"));
+				const QString ordinaryWorld =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/worlds/plugins/AddOn/prompt.wav"));
+				const QString unaffected =
+				    soundFixture(root.path(), QStringLiteral("sounds/Erion/unrelated.wav"));
+				QVERIFY(!pluginWorld.isEmpty() && !ordinaryWorld.isEmpty() && !unaffected.isEmpty());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("worlds/plugins/AddOn/prompt.wav")).isEmpty());
+				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("custom/plugins")));
+				SoundEngine engine;
+				engine.initializePlayback();
+				engine.configureSoundDirectory(root.path());
+				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				const QString request = QStringLiteral("worlds/plugins/AddOn/prompt.wav");
+				QCOMPARE(session->playFile(1, request, true, -100.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), pluginWorld);
+				QCOMPARE(session->playFile(2, QStringLiteral("unrelated.wav"), true, -100.0, 0.0), eOK);
+				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("custom/plugins")));
+				QCOMPARE(session->playFile(1, request, true, -100.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), ordinaryWorld);
+				const quint64 resolved = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				QCOMPARE(session->playFile(2, QStringLiteral("unrelated.wav"), true, -100.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), resolved);
+				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
+				QCOMPARE(session->playFile(1, request, true, -100.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), pluginWorld);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), resolved);
+			}
+
+			/** @brief Verifies root reconfiguration cancels pending native catalog requests across both protocols. */
+			void nativePendingLookupIsCancelledOnRootChange()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-native-root-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav")).isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				for (const auto protocol : {QMudNativeSoundProtocol::Msp, QMudNativeSoundProtocol::Mxp})
+				{
+					auto request     = nativeSoundRequest(QStringLiteral("legacy/cue.wav"));
+					request.protocol = protocol;
+					request.volume   = 0;
+					QVERIFY(session->submitNativeSound(request));
+					QVERIFY(SoundEngineTestAccess::nativePlaybackState(engine, session, protocol,
+					                                                   QMudNativeSoundMedia::Sound)
+					            .current);
+				}
+				engine.configureSoundDirectory(testSoundHome());
+				for (const auto protocol : {QMudNativeSoundProtocol::Msp, QMudNativeSoundProtocol::Mxp})
+					QVERIFY(!SoundEngineTestAccess::nativePlaybackState(engine, session, protocol,
+					                                                    QMudNativeSoundMedia::Sound)
+					             .current);
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QCOMPARE(session->status(1), -2);
+				QCOMPARE(session->status(2), -2);
+			}
+
+			/** @brief Verifies natural completion releases LuaAudio query ownership while retaining its cached backend. */
+			void completedLuaAudioVolumeDoesNotBecomeMasterVolume()
+			{
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(testSoundHome());
+				runtime.applyDefaultWorldOptions();
+				runtime.attachSoundEngine(&engine);
+				const auto played = QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("play"),
+				                                                           {testSoundFileName(), 0, 0, 0});
+				QCOMPARE(played.errorCode, eOK);
+				const int buffer = played.returnValues.front().toInt();
+				QVERIFY(buffer > 0);
+				const auto session = WorldRuntimeTestAccess::soundSession(runtime);
+				QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, buffer));
+				QCOMPARE(runtime.soundStatus(buffer), 0);
+				QCOMPARE(
+				    QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("getVolume"), {buffer})
+				        .returnValues.front()
+				        .toDouble(),
+				    0.0);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&runtime, QStringLiteral("getVolume"), {})
+				             .returnValues.front()
+				             .toDouble(),
+				         100.0);
+				QVERIFY(SoundEngineTestAccess::cacheState(engine).backendCount > 0);
+			}
+
+			/** @brief Verifies world-first selection for every path form before and after catalog completion. */
+			void worldDirectoryPriorityAcrossFileEntryPaths()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("world-priority-XXXXXX")));
+				QVERIFY(root.isValid());
+				const auto fixture = [&](const QString &relative)
+				{
+					QString path = QDir(root.path()).filePath(relative);
+					if (!QDir().mkpath(QFileInfo(path).absolutePath()) ||
+					    !QFile::copy(testSoundFileName(), path))
+						return QString();
+					return path;
+				};
+				const QString shared         = fixture(QStringLiteral("sounds/shared/voice.wav"));
+				const QString preferred      = fixture(QStringLiteral("sounds/Erion/shared/voice.wav"));
+				const QString other          = fixture(QStringLiteral("sounds/Other/shared/voice.wav"));
+				const QString plugin         = fixture(QStringLiteral("worlds/plugins/AddOn/prompt.wav"));
+				const QString pluginOverride = fixture(QStringLiteral("sounds/Erion/AddOn/prompt.wav"));
+				const QString relocated      = fixture(QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				QVERIFY(!shared.isEmpty() && !preferred.isEmpty() && !other.isEmpty() && !plugin.isEmpty() &&
+				        !pluginOverride.isEmpty() && !relocated.isEmpty());
+				QVERIFY(!fixture(QStringLiteral("sounds/legacy/cue.wav")).isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				QVERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
+				quint64 generation = 100;
+				for (const bool catalogReady : {false, true})
+				{
+					if (catalogReady)
+					{
+						SoundEngineTestAccess::setCatalogPaused(engine, false);
+						QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+					}
+					for (const QString &request :
+					     QStringList{QStringLiteral("shared/voice.wav"),
+					                 QStringLiteral("sounds/shared/voice.wav"), shared, preferred})
+					{
+						int buffer = 0;
+						QCOMPARE(session->playFile(0, request, true, 0.0, 0.0, 0, &buffer), eOK);
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer),
+						         preferred);
+						QCOMPARE(session->stop(buffer), eOK);
+						const quint64 prepared = session->prepareFile(request);
+						QVERIFY(prepared != 0);
+						QCOMPARE(session->commitPrepared(prepared, 1, false, 0.0, 0.0), eOK);
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), preferred);
+						QCOMPARE(session->stop(1), eOK);
+						++generation;
+						const int reserved = session->reserveLuaAudioChannel(request, generation);
+						QVERIFY(reserved > 0);
+						QCOMPARE(
+						    session->playFile(reserved, request, true, 0.0, 0.0, generation, &buffer, true),
+						    eOK);
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer),
+						         preferred);
+						QVERIFY(session->confirmLuaAudioOwnership(buffer, generation));
+						QCOMPARE(session->stop(buffer), eOK);
+						QVERIFY(session->submitNativeSound(nativeSoundRequest(request)));
+						const auto native = SoundEngineTestAccess::nativePlaybackState(
+						    engine, session, QMudNativeSoundProtocol::Msp, QMudNativeSoundMedia::Sound);
+						QVERIFY(native.current);
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, native.buffer),
+						         preferred);
+						QCOMPARE(session->stop(native.buffer), eOK);
+					}
+					for (const QString &request :
+					     QStringList{QStringLiteral("worlds/plugins/AddOn/prompt.wav"), plugin})
+					{
+						int buffer = 0;
+						QCOMPARE(session->playFile(0, request, true, 0.0, 0.0, 0, &buffer), eOK);
+						QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer),
+						         pluginOverride);
+						QCOMPARE(session->stop(buffer), eOK);
+					}
+				}
+				int buffer = 0;
+				QCOMPARE(
+				    session->playFile(0, QStringLiteral("sounds/legacy/cue.wav"), true, 0.0, 0.0, 0, &buffer),
+				    eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer), relocated);
+				const quint64 slow = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				QCOMPARE(session->playFile(buffer, QStringLiteral("sounds/legacy/cue.wav"), true, 0.0, 0.0),
+				         eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), slow);
+				QCOMPARE(session->stop(buffer), eOK);
+				for (const QString &pattern :
+				     {QStringLiteral("sounds/shared/vo*.wav"), QStringLiteral("sounds/shared/voice")})
+				{
+					QVERIFY(session->submitNativeSound(nativeSoundRequest(pattern)));
+					const auto native = SoundEngineTestAccess::nativePlaybackState(
+					    engine, session, QMudNativeSoundProtocol::Msp, QMudNativeSoundMedia::Sound);
+					QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, native.buffer),
+					         preferred);
+					QCOMPARE(session->stop(native.buffer), eOK);
+				}
+				const quint64 prepared = session->prepareFile(shared);
+				QVERIFY(prepared != 0);
+				auto nativeRequest        = nativeSoundRequest(shared);
+				nativeRequest.repeatCount = 2;
+				QVERIFY(session->submitNativeSound(nativeRequest));
+				const auto native = SoundEngineTestAccess::nativePlaybackState(
+				    engine, session, QMudNativeSoundProtocol::Msp, QMudNativeSoundMedia::Sound);
+				session->updateWorldSoundDirectory(QStringLiteral("sounds/Other"));
+				QCOMPARE(session->commitPrepared(prepared, 2, false, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 2), preferred);
+				QVERIFY(SoundEngineTestAccess::completeActiveChannel(engine, session, native.buffer));
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, native.buffer),
+				         preferred);
+				QCOMPARE(session->playFile(3, shared, true, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 3), other);
+			}
+
+			/** @brief Supplies each entry boundary that assigns a normalized playback gain. */
+			void playbackGainNormalization_data()
+			{
+				QTest::addColumn<int>("entry");
+				QTest::newRow("direct-file") << 0;
+				QTest::newRow("prepared-file") << 1;
+				QTest::newRow("memory") << 2;
+				QTest::newRow("reserved-file") << 3;
+			}
+
+			/** @brief Verifies every integer percentage and fractional reserved gains survive playback assignment exactly. */
+			void playbackGainNormalization()
+			{
+				QFETCH(int, entry);
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				const auto session = engine.registerSession({});
+				QVERIFY(session);
+				const QByteArray memory = QMudTestSoundData::silentPcmWave(300);
+				for (int index = 0; index <= (entry == 3 ? 103 : 100); ++index)
+				{
+					const double percent = index <= 100   ? static_cast<double>(index)
+					                       : index == 101 ? 34.25
+					                       : index == 102 ? 41.125
+					                                      : 0.00125;
+					if (entry == 0)
+						QCOMPARE(session->playFile(1, testSoundFileName(), true, percent - 100.0, 0.0), eOK);
+					else if (entry == 1)
+					{
+						const quint64 token = session->prepareFile(testSoundFileName());
+						QVERIFY(token != 0);
+						QCOMPARE(session->commitPrepared(token, 1, true, percent - 100.0, 0.0), eOK);
+					}
+					else if (entry == 2)
+						QCOMPARE(session->playMemory(1, memory, true, percent - 100.0, 0.0), eOK);
+					else
+					{
+						const auto generation = static_cast<quint64>(index) + 1;
+						QCOMPARE(session->reserveLuaAudioChannel(testSoundFileName(), generation), 1);
+						QCOMPARE(
+						    session->setLuaAudioAttribute(1, generation, QMudSoundAttribute::Volume, percent),
+						    eOK);
+						QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, generation,
+						                           nullptr, true),
+						         eOK);
+					}
+					const double observed = SoundEngineTestAccess::activeAttribute(
+					    engine, session, 1, QMudSoundAttribute::Volume);
+					const double expected = (percent / 100.0) * 100.0;
+					QVERIFY2(observed == expected,
+					         qPrintable(QStringLiteral("%1 percent: actual %2, expected %3")
+					                        .arg(percent)
+					                        .arg(observed, 0, 'g', 17)
+					                        .arg(expected, 0, 'g', 17)));
+					QCOMPARE(session->stop(1), eOK);
+				}
+			}
+
+			/** @brief Verifies native catalog continuations consume the current linear gain without a unit round trip. */
+			void nativeLookupPreservesCurrentGain()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-native-gain-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/cue.wav")).isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				std::vector<std::shared_ptr<SoundEngineSession>> sessions;
+				for (const QMudNativeSoundProtocol protocol :
+				     {QMudNativeSoundProtocol::Msp, QMudNativeSoundProtocol::Mxp})
+					for (const QMudNativeSoundMedia media :
+					     {QMudNativeSoundMedia::Sound, QMudNativeSoundMedia::Music})
+					{
+						const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+						QVERIFY(session);
+						auto request        = nativeSoundRequest(QStringLiteral("legacy/cue.wav"), media);
+						request.protocol    = protocol;
+						request.repeatCount = -1;
+						request.volume      = 34;
+						QVERIFY(session->submitNativeSound(request));
+						const int buffer =
+						    SoundEngineTestAccess::nativePlaybackState(engine, session, protocol, media)
+						        .buffer;
+						QVERIFY(buffer > 0);
+						QCOMPARE(session->playFile(buffer, {}, true, -59.0, 0.0), eOK);
+						sessions.push_back(session);
+					}
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				for (const auto &session : sessions)
+				{
+					int playing = 0;
+					for (int buffer = 1; buffer <= SoundEngineSession::kChannelCount; ++buffer)
+						if (!SoundEngineTestAccess::activeFileIdentity(engine, session, buffer).isEmpty())
+						{
+							++playing;
+							QVERIFY(SoundEngineTestAccess::activeAttribute(engine, session, buffer,
+							                                               QMudSoundAttribute::Volume) ==
+							        (41.0 / 100.0) * 100.0);
+						}
+					QCOMPARE(playing, 1);
+				}
+			}
+
+			/** @brief Supplies terminal-event orders and control, cancellation, failure, and backpressure cases. */
+			void loopUpdateSurvivesDecoderCompletion_data()
+			{
+				QTest::addColumn<int>("ordering");
+				QTest::addColumn<int>("transition");
+				const QStringList orders{QStringLiteral("update-before-end"),
+				                         QStringLiteral("end-update-stop"), QStringLiteral("stop-update-end"),
+				                         QStringLiteral("end-stop-update"),
+				                         QStringLiteral("stop-end-update")};
+				const QStringList transitions{QStringLiteral("continue"),
+				                              QStringLiteral("disable-loop"),
+				                              QStringLiteral("stop"),
+				                              QStringLiteral("replace-owner"),
+				                              QStringLiteral("module-free"),
+				                              QStringLiteral("decoder-error"),
+				                              QStringLiteral("completed-fade"),
+				                              QStringLiteral("native-repeat-policy"),
+				                              QStringLiteral("session-close"),
+				                              QStringLiteral("device-change"),
+				                              QStringLiteral("pending-replacement"),
+				                              QStringLiteral("backpressure-hysteresis"),
+				                              QStringLiteral("disable-reenable-loop"),
+				                              QStringLiteral("low-water-continuation")};
+				for (int order = 0; order < orders.size(); ++order)
+					for (int transition = 0; transition < transitions.size(); ++transition)
+						QTest::newRow(qPrintable(orders[order] + QLatin1Char('-') + transitions[transition]))
+						    << order << transition;
+			}
+
+			/** @brief Verifies repeat updates and terminal events retain PCM and ownership through production worker paths. */
+			void loopUpdateSurvivesDecoderCompletion()
+			{
+				QFETCH(int, ordering);
+				QFETCH(int, transition);
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				const auto session = engine.registerSession({});
+				QVERIFY(session);
+				QVERIFY(SoundEngineTestAccess::decoderContinuation(engine, session, ordering, transition));
+			}
+
+			/** @brief Supplies gains previously rounded differently on initial playback and reserved starts. */
+			void globalVolumeNoOpPreservesStopEnvelope_data()
+			{
+				QTest::addColumn<double>("percent");
+				QTest::addColumn<bool>("reserved");
+				for (const double value :
+				     {20.0, 30.0, 34.0, 41.0, 42.0, 43.0, 44.0, 45.0, 70.0, 100.0, 34.25})
+					for (const bool delayed : {false, true})
+						QTest::newRow(
+						    qPrintable(QString::number(value) + (delayed ? "-reserved" : "-direct")))
+						    << value << delayed;
+			}
+
+			/** @brief Verifies a global volume no-op preserves a pending stop on the real audio transport. */
+			void globalVolumeNoOpPreservesStopEnvelope()
+			{
+				QFETCH(double, percent);
+				QFETCH(bool, reserved);
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				const auto session = engine.registerSession({});
+				QVERIFY(session);
+				if (reserved)
+				{
+					QCOMPARE(session->reserveLuaAudioChannel(testSoundFileName(), 91, 100.0), 1);
+					QVERIFY(session->confirmLuaAudioOwnership(1, 91));
+					QCOMPARE(session->setLuaAudioAttribute(1, 91, QMudSoundAttribute::Volume, percent), eOK);
+				}
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, percent - 100.0, 0.0, 91, nullptr,
+				                           reserved),
+				         eOK);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 91));
+				// Flat gain makes the no-op condition independent of audio callback timing.
+				QCOMPARE(session->setLuaAudioAttribute(1, 91, QMudSoundAttribute::Volume, percent,
+				                                       std::chrono::milliseconds{100}, true),
+				         eOK);
+				QCOMPARE(session->setLuaAudioAttribute(0, 0, QMudSoundAttribute::Volume, percent), eOK);
+				QTRY_COMPARE(session->status(1), -2);
+			}
+
+			/** @brief Verifies audible controls, published reads, cancellation, and backend reuse share one generation. */
+			void luaAudioControlsPublishAndCancelAcrossAssignments()
+			{
+				std::atomic<quint64>          released{0};
+				SoundEngine::SessionCallbacks callbacks;
+				callbacks.luaAudioOwnershipReleased = [&released](int, const quint64 generation)
+				{ released.store(generation, std::memory_order_release); };
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				const auto session = engine.registerSession(callbacks);
+				QVERIFY(session);
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, 11), eOK);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 11));
+				const auto original = session->snapshot();
+				QCOMPARE(original->volume[0], 100.0);
+				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Volume, 50.0), eOK);
+				QCOMPARE(session->snapshot()->volume[0], 50.0);
+				QCOMPARE(original->volume[0], 100.0);
+				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Pan, 100.0), eOK);
+				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Pitch, 4.0), eOK);
+				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Pitch, 3.0, {}, false,
+				                                       QMudSoundAttributeTarget::Relative),
+				         eOK);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+				         100.0);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pitch),
+				    7.0);
+				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Volume, 0.0,
+				                                       std::chrono::milliseconds{1000}),
+				         eOK);
+				QTRY_COMPARE(session->snapshot()->volume[0], 0.0);
+				QCOMPARE(session->status(1), 2);
+				QCOMPARE(session->stopLuaAudioChannel(1, 11), eOK);
+				QCOMPARE(released.load(std::memory_order_acquire), 11);
+				const auto backendCount = SoundEngineTestAccess::cacheState(engine).backendCount;
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, 22), eOK);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 22));
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, backendCount);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+				         0.0);
+				QCOMPARE(
+				    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pitch),
+				    0.0);
+				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Volume, 10.0),
+				         eCannotPlaySound);
+				QCOMPARE(session->snapshot()->volume[0], 100.0);
+				QCOMPARE(session->setLuaAudioAttribute(1, 22, QMudSoundAttribute::Volume, 0.0,
+				                                       std::chrono::milliseconds{1000}, true),
+				         eOK);
+				QTRY_COMPARE(session->status(1), -2);
+				QCOMPARE(released.load(std::memory_order_acquire), 22);
+				const int reserved =
+				    session->reserveLuaAudioChannel(testSoundFileName(), 33, 70.0, 20.0, 2.0);
+				QVERIFY(reserved > 0);
+				QVERIFY(session->confirmLuaAudioOwnership(reserved, 33));
+				QCOMPARE(session->setLuaAudioAttribute(reserved, 33, QMudSoundAttribute::Volume, 35.0), eOK);
+				QCOMPARE(session->setLuaAudioAttribute(reserved, 33, QMudSoundAttribute::Pan, -50.0), eOK);
+				QCOMPARE(session->setLuaAudioAttribute(reserved, 33, QMudSoundAttribute::Pitch, 6.0), eOK);
+				QCOMPARE(session->setLuaAudioAttribute(reserved, 33, QMudSoundAttribute::Pitch, 2.0, {},
+				                                       false, QMudSoundAttributeTarget::Relative),
+				         eOK);
+				int selected = 0;
+				QCOMPARE(session->playFile(reserved, testSoundFileName(), true, -30.0, 20.0, 33, &selected,
+				                           true, 2.0),
+				         eOK);
+				QCOMPARE(selected, reserved);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, selected,
+				                                                QMudSoundAttribute::Volume),
+				         35.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, selected,
+				                                                QMudSoundAttribute::Pan),
+				         -50.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, selected,
+				                                                QMudSoundAttribute::Pitch),
+				         8.0);
+				QCOMPARE(
+				    session->setLuaAudioAttribute(selected, 33, QMudSoundAttribute::Volume, 0.0, {}, true),
+				    eOK);
+				QCOMPARE(session->status(selected), -2);
+				QCOMPARE(released.load(std::memory_order_acquire), 33);
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, 44), eOK);
+				QCOMPARE(session->playFile(2, testSoundFileName(), true, 0.0, 0.0), eOK);
+				QCOMPARE(session->setLuaAudioAttribute(0, 0, QMudSoundAttribute::Volume, 25.0), eOK);
+				QCOMPARE(session->snapshot()->volume[0], 25.0);
+				QCOMPARE(session->snapshot()->volume[1], 100.0);
+				QCOMPARE(session->setLuaAudioInitialized(false), eOK);
+				QCOMPARE(session->status(1), -2);
+				QCOMPARE(session->status(2), 2);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 44));
+				QCOMPARE(released.load(std::memory_order_acquire), 44);
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, 55), eCannotPlaySound);
+				QCOMPARE(session->reserveLuaAudioChannel(testSoundFileName(), 55), 0);
+				QCOMPARE(session->setLuaAudioInitialized(true), eOK);
+				QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, 55), eOK);
+				QVERIFY(session->confirmLuaAudioOwnership(1, 55));
+				session->close();
+				QCOMPARE(session->setLuaAudioAttribute(1, 22, QMudSoundAttribute::Pan, 25.0),
+				         eCannotPlaySound);
+			}
+
+			/** @brief Verifies all file entry paths share fallback while warm reuse yields only to an exact match. */
+			void sharedFallbackPreservesWarmReuseAndPreparedIdentity()
+			{
+				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-fallback-XXXXXX")));
+				QVERIFY(root.isValid());
+				const QString sourceDirectory =
+				    QDir(root.path()).filePath(QStringLiteral("sounds/Erion/notifications"));
+				const QString collisionDirectory =
+				    QDir(root.path()).filePath(QStringLiteral("sounds/Other/combat"));
+				QVERIFY(QDir().mkpath(sourceDirectory));
+				QVERIFY(QDir().mkpath(collisionDirectory));
+				const QString source = QDir(sourceDirectory).filePath(QStringLiteral("crash.wav"));
+				QVERIFY(QFile::copy(testSoundFileName(), source));
+				QVERIFY(QFile::copy(testSoundFileName(),
+				                    QDir(collisionDirectory).filePath(QStringLiteral("crash.wav"))));
+				SoundEngine engine;
+				engine.initializePlayback();
+				engine.configureSoundDirectory(root.path());
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				const auto session = engine.registerSession({}, QStringLiteral("./sounds/Erion/"));
+				QVERIFY(session);
+				const QString request = QStringLiteral(R"(worlds\sounds\notifications\crash.wav)");
+				int           buffer  = 0;
+				QCOMPARE(session->playFile(0, request, false, 0.0, 0.0, 0, &buffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer), source);
+				const quint64   slow     = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				const qsizetype backends = SoundEngineTestAccess::cacheState(engine).backendCount;
+				QCOMPARE(session->playFile(buffer, request, false, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), slow);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, backends);
+				QCOMPARE(session->stop(buffer), eOK);
+				const int reserved = session->reserveLuaAudioChannel(request, 11);
+				QVERIFY(reserved > 0);
+				QCOMPARE(session->stopLuaAudioChannel(reserved, 11), eOK);
+				const quint64 prepared = session->prepareFile(request);
+				QVERIFY(prepared != 0);
+				QVERIFY(session->submitNativeSound(nativeSoundRequest(request)));
+				const int nativeBuffer =
+				    SoundEngineTestAccess::nativePlaybackState(engine, session, QMudNativeSoundProtocol::Msp,
+				                                               QMudNativeSoundMedia::Sound)
+				        .buffer;
+				QVERIFY(nativeBuffer > 0);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, nativeBuffer), source);
+				QCOMPARE(session->stop(nativeBuffer), eOK);
+				const QString otherDirectory =
+				    QDir(root.path()).filePath(QStringLiteral("sounds/Other/notifications"));
+				QVERIFY(QDir().mkpath(otherDirectory));
+				QVERIFY(QFile::copy(testSoundFileName(),
+				                    QDir(otherDirectory).filePath(QStringLiteral("crash.wav"))));
+				SoundEngineTestAccess::reconcileSoundRoot(engine);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, 3);
+				const quint64 afterNative = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				QCOMPARE(session->playFile(0, request, false, 0.0, 0.0, 0, &buffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer), source);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), afterNative);
+				QCOMPARE(session->stop(buffer), eOK);
+				const QString exactDirectory =
+				    QDir(root.path()).filePath(QStringLiteral("sounds/worlds/sounds/notifications"));
+				QVERIFY(QDir().mkpath(exactDirectory));
+				const QString exact = QDir(exactDirectory).filePath(QStringLiteral("crash.wav"));
+				QVERIFY(QFile::copy(testSoundFileName(), exact));
+				SoundEngineTestAccess::reconcileSoundRoot(engine);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, 4);
+				QCOMPARE(session->playFile(0, request, false, 0.0, 0.0, 0, &buffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer), source);
+				QCOMPARE(session->stop(buffer), eOK);
+				QCOMPARE(session->commitPrepared(prepared, 1, false, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), source);
+				QCOMPARE(session->stop(1), eOK);
+				const QString preferredDirectory =
+				    QDir(root.path()).filePath(QStringLiteral("sounds/Erion/worlds/sounds/notifications"));
+				QVERIFY(QDir().mkpath(preferredDirectory));
+				QVERIFY(QFile::copy(testSoundFileName(),
+				                    QDir(preferredDirectory).filePath(QStringLiteral("crash.wav"))));
+				SoundEngineTestAccess::reconcileSoundRoot(engine);
+				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, 5);
+				const quint64 exactSlow = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				QCOMPARE(session->playFile(0, request, false, 0.0, 0.0, 0, &buffer), eOK);
+				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, buffer),
+				         QDir(preferredDirectory).filePath(QStringLiteral("crash.wav")));
+				const quint64 promotedSlow = SoundEngineTestAccess::slowFileResolutionCount(engine);
+				QVERIFY(promotedSlow >= exactSlow);
+				QCOMPARE(session->playFile(buffer, request, false, 0.0, 0.0), eOK);
+				QCOMPARE(SoundEngineTestAccess::slowFileResolutionCount(engine), promotedSlow);
+				QCOMPARE(session->stop(buffer), eOK);
 			}
 
 			/**
@@ -1838,6 +3588,281 @@ namespace
 				QCOMPARE(secondStep.sourceCount, 1);
 				QCOMPARE(secondStep.backendCount, 1);
 				QVERIFY(!secondStep.maintenancePending);
+			}
+
+			/** @brief Supplies preparation phases and resident-resource reuse for pending control updates. */
+			void pendingMemoryControls_data()
+			{
+				QTest::addColumn<int>("phase");
+				QTest::addColumn<bool>("loop");
+				for (int phase = 0; phase < 3; ++phase)
+					for (const bool loop : {false, true})
+						QTest::newRow(qPrintable(QStringLiteral("phase-%1-loop-%2").arg(phase).arg(loop)))
+						    << phase << loop;
+			}
+
+			/** @brief Verifies pending updates survive hashing, materialization, reuse, and exact result publication. */
+			void pendingMemoryControls()
+			{
+				QFETCH(int, phase);
+				QFETCH(bool, loop);
+				SoundEngine engine;
+				const auto  session = registerTestSession(engine);
+				QVERIFY(session);
+				const auto payload = QMudTestSoundData::silentPcmWave(300);
+				if (phase == 2)
+				{
+					QCOMPARE(session->playMemory(1, payload, true, 0.0, 0.0), eOK);
+					QCOMPARE(session->stop(1), eOK);
+				}
+				MemoryPreparationBlocker digest(engine);
+				QVERIFY(digest.waitUntilEntered());
+				std::shared_ptr<const SoundEngineSession::Snapshot> started;
+				int                                                 selected = 0;
+				PendingSoundCall                                    call(
+				    session, [&]
+				    { return session->playMemory(1, payload, !loop, -80.0, 10.0, 0, &selected, &started); });
+				QTRY_COMPARE(session->status(1), 0);
+				QCOMPARE(session->snapshot()->volume[0], 20.0);
+				std::unique_ptr<MemoryPreparationBlocker> materialization;
+				if (phase == 1)
+				{
+					materialization = std::make_unique<MemoryPreparationBlocker>(engine);
+					digest.release();
+					QVERIFY(materialization->waitUntilEntered());
+				}
+				QCOMPARE(session->playFile(1, {}, !loop, -70.0, -25.0), eOK);
+				std::shared_ptr<const SoundEngineSession::Snapshot> updated;
+				QCOMPARE(session->playFile(1, {}, loop, -58.875, 35.0, 0, nullptr, false, 0.0, &updated),
+				         eOK);
+				QVERIFY(updated);
+				QCOMPARE(updated->status[0], 0);
+				QCOMPARE(updated->volume[0], 41.125);
+				QCOMPARE(session->playFile(1, {}, !loop, std::numeric_limits<double>::quiet_NaN(), 0.0),
+				         eBadParameter);
+				QVERIFY(!call.finished.load(std::memory_order_acquire));
+				digest.release();
+				if (materialization)
+					materialization->release();
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				QCOMPARE(call.result, eOK);
+				QCOMPARE(selected, 1);
+				QVERIFY(started);
+				QCOMPARE(started->status[0], loop ? 2 : 1);
+				QCOMPARE(started->volume[0], 41.125);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+				         35.0);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 1);
+				QCOMPARE(session->stop(1), eOK);
+				QCOMPARE(updated->volume[0], 41.125);
+				QCOMPARE(started->volume[0], 41.125);
+			}
+
+			/** @brief Supplies both preparation boundaries and cancellation/replacement outcomes. */
+			void pendingMemoryCancellation_data()
+			{
+				QTest::addColumn<int>("phase");
+				QTest::addColumn<int>("transition");
+				for (int phase = 0; phase < 2; ++phase)
+					for (int transition = 0; transition < 5; ++transition)
+						QTest::newRow(
+						    qPrintable(QStringLiteral("phase-%1-transition-%2").arg(phase).arg(transition)))
+						    << phase << transition;
+			}
+
+			/** @brief Verifies updated controls cannot revive a canceled assignment or affect its replacement. */
+			void pendingMemoryCancellation()
+			{
+				QFETCH(int, phase);
+				QFETCH(int, transition);
+				SoundEngine engine;
+				const auto  session = registerTestSession(engine);
+				QVERIFY(session);
+				MemoryPreparationBlocker digest(engine);
+				QVERIFY(digest.waitUntilEntered());
+				PendingSoundCall call(session,
+				                      [&]
+				                      {
+					                      return session->playMemory(1, QMudTestSoundData::silentPcmWave(300),
+					                                                 false, -80.0, 0.0);
+				                      });
+				QTRY_COMPARE(session->status(1), 0);
+				std::unique_ptr<MemoryPreparationBlocker> materialization;
+				if (phase == 1)
+				{
+					materialization = std::make_unique<MemoryPreparationBlocker>(engine);
+					digest.release();
+					QVERIFY(materialization->waitUntilEntered());
+				}
+				QCOMPARE(session->playFile(1, {}, true, -60.0, 35.0), eOK);
+				if (transition == 0)
+					QCOMPARE(session->stop(1), eOK);
+				else if (transition == 1)
+					QCOMPARE(session->playFile(1, testSoundFileName(), true, -25.0, -10.0), eOK);
+				else if (transition == 2)
+					session->close();
+				else if (transition == 3)
+					SoundEngineTestAccess::resetForAudioDeviceChange(engine);
+				else
+					QCOMPARE(session->playFile(1, QStringLiteral("missing-memory-replacement.wav"), true, 0.0,
+					                           0.0),
+					         eFileNotFound);
+				if (transition != 4)
+				{
+					QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+					QCOMPARE(call.result, eCannotPlaySound);
+				}
+				digest.release();
+				if (materialization)
+					materialization->release();
+				MemoryPreparationBlocker drained(engine);
+				QVERIFY(drained.waitUntilEntered());
+				drained.release();
+				QTRY_VERIFY(call.finished.load(std::memory_order_acquire));
+				if (transition == 4)
+				{
+					QCOMPARE(call.result, eOK);
+					QCOMPARE(session->status(1), 2);
+					QCOMPARE(session->snapshot()->volume[0], 40.0);
+					QCOMPARE(
+					    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+					    35.0);
+				}
+				else if (transition == 1)
+				{
+					QCOMPARE(session->status(1), 2);
+					QCOMPARE(session->snapshot()->volume[0], 75.0);
+					QCOMPARE(
+					    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+					    -10.0);
+				}
+				else if (transition != 2)
+					QCOMPARE(session->status(1), -2);
+			}
+
+			/** @brief Supplies direct/prepared replacements, both completion orders, misses, and cancellation. */
+			void pendingMemoryAndFileReplacement_data()
+			{
+				QTest::addColumn<bool>("memoryFirst");
+				QTest::addColumn<int>("replacement");
+				for (const bool memoryFirst : {false, true})
+					for (int replacement = 0; replacement < 5; ++replacement)
+						QTest::newRow(qPrintable(QStringLiteral("memory-first-%1-replacement-%2")
+						                             .arg(memoryFirst)
+						                             .arg(replacement)))
+						    << memoryFirst << replacement;
+			}
+
+			/** @brief Verifies one update reaches both pending occurrences and preserves replacement ordering. */
+			void pendingMemoryAndFileReplacement()
+			{
+				QFETCH(bool, memoryFirst);
+				QFETCH(int, replacement);
+				QTemporaryDir root(
+				    QDir::current().filePath(QStringLiteral("sound-memory-replacement-XXXXXX")));
+				QVERIFY(root.isValid());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/next.wav")).isEmpty());
+				SoundEngine engine;
+				engine.initializePlayback();
+				SoundEngineTestAccess::setCatalogPaused(engine, true);
+				engine.configureSoundDirectory(root.path());
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				QVERIFY(session);
+				MemoryPreparationBlocker preparation(engine);
+				QVERIFY(preparation.waitUntilEntered());
+				PendingSoundCall memory(session,
+				                        [&]
+				                        {
+					                        return session->playMemory(
+					                            1, QMudTestSoundData::silentPcmWave(300), false, -80.0, 0.0);
+				                        });
+				QTRY_COMPARE(session->status(1), 0);
+				const bool    prepared = replacement >= 2;
+				const bool    missing  = replacement == 1 || replacement == 3;
+				const QString request =
+				    missing ? QStringLiteral("legacy/missing.wav") : QStringLiteral("legacy/next.wav");
+				const quint64    token = prepared ? session->prepareFile(request) : 0;
+				PendingSoundCall next(session,
+				                      [&]
+				                      {
+					                      return prepared
+					                                 ? session->commitPrepared(token, 1, false, -90.0, 0.0)
+					                                 : session->playFile(1, request, false, -90.0, 0.0);
+				                      });
+				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
+				if (prepared)
+					QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session, true), 1);
+				QCOMPARE(session->playFile(1, {}, true, -58.875, -35.0), eOK);
+				if (replacement == 4)
+					session->cancelPrepared(token);
+				if (memoryFirst)
+				{
+					preparation.release();
+					QTRY_VERIFY(memory.finished.load(std::memory_order_acquire));
+					QCOMPARE(memory.result, eOK);
+					QCOMPARE(session->status(1), 2);
+					QCOMPARE(session->snapshot()->volume[0], 41.125);
+					QCOMPARE(
+					    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+					    -35.0);
+				}
+				SoundEngineTestAccess::setCatalogPaused(engine, false);
+				QTRY_VERIFY(next.finished.load(std::memory_order_acquire));
+				QCOMPARE(next.result, replacement == 4 ? eCannotPlaySound : missing ? eFileNotFound : eOK);
+				preparation.release();
+				QTRY_VERIFY(memory.finished.load(std::memory_order_acquire));
+				QCOMPARE(memory.result,
+				         !memoryFirst && !missing && replacement != 4 ? eCannotPlaySound : eOK);
+				QCOMPARE(session->status(1), 2);
+				QCOMPARE(session->snapshot()->volume[0], 41.125);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
+				         -35.0);
+			}
+
+			/** @brief Verifies shared materialization retains per-channel controls and confirmed ownership. */
+			void pendingMemorySharingPreservesIndependentControls()
+			{
+				SoundEngine                   engine;
+				std::atomic<quint64>          released{0};
+				SoundEngine::SessionCallbacks callbacks;
+				callbacks.luaAudioOwnershipReleased = [&](const int, const quint64 generation)
+				{ released.store(generation); };
+				const auto first  = registerTestSession(engine, std::move(callbacks));
+				const auto second = engine.registerSession({});
+				QVERIFY(first && second);
+				const auto               payload = QMudTestSoundData::silentPcmWave(300);
+				MemoryPreparationBlocker preparation(engine);
+				QVERIFY(preparation.waitUntilEntered());
+				PendingSoundCall one(first,
+				                     [&] { return first->playMemory(1, payload, true, -80.0, 0.0, 71); });
+				PendingSoundCall two(second,
+				                     [&] { return second->playMemory(1, payload, true, -20.0, 0.0); });
+				QTRY_COMPARE(first->status(1), 0);
+				QTRY_COMPARE(second->status(1), 0);
+				QVERIFY(first->confirmLuaAudioOwnership(1, 71));
+				QCOMPARE(first->playFile(1, {}, true, -60.0, 15.0, 72), eCannotPlaySound);
+				QCOMPARE(first->playFile(1, {}, true, -60.0, 15.0, 71), eOK);
+				QCOMPARE(first->setLuaAudioAttribute(1, 71, QMudSoundAttribute::Volume, 35.25), eOK);
+				QCOMPARE(first->setLuaAudioAttribute(1, 71, QMudSoundAttribute::Pan, -33.0), eOK);
+				QCOMPARE(first->setLuaAudioAttribute(1, 71, QMudSoundAttribute::Pitch, 8.0), eOK);
+				QCOMPARE(second->playFile(1, {}, true, -30.0, 25.0), eOK);
+				preparation.release();
+				QTRY_VERIFY(one.finished.load(std::memory_order_acquire));
+				QTRY_VERIFY(two.finished.load(std::memory_order_acquire));
+				QCOMPARE(one.result, eOK);
+				QCOMPARE(two.result, eOK);
+				QCOMPARE(first->snapshot()->volume[0], 35.25);
+				QCOMPARE(second->snapshot()->volume[0], 70.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, first, 1, QMudSoundAttribute::Pan),
+				         -33.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, first, 1, QMudSoundAttribute::Pitch),
+				         8.0);
+				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, second, 1, QMudSoundAttribute::Pan),
+				         25.0);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).sourceCount, 1);
+				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, 2);
+				QCOMPARE(first->stopLuaAudioChannel(1, 71), eOK);
+				QCOMPARE(released.load(), 71);
 			}
 
 			/** @brief Verifies a canceled prepared-memory resource never enters the reusable-resource index. */

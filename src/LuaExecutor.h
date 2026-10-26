@@ -14,6 +14,7 @@
 #include "AnsiSgrParseUtils.h"
 #include "Flags.h"
 #include "MiniWindow.h"
+#include "SoundEngine.h"
 #include "TelnetProcessor.h"
 
 #include <QByteArray>
@@ -3131,9 +3132,63 @@ struct LuaCallbackUdpPresentationSnapshot
  */
 struct LuaCallbackSoundPresentationSnapshot
 {
-		quint64         sessionId{0};
-		quint64         revision{0};
-		QHash<int, int> statusByBuffer;
+		quint64                                                sessionId{0};
+		quint64                                                revision{0};
+		QHash<int, int>                                        statusByBuffer;
+		QHash<int, double>                                     volumeByBuffer;
+		std::array<quint64, SoundEngineSession::kChannelCount> revisionByBuffer{};
+
+		/**
+		 * @brief Projects exactly the channels affected by one completed sound command.
+		 * @param state Immutable worker state at command completion.
+		 * @param buffer One-based affected channel, or zero for every channel.
+		 * @return Session-scoped sound changes carrying each affected channel's observation revision.
+		 */
+		[[nodiscard]] static LuaCallbackSoundPresentationSnapshot
+		fromSoundSnapshot(const SoundEngineSession::Snapshot &state, const int buffer)
+		{
+			LuaCallbackSoundPresentationSnapshot result;
+			result.sessionId = state.sessionId;
+			result.revision  = state.revision;
+			if (buffer < 0 || buffer > SoundEngineSession::kChannelCount)
+				return result;
+			const int first = buffer == 0 ? 1 : buffer;
+			const int last  = buffer == 0 ? SoundEngineSession::kChannelCount : buffer;
+			for (int channel = first; channel <= last; ++channel)
+			{
+				const auto index = static_cast<std::size_t>(channel - 1);
+				result.statusByBuffer.insert(channel, state.status[index]);
+				result.volumeByBuffer.insert(channel, state.volume[index]);
+				result.revisionByBuffer[index] = state.revision;
+			}
+			return result;
+		}
+
+		/**
+		 * @brief Merges preceding sound changes without replacing newer observations or another session.
+		 * @param changes Completed changes, containing only the affected channels.
+		 */
+		void merge(const LuaCallbackSoundPresentationSnapshot &changes)
+		{
+			if (changes.statusByBuffer.isEmpty())
+				return;
+			if (statusByBuffer.isEmpty())
+				sessionId = changes.sessionId;
+			if (sessionId != changes.sessionId)
+				return;
+			for (auto it = changes.statusByBuffer.cbegin(); it != changes.statusByBuffer.cend(); ++it)
+			{
+				if (it.key() < 1 || it.key() > SoundEngineSession::kChannelCount)
+					continue;
+				const auto index = static_cast<std::size_t>(it.key() - 1);
+				if (changes.revisionByBuffer[index] < revisionByBuffer[index])
+					continue;
+				statusByBuffer.insert(it.key(), it.value());
+				volumeByBuffer.insert(it.key(), changes.volumeByBuffer.value(it.key()));
+				revisionByBuffer[index] = changes.revisionByBuffer[index];
+			}
+			revision = qMax(revision, changes.revision);
+		}
 };
 
 /**
@@ -3519,7 +3574,7 @@ struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
 		bool                                                  hasUsedUdpPortsSnapshot{false};
 		QSet<int>                                             usedUdpPortsSnapshot;
 		QHash<int, int>                                       usedUdpPortReferenceCountsSnapshot;
-		QHash<int, int>                                       soundStatusByBuffer;
+		LuaCallbackSoundPresentationSnapshot                  soundState;
 		// Request-local callback line context and overlays.
 		bool                                                  hasLineBufferSnapshot{false};
 		int                                                   lineBufferCount{0};

@@ -17,6 +17,7 @@
 #include "LuaExecutor.h"
 #include "MiniWindow.h"
 #include "ReloadUtils.h"
+#include "SoundEngine.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
 #include "WorldOptions.h"
@@ -47,6 +48,7 @@
 #include <QtSql/QSqlQuery>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <coroutine>
 #include <functional>
 #include <iterator>
@@ -1006,6 +1008,10 @@ class WorldRuntime : public QObject
 				std::function<bool(int)>                                       reusable;
 				std::function<int(const QString &, quint64)>                   reserve;
 				std::function<void(int, quint64)>                              confirm;
+				std::function<int(int, quint64, QMudSoundAttribute, double, std::chrono::milliseconds, bool,
+				                  QMudSoundAttributeTarget)>
+				                           attribute;
+				std::function<double(int)> volume;
 		};
 		/**
 		 * @brief Owner metadata produced while resolving a stable rule location.
@@ -3389,10 +3395,10 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool                    requestMccpDisableForReload(int timeoutMs);
 		/**
-		 * @brief Sends raw bytes to the world socket.
+		 * @brief Sends raw bytes after any Telnet protocol output already pending at the physical write boundary.
 		 * @param payload Bytes to send.
 		 * @param commandTransaction Optional command transaction resolved by the physical write.
-		 * @return Number of bytes accepted by the socket, or a non-positive value on failure.
+		 * @return Payload bytes accepted by the socket, excluding protocol output, or a non-positive value on failure.
 		 */
 		qint64 sendToWorld(const QByteArray                                 &payload,
 		                   const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
@@ -4363,9 +4369,10 @@ class WorldRuntime : public QObject
 		 * @param buffer Sound buffer slot index.
 		 * @param fileName Sound file path.
 		 * @param loop Loop playback when `true`.
-		 * @param volume Playback volume.
-		 * @param pan Stereo pan value.
+		 * @param volume Finite playback volume.
+		 * @param pan Finite stereo pan value.
 		 * @param completion Final status consumer.
+		 * @return Immediate validation/dispatch status, with final status delivered to completion.
 		 */
 		int playSoundInterceptedWithCompletion(int buffer, const QString &fileName, bool loop, double volume,
 		                                       double pan, std::function<void(int)> completion);
@@ -4377,10 +4384,12 @@ class WorldRuntime : public QObject
 		 * @param volume Playback volume.
 		 * @param pan Stereo pan value.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
+		 * @param postState Optional destination receiving the immutable post-command channel state.
 		 * @return API status code.
 		 */
 		int playSoundDirect(int buffer, const QString &fileName, bool loop, double volume, double pan,
-		                    int *selectedBuffer = nullptr) const;
+		                    int                                                 *selectedBuffer = nullptr,
+		                    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Selects and starts one LuaAudio-owned file play on the sound worker.
 		 * @param buffer Zero for atomic automatic selection, or a fixed reserved channel.
@@ -4391,23 +4400,34 @@ class WorldRuntime : public QObject
 		 * @param generation LuaAudio ownership generation for completion validation.
 		 * @param requireReservation Require the fixed channel to hold this generation's reservation.
 		 * @param selectedBuffer Destination receiving the selected one-based channel on success.
+		 * @param pitch Initial LuaAudio frequency offset in units of 100 Hz.
+		 * @param postState Optional immutable post-command state destination.
 		 * @return API status code.
 		 */
-		int playSoundForNativeAudio(int buffer, const QString &fileName, bool loop, double volume, double pan,
-		                            quint64 generation, bool requireReservation, int *selectedBuffer) const;
+		int playSoundForNativeAudio(
+		    int buffer, const QString &fileName, bool loop, double volume, double pan, quint64 generation,
+		    bool requireReservation, int *selectedBuffer, double pitch = 0.0,
+		    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Validates a delayed LuaAudio file and reserves one worker-owned channel.
 		 * @param fileName Legacy QMud-home-relative or absolute-safe sound path.
 		 * @param generation LuaAudio ownership generation attached to the reservation.
+		 * @param volume Captured initial LuaAudio volume from zero through 100.
+		 * @param pan Captured initial balance.
+		 * @param pitch Captured initial frequency offset in units of 100 Hz.
+		 * @param postState Optional immutable post-command state destination.
 		 * @return Selected one-based channel, or zero when none is reusable.
 		 */
-		[[nodiscard]] int reserveSoundBufferForNativeAudio(const QString &fileName, quint64 generation) const;
+		[[nodiscard]] int reserveSoundBufferForNativeAudio(
+		    const QString &fileName, quint64 generation, double volume = 100.0, double pan = 0.0,
+		    double                                               pitch     = 0.0,
+		    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Synchronously confirms or releases registry ownership after a LuaAudio play or reservation.
 		 * @param buffer One-based selected channel.
 		 * @param generation LuaAudio ownership generation to confirm.
 		 */
-		void              confirmSoundBufferForNativeAudio(int buffer, quint64 generation) const;
+		void confirmSoundBufferForNativeAudio(int buffer, quint64 generation) const;
 		/**
 		 * @brief Updates a LuaAudio channel only while its ownership generation remains current.
 		 * @param buffer Fixed one-based channel.
@@ -4417,15 +4437,54 @@ class WorldRuntime : public QObject
 		 * @param generation Expected LuaAudio ownership generation.
 		 * @return API status code.
 		 */
-		int               updateSoundForNativeAudio(int buffer, bool loop, double volume, double pan,
-		                                            quint64 generation) const;
+		int  updateSoundForNativeAudio(int buffer, bool loop, double volume, double pan,
+		                               quint64 generation) const;
+		/**
+		 * @brief Applies one LuaAudio attribute to the current worker-owned generation.
+		 * @param buffer One-based channel, or zero to update all active non-muted LuaAudio volumes.
+		 * @param generation Expected ownership generation, or zero for global volume.
+		 * @param attribute Independently controlled playback attribute.
+		 * @param value Target in LuaAudio units.
+		 * @param duration Slide duration in milliseconds.
+		 * @param stopAtEnd Whether completing the volume slide stops playback.
+		 * @param targetMode Whether a pitch target offsets its current sample-clock value.
+		 * @param postState Optional immutable post-command state destination.
+		 * @return API status code.
+		 */
+		int  setSoundAttributeForNativeAudio(
+		    int buffer, quint64 generation, QMudSoundAttribute attribute, double value,
+		    std::chrono::milliseconds duration = {}, bool stopAtEnd = false,
+		    QMudSoundAttributeTarget targetMode = QMudSoundAttributeTarget::Absolute,
+		    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
+		/**
+		 * @brief Reads the latest worker-published LuaAudio volume without crossing a QObject thread.
+		 * @param buffer One-based channel.
+		 * @return Current volume in the range zero through 100.
+		 */
+		[[nodiscard]] double                              soundVolumeForNativeAudio(int buffer) const;
+		/**
+		 * @brief Captures the opaque sound session for owner cleanup without retaining a runtime QObject.
+		 * @return Current thread-safe sound session, or an empty pointer.
+		 */
+		[[nodiscard]] std::shared_ptr<SoundEngineSession> soundSessionForNativeAudio() const;
+		/**
+		 * @brief Initializes or frees this world's LuaAudio state through the sound command FIFO.
+		 * @param initialized Whether LuaAudio may accept playback.
+		 * @param postState Optional immutable post-command state destination.
+		 * @return API status code.
+		 */
+		int                                               setLuaAudioInitialized(
+		    bool initialized, std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Stops a LuaAudio channel only while its ownership generation remains current.
 		 * @param buffer Fixed one-based channel.
 		 * @param generation Expected LuaAudio ownership generation.
+		 * @param postState Optional immutable post-command state destination.
 		 * @return API status code.
 		 */
-		int               stopSoundForNativeAudio(int buffer, quint64 generation) const;
+		int stopSoundForNativeAudio(
+		    int buffer, quint64 generation,
+		    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Plays sound from memory bytes.
 		 * @param buffer Sound buffer slot index.
@@ -4434,16 +4493,21 @@ class WorldRuntime : public QObject
 		 * @param volume Playback volume.
 		 * @param pan Stereo pan value.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
+		 * @param postState Optional destination receiving the immutable post-command channel state.
 		 * @return API status code.
 		 */
-		int playSoundMemoryDirect(int buffer, const QByteArray &data, bool loop, double volume, double pan,
-		                          int *selectedBuffer = nullptr) const;
+		int
+		playSoundMemoryDirect(int buffer, const QByteArray &data, bool loop, double volume, double pan,
+		                      int                                                 *selectedBuffer = nullptr,
+		                      std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Immediately stops direct playback in one buffer or every buffer.
 		 * @param buffer Sound buffer slot index.
+		 * @param postState Optional destination receiving the immutable post-command channel state.
 		 * @return API status code.
 		 */
-		int stopSoundDirect(int buffer) const;
+		int stopSoundDirect(int                                                  buffer,
+		                    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
 		/**
 		 * @brief Requests callback-interceptable cancellation of all sound playback.
 		 * @return API status code.
@@ -6241,6 +6305,10 @@ class WorldRuntime : public QObject
 		 */
 		void finalizeSocketConnectedState();
 		/**
+		 * @brief Invalidates connection-bound work and resets session state after transport disconnection.
+		 */
+		void handleSocketDisconnected();
+		/**
 		 * @brief Starts START-TLS socket upgrade when requested by telnet negotiation.
 		 * @return `true` when upgrade start succeeds.
 		 */
@@ -7097,6 +7165,12 @@ class WorldRuntime : public QObject
 		 * @brief Marks callback-visible sound-buffer presentation dirty.
 		 */
 		void invalidateLuaCallbackSoundPresentationSnapshot() const;
+		/**
+		 * @brief Records a completed sound change in the active causal mutation segment.
+		 * @param changes Immutable projection of the affected sound channels.
+		 */
+		void publishLuaCallbackSoundMutation(const LuaCallbackSoundPresentationSnapshot &changes);
+
 		/**
 		 * @brief Populates fields that must reflect the current callback dispatch.
 		 * @param snapshot Snapshot to update.
@@ -8032,13 +8106,28 @@ class WorldRuntime : public QObject
 		[[nodiscard]] CausalOutboundStageResult stageCausalOutboundTransmission(
 		    QByteArray &payload, bool triggerPriority,
 		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
-		void flushReadyCausalOutboundGroups();
-		void flushCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group);
+		/**
+		 * @brief Writes one packet and applies the shared transport accounting and notification lifecycle.
+		 * @param payload Packet bytes, with protocol prerequisites already satisfied.
+		 * @param commandTransaction Optional command transaction resolved by this physical write.
+		 * @return Bytes accepted by the socket, or a non-positive value on failure.
+		 */
+		qint64 writeWorldPacket(const QByteArray                                 &payload,
+		                        const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
+		/**
+		 * @brief Writes pending Telnet protocol bytes without re-entering the application output boundary.
+		 * @return `true` when pending protocol output is satisfied without losing the connection; `false` on
+		 * failure or a non-writable graceful close, including when no protocol bytes were pending. Incoming
+		 * operation validity is determined separately by its connection generation and cancellation state.
+		 */
+		bool   flushTelnetOutput();
+		void   flushReadyCausalOutboundGroups();
+		void   flushCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group);
 		/**
 		 * @brief Completes command host accounting and releases its causal transmission group.
 		 * @param commandTransaction Command transaction to release.
 		 */
-		void finishOutboundCommandNotification(
+		void   finishOutboundCommandNotification(
 		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction);
 		/**
 		 * @brief Cancels command host accounting and discards its packet-debug publication.
@@ -8688,6 +8777,7 @@ class WorldRuntime : public QObject
 				LuaCallbackMiniWindowCausalMutations                  miniWindowMutations;
 				LuaCallbackMiniWindowPresentationMutations            miniWindowPresentationMutations;
 				LuaCallbackRuntimeCounterUpdates                      runtimeCounterUpdates;
+				LuaCallbackSoundPresentationSnapshot                  soundMutations;
 				RuntimeCountersSnapshot                               runtimeCountersBefore;
 				bool                                                  hasRuntimeCountersBefore{false};
 				LuaCallbackEntityMutations                            entityMutations;
@@ -9276,6 +9366,8 @@ class WorldRuntime : public QObject
 		TestSoundBackend                        m_testSoundBackend;
 		mutable QMutex                          m_testSoundBackendMutex;
 		std::atomic_bool                        m_hasTestSoundBackend{false};
+		mutable std::atomic<quint64>            m_testSoundRevision{1};
+		mutable std::atomic_bool                m_testLuaAudioInitialized{true};
 		QPointer<SoundEngine>                   m_soundEngine;
 		QMudAtomicSharedPtr<SoundEngineSession> m_soundSession{std::shared_ptr<SoundEngineSession>{}};
 		std::atomic<quint64>                    m_nextTestSoundPreparationToken{1};

@@ -14,6 +14,7 @@
 #include "MainFrame.h"
 #include "ReloadUtils.h"
 #include "SingleInstanceIpc.h"
+#include "SoundEngine.h"
 #include "WorldView.h"
 #include <QApplication>
 #include <QCoreApplication>
@@ -144,6 +145,11 @@ namespace
 	}
 #endif
 } // namespace
+
+bool SoundEngine::isOutputMuted() noexcept
+{
+	return false;
+}
 
 int main(int argc, char *argv[])
 {

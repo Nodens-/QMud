@@ -230,8 +230,8 @@ and potential contributors need to fully understand them.
 5. Sound engine
 ---------------
 
-- AppController owns one process-wide sound engine. Its worker thread owns every QSoundEffect, QMediaPlayer,
-  QAudioOutput, retained memory-playback temporary file, prepared request, channel assignment, and cached backend.
+- AppController owns one process-wide sound engine. Its worker thread owns every QMediaPlayer, QAudioBufferOutput,
+  QAudioSink, retained memory-playback temporary file, prepared request, channel assignment, and cached backend.
   One ordered preparation task hashes and materializes new memory payloads without blocking worker control commands.
   It returns the closed temporary-file resource to the worker before playback. Runtime and Lua threads submit value
   commands and never access multimedia objects.
@@ -248,12 +248,19 @@ and potential contributors need to fully understand them.
   decide suppression. A handled or canceled occurrence returns its prepared backend to the idle cache, while an
   occurrence with no handler commits. Sound() called from inside OnPluginPlaySound is direct so a callback can play
   one replacement without recursively intercepting itself.
-- Intentionally delayed LuaAudio operations retain their existing runtime-owned timers and cancellation generations.
+- Intentionally delayed LuaAudio plays retain their existing runtime-owned timers and cancellation generations.
   Every operation for one buffer generation shares one cancellation signal. Ownership release flips that signal once
   instead of retaining or walking per-operation tokens. When a timer expires, it validates the signal and generation
   before submitting its sound operation directly. Registry mutations, channel updates, and channel stops validate the
   same captured generation, so stale work cannot recreate state or affect a reused channel. LuaAudio uses a dedicated
   bounded state lock, and delayed operations must not enter callback mutation playback.
+- Every file entry path uses the same world-first search scopes. The configured world directory is searched before
+  the shared sounds tree for every request form, including sounds-prefixed, absolute, plugin, and native paths.
+  Exact matches precede filename fallback within each scope. An eligible filename contributes the baseline match and
+  each consecutive matching trailing directory increases its rank. Nonmatching filenames are excluded. Exhausting
+  a stale exact or fallback group reselects within that scope before considering the next scope.
+  A valid cached exact request reuses its source immediately. A world selection never yields to a shared fallback-scope
+  match.
 - Logical channel state is independent of cached multimedia objects. Explicit stop frees the channel. Natural
   completion leaves it allocated with status zero and retains its backend for at least 300 seconds. The minute-based,
   low-priority maintenance pass may then detach that backend without changing channel status or reusability. A replay
@@ -262,10 +269,12 @@ and potential contributors need to fully understand them.
 - Memory playback reserves its logical channel before asynchronous hashing. Stop, replacement, session close, device
   change, and shutdown invalidate the assignment generation, wake any waiting caller, and prevent a late preparation
   result from starting. Identical concurrent payloads share one materialization operation and retained resource.
-- QSoundEffect instances for the same source rely on Qt's process-wide de`coded-sample cache. Separate instances provide
-  simultaneous channel state without a second QMud PCM cache. QMediaPlayer instances are reused sequentially, but Qt
-  does not guarantee shared decoded data for simultaneous compressed playback.
-- One process-wide cache policy applies uniformly to effect and media-player sources. The budget counts each loaded
+  Current controls belong to that channel throughout hashing and materialization. Preparation records never retain a
+  second mutable copy. Buffer updates apply through the ordinary worker FIFO to both the current memory assignment
+  and any applicable pending file replacement. Completion consumes current channel controls and its normalized gain.
+- QMediaPlayer instances are reused sequentially, but Qt does not guarantee shared decoded data for simultaneous
+  compressed playback.
+- One process-wide cache policy applies uniformly to all playback sources. The budget counts each loaded
   file or memory payload once by source size across thin playback instances. The minute timer requests
   completed-channel, idle-age, and size maintenance. Size pressure evicts fully idle sources from least to most recently
   used. Each event removes at most one fully idle source and reposts itself while more eviction is required, so a large
@@ -273,12 +282,15 @@ and potential contributors need to fully understand them.
   periodic boundary rather than starting additional maintenance cycles. Active, prepared, and completed-grace sources
   are protected, so protected sources may temporarily exceed the configured budget. Policy defaults, limits, UI
   ranges, and worker normalization come from SoundEngine::CachePolicy.
-- Sound status is published as an immutable revisioned per-session snapshot only when callback-visible status changes.
-  Callback capture performs one atomic snapshot load for all ten channels and keys its cached presentation by session
-  identity and revision. Callback-local status overlays preserve read-your-writes for direct play, update, stop, and
-  LuaAudio allocation. Channel selection and reservation use live worker-owned state and are never inferred from a
-  callback snapshot.
-- Multimedia device discovery and both playback backend types are initialized during application startup before
+- Sound status and current volume are published as an immutable revisioned per-session snapshot only when their values
+  change. Callback capture performs one atomic snapshot load for all ten channels and keys its cached presentation by
+  session identity and revision. Callback-local status and volume overlays preserve read-your-writes for direct play,
+  update, stop, and LuaAudio controls and allocation. Ordinary direct mutations carry their immutable post-command state
+  through completion, so callback publication cannot substitute a later unrelated worker observation. All sound writers
+  use one callback mutation-publication helper. LuaAudio getVolume() selects the master only for omitted/zero IDs.
+  Nonzero IDs without current voice ownership return zero even while their decoder remains cached. Channel selection
+  and reservation use live worker-owned state and are never inferred from a callback snapshot.
+- Multimedia device discovery and the decoder and sink backends are initialized during application startup before
   worlds open. Device changes invalidate prepared, active, and idle objects bound to the previous output and publish
   the resulting channel state.
 - Session close rejects later submissions, cancels prepared requests, stops its channels, and removes runtime callback

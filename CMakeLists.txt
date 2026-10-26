@@ -335,6 +335,7 @@ set(QMUD_SOURCES
         helpers/WorldCommandProcessorUtils.cpp
         helpers/SoundFileRoutingUtils.cpp
         SoundEngine.cpp
+        SoundPcmStream.cpp
         MspProtocol.cpp
         helpers/ShortcutPreferenceUtils.cpp
         helpers/LuaExecutionUtils.cpp
@@ -440,6 +441,7 @@ set(QMUD_HEADERS
         helpers/WorldCommandProcessorUtils.h
         helpers/SoundFileRoutingUtils.h
         SoundEngine.h
+        SoundPcmStream.h
         helpers/ShortcutPreferenceUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h

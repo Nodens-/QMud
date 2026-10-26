@@ -25,6 +25,7 @@
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
 #include "LuaHeaders.h"
+#include "LuaSupport.h"
 #include "MainFrame.h"
 #include "MainFrameActionUtils.h"
 #include "MainFrameMdiUtils.h"
@@ -7657,8 +7658,8 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 		        if (m_tlsMethod == eTlsStartTls)
 		        {
 			        m_telnet.queueStartTlsNegotiation();
-			        if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
-				        sendToWorld(outbound);
+			        if (!flushTelnetOutput())
+				        return;
 			        startStartTlsFallbackTimer();
 			        return;
 		        }
@@ -7671,30 +7672,7 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 			        m_telnet.setStartTlsActive(true);
 		        finalizeSocketConnectedState();
 	        });
-	connect(m_socket, &WorldSocketService::disconnected, this,
-	        [this]
-	        {
-		        invalidateConnectionGeneration();
-		        cancelStartTlsFallbackTimer();
-		        cancelReloadMccpProbeTimeout();
-		        m_reloadReattachMccpProbePending        = false;
-		        m_reloadReattachMccpResumePending       = false;
-		        m_reloadReattachLookProbeSent           = false;
-		        m_reloadReattachMccpProbeDecisionOffset = 0;
-		        m_reloadMccpProbeTimeoutPass            = 0;
-		        m_reloadReattachMccpProbeBuffer.clear();
-		        clearReloadReattachDeferredStreamState();
-		        const bool wasConnected = m_socketReadyForWorld || m_connectPhase == eConnectDisconnecting;
-		        mxpShutDown();
-		        m_connectViaProxy     = false;
-		        m_connectPhase        = eConnectNotConnected;
-		        m_socketReadyForWorld = false;
-		        m_telnet.resetConnectionState();
-		        resetNativeProtocolSoundState();
-		        resetAnsiRenderState();
-		        if (wasConnected)
-			        emit disconnected();
-	        });
+	connect(m_socket, &WorldSocketService::disconnected, this, &WorldRuntime::handleSocketDisconnected);
 	QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
 	replaceLuaAudioVariables({});
 }
@@ -8919,8 +8897,14 @@ void WorldRuntime::flushReadyCausalOutboundGroups()
 		const bool hasSealedSegment = hasSegment && group->segments.front().sealed;
 		if (group->retainCount > 0 && !hasSealedSegment)
 			break;
+		const quint64 connectionEpoch = m_connectionEpoch;
 		m_flushingCausalOutboundGroup = group;
 		flushCausalOutboundGroup(group);
+		if (connectionEpoch != m_connectionEpoch)
+		{
+			drainOutgoingPacketDebugRecords();
+			return;
+		}
 		m_flushingCausalOutboundGroup.clear();
 		if (group->commandNotificationPending)
 			break;
@@ -9121,11 +9105,12 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const bool simulatedInput,
                                                  const quint64 operationId)
 {
-	const bool reloadProbeReplay     = simulatedInput && operationId != 0 && m_activeRawIngressOperation &&
-	                                   m_activeRawIngressOperation->id == operationId &&
-	                                   m_activeRawIngressOperation->source == RawIngressSource::ReloadReplay;
-	bool       completionTransferred = false;
-	const auto completeRawData       = qScopeGuard(
+	const quint64 connectionEpoch   = m_connectionEpoch;
+	const bool    reloadProbeReplay = simulatedInput && operationId != 0 && m_activeRawIngressOperation &&
+	                                  m_activeRawIngressOperation->id == operationId &&
+	                                  m_activeRawIngressOperation->source == RawIngressSource::ReloadReplay;
+	bool          completionTransferred = false;
+	const auto    completeRawData       = qScopeGuard(
 	    [this, operationId, &completionTransferred]
 	    {
 		    if (operationId != 0 && !completionTransferred)
@@ -9175,6 +9160,8 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 	if (useMxp >= 0)
 		m_telnet.setUseMxp(useMxp);
 	updateTelnetWindowSizeForNaws();
+	if (connectionEpoch != m_connectionEpoch)
+		return;
 	bool initialServerSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
 	if (!terminalId.isEmpty())
 		m_telnet.setTerminalIdentification(terminalId);
@@ -9188,13 +9175,14 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 		    qScopeGuard([this] { endLuaCallbackSnapshotMutationBatch(); });
 		QByteArray processed = m_telnet.processBytes(data);
 		Q_UNUSED(closeSnapshotMutationBatch);
+		if (connectionEpoch != m_connectionEpoch)
+			return;
 		QList<TelnetProcessor::TelnetStreamEvent> telnetStreamEventsDuringProbe =
 		    m_telnet.takeTelnetStreamEvents();
 		QList<TelnetProcessor::MxpEvent>      mxpEventsDuringProbe      = m_telnet.takeMxpEvents();
 		QList<TelnetProcessor::MxpModeChange> mxpModeChangesDuringProbe = m_telnet.takeMxpModeChanges();
-		QByteArray const                      outbound                  = m_telnet.takeOutboundData();
-		if (!outbound.isEmpty())
-			sendToWorld(outbound);
+		if (!flushTelnetOutput())
+			return;
 		if (m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls &&
 		    m_telnet.takeStartTlsNegotiationRejected() && !m_socketReadyForWorld)
 		{
@@ -9202,6 +9190,8 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 			outputText(QStringLiteral("TLS Encryption NOT enabled: Server denied."), true, true);
 			m_telnet.setStartTlsEnabled(false);
 			finalizeSocketConnectedState();
+			if (connectionEpoch != m_connectionEpoch)
+				return;
 		}
 		if (m_telnet.takeStartTlsUpgradeRequest())
 		{
@@ -9358,6 +9348,8 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 		    data, [this](QByteArray &packetPayload)
 		    { callPluginCallbacksTransformBytes(LuaCallbackEvent::PacketReceived, packetPayload); });
 		Q_UNUSED(closeSnapshotMutationBatch);
+		if (connectionEpoch != m_connectionEpoch)
+			return;
 		if (operationId != 0 && m_activeRawIngressOperation &&
 		    m_activeRawIngressOperation->id == operationId &&
 		    m_activeRawIngressOperation->cancellationRequested)
@@ -9446,22 +9438,29 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 			}
 		}
 	}
-	QByteArray const outbound = m_telnet.takeOutboundData();
-	if (!outbound.isEmpty())
-		sendToWorld(outbound);
-	if (m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls && m_telnet.takeStartTlsNegotiationRejected() &&
-	    !m_socketReadyForWorld)
+	const bool protocolOutputReady = flushTelnetOutput();
+	if (connectionEpoch != m_connectionEpoch || rawIngressCancellationRequested(operationId))
+		return;
+	// Graceful closure can reject output while this generation still owns valid incoming data.
+	// Consume its text and events together, but do not advance TLS without its protocol prerequisites.
+	if (protocolOutputReady)
 	{
-		cancelStartTlsFallbackTimer();
-		outputText(QStringLiteral("TLS Encryption NOT enabled: Server denied."), true, true);
-		m_telnet.setStartTlsEnabled(false);
-		finalizeSocketConnectedState();
-	}
-	if (m_telnet.takeStartTlsUpgradeRequest())
-	{
-		cancelStartTlsFallbackTimer();
-		if (!beginStartTlsUpgrade())
-			return;
+		if (m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls &&
+		    m_telnet.takeStartTlsNegotiationRejected() && !m_socketReadyForWorld)
+		{
+			cancelStartTlsFallbackTimer();
+			outputText(QStringLiteral("TLS Encryption NOT enabled: Server denied."), true, true);
+			m_telnet.setStartTlsEnabled(false);
+			finalizeSocketConnectedState();
+			if (connectionEpoch != m_connectionEpoch)
+				return;
+		}
+		if (m_telnet.takeStartTlsUpgradeRequest())
+		{
+			cancelStartTlsFallbackTimer();
+			if (!beginStartTlsUpgrade())
+				return;
+		}
 	}
 
 	QList<TelnetProcessor::MxpEvent>      events;
@@ -11848,6 +11847,30 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 	co_return;
 }
 
+void WorldRuntime::handleSocketDisconnected()
+{
+	invalidateConnectionGeneration();
+	cancelStartTlsFallbackTimer();
+	cancelReloadMccpProbeTimeout();
+	m_reloadReattachMccpProbePending        = false;
+	m_reloadReattachMccpResumePending       = false;
+	m_reloadReattachLookProbeSent           = false;
+	m_reloadReattachMccpProbeDecisionOffset = 0;
+	m_reloadMccpProbeTimeoutPass            = 0;
+	m_reloadReattachMccpProbeBuffer.clear();
+	clearReloadReattachDeferredStreamState();
+	const bool wasConnected = m_socketReadyForWorld || m_connectPhase == eConnectDisconnecting;
+	mxpShutDown();
+	m_connectViaProxy     = false;
+	m_connectPhase        = eConnectNotConnected;
+	m_socketReadyForWorld = false;
+	m_telnet.resetConnectionState();
+	resetNativeProtocolSoundState();
+	resetAnsiRenderState();
+	if (wasConnected)
+		emit disconnected();
+}
+
 void WorldRuntime::finalizeSocketConnectedState()
 {
 	if (m_socketReadyForWorld)
@@ -11859,8 +11882,8 @@ void WorldRuntime::finalizeSocketConnectedState()
 	if (useMxp >= 0)
 		m_telnet.setUseMxp(useMxp);
 	m_telnet.queueInitialNegotiation(true, convertGA);
-	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
-		sendToWorld(outbound);
+	if (!flushTelnetOutput())
+		return;
 	m_socketReadyForWorld = true;
 	emit connected();
 }
@@ -12170,7 +12193,8 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 	m_incomingSocketDataPaused = false;
 	invalidateConnectionGeneration();
 
-	QString adoptionError;
+	const quint64 connectionEpoch = m_connectionEpoch;
+	QString       adoptionError;
 	if (!m_socket->adoptConnectedSocketDescriptor(static_cast<qintptr>(descriptor), &adoptionError))
 	{
 		if (errorMessage)
@@ -12189,14 +12213,22 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 	m_connectTime                     = QDateTime::currentDateTime();
 	const bool convertGA = isEnabledFlag(m_worldAttributes.value(QStringLiteral("convert_ga_to_newline")));
 	m_telnet.setConvertGAtoNewline(convertGA);
-	m_socketReadyForWorld = true;
 	updateTelnetWindowSizeForNaws();
-	m_telnet.restoreNawsNegotiatedState(nawsNegotiated);
-	m_telnet.restoreMspNegotiatedState(mspNegotiated);
-	m_mspDefaultSoundUrl = mspDefaultSoundUrl;
-	m_mxpDefaultSoundUrl = mxpDefaultSoundUrl;
-	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
-		sendToWorld(outbound);
+	if (connectionEpoch == m_connectionEpoch)
+		m_telnet.restoreNawsNegotiatedState(nawsNegotiated);
+	if (connectionEpoch == m_connectionEpoch)
+	{
+		m_telnet.restoreMspNegotiatedState(mspNegotiated);
+		m_mspDefaultSoundUrl = mspDefaultSoundUrl;
+		m_mxpDefaultSoundUrl = mxpDefaultSoundUrl;
+	}
+	if (connectionEpoch != m_connectionEpoch || !flushTelnetOutput())
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Unable to send Telnet protocol data after socket adoption.");
+		return false;
+	}
+	m_socketReadyForWorld = true;
 	emit connected();
 	return true;
 }
@@ -12269,8 +12301,7 @@ void WorldRuntime::requestMccpResumeAfterReloadReattach()
 		return;
 	}
 	m_telnet.queueEnableCompression2Negotiation();
-	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
-		sendToWorld(outbound);
+	flushTelnetOutput();
 }
 
 void WorldRuntime::clearReloadReattachDeferredStreamState()
@@ -12406,9 +12437,7 @@ void WorldRuntime::queueMccpDisableForReload()
 	m_reloadMccpDisableForReloadFatal = false;
 
 	m_telnet.queueDisableCompressionNegotiation();
-	const QByteArray outbound = m_telnet.takeOutboundData();
-	if (!outbound.isEmpty())
-		sendToWorld(outbound);
+	flushTelnetOutput();
 }
 
 bool WorldRuntime::isMccpDisableCompleteForReload() const
@@ -12454,6 +12483,59 @@ bool WorldRuntime::requestMccpDisableForReload(const int timeoutMs)
 
 qint64 WorldRuntime::sendToWorld(const QByteArray                                 &payload,
                                  const QSharedPointer<OutboundCommandTransaction> &commandTransaction)
+{
+	if (!payload.isEmpty())
+	{
+		const quint64                      connectionEpoch = m_connectionEpoch;
+		const QPointer<WorldSocketService> socket          = m_socket;
+		// The causal scheduler decides when this payload may reach the transport. Protocol bytes
+		// already queued at that point are prerequisites, not another application queue position.
+		if (currentConnectionContextRejected() || currentConnectionCallbackContextCancelled() ||
+		    !flushTelnetOutput() || connectionEpoch != m_connectionEpoch || socket != m_socket)
+		{
+			if (commandTransaction &&
+			    commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+				commandTransaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
+			return -1;
+		}
+	}
+	return writeWorldPacket(payload, commandTransaction);
+}
+
+bool WorldRuntime::flushTelnetOutput()
+{
+	// Disconnecting also covers deferred causal draining, when the transport still accepts writes.
+	// Once the transport leaves ConnectedState, preserve its graceful drain of accepted bytes.
+	const bool gracefulClosePending =
+	    m_connectPhase == eConnectDisconnecting && m_socket && !m_socket->isConnected();
+	const QByteArray outbound = m_telnet.takeOutboundData();
+	if (outbound.isEmpty())
+		return !gracefulClosePending;
+	const quint64                      connectionEpoch = m_connectionEpoch;
+	const QPointer<WorldSocketService> socket          = m_socket;
+	const qint64                       written = gracefulClosePending ? -1 : writeWorldPacket(outbound);
+	const bool sameConnection                  = connectionEpoch == m_connectionEpoch && socket == m_socket;
+	if (sameConnection && written == outbound.size())
+		return true;
+
+	// Failed prerequisites cannot complete reload preparation, including during graceful closure.
+	if (m_reloadMccpDisableForReloadArmed)
+		m_reloadMccpDisableForReloadFatal = true;
+	if (!sameConnection || gracefulClosePending)
+		return false;
+	// A truncated or lost protocol batch cannot be followed by dependent application bytes.
+	// Abort instead of graceful causal draining, and use the normal disconnection lifecycle.
+	if (socket)
+		socket->abortSocket();
+	// An already-unconnected transport need not emit disconnected() when aborted.
+	if (connectionEpoch == m_connectionEpoch && socket == m_socket)
+		handleSocketDisconnected();
+	emit socketError(QStringLiteral("Unable to send complete Telnet protocol data. World closed."));
+	return false;
+}
+
+qint64 WorldRuntime::writeWorldPacket(const QByteArray                                 &payload,
+                                      const QSharedPointer<OutboundCommandTransaction> &commandTransaction)
 {
 	if (commandTransaction &&
 	    commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
@@ -16297,7 +16379,7 @@ void WorldRuntime::clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot 
 	snapshot.usedUdpPortsSnapshot.clear();
 	snapshot.usedUdpPortReferenceCountsSnapshot.clear();
 
-	snapshot.soundStatusByBuffer.clear();
+	snapshot.soundState = {};
 
 	snapshot.hasUiSnapshot = false;
 	snapshot.guiSystemValues.clear();
@@ -17179,7 +17261,7 @@ void WorldRuntime::populateLuaCallbackSoundSnapshot(LuaCallbackSnapshot &snapsho
 	snapshot.soundPresentation = luaCallbackSoundPresentationSnapshot();
 	if (!snapshot.soundPresentation)
 		return;
-	snapshot.soundStatusByBuffer = snapshot.soundPresentation->statusByBuffer;
+	snapshot.soundState = *snapshot.soundPresentation;
 }
 
 QSharedPointer<const LuaCallbackCommandUiPresentationSnapshot>
@@ -17221,7 +17303,8 @@ WorldRuntime::luaCallbackSoundPresentationSnapshot() const
 		QMutexLocker locker(&m_testSoundBackendMutex);
 		testBackend = m_testSoundBackend;
 	}
-	const bool testBackendCanChangeExternally           = static_cast<bool>(testBackend.status);
+	const bool testBackendCanChangeExternally =
+	    static_cast<bool>(testBackend.status) || static_cast<bool>(testBackend.volume);
 	const std::shared_ptr<SoundEngineSession> session   = m_soundSession.load(std::memory_order_acquire);
 	const quint64                             sessionId = session ? session->id() : 0;
 	const std::shared_ptr<const SoundEngineSession::Snapshot> engineSnapshot =
@@ -17234,17 +17317,24 @@ WorldRuntime::luaCallbackSoundPresentationSnapshot() const
 	{
 		return m_luaCallbackSoundPresentationSnapshot;
 	}
-	auto presentation       = QSharedPointer<LuaCallbackSoundPresentationSnapshot>::create();
-	presentation->sessionId = sessionId;
-	presentation->revision  = sessionRevision;
-	presentation->statusByBuffer.reserve(kMaxSoundBuffers);
-	for (int buffer = 1; buffer <= kMaxSoundBuffers; ++buffer)
+	SoundEngineSession::Snapshot unavailable;
+	unavailable.sessionId = sessionId;
+	unavailable.revision  = sessionRevision;
+	unavailable.status.fill(-3);
+	auto presentation = QSharedPointer<LuaCallbackSoundPresentationSnapshot>::create(
+	    LuaCallbackSoundPresentationSnapshot::fromSoundSnapshot(
+	        engineSnapshot ? *engineSnapshot : unavailable, 0));
+	if (testBackendCanChangeExternally)
 	{
-		const auto index  = static_cast<std::size_t>(buffer - 1);
-		const int  status = testBackend.status ? testBackend.status(buffer)
-		                    : engineSnapshot   ? engineSnapshot->status[index]
-		                                       : -3;
-		presentation->statusByBuffer.insert(buffer, status);
+		presentation->revision = m_testSoundRevision.fetch_add(1, std::memory_order_relaxed);
+		presentation->revisionByBuffer.fill(presentation->revision);
+		for (int buffer = 1; buffer <= kMaxSoundBuffers; ++buffer)
+		{
+			if (testBackend.status)
+				presentation->statusByBuffer.insert(buffer, testBackend.status(buffer));
+			if (testBackend.volume)
+				presentation->volumeByBuffer.insert(buffer, testBackend.volume(buffer));
+		}
 	}
 	m_luaCallbackSoundPresentationSnapshot = std::move(presentation);
 	m_luaCallbackSoundPresentationDirty    = false;
@@ -17254,6 +17344,19 @@ WorldRuntime::luaCallbackSoundPresentationSnapshot() const
 void WorldRuntime::invalidateLuaCallbackSoundPresentationSnapshot() const
 {
 	m_luaCallbackSoundPresentationDirty = true;
+}
+
+void WorldRuntime::publishLuaCallbackSoundMutation(const LuaCallbackSoundPresentationSnapshot &changes)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::publishLuaCallbackSoundMutation");
+	if (!m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		const auto session = m_soundSession.load(std::memory_order_acquire);
+		if (!session || session->id() != changes.sessionId)
+			return;
+	}
+	if (!m_causalPluginCallbackSnapshotCaptureStack.isEmpty())
+		m_causalPluginCallbackSnapshotCaptureStack.last()->soundMutations.merge(changes);
 }
 
 void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
@@ -17831,6 +17934,7 @@ void WorldRuntime::applyCausalPluginCallbackSnapshotDeltas(PluginCallbackDispatc
 			    revision->targetedRulePatches);
 		}
 		applyCausalMiniWindowPresentationMutations(*rebased, revision->miniWindowPresentationMutations);
+		rebased->soundState.merge(revision->soundMutations);
 	}
 	Q_ASSERT(revision == m_causalPluginCallbackSnapshotRevision);
 	if (revision != m_causalPluginCallbackSnapshotRevision)
@@ -18508,7 +18612,8 @@ int WorldRuntime::playSoundInterceptedWithCompletion(const int buffer, const QSt
                                                      const bool loop, const double volume, const double pan,
                                                      std::function<void(int)> completion)
 {
-	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()))
+	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()) ||
+	    !qIsFinite(volume) || !qIsFinite(pan))
 	{
 		if (completion)
 			completion(eBadParameter);
@@ -18570,8 +18675,34 @@ int WorldRuntime::playSoundInterceptedWithCompletion(const int buffer, const QSt
 	return eCannotPlaySound;
 }
 
+namespace
+{
+	/**
+	 * @brief Captures a test backend at the same command boundary used by the production worker.
+	 * @param backend Installed deterministic sound backend.
+	 * @param revision Monotonic observation revision belonging to this test runtime.
+	 * @return Immutable status and volume state for the backend's channels.
+	 */
+	std::shared_ptr<const SoundEngineSession::Snapshot>
+	captureTestSoundSnapshot(const WorldRuntime::TestSoundBackend &backend, const quint64 revision)
+	{
+		auto state      = std::make_shared<SoundEngineSession::Snapshot>();
+		state->revision = revision;
+		for (int buffer = 1; buffer <= SoundEngineSession::kChannelCount; ++buffer)
+		{
+			const auto index = static_cast<std::size_t>(buffer - 1);
+			if (backend.status)
+				state->status[index] = backend.status(buffer);
+			if (backend.volume)
+				state->volume[index] = backend.volume(buffer);
+		}
+		return state;
+	}
+} // namespace
+
 int WorldRuntime::playSoundDirect(const int buffer, const QString &fileName, const bool loop,
-                                  const double volume, const double pan, int *selectedBuffer) const
+                                  const double volume, const double pan, int *selectedBuffer,
+                                  std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()))
 		return eBadParameter;
@@ -18584,14 +18715,28 @@ int WorldRuntime::playSoundDirect(const int buffer, const QString &fileName, con
 	if (backend.play)
 	{
 		const int result = backend.play(buffer, fileName, loop, volume, pan);
-		if (result == eOK && selectedBuffer)
-			*selectedBuffer = buffer > 0 ? buffer : (backend.automaticBuffer ? backend.automaticBuffer() : 0);
+		if (result == eOK)
+		{
+			const int selected =
+			    buffer > 0 ? buffer : (backend.automaticBuffer ? backend.automaticBuffer() : 0);
+			if (selectedBuffer)
+				*selectedBuffer = selected;
+			if (postState && selected >= 1 && selected <= kMaxSoundBuffers)
+			{
+				auto state      = std::make_shared<SoundEngineSession::Snapshot>();
+				state->revision = m_testSoundRevision.fetch_add(1, std::memory_order_relaxed);
+				state->status[static_cast<std::size_t>(selected - 1)] = loop ? 2 : 1;
+				state->volume[static_cast<std::size_t>(selected - 1)] =
+				    backend.volume ? backend.volume(selected) : 0.0;
+				*postState = std::move(state);
+			}
+		}
 		return result;
 	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	if (!session)
 		return eCannotPlaySound;
-	return session->playFile(buffer, fileName, loop, volume, pan, 0, selectedBuffer);
+	return session->playFile(buffer, fileName, loop, volume, pan, 0, selectedBuffer, false, 0.0, postState);
 }
 
 void WorldRuntime::stopNativeMspPlayback() const
@@ -18727,7 +18872,8 @@ void WorldRuntime::executeNativeSoundRequest(const QMudNativeSoundRequest &reque
 }
 
 int WorldRuntime::playSoundMemoryDirect(const int buffer, const QByteArray &data, const bool loop,
-                                        const double volume, const double pan, int *selectedBuffer) const
+                                        const double volume, const double pan, int *selectedBuffer,
+                                        std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || data.isEmpty())
 		return eBadParameter;
@@ -18740,19 +18886,34 @@ int WorldRuntime::playSoundMemoryDirect(const int buffer, const QByteArray &data
 	if (backend.play)
 	{
 		const int result = backend.play(buffer, QStringLiteral("<memory>"), loop, volume, pan);
-		if (result == eOK && selectedBuffer)
-			*selectedBuffer = buffer > 0 ? buffer : (backend.automaticBuffer ? backend.automaticBuffer() : 0);
+		if (result == eOK)
+		{
+			const int selected =
+			    buffer > 0 ? buffer : (backend.automaticBuffer ? backend.automaticBuffer() : 0);
+			if (selectedBuffer)
+				*selectedBuffer = selected;
+			if (postState && selected >= 1 && selected <= kMaxSoundBuffers)
+			{
+				auto state      = std::make_shared<SoundEngineSession::Snapshot>();
+				state->revision = m_testSoundRevision.fetch_add(1, std::memory_order_relaxed);
+				state->status[static_cast<std::size_t>(selected - 1)] = loop ? 2 : 1;
+				state->volume[static_cast<std::size_t>(selected - 1)] =
+				    backend.volume ? backend.volume(selected) : 0.0;
+				*postState = std::move(state);
+			}
+		}
 		return result;
 	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	if (!session)
 		return eCannotPlaySound;
-	return session->playMemory(buffer, data, loop, volume, pan, 0, selectedBuffer);
+	return session->playMemory(buffer, data, loop, volume, pan, 0, selectedBuffer, postState);
 }
 
-int WorldRuntime::playSoundForNativeAudio(const int buffer, const QString &fileName, const bool loop,
-                                          const double volume, const double pan, const quint64 generation,
-                                          const bool requireReservation, int *selectedBuffer) const
+int WorldRuntime::playSoundForNativeAudio(
+    const int buffer, const QString &fileName, const bool loop, const double volume, const double pan,
+    const quint64 generation, const bool requireReservation, int *selectedBuffer, const double pitch,
+    std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || fileName.isEmpty() || generation == 0 || !selectedBuffer)
 		return eBadParameter;
@@ -18764,6 +18925,8 @@ int WorldRuntime::playSoundForNativeAudio(const int buffer, const QString &fileN
 	}
 	if (backend.play)
 	{
+		if (!m_testLuaAudioInitialized.load(std::memory_order_acquire))
+			return eCannotPlaySound;
 		int targetBuffer = buffer;
 		if (targetBuffer == 0)
 		{
@@ -18780,16 +18943,26 @@ int WorldRuntime::playSoundForNativeAudio(const int buffer, const QString &fileN
 			return eCannotPlaySound;
 		const int result = backend.play(targetBuffer, fileName, loop, volume, pan);
 		if (result == eOK)
+		{
 			*selectedBuffer = targetBuffer;
+			if (pitch != 0.0 && backend.attribute)
+				static_cast<void>(backend.attribute(targetBuffer, generation, QMudSoundAttribute::Pitch,
+				                                    pitch, {}, false, QMudSoundAttributeTarget::Absolute));
+		}
+		if (result == eOK && postState)
+			*postState = captureTestSoundSnapshot(
+			    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
 		return result;
 	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	return session ? session->playFile(buffer, fileName, loop, volume, pan, generation, selectedBuffer,
-	                                   requireReservation)
+	                                   requireReservation, pitch, postState)
 	               : eCannotPlaySound;
 }
 
-int WorldRuntime::reserveSoundBufferForNativeAudio(const QString &fileName, const quint64 generation) const
+int WorldRuntime::reserveSoundBufferForNativeAudio(
+    const QString &fileName, const quint64 generation, const double volume, const double pan,
+    const double pitch, std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
 {
 	if (fileName.isEmpty() || generation == 0)
 		return 0;
@@ -18800,9 +18973,26 @@ int WorldRuntime::reserveSoundBufferForNativeAudio(const QString &fileName, cons
 		backend = m_testSoundBackend;
 	}
 	if (backend.play)
-		return backend.reserve ? backend.reserve(fileName, generation) : 0;
+	{
+		if (!m_testLuaAudioInitialized.load(std::memory_order_acquire))
+			return 0;
+		const int buffer = backend.reserve ? backend.reserve(fileName, generation) : 0;
+		if (buffer > 0 && backend.attribute)
+		{
+			static_cast<void>(backend.attribute(buffer, generation, QMudSoundAttribute::Volume, volume, {},
+			                                    false, QMudSoundAttributeTarget::Absolute));
+			static_cast<void>(backend.attribute(buffer, generation, QMudSoundAttribute::Pan, pan, {}, false,
+			                                    QMudSoundAttributeTarget::Absolute));
+			static_cast<void>(backend.attribute(buffer, generation, QMudSoundAttribute::Pitch, pitch, {},
+			                                    false, QMudSoundAttributeTarget::Absolute));
+		}
+		if (buffer > 0 && postState)
+			*postState = captureTestSoundSnapshot(
+			    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
+		return buffer;
+	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
-	return session ? session->reserveLuaAudioChannel(fileName, generation) : 0;
+	return session ? session->reserveLuaAudioChannel(fileName, generation, volume, pan, pitch, postState) : 0;
 }
 
 void WorldRuntime::confirmSoundBufferForNativeAudio(const int buffer, const quint64 generation) const
@@ -18843,7 +19033,9 @@ int WorldRuntime::updateSoundForNativeAudio(const int buffer, const bool loop, c
 	return session ? session->playFile(buffer, QString(), loop, volume, pan, generation) : eCannotPlaySound;
 }
 
-int WorldRuntime::stopSoundForNativeAudio(const int buffer, const quint64 generation) const
+int WorldRuntime::stopSoundForNativeAudio(
+    const int buffer, const quint64 generation,
+    std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
 {
 	if (buffer < 1 || buffer > kMaxSoundBuffers || generation == 0)
 		return eBadParameter;
@@ -18854,12 +19046,107 @@ int WorldRuntime::stopSoundForNativeAudio(const int buffer, const quint64 genera
 		backend = m_testSoundBackend;
 	}
 	if (backend.stop)
-		return backend.stop(buffer);
+	{
+		const int result = backend.stop(buffer);
+		if (result == eOK && postState)
+			*postState = captureTestSoundSnapshot(
+			    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
+		return result;
+	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
-	return session ? session->stopLuaAudioChannel(buffer, generation) : eCannotPlaySound;
+	return session ? session->stopLuaAudioChannel(buffer, generation, postState) : eCannotPlaySound;
 }
 
-int WorldRuntime::stopSoundDirect(const int buffer) const
+int WorldRuntime::setSoundAttributeForNativeAudio(
+    const int buffer, const quint64 generation, const QMudSoundAttribute attribute, const double value,
+    const std::chrono::milliseconds duration, const bool stopAtEnd, const QMudSoundAttributeTarget targetMode,
+    std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
+{
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.attribute)
+	{
+		if (buffer == 0 && generation == 0 && attribute == QMudSoundAttribute::Volume)
+		{
+			for (const int owned : QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(this))
+			{
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState state;
+				if (QMudNativePluginRegistry::luaAudioRuntimeBufferState(this, owned, state) &&
+				    state.playbackSubmitted && soundStatus(owned) > 0 &&
+				    soundVolumeForNativeAudio(owned) != 0.0 && soundVolumeForNativeAudio(owned) != value)
+					static_cast<void>(backend.attribute(owned, state.generation, attribute, value, duration,
+					                                    stopAtEnd, targetMode));
+			}
+			if (postState)
+				*postState = captureTestSoundSnapshot(
+				    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
+			return eOK;
+		}
+		const int result =
+		    backend.attribute(buffer, generation, attribute, value, duration, stopAtEnd, targetMode);
+		if (result == eOK && postState)
+			*postState = captureTestSoundSnapshot(
+			    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
+		return result;
+	}
+	if (backend.play)
+		return eCannotPlaySound;
+	const auto session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->setLuaAudioAttribute(buffer, generation, attribute, value, duration, stopAtEnd,
+	                                               targetMode, postState)
+	               : eCannotPlaySound;
+}
+
+double WorldRuntime::soundVolumeForNativeAudio(const int buffer) const
+{
+	if (buffer < 1 || buffer > kMaxSoundBuffers)
+		return 0.0;
+	TestSoundBackend backend;
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		QMutexLocker locker(&m_testSoundBackendMutex);
+		backend = m_testSoundBackend;
+	}
+	if (backend.volume)
+		return backend.volume(buffer);
+	const auto session  = m_soundSession.load(std::memory_order_acquire);
+	const auto snapshot = session ? session->snapshot() : nullptr;
+	return snapshot ? snapshot->volume[static_cast<std::size_t>(buffer - 1)] : 0.0;
+}
+
+std::shared_ptr<SoundEngineSession> WorldRuntime::soundSessionForNativeAudio() const
+{
+	return m_soundSession.load(std::memory_order_acquire);
+}
+
+int WorldRuntime::setLuaAudioInitialized(const bool                                           initialized,
+                                         std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
+{
+	if (m_hasTestSoundBackend.load(std::memory_order_acquire))
+	{
+		m_testLuaAudioInitialized.store(initialized, std::memory_order_release);
+		if (postState)
+		{
+			TestSoundBackend backend;
+			{
+				QMutexLocker locker(&m_testSoundBackendMutex);
+				backend = m_testSoundBackend;
+			}
+			*postState = captureTestSoundSnapshot(
+			    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
+		}
+		return eOK;
+	}
+	const auto session = m_soundSession.load(std::memory_order_acquire);
+	return session ? session->setLuaAudioInitialized(initialized, postState) : eCannotPlaySound;
+}
+
+int WorldRuntime::stopSoundDirect(const int                                            buffer,
+                                  std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers)
 		return eBadParameter;
@@ -18870,9 +19157,15 @@ int WorldRuntime::stopSoundDirect(const int buffer) const
 		backend = m_testSoundBackend;
 	}
 	if (backend.stop)
-		return backend.stop(buffer);
+	{
+		const int result = backend.stop(buffer);
+		if (result == eOK && postState)
+			*postState = captureTestSoundSnapshot(
+			    backend, m_testSoundRevision.fetch_add(1, std::memory_order_relaxed));
+		return result;
+	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
-	return session ? session->stop(buffer) : eCannotPlaySound;
+	return session ? session->stop(buffer, postState) : eCannotPlaySound;
 }
 
 int WorldRuntime::cancelSoundIntercepted()
@@ -18924,11 +19217,12 @@ void WorldRuntime::setSoundBackendForTest(TestSoundBackend backend)
 	{
 		QMutexLocker locker(&m_testSoundBackendMutex);
 		m_testSoundBackend = std::move(backend);
-		m_hasTestSoundBackend.store(m_testSoundBackend.play || m_testSoundBackend.nativeSound ||
-		                                m_testSoundBackend.stop || m_testSoundBackend.status ||
-		                                m_testSoundBackend.reusable || m_testSoundBackend.reserve ||
-		                                m_testSoundBackend.confirm,
-		                            std::memory_order_release);
+		m_testLuaAudioInitialized.store(true, std::memory_order_release);
+		m_hasTestSoundBackend.store(
+		    m_testSoundBackend.play || m_testSoundBackend.nativeSound || m_testSoundBackend.stop ||
+		        m_testSoundBackend.status || m_testSoundBackend.reusable || m_testSoundBackend.reserve ||
+		        m_testSoundBackend.confirm || m_testSoundBackend.attribute || m_testSoundBackend.volume,
+		    std::memory_order_release);
 	}
 	invalidateLuaCallbackSoundPresentationSnapshot();
 }
@@ -21995,8 +22289,7 @@ void WorldRuntime::setSoundAvailable(const bool available)
 		resetNativeProtocolSoundState();
 	if (isConnected())
 	{
-		if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
-			sendToWorld(outbound);
+		flushTelnetOutput();
 	}
 }
 
@@ -27957,9 +28250,7 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 
 	if (m_socket && m_socket->isConnected())
 	{
-		const QByteArray outbound = m_telnet.takeOutboundData();
-		if (!outbound.isEmpty())
-			sendToWorld(outbound);
+		flushTelnetOutput();
 	}
 }
 
@@ -31924,6 +32215,11 @@ int WorldRuntime::reloadPlugin(const QString &pluginId, QString *error)
 		if (!nativeShimVisibleForPluginApi(m_plugins, resolvedPluginId))
 			return eNoSuchPlugin;
 		const int shadowIndex = nativeShimShadowPluginIndex(m_plugins, resolvedPluginId);
+		if (resolvedPluginId == QMudNativePluginRegistry::luaAudioPluginId())
+		{
+			static_cast<void>(QMudNativePluginRegistry::callLuaAudio(this, QStringLiteral("unload"), {}));
+			static_cast<void>(QMudNativePluginRegistry::callLuaAudio(this, QStringLiteral("init"), {}));
+		}
 		if (shadowIndex < 0)
 			return eOK;
 
@@ -32367,24 +32663,7 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 		}
 		lua_pushnumber(callerState, result.errorCode);
 		for (const QVariant &value : result.returnValues)
-		{
-			switch (value.typeId())
-			{
-			case QMetaType::Bool:
-				lua_pushboolean(callerState, value.toBool());
-				break;
-			case QMetaType::Int:
-			case QMetaType::LongLong:
-				lua_pushinteger(callerState, static_cast<lua_Integer>(value.toLongLong()));
-				break;
-			case QMetaType::Double:
-				lua_pushnumber(callerState, value.toDouble());
-				break;
-			default:
-				pushUtf8String(callerState, value.toString());
-				break;
-			}
-		}
+			QMudLuaSupport::pushCallPluginValue(callerState, value);
 		return pushedValueCount;
 	}
 
@@ -34759,6 +35038,7 @@ bool WorldRuntime::loadLuaAudioStateVariables(QMap<QString, QString> &variables,
 
 void WorldRuntime::replaceLuaAudioVariables(QMap<QString, QString> variables)
 {
+	static_cast<void>(setLuaAudioInitialized(true));
 	QString volumeText;
 	if (!QMudVariableMapUtils::findValue(variables, QStringLiteral("vol"), volumeText))
 	{
