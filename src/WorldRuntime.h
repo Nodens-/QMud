@@ -73,6 +73,7 @@ class WorldCommandProcessorMutationAccess;
 struct LuaDeferredRuntimeMutationPlayback;
 struct LuaDeferredRuntimeMutationBatchSequence;
 struct CausalOutboundGroup;
+struct LuaCallbackPreparedCausalSnapshotDelta;
 namespace QMudMspProtocol
 {
 	struct Command;
@@ -8791,6 +8792,7 @@ class WorldRuntime : public QObject
 				QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>>
 				    scopedStableSnapshotPatches;
 				QHash<LuaCallbackStableSnapshotDomain, LuaCallbackTargetedRulePatches> targetedRulePatches;
+				std::shared_ptr<const LuaCallbackPreparedCausalSnapshotDelta>          preparedDelta;
 		};
 		/**
 		 * @brief Captures causal runtime counters before a callback mutation segment.

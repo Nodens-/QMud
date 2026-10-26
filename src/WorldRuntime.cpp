@@ -124,6 +124,7 @@
 #include <ranges>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 #include <zlib.h>
 
@@ -167,6 +168,22 @@ void OutboundCommandTransaction::resolve(const Outcome resolvedOutcome)
 	else
 		callback();
 }
+
+/** @brief Immutable replay work owned by one completed causal revision. */
+struct LuaCallbackPreparedCausalSnapshotDelta
+{
+		QVector<std::function<void(LuaCallbackSnapshot &)>> operations;
+
+		/**
+		 * @brief Applies prepared edits and target-dependent handlers in their original order.
+		 * @param target Callback's private event-time snapshot.
+		 */
+		void                                                apply(LuaCallbackSnapshot &target) const
+		{
+			for (const auto &operation : operations)
+				operation(target);
+		}
+};
 
 namespace
 {
@@ -514,64 +531,166 @@ namespace
 			target = after;
 	}
 
-	template <typename Map> void applyCausalSnapshotMapDelta(Map &target, const Map &before, const Map &after)
+	/** @brief Captured endpoints for a non-map value whose merge policy remains target-dependent. */
+	template <typename T> struct CausalSnapshotValueDelta
 	{
-		for (auto it = before.constBegin(); it != before.constEnd(); ++it)
-		{
-			if (!after.contains(it.key()))
-				target.remove(it.key());
-		}
-		for (auto it = after.constBegin(); it != after.constEnd(); ++it)
-		{
-			const auto beforeIt = before.constFind(it.key());
-			if (beforeIt == before.constEnd())
+			T    before;
+			T    after;
+
+			/**
+			 * @brief Merges the captured endpoints using the value type's existing causal policy.
+			 * @param target Value in the callback's event-time snapshot.
+			 */
+			void apply(T &target) const;
+	};
+
+	template <typename Map> struct CausalSnapshotMapDelta;
+
+	/** @brief Recursively prepared changes for an ordered map value. */
+	template <typename Key, typename Value>
+	struct CausalSnapshotValueDelta<QMap<Key, Value>> : CausalSnapshotMapDelta<QMap<Key, Value>>
+	{
+			using CausalSnapshotMapDelta<QMap<Key, Value>>::CausalSnapshotMapDelta;
+	};
+
+	/** @brief Recursively prepared changes for a hash map value. */
+	template <typename Key, typename Value>
+	struct CausalSnapshotValueDelta<QHash<Key, Value>> : CausalSnapshotMapDelta<QHash<Key, Value>>
+	{
+			using CausalSnapshotMapDelta<QHash<Key, Value>>::CausalSnapshotMapDelta;
+	};
+
+	/** @brief One removal, insertion, or target-conditional update of a map entry. */
+	template <typename Map> struct CausalSnapshotMapEntryDelta
+	{
+			using Key   = Map::key_type;
+			using Value = Map::mapped_type;
+			Key                                                                  key;
+			std::variant<std::monostate, Value, CausalSnapshotValueDelta<Value>> edit;
+
+			/**
+			 * @brief Discovers an entry edit while preserving absence separately from an empty value.
+			 * @param key Canonical map key.
+			 * @param before Value before the revision, or null when absent.
+			 * @param after Value after the revision, or null when absent.
+			 * @return Prepared edit, or no edit when presence and value are unchanged.
+			 */
+			static std::optional<CausalSnapshotMapEntryDelta> prepare(const Key &key, const Value *before,
+			                                                          const Value *after)
 			{
-				target.insert(it.key(), it.value());
-				continue;
+				if (!before)
+				{
+					if (!after)
+						return std::nullopt;
+					return CausalSnapshotMapEntryDelta{key, {*after}};
+				}
+				if (!after)
+					return CausalSnapshotMapEntryDelta{key, {std::monostate{}}};
+				if (*before == *after)
+					return std::nullopt;
+				return CausalSnapshotMapEntryDelta{key, {CausalSnapshotValueDelta<Value>{*before, *after}}};
 			}
-			if (beforeIt.value() == it.value())
-				continue;
-			auto targetIt = target.find(it.key());
-			if (targetIt != target.end())
-				applyCausalSnapshotValueDelta(targetIt.value(), beforeIt.value(), it.value());
-		}
-	}
+
+			/**
+			 * @brief Applies an edit without recreating an entry that the target no longer contains.
+			 * @param target Callback-local map to update.
+			 */
+			void apply(Map &target) const
+			{
+				if (edit.index() == 0)
+					target.remove(key);
+				else if (const auto *addition = std::get_if<1>(&edit))
+					target.insert(key, *addition);
+				else if (auto it = target.find(key); it != target.end())
+					std::get<2>(edit).apply(it.value());
+			}
+	};
+
+	template <typename Map> constexpr bool                 kCausalMapIsOrdered                   = false;
+	template <typename Key, typename Value> constexpr bool kCausalMapIsOrdered<QMap<Key, Value>> = true;
+
+	/** @brief Sparse, recursively owned map edits discovered once from immutable endpoints. */
+	template <typename Map> struct CausalSnapshotMapDelta
+	{
+			using Entry = CausalSnapshotMapEntryDelta<Map>;
+			QVector<Entry> removals;
+			QVector<Entry> changes;
+
+			/**
+			 * @brief Discovers map differences, using a linear merge walk for ordered maps.
+			 * @param before Immutable map before the revision.
+			 * @param after Immutable map after the revision.
+			 */
+			CausalSnapshotMapDelta(const Map &before, const Map &after)
+			{
+				if (before == after)
+					return;
+				if constexpr (kCausalMapIsOrdered<Map>)
+				{
+					auto                                    old  = before.cbegin();
+					auto                                    next = after.cbegin();
+					const std::less<typename Map::key_type> less;
+					while (old != before.cend() || next != after.cend())
+					{
+						if (next == after.cend() || (old != before.cend() && less(old.key(), next.key())))
+						{
+							removals.push_back(*Entry::prepare(old.key(), &old.value(), nullptr));
+							++old;
+						}
+						else if (old == before.cend() || less(next.key(), old.key()))
+						{
+							changes.push_back(*Entry::prepare(next.key(), nullptr, &next.value()));
+							++next;
+						}
+						else
+						{
+							if (auto edit = Entry::prepare(next.key(), &old.value(), &next.value()))
+								changes.push_back(std::move(*edit));
+							++old;
+							++next;
+						}
+					}
+				}
+				else
+				{
+					for (auto it = before.cbegin(); it != before.cend(); ++it)
+						if (!after.contains(it.key()))
+							removals.push_back(*Entry::prepare(it.key(), &it.value(), nullptr));
+					for (auto it = after.cbegin(); it != after.cend(); ++it)
+					{
+						const auto old = before.constFind(it.key());
+						if (auto edit = Entry::prepare(
+						        it.key(), old == before.cend() ? nullptr : &old.value(), &it.value()))
+							changes.push_back(std::move(*edit));
+					}
+				}
+			}
+
+			/**
+			 * @brief Replays removals first, then additions and updates in the captured map's order.
+			 * @param target Callback-local map to update.
+			 */
+			void apply(Map &target) const
+			{
+				for (const Entry &entry : removals)
+					entry.apply(target);
+				for (const Entry &entry : changes)
+					entry.apply(target);
+			}
+	};
 
 	template <typename Key, typename Value>
 	void applyCausalSnapshotValueDelta(QMap<Key, Value> &target, const QMap<Key, Value> &before,
 	                                   const QMap<Key, Value> &after)
 	{
-		applyCausalSnapshotMapDelta(target, before, after);
+		CausalSnapshotValueDelta<QMap<Key, Value>>(before, after).apply(target);
 	}
 
 	template <typename Key, typename Value>
 	void applyCausalSnapshotValueDelta(QHash<Key, Value> &target, const QHash<Key, Value> &before,
 	                                   const QHash<Key, Value> &after)
 	{
-		applyCausalSnapshotMapDelta(target, before, after);
-	}
-
-	template <typename Map>
-	void applyCausalSnapshotMapEntryDelta(Map &target, const Map &before, const Map &after,
-	                                      const typename Map::key_type &key)
-	{
-		const auto beforeIt = before.constFind(key);
-		const auto afterIt  = after.constFind(key);
-		if (beforeIt == before.constEnd())
-		{
-			if (afterIt != after.constEnd())
-				target.insert(key, afterIt.value());
-			return;
-		}
-		if (afterIt == after.constEnd())
-		{
-			target.remove(key);
-			return;
-		}
-		if (beforeIt.value() == afterIt.value())
-			return;
-		if (auto targetIt = target.find(key); targetIt != target.end())
-			applyCausalSnapshotValueDelta(targetIt.value(), beforeIt.value(), afterIt.value());
+		CausalSnapshotValueDelta<QHash<Key, Value>>(before, after).apply(target);
 	}
 
 	void applyCausalSnapshotNameEntryDelta(QStringList &target, const bool beforeContains,
@@ -1849,36 +1968,122 @@ namespace
 			targetStore.detailStates = targetStore.detailStates.withUpdates(detailStateUpdates);
 	}
 
-	void applyCausalStableSnapshotRevisionUnchecked(
-	    LuaCallbackSnapshot &target, const LuaCallbackSnapshot &before, const LuaCallbackSnapshot &after,
-	    const quint32 domainMask, const QVector<LuaCallbackMapperSnapshotOperation> &mapperOperations,
-	    const QVector<LuaCallbackArrayMutation>    &arrayMutations,
-	    const LuaCallbackMiniWindowCausalMutations &miniWindowMutations,
-	    const LuaCallbackRuntimeCounterUpdates     &runtimeCounterUpdates,
-	    const LuaCallbackEntityMutations           &entityMutations,
+	// Define this after every value-policy overload so prepared leaves retain the same overload selection.
+	template <typename T> void CausalSnapshotValueDelta<T>::apply(T &target) const
+	{
+		applyCausalSnapshotValueDelta(target, before, after);
+	}
+
+	/**
+	 * @brief Adds one field's prepared delta through the existing causal field traversal.
+	 * @tparam Member Snapshot field selected by the traversal.
+	 * @param prepared Revision-owned replay operations.
+	 * @param before Immutable snapshot before the revision.
+	 * @param after Immutable snapshot after the revision.
+	 */
+	template <auto Member>
+	void appendCausalSnapshotFieldDelta(LuaCallbackPreparedCausalSnapshotDelta &prepared,
+	                                    const LuaCallbackSnapshot &before, const LuaCallbackSnapshot &after)
+	{
+		const auto &old  = before.*Member;
+		const auto &next = after.*Member;
+		if (old == next)
+			return;
+		using Value = std::remove_cvref_t<decltype(old)>;
+		prepared.operations.push_back([delta = CausalSnapshotValueDelta<Value>{old, next}](
+		                                  LuaCallbackSnapshot &target) { delta.apply(target.*Member); });
+	}
+
+	/**
+	 * @brief Adds a scoped map-entry edit using the shared recursive map-delta implementation.
+	 * @tparam Member Snapshot map selected by the traversal.
+	 * @param prepared Revision-owned replay operations.
+	 * @param before Immutable snapshot before the revision.
+	 * @param after Immutable snapshot after the revision.
+	 * @param key Entry selected by the existing typed patch scope.
+	 */
+	template <auto Member, typename Key>
+	void appendCausalSnapshotMapEntryDelta(LuaCallbackPreparedCausalSnapshotDelta &prepared,
+	                                       const LuaCallbackSnapshot              &before,
+	                                       const LuaCallbackSnapshot &after, const Key &key)
+	{
+		const auto &oldMap  = before.*Member;
+		const auto &nextMap = after.*Member;
+		using Map           = std::remove_cvref_t<decltype(oldMap)>;
+		const auto old      = oldMap.constFind(key);
+		const auto next     = nextMap.constFind(key);
+		if (auto edit =
+		        CausalSnapshotMapEntryDelta<Map>::prepare(key, old == oldMap.cend() ? nullptr : &old.value(),
+		                                                  next == nextMap.cend() ? nullptr : &next.value()))
+			prepared.operations.push_back([edit = std::move(*edit)](LuaCallbackSnapshot &target)
+			                              { edit.apply(target.*Member); });
+	}
+
+	/**
+	 * @brief Prepares one closed revision while retaining the existing domain and field replay order.
+	 * @param beforeSnapshot Immutable snapshot before the revision.
+	 * @param afterSnapshot Immutable snapshot after the revision.
+	 * @param domainMask Domains affected by the revision.
+	 * @param mapperOperations Accepted mapper operations, including net-zero intent.
+	 * @param arrayMutations Accepted generation-checked array mutations.
+	 * @param miniWindowMutations Accepted miniwindow mutations.
+	 * @param runtimeCounterUpdates Captured causal counter changes.
+	 * @param entityMutations Accepted entity mutations.
+	 * @param entityResetSlots Captured entity reset operations.
+	 * @param fullDomainMask Domains requiring full rather than scoped replay.
+	 * @param scopedPatches Existing typed owner and item patch scopes.
+	 * @param targetedRulePatches Existing generation-checked rule patches.
+	 * @return Immutable prepared operations with independently owned captured values.
+	 */
+	std::shared_ptr<const LuaCallbackPreparedCausalSnapshotDelta> prepareCausalStableSnapshotRevision(
+	    const QSharedPointer<const LuaCallbackSnapshot> &beforeSnapshot,
+	    const QSharedPointer<const LuaCallbackSnapshot> &afterSnapshot, const quint32 domainMask,
+	    const QVector<LuaCallbackMapperSnapshotOperation> &mapperOperations,
+	    const QVector<LuaCallbackArrayMutation>           &arrayMutations,
+	    const LuaCallbackMiniWindowCausalMutations        &miniWindowMutations,
+	    const LuaCallbackRuntimeCounterUpdates            &runtimeCounterUpdates,
+	    const LuaCallbackEntityMutations                  &entityMutations,
 	    const LuaCallbackEntityResetSlots &entityResetSlots, const quint32 fullDomainMask,
 	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches,
 	    const QHash<LuaCallbackStableSnapshotDomain, LuaCallbackTargetedRulePatches>     &targetedRulePatches)
 	{
+		const auto &before   = *beforeSnapshot;
+		const auto &after    = *afterSnapshot;
+		auto        prepared = std::make_shared<LuaCallbackPreparedCausalSnapshotDelta>();
 #define QMUD_CAUSAL_DOMAIN(name)                                                                             \
 	if ((domainMask & luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::name)) != 0U)
-#define QMUD_CAUSAL_FIELD(field) applyCausalSnapshotValueDelta(target.field, before.field, after.field)
+#define QMUD_CAUSAL_FIELD(field)                                                                             \
+	appendCausalSnapshotFieldDelta<&LuaCallbackSnapshot::field>(*prepared, before, after)
 		QMUD_CAUSAL_DOMAIN(MiniWindows)
 		{
-			applyCausalMiniWindowMutations(target, before, after, miniWindowMutations);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot, miniWindowMutations](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalMiniWindowMutations(target, *beforeSnapshot, *afterSnapshot,
+				                                   miniWindowMutations);
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(WorldVariables)
 		{
 			QMUD_CAUSAL_FIELD(hasWorldVariablesSnapshot);
 			QMUD_CAUSAL_FIELD(worldVariablesSnapshot);
 			QMUD_CAUSAL_FIELD(hasVariableEntriesSnapshot);
-			applyCausalVariableSequenceDelta(target.variableEntriesSnapshot, before.variableEntriesSnapshot,
-			                                 after.variableEntriesSnapshot);
-			const qsizetype variableCount = target.hasVariableEntriesSnapshot
-			                                    ? target.variableEntriesSnapshot.size()
-			                                    : target.worldVariablesSnapshot.size();
-			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::VariableCount,
-			                                  variableCount);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalVariableSequenceDelta(target.variableEntriesSnapshot,
+				                                     beforeSnapshot->variableEntriesSnapshot,
+				                                     afterSnapshot->variableEntriesSnapshot);
+			    });
+			prepared->operations.push_back(
+			    [](LuaCallbackSnapshot &target)
+			    {
+				    const qsizetype variableCount = target.hasVariableEntriesSnapshot
+				                                        ? target.variableEntriesSnapshot.size()
+				                                        : target.worldVariablesSnapshot.size();
+				    setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::VariableCount,
+				                                      variableCount);
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(PluginVariables)
 		{
@@ -1887,36 +2092,69 @@ namespace
 		}
 		QMUD_CAUSAL_DOMAIN(Triggers)
 		{
-			applyCausalRuleSnapshotDomain(target, before, after, target.triggerSnapshotStore,
-			                              before.triggerSnapshotStore, after.triggerSnapshotStore,
-			                              LuaCallbackStableSnapshotDomain::Triggers, fullDomainMask,
-			                              scopedPatches, targetedRulePatches);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot, fullDomainMask, scopedPatches,
+			     targetedRulePatches](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalRuleSnapshotDomain(
+				        target, *beforeSnapshot, *afterSnapshot, target.triggerSnapshotStore,
+				        beforeSnapshot->triggerSnapshotStore, afterSnapshot->triggerSnapshotStore,
+				        LuaCallbackStableSnapshotDomain::Triggers, fullDomainMask, scopedPatches,
+				        targetedRulePatches);
+			    });
 			QMUD_CAUSAL_FIELD(triggerListOverridesByPluginId);
 			QMUD_CAUSAL_FIELD(missingTriggerListPluginIds);
-			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::TriggerCount,
-			                                  callbackRuleSnapshotOwnerCount(target.triggerSnapshotStore, 0));
+			prepared->operations.push_back(
+			    [](LuaCallbackSnapshot &target)
+			    {
+				    setLuaCallbackRuntimeCounterValue(
+				        target, LuaCallbackRuntimeCounterField::TriggerCount,
+				        callbackRuleSnapshotOwnerCount(target.triggerSnapshotStore, 0));
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(Aliases)
 		{
-			applyCausalRuleSnapshotDomain(target, before, after, target.aliasSnapshotStore,
-			                              before.aliasSnapshotStore, after.aliasSnapshotStore,
-			                              LuaCallbackStableSnapshotDomain::Aliases, fullDomainMask,
-			                              scopedPatches, targetedRulePatches);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot, fullDomainMask, scopedPatches,
+			     targetedRulePatches](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalRuleSnapshotDomain(
+				        target, *beforeSnapshot, *afterSnapshot, target.aliasSnapshotStore,
+				        beforeSnapshot->aliasSnapshotStore, afterSnapshot->aliasSnapshotStore,
+				        LuaCallbackStableSnapshotDomain::Aliases, fullDomainMask, scopedPatches,
+				        targetedRulePatches);
+			    });
 			QMUD_CAUSAL_FIELD(aliasListOverridesByPluginId);
 			QMUD_CAUSAL_FIELD(missingAliasListPluginIds);
-			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::AliasCount,
-			                                  callbackRuleSnapshotOwnerCount(target.aliasSnapshotStore, 0));
+			prepared->operations.push_back(
+			    [](LuaCallbackSnapshot &target)
+			    {
+				    setLuaCallbackRuntimeCounterValue(
+				        target, LuaCallbackRuntimeCounterField::AliasCount,
+				        callbackRuleSnapshotOwnerCount(target.aliasSnapshotStore, 0));
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(Timers)
 		{
-			applyCausalRuleSnapshotDomain(target, before, after, target.timerSnapshotStore,
-			                              before.timerSnapshotStore, after.timerSnapshotStore,
-			                              LuaCallbackStableSnapshotDomain::Timers, fullDomainMask,
-			                              scopedPatches, targetedRulePatches);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot, fullDomainMask, scopedPatches,
+			     targetedRulePatches](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalRuleSnapshotDomain(
+				        target, *beforeSnapshot, *afterSnapshot, target.timerSnapshotStore,
+				        beforeSnapshot->timerSnapshotStore, afterSnapshot->timerSnapshotStore,
+				        LuaCallbackStableSnapshotDomain::Timers, fullDomainMask, scopedPatches,
+				        targetedRulePatches);
+			    });
 			QMUD_CAUSAL_FIELD(timerListOverridesByPluginId);
 			QMUD_CAUSAL_FIELD(missingTimerListPluginIds);
-			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::TimerCount,
-			                                  callbackRuleSnapshotOwnerCount(target.timerSnapshotStore, 0));
+			prepared->operations.push_back(
+			    [](LuaCallbackSnapshot &target)
+			    {
+				    setLuaCallbackRuntimeCounterValue(
+				        target, LuaCallbackRuntimeCounterField::TimerCount,
+				        callbackRuleSnapshotOwnerCount(target.timerSnapshotStore, 0));
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(WorldAttributes)
 		{
@@ -1935,7 +2173,8 @@ namespace
 			}
 			else if (!arrayMutations.isEmpty())
 			{
-				applyCausalArrayMutations(target, arrayMutations);
+				prepared->operations.push_back([arrayMutations](LuaCallbackSnapshot &target)
+				                               { applyCausalArrayMutations(target, arrayMutations); });
 			}
 		}
 		QMUD_CAUSAL_DOMAIN(Colours)
@@ -1948,10 +2187,16 @@ namespace
 		}
 		QMUD_CAUSAL_DOMAIN(CustomElements)
 		{
-			applyCausalCustomElementDelta(target.customElementsSnapshot, before.customElementsSnapshot,
-			                              after.customElementsSnapshot);
-			setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::CustomElementCount,
-			                                  target.customElementsSnapshot.size());
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalCustomElementDelta(target.customElementsSnapshot,
+				                                  beforeSnapshot->customElementsSnapshot,
+				                                  afterSnapshot->customElementsSnapshot);
+				    setLuaCallbackRuntimeCounterValue(target,
+				                                      LuaCallbackRuntimeCounterField::CustomElementCount,
+				                                      target.customElementsSnapshot.size());
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(Mapper)
 		{
@@ -1961,10 +2206,16 @@ namespace
 			if (mapperOperations.isEmpty())
 				QMUD_CAUSAL_FIELD(mappingEntriesSnapshot);
 			else
-				applyCausalMapperOperations(target, mapperOperations);
-			if (target.hasMappingEntriesSnapshot)
-				setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::MappingCount,
-				                                  target.mappingEntriesSnapshot.size());
+				prepared->operations.push_back([mapperOperations](LuaCallbackSnapshot &target)
+				                               { applyCausalMapperOperations(target, mapperOperations); });
+			prepared->operations.push_back(
+			    [](LuaCallbackSnapshot &target)
+			    {
+				    if (target.hasMappingEntriesSnapshot)
+					    setLuaCallbackRuntimeCounterValue(target,
+					                                      LuaCallbackRuntimeCounterField::MappingCount,
+					                                      target.mappingEntriesSnapshot.size());
+			    });
 		}
 		QMUD_CAUSAL_DOMAIN(Databases)
 		{
@@ -1995,12 +2246,17 @@ namespace
 					if (scope.kind != LuaCallbackStableSnapshotPatchKind::Item)
 						continue;
 					if (scope.topologyMayChange)
-						applyCausalSnapshotNameEntryDelta(
-						    target.databaseNamesSnapshot,
-						    before.databaseSnapshotsByName.contains(scope.itemName),
-						    after.databaseSnapshotsByName.contains(scope.itemName), scope.itemName);
+						prepared->operations.push_back(
+						    [name        = scope.itemName,
+						     oldPresent  = before.databaseSnapshotsByName.contains(scope.itemName),
+						     nextPresent = after.databaseSnapshotsByName.contains(scope.itemName)](
+						        LuaCallbackSnapshot &target)
+						    {
+							    applyCausalSnapshotNameEntryDelta(target.databaseNamesSnapshot, oldPresent,
+							                                      nextPresent, name);
+						    });
 #define QMUD_CAUSAL_DATABASE_ENTRY(field)                                                                    \
-	applyCausalSnapshotMapEntryDelta(target.field, before.field, after.field, scope.itemName)
+	appendCausalSnapshotMapEntryDelta<&LuaCallbackSnapshot::field>(*prepared, before, after, scope.itemName)
 					QMUD_CAUSAL_DATABASE_ENTRY(databaseSnapshotsByName);
 					QMUD_CAUSAL_DATABASE_ENTRY(databaseColumnsByName);
 					QMUD_CAUSAL_DATABASE_ENTRY(databaseErrorsByName);
@@ -2011,12 +2267,18 @@ namespace
 					QMUD_CAUSAL_DATABASE_ENTRY(databaseChangesByName);
 					QMUD_CAUSAL_DATABASE_ENTRY(databaseLastInsertRowidByName);
 #undef QMUD_CAUSAL_DATABASE_ENTRY
-					applyCausalSnapshotSetEntryDelta(target.missingDatabaseColumnNamesByName,
-					                                 before.missingDatabaseColumnNamesByName,
-					                                 after.missingDatabaseColumnNamesByName, scope.itemName);
-					applyCausalSnapshotSetEntryDelta(target.missingDatabaseColumnValuesByName,
-					                                 before.missingDatabaseColumnValuesByName,
-					                                 after.missingDatabaseColumnValuesByName, scope.itemName);
+					prepared->operations.push_back(
+					    [beforeSnapshot, afterSnapshot, name = scope.itemName](LuaCallbackSnapshot &target)
+					    {
+						    applyCausalSnapshotSetEntryDelta(target.missingDatabaseColumnNamesByName,
+						                                     beforeSnapshot->missingDatabaseColumnNamesByName,
+						                                     afterSnapshot->missingDatabaseColumnNamesByName,
+						                                     name);
+						    applyCausalSnapshotSetEntryDelta(
+						        target.missingDatabaseColumnValuesByName,
+						        beforeSnapshot->missingDatabaseColumnValuesByName,
+						        afterSnapshot->missingDatabaseColumnValuesByName, name);
+					    });
 				}
 			}
 		}
@@ -2046,12 +2308,21 @@ namespace
 			QMUD_CAUSAL_FIELD(pluginEnginesById);
 			QMUD_CAUSAL_FIELD(pluginRuntimeIdentitiesById);
 			QMUD_CAUSAL_FIELD(pluginLuaFunctionsById);
-			applyCausalUniqueStringSequenceDelta(target.broadcastPluginIdsSnapshot,
-			                                     before.broadcastPluginIdsSnapshot,
-			                                     after.broadcastPluginIdsSnapshot);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalUniqueStringSequenceDelta(target.broadcastPluginIdsSnapshot,
+				                                         beforeSnapshot->broadcastPluginIdsSnapshot,
+				                                         afterSnapshot->broadcastPluginIdsSnapshot);
+			    });
 			QMUD_CAUSAL_FIELD(hasBroadcastPluginSnapshot);
-			applyCausalUniqueStringSequenceDelta(target.pluginIdsSnapshot, before.pluginIdsSnapshot,
-			                                     after.pluginIdsSnapshot);
+			prepared->operations.push_back(
+			    [beforeSnapshot, afterSnapshot](LuaCallbackSnapshot &target)
+			    {
+				    applyCausalUniqueStringSequenceDelta(target.pluginIdsSnapshot,
+				                                         beforeSnapshot->pluginIdsSnapshot,
+				                                         afterSnapshot->pluginIdsSnapshot);
+			    });
 			QMUD_CAUSAL_FIELD(pluginIdsByLookupKey);
 			QMUD_CAUSAL_FIELD(pluginInfoValuesById);
 			QMUD_CAUSAL_FIELD(pluginCallbackPresenceByName);
@@ -2072,37 +2343,23 @@ namespace
 		}
 #undef QMUD_CAUSAL_FIELD
 #undef QMUD_CAUSAL_DOMAIN
-		for (auto it = runtimeCounterUpdates.cbegin(); it != runtimeCounterUpdates.cend(); ++it)
-			setLuaCallbackRuntimeCounterValue(target, it.key(), it.value());
-		applyCausalEntityMutations(target, entityMutations, entityResetSlots);
-	}
-
-	void applyCausalStableSnapshotRevision(
-	    LuaCallbackSnapshot &target, const LuaCallbackSnapshot &before, const LuaCallbackSnapshot &after,
-	    const quint32 domainMask, const QVector<LuaCallbackMapperSnapshotOperation> &mapperOperations,
-	    const QVector<LuaCallbackArrayMutation>    &arrayMutations,
-	    const LuaCallbackMiniWindowCausalMutations &miniWindowMutations,
-	    const LuaCallbackRuntimeCounterUpdates     &runtimeCounterUpdates,
-	    const LuaCallbackEntityMutations           &entityMutations,
-	    const LuaCallbackEntityResetSlots &entityResetSlots, const quint32 fullDomainMask,
-	    const QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableCausalPatch>> &scopedPatches,
-	    const QHash<LuaCallbackStableSnapshotDomain, LuaCallbackTargetedRulePatches>     &targetedRulePatches)
-	{
-		applyCausalStableSnapshotRevisionUnchecked(target, before, after, domainMask, mapperOperations,
-		                                           arrayMutations, miniWindowMutations, runtimeCounterUpdates,
-		                                           entityMutations, entityResetSlots, fullDomainMask,
-		                                           scopedPatches, targetedRulePatches);
+		prepared->operations.push_back(
+		    [runtimeCounterUpdates, entityMutations, entityResetSlots](LuaCallbackSnapshot &target)
+		    {
+			    for (auto it = runtimeCounterUpdates.cbegin(); it != runtimeCounterUpdates.cend(); ++it)
+				    setLuaCallbackRuntimeCounterValue(target, it.key(), it.value());
+			    applyCausalEntityMutations(target, entityMutations, entityResetSlots);
+		    });
 #ifndef NDEBUG
 		LuaCallbackSnapshot verification = before;
-		applyCausalStableSnapshotRevisionUnchecked(verification, before, after, domainMask, mapperOperations,
-		                                           arrayMutations, miniWindowMutations, runtimeCounterUpdates,
-		                                           entityMutations, entityResetSlots, fullDomainMask,
-		                                           scopedPatches, targetedRulePatches);
+		prepared->apply(verification);
 		const quint32 verificationMask =
 		    domainMask & ~luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::MiniWindows);
 		Q_ASSERT(luaCallbackStableSnapshotDomainsEqual(verification, after, verificationMask));
 #endif
+		return prepared;
 	}
+
 	quint64 nextWorldRuntimeOpenSequence()
 	{
 		static std::atomic<quint64> sequenceCounter{0};
@@ -17877,12 +18134,16 @@ void WorldRuntime::applyCausalPluginCallbackSnapshotDeltas(PluginCallbackDispatc
 			break;
 		if (revision->before && revision->after)
 		{
-			applyCausalStableSnapshotRevision(
-			    *rebased, *revision->before, *revision->after, revision->stableDomainMask,
-			    revision->mapperOperations, revision->arrayMutations, revision->miniWindowMutations,
-			    revision->runtimeCounterUpdates, revision->entityMutations, revision->entityResetSlots,
-			    revision->fullStableDomainMask, revision->scopedStableSnapshotPatches,
-			    revision->targetedRulePatches);
+			Q_ASSERT(!revision->hasRuntimeCountersBefore);
+			if (!revision->preparedDelta)
+			{
+				revision->preparedDelta = prepareCausalStableSnapshotRevision(
+				    revision->before, revision->after, revision->stableDomainMask, revision->mapperOperations,
+				    revision->arrayMutations, revision->miniWindowMutations, revision->runtimeCounterUpdates,
+				    revision->entityMutations, revision->entityResetSlots, revision->fullStableDomainMask,
+				    revision->scopedStableSnapshotPatches, revision->targetedRulePatches);
+			}
+			revision->preparedDelta->apply(*rebased);
 		}
 		applyCausalMiniWindowPresentationMutations(*rebased, revision->miniWindowPresentationMutations);
 		rebased->soundState.merge(revision->soundMutations);
