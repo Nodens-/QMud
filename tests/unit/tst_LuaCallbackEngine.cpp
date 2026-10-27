@@ -454,6 +454,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void unchangedPluginWriteStillAppliesToNewerRuntimeState();
 		/** @brief Verifies full and sparse variable overlays survive nested calls and deletion. */
 		void nestedPluginVariablesUseCanonicalFullAndSparseOverlays();
+		/** @brief Verifies state-save callbacks and files observe writes at their ordered journal position. */
+		void pluginVariableSaveRetainsIntermediateJournalValues();
 		/** @brief Verifies state saving retains original names and the established XML escaping rules. */
 		void pluginStateSaveEscapesXmlAndPreservesVariableLabels();
 		/** @brief Verifies world/plugin XML ingestion and differently cased persisted state use canonical keys. */
@@ -8346,9 +8348,14 @@ function mutate_and_observe(_)
   local receipt = GetPluginVariable("abcdefabcdefabcdefabcdeb", " RECEIPT ")
   assert(GetVariable("receipt") == "caller")
   assert(GetVariable("receipt") == "caller")
+  assert(GetVariableList().before == "local")
+  assert(GetPluginVariableList("abcdefabcdefabcdefabcdea").receipt == "caller")
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdea", 12) == 2)
   assert(GetPluginVariable("abcdefabcdefabcdefabcdeb", "before") == "target")
   assert(GetVariable("before") == "local")
   assert(DeleteVariable(" BEFORE ") == 0)
+  assert(GetVariableList().before == nil)
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdea", 12) == 1)
   local deleted_code, deleted = CallPlugin("abcdefabcdefabcdefabcdeb", "observe")
   assert(deleted_code == 0)
   return value .. "|" .. tostring(receipt) .. "|" .. deleted
@@ -8365,6 +8372,8 @@ function observe()
   assert(GetVariable("before") == "target")
   local value = GetPluginVariable("abcdefabcdefabcdefabcdea", " BEFORE ")
   assert(SetVariable("Receipt", "nested") == 0)
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdeb", 12) == 2)
+  assert(GetVariableList().receipt == "nested")
   return tostring(value)
 end
 )lua");
@@ -8389,6 +8398,74 @@ end
 			QCOMPARE(snapshot->pluginVariablesSnapshotById.value(callerId).value(QStringLiteral("before")),
 			         QStringLiteral("prior"));
 	}
+}
+
+void tst_LuaCallbackEngine::pluginVariableSaveRetainsIntermediateJournalValues()
+{
+	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("variable-order-XXXXXX")));
+	QVERIFY(directory.isValid());
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(QDir::currentPath());
+	runtime.setStateFilesDirectory(directory.path());
+	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("ordered-variable-save"));
+	const QString        id     = QStringLiteral("abcdefabcdefabcdefabcdef");
+	auto                 engine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), id);
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = engine.data();
+	initialization.workerLifetimeOwner = engine;
+	initialization.runtime             = &runtime;
+	initialization.pluginId            = id;
+	initialization.pluginName          = id;
+	initialization.scriptText          = QStringLiteral(R"lua(
+function exercise(_)
+  assert(type(GetVariableList()) == "table")
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 0)
+  assert(select("#", GetPluginVariableList("abcdefabcdefabcdefabcdea")) == 0)
+  assert(SetVariable("Phase", "A") == 0)
+  assert(GetVariableList().phase == "A")
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 1)
+  assert(SaveState() == 0)
+  assert(SetVariable("PHASE", "B") == 0)
+  assert(GetVariableList().phase == "B")
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 1)
+  return GetVariable("phase")
+end
+function OnPluginSaveState()
+  assert(GetVariable("phase") == "A")
+  assert(GetVariableList().phase == "A")
+  assert(SetVariable("saved_phase", GetVariable("phase")) == 0)
+  assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 2)
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+	auto snapshot = captureMutableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	snapshot->unavailablePluginVariableSnapshotIds.insert(QStringLiteral("abcdefabcdefabcdefabcdea"));
+	LuaBatchDispatchRequest request;
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.engines             = {engine};
+	request.functionName        = QStringLiteral("exercise");
+	request.callbackSnapshotArg = snapshot;
+	const auto result           = runtime.queuePluginCallbackDispatch(
+	    request, WorldRuntime::PluginCallbackCompletionPolicy::ResultRequired);
+	QCOMPARE(result.stringResult, QStringLiteral("B"));
+	QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("phase")), QStringLiteral("B"));
+	QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("saved_phase")), QStringLiteral("A"));
+	QVERIFY(snapshot->pluginVariablesSnapshotById.value(id).isEmpty());
+	QFile state(QDir(directory.path())
+	                .filePath(QStringLiteral("ordered-variable-save-") + id + QStringLiteral("-state.xml")));
+	QVERIFY(state.open(QIODevice::ReadOnly));
+	const auto xml = QString::fromUtf8(state.readAll());
+	QVERIFY(xml.contains(QStringLiteral("name=\"Phase\">A</variable>")));
+	QVERIFY(xml.contains(QStringLiteral("name=\"saved_phase\">A</variable>")));
+	QVERIFY(!xml.contains(QStringLiteral(">B</variable>")));
+	runtime.dispatchTeardownLuaEngines({engine}, true);
 }
 
 void tst_LuaCallbackEngine::pluginStateSaveEscapesXmlAndPreservesVariableLabels()

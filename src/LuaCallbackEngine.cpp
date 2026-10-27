@@ -502,6 +502,15 @@ static void updateCallbackSendCommandSnapshots(const LuaCallbackEngine *engine, 
                                                bool immediate);
 static bool resolveCommandUiSnapshotLightForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                                 WorldRuntime::CommandUiSnapshot &snapshot);
+/**
+ * @brief Resolves a complete owning variable map through the callback view and existing runtime read policy.
+ * @param engine Calling engine.
+ * @param runtime Target runtime.
+ * @param pluginId Canonical plugin identifier, or empty for world variables.
+ * @param values Receives the complete map when available.
+ * @param pluginAvailable Receives whether the owner is available.
+ * @return Whether the map and owner availability were resolved.
+ */
 static bool resolveVariableSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                           const QString &pluginId, QMap<QString, QString> &values,
                                           bool &pluginAvailable);
@@ -857,30 +866,6 @@ namespace
 			}
 	};
 
-	/** @brief Owns the canonical variable identity without allocating a concatenated cache key. */
-	struct CallbackVariableKey
-	{
-			QString       pluginId;
-			QString       name;
-
-			/**
-			 * @brief Compares canonical variable identities.
-			 * @return Whether both the plugin and variable names match.
-			 */
-			bool          operator==(const CallbackVariableKey &) const = default;
-
-			/**
-			 * @brief Hashes the shared strings forming one canonical variable identity.
-			 * @param key Variable identity to hash.
-			 * @param seed Caller-provided hash seed.
-			 * @return Hash value for the variable identity.
-			 */
-			friend size_t qHash(const CallbackVariableKey &key, const size_t seed = 0) noexcept
-			{
-				return qHashMulti(seed, key.pluginId, key.name);
-			}
-	};
-
 	struct LuaCallbackExecutionContext
 	{
 			bool                                 originatedFromCallback{false};
@@ -981,8 +966,7 @@ namespace
 			bool                                                  hasVariableEntriesSnapshot{false};
 			QList<WorldRuntime::Keypad>                           keypadEntriesSnapshot;
 			bool                                                  hasKeypadEntriesSnapshot{false};
-			QHash<QString, QMap<QString, QString>>                pluginVariablesSnapshotById;
-			QSet<QString>                                         mutatedPluginVariableSnapshotIds;
+			QHash<QString, QMudVariableMapUtils::WorkingView>     pluginVariableViews;
 			QHash<QString, std::shared_ptr<LuaCallbackArrayWorkingCopy>> arraySnapshotsByName;
 			QSet<QString>                                                missingArraySnapshotNames;
 			QSet<QString>                                                mutatedArraySnapshotNames;
@@ -1060,11 +1044,7 @@ namespace
 			QHash<int, int>                                 usedUdpPortReferenceCountsSnapshot;
 			bool                                            hasUsedUdpPortsSnapshot{false};
 			bool                                            usedUdpPortsSnapshotDirty{false};
-			QHash<CallbackVariableKey, QString>             variableValuesByKey;
-			QSet<CallbackVariableKey>                       missingVariableValueKeys;
-			// Retain canonical names for sparse mutations before a full variable map is materialized.
-			QHash<CallbackVariableKey, QString>             mutatedVariableNamesByKey;
-			QSet<QString>                                   unavailablePluginVariableSnapshotIds;
+			QHash<QString, std::optional<QString>>          worldVariableValuesByName;
 			QHash<QString, WorldRuntime::Trigger>           triggerSnapshotsByKey;
 			QSet<QString>                                   missingTriggerSnapshotKeys;
 			QSet<QString>                                   missingTriggerPluginIds;
@@ -1340,8 +1320,18 @@ namespace
 		return styleRuns ? CallbackWildcardDomain::Trigger : CallbackWildcardDomain::Alias;
 	}
 
+	/**
+	 * @brief Seeds callback-local observation state from an owning immutable snapshot.
+	 * @param engine Engine whose current context is seeded.
+	 * @param snapshot Snapshot retained by the context.
+	 */
 	void seedCallbackSnapshot(const LuaCallbackEngine                         *engine,
 	                          const QSharedPointer<const LuaCallbackSnapshot> &snapshot);
+	/**
+	 * @brief Seeds observation state while acquiring ownership of a legacy snapshot argument.
+	 * @param engine Engine whose current context is seeded.
+	 * @param snapshot Snapshot copied or shared through its existing dispatch owner.
+	 */
 	void seedCallbackSnapshot(const LuaCallbackEngine *engine, const LuaCallbackSnapshot *snapshot);
 
 	LuaCallbackExecutionContext *activeCallbackContext(const LuaCallbackEngine *engine)
@@ -3441,85 +3431,79 @@ namespace
 		}
 	}
 
+	/**
+	 * @brief Lazily obtains a plugin's working view from the owning immutable dispatch snapshot.
+	 * @param engine Engine owning the active callback context.
+	 * @param pluginId Canonical nonempty variable owner identifier.
+	 * @return Lane-local working view, or null when no callback context is active.
+	 */
+	QMudVariableMapUtils::WorkingView *callbackPluginVariableView(const LuaCallbackEngine *engine,
+	                                                              const QString           &pluginId)
+	{
+		auto *context = activeCallbackContext(engine);
+		if (!context || pluginId.isEmpty())
+			return nullptr;
+		if (auto existing = context->pluginVariableViews.find(pluginId);
+		    existing != context->pluginVariableViews.end())
+			return &*existing;
+		QMudVariableMapUtils::WorkingView view;
+		if (const auto *snapshot = engine->currentDispatchSnapshot())
+		{
+			if (snapshot->unavailablePluginVariableSnapshotIds.contains(pluginId))
+				view.makeUnavailable();
+			else if (const auto captured = snapshot->pluginVariablesSnapshotById.constFind(pluginId);
+			         captured != snapshot->pluginVariablesSnapshotById.cend())
+				view.capture(*captured);
+		}
+		return &*context->pluginVariableViews.insert(pluginId, std::move(view));
+	}
+
+	/**
+	 * @brief Obtains an owning complete map from the callback's current variable view.
+	 * @param engine Engine owning the callback.
+	 * @param pluginId Canonical plugin identifier, or empty for world variables.
+	 * @param values Receives a shared owning copy of the complete map.
+	 * @param pluginAvailable Receives whether the variable owner is available.
+	 * @return Whether source availability and the complete map are resolved.
+	 */
 	bool tryResolveCallbackVariableSnapshotFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                                 QMap<QString, QString> &values, bool &pluginAvailable)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return false;
 		if (pluginId.isEmpty())
 		{
 			if (!context->hasWorldVariablesSnapshot)
-				return false;
+			{
+				const auto *snapshot = engine->currentDispatchSnapshot();
+				if (!snapshot || !snapshot->hasWorldVariablesSnapshot)
+					return false;
+				context->worldVariablesSnapshot    = snapshot->worldVariablesSnapshot;
+				context->hasWorldVariablesSnapshot = true;
+			}
 			values          = context->worldVariablesSnapshot;
 			pluginAvailable = true;
 			return true;
 		}
-		const QString &pluginKey = pluginId;
-		if (pluginKey.isEmpty())
-			return false;
-		if (context->unavailablePluginVariableSnapshotIds.contains(pluginKey))
+		auto *view = callbackPluginVariableView(engine, pluginId);
+		if (view->source() == QMudVariableMapUtils::WorkingView::Source::Unavailable)
 		{
 			values.clear();
 			pluginAvailable = false;
 			return true;
 		}
-		const auto snapshotIt = context->pluginVariablesSnapshotById.constFind(pluginKey);
-		if (snapshotIt == context->pluginVariablesSnapshotById.constEnd())
+		const auto *complete = view->values();
+		if (!complete)
 			return false;
-		values          = snapshotIt.value();
+		values          = *complete;
 		pluginAvailable = true;
 		return true;
 	}
 
-	bool tryResolveCallbackVariableSnapshotViewFromCache(const LuaCallbackEngine       *engine,
-	                                                     const QString                 &pluginId,
-	                                                     const QMap<QString, QString> *&valuesView,
-	                                                     bool &pluginAvailable, bool &cacheHit)
-	{
-		valuesView          = nullptr;
-		cacheHit            = false;
-		pluginAvailable     = false;
-		const auto *context = activeCallbackContextConst(engine);
-		if (!context)
-			return false;
-		if (pluginId.isEmpty())
-		{
-			if (!context->hasWorldVariablesSnapshot)
-				return false;
-			valuesView      = &context->worldVariablesSnapshot;
-			cacheHit        = true;
-			pluginAvailable = true;
-			return true;
-		}
-		const QString &pluginKey = pluginId;
-		if (pluginKey.isEmpty())
-			return false;
-		if (context->unavailablePluginVariableSnapshotIds.contains(pluginKey))
-		{
-			cacheHit        = true;
-			pluginAvailable = false;
-			return false;
-		}
-		const auto snapshotIt = context->pluginVariablesSnapshotById.constFind(pluginKey);
-		if (snapshotIt == context->pluginVariablesSnapshotById.constEnd())
-			return false;
-		valuesView      = &(*snapshotIt);
-		cacheHit        = true;
-		pluginAvailable = true;
-		return true;
-	}
-
-	/**
-	 * @brief Copies a canonical variable identity without concatenating or normalizing its strings.
-	 * @param pluginId Canonical plugin identifier, or empty for world variables.
-	 * @param name Canonical variable name.
-	 * @return Owning cache key sharing the input string storage.
-	 */
-	CallbackVariableKey makeCallbackVariableValueKey(const QString &pluginId, const QString &name);
-	QString             makeCallbackPluginInfoKey(const QString &pluginId, int infoType);
-	bool                tryResolveCallbackVariableEntriesFromSnapshot(const LuaCallbackEngine       *engine,
-	                                                                  QList<WorldRuntime::Variable> &entries)
+	QString makeCallbackPluginInfoKey(const QString &pluginId, int infoType);
+	bool    tryResolveCallbackVariableEntriesFromSnapshot(const LuaCallbackEngine       *engine,
+	                                                      QList<WorldRuntime::Variable> &entries)
 	{
 		auto *context = activeCallbackContext(engine);
 		if (!context || !engine)
@@ -3549,6 +3533,16 @@ namespace
 		return true;
 	}
 
+	/**
+	 * @brief Resolves a value or known miss without materializing a plugin's complete map.
+	 * @param engine Calling engine.
+	 * @param pluginId Canonical plugin identifier, or empty for world variables.
+	 * @param name Canonical variable name.
+	 * @param value Receives a present value.
+	 * @param pluginAvailable Receives availability when the lookup is resolved.
+	 * @param cacheHit Receives whether the lookup is resolved, including known misses.
+	 * @return Whether the variable is present.
+	 */
 	bool tryResolveCallbackVariableValueFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                              const QString &name, QString &value, bool &pluginAvailable,
 	                                              bool &cacheHit)
@@ -3558,27 +3552,22 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString &pluginKey = pluginId;
-		if (!pluginKey.isEmpty() && context->unavailablePluginVariableSnapshotIds.contains(pluginKey))
+		if (!pluginId.isEmpty())
 		{
-			cacheHit        = true;
-			pluginAvailable = false;
-			return false;
+			auto      *view  = callbackPluginVariableView(engine, pluginId);
+			const bool found = view->find(name, value, cacheHit);
+			pluginAvailable =
+			    cacheHit && view->source() != QMudVariableMapUtils::WorkingView::Source::Unavailable;
+			return found;
 		}
-		const CallbackVariableKey key = makeCallbackVariableValueKey(pluginId, name);
-		if (const auto valueIt = context->variableValuesByKey.constFind(key);
-		    valueIt != context->variableValuesByKey.constEnd())
+		if (const auto entry = context->worldVariableValuesByName.constFind(name);
+		    entry != context->worldVariableValuesByName.cend())
 		{
 			cacheHit        = true;
 			pluginAvailable = true;
-			value           = valueIt.value();
-			return true;
-		}
-		if (context->missingVariableValueKeys.contains(key))
-		{
-			cacheHit        = true;
-			pluginAvailable = true;
-			return false;
+			if (*entry)
+				value = **entry;
+			return entry->has_value();
 		}
 		return false;
 	}
@@ -3600,6 +3589,13 @@ namespace
 	bool    resolveVariableSnapshotValue(const QMap<QString, QString> &values, const QString &name,
 	                                     QString &value);
 
+	/**
+	 * @brief Installs a resolved variable base while preserving explicit sparse plugin writes.
+	 * @param engine Calling engine.
+	 * @param pluginId Canonical plugin identifier, or empty for world variables.
+	 * @param values Complete captured map.
+	 * @param pluginAvailable Whether the owner is available.
+	 */
 	void    cacheCallbackVariableSnapshot(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                      const QMap<QString, QString> &values, const bool pluginAvailable)
 	{
@@ -3612,19 +3608,22 @@ namespace
 			context->hasWorldVariablesSnapshot = true;
 			return;
 		}
-		const QString &pluginKey = pluginId;
-		if (pluginKey.isEmpty())
-			return;
-		if (!pluginAvailable)
-		{
-			context->pluginVariablesSnapshotById.remove(pluginKey);
-			context->unavailablePluginVariableSnapshotIds.insert(pluginKey);
-			return;
-		}
-		context->unavailablePluginVariableSnapshotIds.remove(pluginKey);
-		context->pluginVariablesSnapshotById.insert(pluginKey, values);
+		auto *view = callbackPluginVariableView(engine, pluginId);
+		if (pluginAvailable)
+			view->capture(values);
+		else
+			view->makeUnavailable();
 	}
 
+	/**
+	 * @brief Caches a resolved observation without publishing a variable mutation.
+	 * @param engine Calling engine.
+	 * @param pluginId Canonical plugin identifier, or empty for world variables.
+	 * @param name Canonical variable name.
+	 * @param found Whether the variable exists.
+	 * @param value Observed value when present.
+	 * @param pluginAvailable Whether the owner is available.
+	 */
 	void cacheCallbackVariableValue(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                const QString &name, const bool found, const QString &value,
 	                                const bool pluginAvailable)
@@ -3634,25 +3633,17 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const CallbackVariableKey key       = makeCallbackVariableValueKey(pluginId, name);
-		const QString            &pluginKey = pluginId;
-		if (!pluginId.isEmpty() && !pluginAvailable)
+		if (pluginId.isEmpty())
 		{
-			context->unavailablePluginVariableSnapshotIds.insert(pluginKey);
-			context->variableValuesByKey.remove(key);
-			context->missingVariableValueKeys.remove(key);
+			context->worldVariableValuesByName.insert(name,
+			                                          found ? std::optional<QString>(value) : std::nullopt);
 			return;
 		}
-		if (!pluginKey.isEmpty())
-			context->unavailablePluginVariableSnapshotIds.remove(pluginKey);
-		if (found)
-		{
-			context->missingVariableValueKeys.remove(key);
-			context->variableValuesByKey.insert(key, value);
-			return;
-		}
-		context->variableValuesByKey.remove(key);
-		context->missingVariableValueKeys.insert(key);
+		auto *view = callbackPluginVariableView(engine, pluginId);
+		if (pluginAvailable)
+			view->remember(name, found, value);
+		else
+			view->makeUnavailable();
 	}
 
 	/**
@@ -3722,20 +3713,12 @@ namespace
 			}
 			context->hasWorldVariablesSnapshot = true;
 
-			const CallbackVariableKey key = makeCallbackVariableValueKey(pluginId, name);
-			const auto                remaining =
+			const auto remaining =
 			    std::ranges::find_if(std::as_const(entries), [&name](const WorldRuntime::Variable &entry)
 			                         { return entry.key == name; });
-			if (remaining == entries.cend())
-			{
-				context->variableValuesByKey.remove(key);
-				context->missingVariableValueKeys.insert(key);
-			}
-			else
-			{
-				context->missingVariableValueKeys.remove(key);
-				context->variableValuesByKey.insert(key, remaining->content);
-			}
+			context->worldVariableValuesByName.insert(name, remaining == entries.cend()
+			                                                    ? std::nullopt
+			                                                    : std::optional<QString>(remaining->content));
 
 			const int variableCount = static_cast<int>(entries.size());
 			updateCallbackRuntimeSnapshot(engine,
@@ -3747,34 +3730,8 @@ namespace
 			return;
 		}
 
-		const CallbackVariableKey key = makeCallbackVariableValueKey(pluginId, name);
-		context->mutatedVariableNamesByKey.insert(key, name);
-		if (removeValue)
-		{
-			context->variableValuesByKey.remove(key);
-			context->missingVariableValueKeys.insert(key);
-		}
-		else
-		{
-			context->missingVariableValueKeys.remove(key);
-			context->variableValuesByKey.insert(key, value);
-		}
-		const QString &pluginKey = pluginId;
-		if (pluginKey.isEmpty())
-			return;
-		context->mutatedPluginVariableSnapshotIds.insert(pluginKey);
-		if (context->unavailablePluginVariableSnapshotIds.contains(pluginKey))
-			return;
-		auto snapshotIt = context->pluginVariablesSnapshotById.find(pluginKey);
-		if (snapshotIt == context->pluginVariablesSnapshotById.end())
-			return;
-		if (removeValue)
-			snapshotIt->remove(name);
-		else
-			QMudVariableMapUtils::insertOrAssign(*snapshotIt, name, value);
-		const QString countKey = makeCallbackPluginInfoKey(pluginId, 12);
-		context->missingPluginInfoValueKeys.remove(countKey);
-		context->pluginInfoValuesByKey.insert(countKey, snapshotIt->size());
+		if (auto *view = callbackPluginVariableView(engine, pluginId))
+			view->write(name, value, removeValue);
 	}
 
 	QString findVariableSnapshotKey(const QMap<QString, QString> &values, const QString &name)
@@ -5625,11 +5582,6 @@ namespace
 		return pluginId + QLatin1Char('\x1F') + QString::number(infoType);
 	}
 
-	CallbackVariableKey makeCallbackVariableValueKey(const QString &pluginId, const QString &name)
-	{
-		return {pluginId, name};
-	}
-
 	int mapCallbackDatabaseVariantTypeToSqlite(const QVariant &value)
 	{
 		if (value.isNull())
@@ -7296,6 +7248,12 @@ namespace
 		context->pluginCallTargetsById.remove(pluginId);
 	}
 
+	/**
+	 * @brief Invalidates all callback-local data belonging to an unloaded or replacement plugin instance.
+	 * @param engine Calling engine.
+	 * @param pluginId Canonical plugin identifier.
+	 * @param removed Whether the plugin is removed rather than awaiting replacement.
+	 */
 	void markCallbackPluginTopologyUnavailable(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                           const bool removed)
 	{
@@ -7324,12 +7282,6 @@ namespace
 		context->triggerListCache.mutatedPluginIds.remove(pluginKey);
 		context->aliasListCache.mutatedPluginIds.remove(pluginKey);
 		context->timerListCache.mutatedPluginIds.remove(pluginKey);
-		context->mutatedPluginVariableSnapshotIds.remove(pluginKey);
-		for (auto it = context->mutatedVariableNamesByKey.begin();
-		     it != context->mutatedVariableNamesByKey.end();)
-		{
-			it = it.key().pluginId == pluginKey ? context->mutatedVariableNamesByKey.erase(it) : ++it;
-		}
 		context->pluginInstalledOverridesById.remove(pluginKey);
 		cacheCallbackPluginInstalledOverride(engine, pluginKey, !removed);
 		markCallbackPluginMetadataSnapshotDirtyForPlugin(engine, pluginKey);
@@ -7339,8 +7291,7 @@ namespace
 		invalidateCallbackTriggerSnapshotCacheForPlugin(engine, pluginKey);
 		invalidateCallbackAliasSnapshotCacheForPlugin(engine, pluginKey);
 		invalidateCallbackTimerSnapshotCacheForPlugin(engine, pluginKey);
-		context->pluginVariablesSnapshotById.remove(pluginKey);
-		context->unavailablePluginVariableSnapshotIds.insert(pluginKey);
+		context->pluginVariableViews[pluginKey].makeUnavailable();
 		context->pluginTriggerWildcardsSnapshotById.remove(pluginKey);
 		context->pluginTriggerNamedWildcardsSnapshotById.remove(pluginKey);
 		context->pluginAliasWildcardsSnapshotById.remove(pluginKey);
@@ -7365,11 +7316,6 @@ namespace
 				}
 			}
 		}
-		for (auto it = context->variableValuesByKey.begin(); it != context->variableValuesByKey.end();)
-			it = it.key().pluginId == pluginKey ? context->variableValuesByKey.erase(it) : ++it;
-		for (auto it = context->missingVariableValueKeys.begin();
-		     it != context->missingVariableValueKeys.end();)
-			it = it->pluginId == pluginKey ? context->missingVariableValueKeys.erase(it) : ++it;
 		QList<WorldRuntime::Trigger> emptyTriggers;
 		QList<WorldRuntime::Alias>   emptyAliases;
 		QList<WorldRuntime::Timer>   emptyTimers;
@@ -9354,6 +9300,13 @@ namespace
 		}
 	}
 
+	/**
+	 * @brief Projects callback-local changes into a cumulative owning dispatch snapshot.
+	 * @param engine Calling engine.
+	 * @param context Current lane-local view and mutation visibility.
+	 * @param snapshot Snapshot receiving explicit mutations and required presentation state.
+	 * @param runtime Runtime providing the snapshot's ownership context.
+	 */
 	void overlayCallbackContextSnapshotsForCallPlugin(const LuaCallbackEngine           *engine,
 	                                                  const LuaCallbackExecutionContext &context,
 	                                                  LuaCallbackSnapshot               &snapshot,
@@ -9560,46 +9513,27 @@ namespace
 			snapshot.hasNotepadPresentationSnapshot = true;
 			snapshot.notepadSnapshot                = context.notepadPresentationSnapshot;
 		}
-		bool hasSparsePluginVariableMutations = false;
-		for (const QString &pluginId : context.mutatedPluginVariableSnapshotIds)
+		for (auto it = context.pluginVariableViews.cbegin(); it != context.pluginVariableViews.cend(); ++it)
 		{
-			if (const auto it = context.pluginVariablesSnapshotById.constFind(pluginId);
-			    it != context.pluginVariablesSnapshotById.constEnd())
+			const QString &pluginId = it.key();
+			const auto    &view     = it.value();
+			if (view.source() == QMudVariableMapUtils::WorkingView::Source::Unavailable)
 			{
-				snapshot.pluginVariablesSnapshotById.insert(pluginId, it.value());
+				snapshot.pluginVariablesSnapshotById.remove(pluginId);
+				snapshot.unavailablePluginVariableSnapshotIds.insert(pluginId);
+				continue;
 			}
-			else
-				hasSparsePluginVariableMutations = true;
-		}
-		if (hasSparsePluginVariableMutations)
-		{
-			for (auto it = context.mutatedVariableNamesByKey.constBegin();
-			     it != context.mutatedVariableNamesByKey.constEnd(); ++it)
+			if (!view.hasWrites())
+				continue;
+			view.project(snapshot.pluginVariablesSnapshotById[pluginId]);
+			snapshot.unavailablePluginVariableSnapshotIds.remove(pluginId);
+			if (const auto count = view.count())
 			{
-				const QString &pluginId = it.key().pluginId;
-				if (pluginId.isEmpty())
-					continue;
-				if (context.mutatedPluginVariableSnapshotIds.contains(pluginId) &&
-				    context.pluginVariablesSnapshotById.contains(pluginId))
-					continue;
-				auto valuesIt = snapshot.pluginVariablesSnapshotById.find(pluginId);
-				if (valuesIt == snapshot.pluginVariablesSnapshotById.end())
-				{
-					valuesIt = snapshot.pluginVariablesSnapshotById.insert(pluginId, {});
-					snapshot.unavailablePluginVariableSnapshotIds.remove(pluginId);
-				}
-				if (context.missingVariableValueKeys.contains(it.key()))
-				{
-					valuesIt->remove(it.value());
-					continue;
-				}
-				const auto valueIt = context.variableValuesByKey.constFind(it.key());
-				if (valueIt == context.variableValuesByKey.constEnd())
-					continue;
-				QMudVariableMapUtils::insertOrAssign(*valuesIt, it.value(), valueIt.value());
+				if (auto info = snapshot.pluginInfoValuesById.find(pluginId);
+				    info != snapshot.pluginInfoValuesById.end())
+					info->insert(12, *count);
 			}
 		}
-		snapshot.unavailablePluginVariableSnapshotIds.unite(context.unavailablePluginVariableSnapshotIds);
 
 		if (context.arrayNameListSnapshotDirty && context.hasArrayNameListSnapshot)
 		{
@@ -10277,8 +10211,7 @@ namespace
 			context->worldVariablesSnapshot    = snapshot->worldVariablesSnapshot;
 			context->hasWorldVariablesSnapshot = true;
 		}
-		context->pluginVariablesSnapshotById          = snapshot->pluginVariablesSnapshotById;
-		context->unavailablePluginVariableSnapshotIds = snapshot->unavailablePluginVariableSnapshotIds;
+		context->pluginVariableViews.clear();
 		context->triggerListCache                     = {};
 		context->triggerListCache.snapshotsByPluginId = snapshot->triggerListOverridesByPluginId;
 		context->triggerListCache.snapshotStore       = snapshot->triggerSnapshotStore;
@@ -10587,57 +10520,6 @@ namespace
 			if (!key.isEmpty())
 				context->existingMiniWindowIds.insert(key);
 		}
-	}
-
-	bool tryBackfillCallbackVariableSnapshotFromDispatch(const LuaCallbackEngine *engine,
-	                                                     const QString           &pluginId,
-	                                                     QMap<QString, QString>  &values,
-	                                                     bool                    &pluginAvailable)
-	{
-		auto *context = activeCallbackContext(engine);
-		if (!context || !engine)
-			return false;
-		const auto *snapshot = engine->currentDispatchSnapshot();
-		if (!snapshot)
-			return false;
-
-		if (pluginId.isEmpty())
-		{
-			if (!context->hasWorldVariablesSnapshot && snapshot->hasWorldVariablesSnapshot)
-			{
-				context->worldVariablesSnapshot    = snapshot->worldVariablesSnapshot;
-				context->hasWorldVariablesSnapshot = true;
-			}
-			if (!context->hasWorldVariablesSnapshot)
-				return false;
-			values          = context->worldVariablesSnapshot;
-			pluginAvailable = true;
-			return true;
-		}
-		const QString &pluginKey = pluginId;
-		if (pluginKey.isEmpty())
-			return false;
-		if (context->unavailablePluginVariableSnapshotIds.contains(pluginKey))
-		{
-			values.clear();
-			pluginAvailable = false;
-			return true;
-		}
-		if (const auto cachedIt = context->pluginVariablesSnapshotById.constFind(pluginKey);
-		    cachedIt != context->pluginVariablesSnapshotById.constEnd())
-		{
-			values          = cachedIt.value();
-			pluginAvailable = true;
-			return true;
-		}
-		const auto snapshotIt = snapshot->pluginVariablesSnapshotById.constFind(pluginKey);
-		if (snapshotIt == snapshot->pluginVariablesSnapshotById.constEnd())
-			return false;
-		context->pluginVariablesSnapshotById.insert(pluginKey, snapshotIt.value());
-		context->unavailablePluginVariableSnapshotIds.remove(pluginKey);
-		values          = snapshotIt.value();
-		pluginAvailable = true;
-		return true;
 	}
 
 	bool tryBackfillCallbackCommandUiSnapshotFromDispatch(const LuaCallbackEngine         *engine,
@@ -18393,6 +18275,11 @@ static int luaDeleteLines(lua_State *L)
 	return 0;
 }
 
+/**
+ * @brief Deletes a variable while preserving callback-local and ordered runtime visibility.
+ * @param L Calling Lua state.
+ * @return Number of Lua results.
+ */
 static int luaDeleteVariable(lua_State *L)
 {
 	const auto   *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
@@ -18409,13 +18296,28 @@ static int luaDeleteVariable(lua_State *L)
 	const auto                       originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 	if (activeCallbackContextConst(engine))
 	{
-		QMap<QString, QString> values;
-		bool                   pluginAvailable = false;
-		if (resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable) &&
-		    pluginAvailable)
+		bool pluginAvailable = false;
+		bool resolved        = false;
+		bool present         = false;
+		if (pluginScoped)
 		{
-			const QString existingKey = findVariableSnapshotKey(values, name);
-			if (existingKey.isEmpty())
+			auto *view = callbackPluginVariableView(engine, pluginId);
+			if (view->source() == QMudVariableMapUtils::WorkingView::Source::Available)
+			{
+				QString ignoredValue;
+				present         = view->find(name, ignoredValue, resolved);
+				pluginAvailable = true;
+			}
+		}
+		if (!resolved)
+		{
+			QMap<QString, QString> values;
+			resolved = resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable);
+			present  = !findVariableSnapshotKey(values, name).isEmpty();
+		}
+		if (resolved && pluginAvailable)
+		{
+			if (!present)
 			{
 				lua_pushnumber(L, eVariableNotFound);
 				return 1;
@@ -19618,8 +19520,6 @@ static bool resolveVariableSnapshotForApi(const LuaCallbackEngine *engine, World
 	if (!engine || !runtime)
 		return false;
 	if (tryResolveCallbackVariableSnapshotFromCache(engine, pluginId, values, pluginAvailable))
-		return true;
-	if (tryBackfillCallbackVariableSnapshotFromDispatch(engine, pluginId, values, pluginAvailable))
 		return true;
 	values.clear();
 	pluginAvailable            = false;
@@ -39357,6 +39257,14 @@ static void cacheCallbackPluginIdListAfterUnload(const LuaCallbackEngine *engine
 	cacheCallbackPluginIdList(engine, ids);
 }
 
+/**
+ * @brief Resolves plugin information including the current callback variable-view count.
+ * @param engine Calling engine.
+ * @param runtime Target runtime.
+ * @param pluginId Canonical plugin identifier or recognized native shim identifier.
+ * @param infoType Requested information selector.
+ * @return Resolved information, or an invalid variant when unavailable.
+ */
 static QVariant resolvePluginInfoValueForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                              const QString &pluginId, const int infoType)
 {
@@ -39396,6 +39304,16 @@ static QVariant resolvePluginInfoValueForApi(const LuaCallbackEngine *engine, Wo
 	// This avoids runtime-thread state mutation for infoType=23 in threaded mode.
 	if (infoType == 23 && effectivePluginId == engine->pluginId())
 		return engine->currentCallingPluginId();
+	if (inCallback && infoType == 12)
+	{
+		if (auto *view = callbackPluginVariableView(engine, effectivePluginId))
+		{
+			if (view->source() == QMudVariableMapUtils::WorkingView::Source::Unavailable)
+				return {};
+			if (const auto count = view->count())
+				return QVariant::fromValue(*count);
+		}
+	}
 	QVariant value;
 	bool     cacheHit = false;
 	if (tryResolveCallbackPluginInfoValueFromCache(engine, effectivePluginId, infoType, value, cacheHit))
@@ -43991,6 +43909,11 @@ static int luaSetVariable(lua_State *L)
 	return 1;
 }
 
+/**
+ * @brief Returns an owning variable-map observation as a Lua table.
+ * @param L Calling Lua state.
+ * @return Number of Lua results.
+ */
 static int luaGetVariableList(lua_State *L)
 {
 	auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
@@ -44007,29 +43930,9 @@ static int luaGetVariableList(lua_State *L)
 		return 1;
 	}
 
-	const QString                 pluginId        = pluginScoped ? engine->pluginId() : QString();
-	const QMap<QString, QString> *cachedValues    = nullptr;
-	bool                          pluginAvailable = false;
-	bool                          cacheHit        = false;
-	if (tryResolveCallbackVariableSnapshotViewFromCache(engine, pluginId, cachedValues, pluginAvailable,
-	                                                    cacheHit))
-	{
-		lua_newtable(L);
-		for (auto it = cachedValues->constBegin(); it != cachedValues->constEnd(); ++it)
-		{
-			pushLuaUtf8String(L, it.key());
-			pushLuaUtf8String(L, it.value());
-			lua_rawset(L, -3);
-		}
-		return 1;
-	}
-	if (cacheHit && !pluginAvailable)
-	{
-		lua_pushnil(L);
-		return 1;
-	}
-
+	const QString          pluginId = pluginScoped ? engine->pluginId() : QString();
 	QMap<QString, QString> values;
+	bool                   pluginAvailable = false;
 	if (!resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable) ||
 	    !pluginAvailable)
 	{
@@ -46537,6 +46440,11 @@ static int luaGetPluginVariable(lua_State *L)
 	return 1;
 }
 
+/**
+ * @brief Returns a plugin variable table with the established unavailable-owner result count.
+ * @param L Calling Lua state.
+ * @return Number of Lua results.
+ */
 static int luaGetPluginVariableList(lua_State *L)
 {
 	auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
@@ -46552,25 +46460,8 @@ static int luaGetPluginVariableList(lua_State *L)
 		lua_pushnil(L);
 		return 1;
 	}
-	QMap<QString, QString>        values;
-	bool                          pluginAvailable = false;
-	const QMap<QString, QString> *cachedValues    = nullptr;
-	bool                          cacheHit        = false;
-	if (tryResolveCallbackVariableSnapshotViewFromCache(engine, pluginId, cachedValues, pluginAvailable,
-	                                                    cacheHit))
-	{
-		lua_newtable(L);
-		for (auto it = cachedValues->constBegin(); it != cachedValues->constEnd(); ++it)
-		{
-			pushLuaUtf8String(L, it.key());
-			pushLuaUtf8String(L, it.value());
-			lua_rawset(L, -3);
-		}
-		return 1;
-	}
-	if (cacheHit && !pluginAvailable)
-		return 0;
-
+	QMap<QString, QString> values;
+	bool                   pluginAvailable = false;
 	if (!resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable))
 	{
 		lua_pushnil(L);

@@ -199,6 +199,138 @@ namespace
 				QVERIFY(visited.isEmpty());
 			}
 
+			/** @brief Verifies sparse writes and empty values survive late capture without publishing cached reads. */
+			void variableWorkingViewPreservesSparseKnowledgeAndReadIsolation()
+			{
+				using View = QMudVariableMapUtils::WorkingView;
+				View    view;
+				QString value;
+				bool    resolved = true;
+				QVERIFY(!view.find(QStringLiteral("unknown"), value, resolved));
+				QVERIFY(!resolved);
+				QVERIFY(!view.count());
+				QVERIFY(!view.values());
+				view.remember(QStringLiteral("observed"), true, QStringLiteral("old observation"));
+				view.remember(QStringLiteral("missing"), false, QString());
+				QMudVariableMapUtils::VariableMap readTarget{
+				    {QStringLiteral("observed"), QStringLiteral("new target")}
+                };
+				view.project(readTarget);
+				QCOMPARE(readTarget.value(QStringLiteral("observed")), QStringLiteral("new target"));
+				view.write(QStringLiteral("empty"), QString(), false);
+				view.write(QStringLiteral("removed"), QString(), true);
+				view.write(QStringLiteral("empty"), QString(), false);
+				QVERIFY(view.find(QStringLiteral("empty"), value, resolved));
+				QVERIFY(resolved);
+				QVERIFY(value.isEmpty());
+				QVERIFY(!view.find(QStringLiteral("removed"), value, resolved));
+				QVERIFY(resolved);
+				QVERIFY(!view.count());
+				QMudVariableMapUtils::VariableMap projected{
+				    {QStringLiteral("observed"), QStringLiteral("new target")       },
+				    {QStringLiteral("missing"),  QStringLiteral("present in target")},
+				    {QStringLiteral("removed"),  QStringLiteral("remove me")        }
+                };
+				view.project(projected);
+				QCOMPARE(projected.value(QStringLiteral("observed")), QStringLiteral("new target"));
+				QVERIFY(projected.contains(QStringLiteral("missing")));
+				QVERIFY(projected.contains(QStringLiteral("empty")));
+				QVERIFY(!projected.contains(QStringLiteral("removed")));
+				QCOMPARE(view.statistics().writtenEntries, qsizetype{2});
+				QCOMPARE(view.statistics().materializations, quint64{0});
+				const QMudVariableMapUtils::VariableMap captured{
+				    {QStringLiteral("removed"),  QStringLiteral("captured")            },
+				    {QStringLiteral("observed"), QStringLiteral("captured observation")}
+                };
+				view.capture(captured);
+				QCOMPARE(view.count(), std::optional<qsizetype>{2});
+				QVERIFY(view.find(QStringLiteral("observed"), value, resolved));
+				QCOMPARE(value, QStringLiteral("captured observation"));
+				QVERIFY(view.find(QStringLiteral("empty"), value, resolved));
+				QVERIFY(value.isEmpty());
+				QVERIFY(!view.find(QStringLiteral("removed"), value, resolved));
+				QVERIFY(captured.contains(QStringLiteral("removed")));
+				view.makeUnavailable();
+				QCOMPARE(view.source(), View::Source::Unavailable);
+				QVERIFY(!view.find(QStringLiteral("empty"), value, resolved));
+				QVERIFY(resolved);
+				QVERIFY(!view.count());
+				QVERIFY(!view.values());
+				QVERIFY(!view.hasWrites());
+			}
+
+			/** @brief Verifies repeated nested-style publications reuse maps and preserve every issued value. */
+			void variableWorkingViewPublicationWorkStaysLinear()
+			{
+				QMudVariableMapUtils::VariableMap base;
+				for (int index = 0; index < 2048; ++index)
+					base.insert(QString::number(index), QStringLiteral("base"));
+				QMudVariableMapUtils::WorkingView view;
+				view.capture(base);
+				QString value;
+				bool    resolved = false;
+				for (int index = 0; index < 1024; ++index)
+				{
+					QVERIFY(!view.find(QStringLiteral("missing-%1").arg(index), value, resolved));
+					QVERIFY(resolved);
+				}
+				QCOMPARE(view.statistics().materializations, quint64{0});
+				QCOMPARE(view.statistics().projectedWrites, quint64{0});
+				QVector<QMudVariableMapUtils::VariableMap> issued;
+				for (int index = 0; index < 64; ++index)
+				{
+					const QString expected = QString::number(index);
+					view.write(QStringLiteral("0"), expected, false);
+					QMudVariableMapUtils::VariableMap snapshot;
+					view.project(snapshot);
+					issued.push_back(snapshot);
+					QCOMPARE(view.statistics().materializations, quint64{1});
+					QCOMPARE(view.statistics().projectedWrites, static_cast<quint64>(index + 1));
+					const auto *first = view.values();
+					QVERIFY(first);
+					for (int repeat = 0; repeat < 4; ++repeat)
+					{
+						QMudVariableMapUtils::VariableMap repeated;
+						view.project(repeated);
+						QVERIFY(&first->constBegin().value() == &repeated.constBegin().value());
+						QCOMPARE(repeated.value(QStringLiteral("0")), expected);
+					}
+					QCOMPARE(view.statistics().projectedWrites, static_cast<quint64>(index + 1));
+				}
+				QCOMPARE(view.statistics().writtenEntries, qsizetype{1});
+				QCOMPARE(view.count(), std::optional<qsizetype>{2048});
+				for (int index = 0; index < issued.size(); ++index)
+					QCOMPARE(issued.at(index).value(QStringLiteral("0")), QString::number(index));
+				QCOMPARE(base.value(QStringLiteral("0")), QStringLiteral("base"));
+				const auto beforeEqualWrite = *view.values();
+				view.write(QStringLiteral("0"), QStringLiteral("63"), false);
+				QVERIFY(&beforeEqualWrite.constBegin().value() == &view.values()->constBegin().value());
+			}
+
+			/** @brief Verifies additions, deletions and recreation maintain counts across materialization. */
+			void variableWorkingViewTracksExistenceTransitions()
+			{
+				QMudVariableMapUtils::WorkingView view;
+				view.capture({});
+				QCOMPARE(view.count(), std::optional<qsizetype>{0});
+				view.write(QStringLiteral("x"), QString(), false);
+				QCOMPARE(view.count(), std::optional<qsizetype>{1});
+				const auto first = *view.values();
+				view.write(QStringLiteral("x"), QStringLiteral("changed"), false);
+				QCOMPARE(view.count(), std::optional<qsizetype>{1});
+				view.write(QStringLiteral("x"), QString(), true);
+				view.write(QStringLiteral("x"), QString(), true);
+				QCOMPARE(view.count(), std::optional<qsizetype>{0});
+				QVERIFY(view.values()->isEmpty());
+				view.write(QStringLiteral("x"), QStringLiteral("recreated"), false);
+				QCOMPARE(view.count(), std::optional<qsizetype>{1});
+				QCOMPARE(view.values()->value(QStringLiteral("x")), QStringLiteral("recreated"));
+				QVERIFY(first.contains(QStringLiteral("x")));
+				QVERIFY(first.value(QStringLiteral("x")).isEmpty());
+				QCOMPARE(view.statistics().writtenEntries, qsizetype{1});
+				QCOMPARE(view.statistics().materializations, quint64{1});
+			}
+
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};
 
