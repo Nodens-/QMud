@@ -694,6 +694,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void causalVariableLabelDeltaPreservesEventValue();
 		/** @brief Rebases a plugin spelling change without overwriting its event-time content. */
 		void causalPluginVariableLabelDeltaPreservesEventValue();
+		/** @brief Verifies exact-base variable replay shares immutable results across queued events. */
+		void causalVariableReplaySharesMatchingRevisionEndpoints();
 		/** @brief Verifies sparse map edits are reused without leaking unrelated event-time state. */
 		void preparedCausalMapEditsReuseAcrossEventViews();
 		/** @brief Verifies ordered revisions are not collapsed into a net-zero endpoint difference. */
@@ -15717,11 +15719,13 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 			QMudSoundAttributeTarget  targetMode;
 	};
 	QList<Control>                 controls;
+	QStringList                    playedFiles;
 	WorldRuntime                   runtime;
 	WorldRuntime::TestSoundBackend backend;
-	backend.play = [&](const int buffer, const QString &, const bool loop, const double volume, double)
+	backend.play = [&](const int buffer, const QString &file, const bool loop, const double volume, double)
 	{
 		QMutexLocker locker(&mutex);
+		playedFiles.push_back(file);
 		reserved.remove(buffer);
 		statuses.insert(buffer, loop ? 2 : 1);
 		volumes.insert(buffer, volume + 100.0);
@@ -15906,6 +15910,20 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	  assert(bad == eBadParameter and message:find("table type", 1, true))
 	  assert(CallPlugin(audio_id, "PPI_play_PPI_", "not a table") == eErrorCallingPluginRoutine)
 	  assert(CallPlugin(audio_id, "stop", 1) == eOK)
+	  local previous_returns = GetPluginVariable(audio_id, "PPI__returns__PPI_")
+	  for _, payload in ipairs({'{[1]={}}', '{[1]=true,[2]=0}', '{}'}) do
+	    local failure = table.pack(CallPlugin(audio_id, "PPI_play_PPI_", payload))
+	    assert(failure.n == 2 and failure[1] == eErrorCallingPluginRoutine and type(failure[2]) == "string")
+	    assert(GetPluginVariable(audio_id, "PPI__returns__PPI_") == previous_returns)
+	  end
+	  for _, file in ipairs({"音-é.wav", 9007199254740993}) do
+	    local direct_code, direct_id = CallPlugin(audio_id, "play", file, 0, nil, nil)
+	    assert(direct_code == eOK and direct_id == 1)
+	    none(ppi.stop(direct_id))
+	    local ppi_id = ppi.play(file, 0, nil, nil)
+	    assert(ppi_id == 1)
+	    none(ppi.stop(ppi_id))
+	  end
 	  assert(type(GetPluginVariable(audio_id, "PPI__returns__PPI_")) == "string")
 	  audio_info = "all contracts passed"
 	end
@@ -15931,6 +15949,11 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
 	executeDeferredMutations(result);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+	QVERIFY(playedFiles.size() >= 4);
+	QCOMPARE(playedFiles.at(playedFiles.size() - 4), QStringLiteral("音-é.wav"));
+	QCOMPARE(playedFiles.at(playedFiles.size() - 3), playedFiles.at(playedFiles.size() - 4));
+	QCOMPARE(playedFiles.at(playedFiles.size() - 2), QStringLiteral("9007199254740992"));
+	QCOMPARE(playedFiles.constLast(), playedFiles.at(playedFiles.size() - 2));
 	QCOMPARE(snapshot->soundState.volumeByBuffer.value(1), 0.0);
 	QVERIFY(std::ranges::any_of(controls,
 	                            [](const Control &control)
@@ -23832,6 +23855,74 @@ end
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
+void tst_LuaCallbackEngine::causalVariableReplaySharesMatchingRevisionEndpoints()
+{
+	WorldRuntime         runtime;
+	const QString        id = QStringLiteral("abcdefabcdefabcdefabcdef");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), id);
+	plugin.enabled = true;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.setVariable(QStringLiteral("probe"), QStringLiteral("before"));
+	runtime.setPluginVariableValue(id, QStringLiteral("probe"), QStringLiteral("before"));
+	const auto event = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(event);
+	const auto cursor = runtime.m_causalPluginCallbackSnapshotRevision;
+	QVector<WorldRuntime::PluginCallbackDispatchCommand> commands(3);
+	for (auto &command : commands)
+	{
+		command.request.callbackSnapshotArg = event;
+		command.causalSnapshotRevision      = cursor;
+	}
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, id]
+	    {
+		    runtime.setVariable(QStringLiteral("PROBE"), QStringLiteral("after"));
+		    runtime.setVariable(QStringLiteral("added"), QStringLiteral("new"));
+		    runtime.setPluginVariableValue(id, QStringLiteral("PROBE"), QStringLiteral("after"));
+		    runtime.setPluginVariableValue(id, QStringLiteral("added"), QStringLiteral("new"));
+	    });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	const auto revision = cursor->next;
+	QVERIFY(revision && revision->before && revision->after);
+	QVERIFY(event->worldVariablesSnapshot.isSharedWith(revision->before->worldVariablesSnapshot));
+	QVERIFY(event->pluginVariablesSnapshotById.value(id).isSharedWith(
+	    revision->before->pluginVariablesSnapshotById.value(id)));
+	// A nested event may already contain this revision's endpoints when replay reaches it.
+	commands[2].request.callbackSnapshotArg = revision->after;
+	for (auto &command : commands)
+	{
+		runtime.applyCausalPluginCallbackSnapshotDeltas(command);
+		const auto rebased = command.request.callbackSnapshotArg;
+		QVERIFY(rebased->worldVariablesSnapshot.isSharedWith(revision->after->worldVariablesSnapshot));
+		QVERIFY(rebased->pluginVariablesSnapshotById.value(id).isSharedWith(
+		    revision->after->pluginVariablesSnapshotById.value(id)));
+		QCOMPARE(rebased->worldVariablesSnapshot.value(QStringLiteral("probe")).content,
+		         QStringLiteral("after"));
+		QCOMPARE(rebased->pluginVariablesSnapshotById.value(id).value(QStringLiteral("probe")).label,
+		         QStringLiteral("PROBE"));
+	}
+	QCOMPARE(event->worldVariablesSnapshot.value(QStringLiteral("probe")).content, QStringLiteral("before"));
+	QCOMPARE(event->pluginVariablesSnapshotById.value(id).value(QStringLiteral("probe")).label,
+	         QStringLiteral("probe"));
+	runtime.setVariable(QStringLiteral("probe"), QStringLiteral("later"));
+	runtime.setPluginVariableValue(id, QStringLiteral("probe"), QStringLiteral("later"));
+	QCOMPARE(commands[0]
+	             .request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("probe"))
+	             .content,
+	         QStringLiteral("after"));
+	QCOMPARE(commands[1]
+	             .request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id)
+	             .value(QStringLiteral("probe"))
+	             .content,
+	         QStringLiteral("after"));
+}
+
 void tst_LuaCallbackEngine::preparedCausalMapEditsReuseAcrossEventViews()
 {
 	std::weak_ptr<const LuaCallbackPreparedCausalSnapshotDelta> retained;
@@ -24250,6 +24341,16 @@ SetEntity("", "ignored")
 table.insert(values, GetEntity(""))
 table.insert(values, string.format("%.0f", GetInfo(226)))
 SetVariable("entity_case_report", table.concat(values, "|"))
+SetEntity("AÉZ", "upper non-ascii")
+SetEntity("AéZ", "lower non-ascii")
+assert(GetEntity("aÉz") == "upper non-ascii")
+assert(GetEntity("aéz") == "lower non-ascii")
+SetEntity(" SPACE ", "whitespace preserved")
+assert(GetEntity(" space ") == "whitespace preserved")
+assert(GetEntity("space") == "")
+SetEntity("aÉz", "")
+SetEntity("aéz", "")
+SetEntity(" space ", "")
 return true
 )lua"),
 	                                         QStringLiteral("entity canonicalization"),

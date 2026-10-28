@@ -681,6 +681,42 @@ namespace
 			}
 	};
 
+	/** @brief Variable edits that reuse immutable endpoints when the event has the exact same base. */
+	template <>
+	struct CausalSnapshotValueDelta<QMudVariableMapUtils::VariableMap>
+	    : CausalSnapshotMapDelta<QMudVariableMapUtils::VariableMap>
+	{
+			using Map = QMudVariableMapUtils::VariableMap;
+			Map before;
+			Map after;
+
+			/**
+			 * @brief Prepares sparse edits and retains owning handles for constant-time sharing checks.
+			 * @param before Immutable variable hash before the revision.
+			 * @param after Immutable variable hash after the revision.
+			 */
+			CausalSnapshotValueDelta(const Map &before, const Map &after)
+			    : CausalSnapshotMapDelta<Map>(before, after), before(before), after(after)
+			{
+			}
+
+			/**
+			 * @brief Shares the exact revision result or merges sparse edits into a divergent event view.
+			 * @param target Event-time variable hash to update without changing issued snapshots.
+			 */
+			void apply(Map &target) const
+			{
+				if (target.isSharedWith(after))
+					return;
+				if (target.isSharedWith(before))
+				{
+					target = after;
+					return;
+				}
+				CausalSnapshotMapDelta<Map>::apply(target);
+			}
+	};
+
 	template <typename Key, typename Value>
 	void applyCausalSnapshotValueDelta(QMap<Key, Value> &target, const QMap<Key, Value> &before,
 	                                   const QMap<Key, Value> &after)

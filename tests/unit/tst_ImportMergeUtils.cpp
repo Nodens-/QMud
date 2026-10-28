@@ -50,6 +50,34 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			/** @brief Checks ASCII normalization and every UTF-16 unit against Qt's established behavior. */
+			void variableNameNormalizationPreservesQtSemantics()
+			{
+				const auto check = [](const QString &input)
+				{
+					const QString                    expected = input.trimmed().toLower();
+					const QMudVariableMapUtils::Name name(input);
+					QCOMPARE(name.key(), expected);
+					QCOMPARE(name.key().isNull(), expected.isNull());
+					QCOMPARE(name.label(), input);
+					QCOMPARE(name.label().isNull(), input.isNull());
+				};
+				check(QString());
+				check(QStringLiteral(""));
+				check(QStringLiteral(" \t\r\n"));
+				check(QStringLiteral(" \u2003ABC_ÉNERGIE_İ_Σ\u2003 "));
+				check(QString::fromUcs4(U" A\U00010400\U0001f600Z "));
+				for (uint code = 0; code <= 0xffff; ++code)
+				{
+					const QString character{QChar(static_cast<ushort>(code))};
+					check(character);
+					check(QStringLiteral(" A") + character + QStringLiteral("Z "));
+				}
+				const QString                    lowercase = QStringLiteral("world_current_room_42");
+				const QMudVariableMapUtils::Name name(lowercase);
+				QCOMPARE(name.key().constData(), lowercase.constData());
+			}
+
 			void namedDuplicateWithoutFlagsFails()
 			{
 				QList<NamedItem> dest{makeNamed(QStringLiteral("dup"), QStringLiteral("main"))};

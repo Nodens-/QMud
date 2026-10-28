@@ -26,7 +26,7 @@ namespace QMudVariableMapUtils
 			 * @brief Normalizes an external lookup key by trimming and lowercasing it.
 			 * @param input External variable name; its original spelling is retained for serialization.
 			 */
-			Name(const QString &input) : m_key(input.trimmed().toLower()), m_label(input)
+			Name(const QString &input) : m_key(normalizeKey(input)), m_label(input)
 			{
 			}
 			/**
@@ -47,6 +47,37 @@ namespace QMudVariableMapUtils
 			}
 
 		private:
+			/**
+			 * @brief Normalizes ASCII names without Unicode conversion, retaining Qt's Unicode fallback.
+			 * @param input External name with optional surrounding whitespace.
+			 * @return Trimmed, lowercase canonical key with the existing Unicode semantics.
+			 */
+			static QString normalizeKey(const QString &input)
+			{
+				QString      key        = input.trimmed();
+				const QChar *data       = key.constData();
+				qsizetype    firstUpper = -1;
+				for (qsizetype index = 0; index < key.size(); ++index)
+				{
+					const ushort character = data[index].unicode();
+					if (character > 0x7f)
+						return std::move(key).toLower();
+					if (firstUpper < 0 && character >= 'A' && character <= 'Z')
+						firstUpper = index;
+				}
+				if (firstUpper >= 0)
+				{
+					QChar *writable = key.data();
+					for (qsizetype index = firstUpper; index < key.size(); ++index)
+					{
+						const ushort character = writable[index].unicode();
+						if (character >= 'A' && character <= 'Z')
+							writable[index] = QChar{static_cast<ushort>(character + ('a' - 'A'))};
+					}
+				}
+				return key;
+			}
+
 			QString m_key;
 			QString m_label;
 	};
