@@ -541,12 +541,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Variable definition payload loaded into runtime.
 		 */
-		struct Variable
-		{
-				QMap<QString, QString> attributes;
-				QString                content;
-				QString                key{};
-		};
+		using Variable = QMudVariableMapUtils::Record;
 		/**
 		 * @brief Color-group customization payload loaded into runtime.
 		 */
@@ -1263,34 +1258,34 @@ class WorldRuntime : public QObject
 		 * @brief Returns serial that increments on timer list structure mutations.
 		 * @return Monotonic timer-list structure mutation serial.
 		 */
-		[[nodiscard]] quint64                timerStructureMutationSerial() const;
+		[[nodiscard]] quint64                                  timerStructureMutationSerial() const;
 		/**
 		 * @brief Marks timer list structure as changed (insert/remove/reorder).
 		 */
-		void                                 noteTimerStructureMutation();
+		void                                                   noteTimerStructureMutation();
 		/**
 		 * @brief Begins coalescing stable callback-snapshot patches for one owner-thread mutation batch.
 		 */
-		void                                 beginLuaCallbackSnapshotMutationBatch() const;
+		void                                                   beginLuaCallbackSnapshotMutationBatch() const;
 		/**
 		 * @brief Applies coalesced stable callback-snapshot patches at the outer mutation boundary.
 		 */
-		void                                 endLuaCallbackSnapshotMutationBatch() const;
+		void                                                   endLuaCallbackSnapshotMutationBatch() const;
 		/**
 		 * @brief Returns macro list.
 		 * @return Immutable macro list.
 		 */
-		[[nodiscard]] const QList<Macro>    &macros() const;
+		[[nodiscard]] const QList<Macro>                      &macros() const;
 		/**
 		 * @brief Replaces macro list.
 		 * @param macros New macro list.
 		 */
-		void                                 setMacros(const QList<Macro> &macros);
+		void                                                   setMacros(const QList<Macro> &macros);
 		/**
-		 * @brief Returns variable list.
-		 * @return Immutable variable list.
+		 * @brief Returns the immutable canonical variable records.
+		 * @return Immutable variable hash.
 		 */
-		[[nodiscard]] const QList<Variable> &variables() const;
+		[[nodiscard]] const QMudVariableMapUtils::VariableMap &variables() const;
 		/**
 		 * @brief Finds variable by name.
 		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
@@ -1299,7 +1294,7 @@ class WorldRuntime : public QObject
 		 */
 		bool                      findVariable(const QMudVariableMapUtils::Name &name, QString &value) const;
 		/**
-		 * @brief Returns variable names in runtime storage order.
+		 * @brief Returns variable names in unspecified order.
 		 * @return Variable names.
 		 */
 		[[nodiscard]] QStringList variableList() const;
@@ -1307,7 +1302,7 @@ class WorldRuntime : public QObject
 		 * @brief Builds a name/value snapshot of world variables.
 		 * @return Variable map keyed by variable name.
 		 */
-		[[nodiscard]] QMap<QString, QString> variableSnapshot() const;
+		[[nodiscard]] QMudVariableMapUtils::VariableMap variableSnapshot() const;
 		/**
 		 * @brief Sets or creates variable value.
 		 * @param name Boundary-normalized name; raw QString inputs normalize once on conversion.
@@ -1315,10 +1310,16 @@ class WorldRuntime : public QObject
 		 */
 		void               setVariable(const QMudVariableMapUtils::Name &name, const QString &value);
 		/**
-		 * @brief Replaces variable list.
-		 * @param variables New variable list.
+		 * @brief Normalizes and replaces variable records from parsed or editor input.
+		 * @param variables Incoming records; the last named entry for each canonical key wins.
 		 */
 		void               setVariables(const QList<Variable> &variables);
+		/**
+		 * @brief Replaces canonical world variable records from an owning hash.
+		 * @param variables Validated canonical records to adopt.
+		 */
+		void               setVariables(const QMudVariableMapUtils::VariableMap &variables);
+
 		/**
 		 * @brief Lua-style associative array APIs.
 		 */
@@ -2022,7 +2023,7 @@ class WorldRuntime : public QObject
 		 * @param values Output variable map when plugin exists.
 		 * @return `true` when plugin exists and snapshot was written.
 		 */
-		bool pluginVariableSnapshot(const QString &pluginId, QMap<QString, QString> &values) const;
+		bool pluginVariableSnapshot(const QString &pluginId, QMudVariableMapUtils::VariableMap &values) const;
 		/**
 		 * @brief Lists trigger names for plugin.
 		 * @param pluginId Plugin id to query.
@@ -8572,27 +8573,27 @@ class WorldRuntime : public QObject
 		};
 		struct SaveSnapshot
 		{
-				QString                   targetFilePath;
-				QString                   startupDirectory;
-				QString                   worldFilePath;
-				QString                   pluginsDirectory;
-				QMap<QString, QString>    worldAttributes;
-				QMap<QString, QString>    worldMultilineAttributes;
-				QList<Include>            includes;
-				QList<Trigger>            triggers;
-				QList<Alias>              aliases;
-				QList<Timer>              timers;
-				QList<Macro>              macros;
-				QList<Variable>           variables;
-				QList<Colour>             colours;
-				QList<Keypad>             keypadEntries;
-				QList<PrintingStyle>      printingStyles;
-				QList<SavePluginSnapshot> plugins;
-				bool                      serializeRuntimeTriggers{true};
-				bool                      serializeRuntimeAliases{true};
-				bool                      serializeRuntimeTimers{true};
-				bool                      serializeRuntimeMacros{true};
-				bool                      serializeRuntimeColours{true};
+				QString                           targetFilePath;
+				QString                           startupDirectory;
+				QString                           worldFilePath;
+				QString                           pluginsDirectory;
+				QMap<QString, QString>            worldAttributes;
+				QMap<QString, QString>            worldMultilineAttributes;
+				QList<Include>                    includes;
+				QList<Trigger>                    triggers;
+				QList<Alias>                      aliases;
+				QList<Timer>                      timers;
+				QList<Macro>                      macros;
+				QMudVariableMapUtils::VariableMap variables;
+				QList<Colour>                     colours;
+				QList<Keypad>                     keypadEntries;
+				QList<PrintingStyle>              printingStyles;
+				QList<SavePluginSnapshot>         plugins;
+				bool                              serializeRuntimeTriggers{true};
+				bool                              serializeRuntimeAliases{true};
+				bool                              serializeRuntimeTimers{true};
+				bool                              serializeRuntimeMacros{true};
+				bool                              serializeRuntimeColours{true};
 		};
 		/**
 		 * @brief Returns whether a runtime collection belongs in the world file.
@@ -8762,7 +8763,7 @@ class WorldRuntime : public QObject
 		QMap<QString, QStringList>                                 m_aliasWildcards;
 		QMap<QString, QMap<QString, QString>>                      m_aliasNamedWildcards;
 		QList<Macro>                                               m_macros;
-		QList<Variable>                                            m_variables;
+		QMudVariableMapUtils::VariableMap                          m_variables;
 		QMap<QString, ArrayEntry>                                  m_arrays;
 		QMap<QString, DatabaseEntry>                               m_databases;
 		QList<Colour>                                              m_colours;

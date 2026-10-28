@@ -12344,14 +12344,15 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		{
 			if (state.selectedVariables.isEmpty())
 				return;
-			QList<WorldRuntime::Variable>        vars;
-			const QList<WorldRuntime::Variable> &all = runtime->variables();
-			for (int i = 0; i < all.size(); ++i)
+			QList<WorldRuntime::Variable> vars;
+			const auto                   &all = runtime->variables();
+			for (const QString &key : state.selectedVariables)
 			{
-				if (!state.selectedVariables.contains(i))
-					continue;
-				vars.push_back(all.at(i));
+				const auto it = all.constFind(key);
+				if (it != all.cend())
+					vars.push_back(*it);
 			}
+
 			if (vars.isEmpty())
 				return;
 			out << nl << "<!--  Variables  -->" << nl << nl;
@@ -12359,12 +12360,6 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
-			std::ranges::stable_sort(vars,
-			                         [](const WorldRuntime::Variable &a, const WorldRuntime::Variable &b)
-			                         {
-				                         return a.attributes.value(QStringLiteral("name")) <
-				                                b.attributes.value(QStringLiteral("name"));
-			                         });
 			for (const auto &variable : vars)
 			{
 				const QString name = variable.attributes.value(QStringLiteral("name"));
@@ -12463,14 +12458,9 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			}
 			if (!state.selectedVariables.isEmpty())
 			{
-				QList<WorldRuntime::Variable> filtered;
-				const auto                   &all = runtime->variables();
-				for (auto i = 0; i < all.size(); ++i)
-				{
-					if (state.selectedVariables.contains(i))
-						continue;
-					filtered.push_back(all.at(i));
-				}
+				auto filtered = runtime->variables();
+				for (const QString &key : state.selectedVariables)
+					filtered.remove(key);
 				runtime->setVariables(filtered);
 			}
 		}
@@ -15338,7 +15328,7 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 	QList<WorldRuntime::Alias>         mergedAliases;
 	QList<WorldRuntime::Timer>         mergedTimers;
 	QList<WorldRuntime::Macro>         mergedMacros;
-	QList<WorldRuntime::Variable>      mergedVariables;
+	QMudVariableMapUtils::VariableMap  mergedVariables;
 	QList<WorldRuntime::Colour>        mergedColours;
 	QList<WorldRuntime::Keypad>        mergedKeypad;
 	QList<WorldRuntime::PrintingStyle> mergedPrinting;

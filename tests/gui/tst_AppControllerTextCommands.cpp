@@ -540,9 +540,10 @@ SetVariable("imported-script-used-fresh-state", tostring(import_old_global == ni
 				    QStringLiteral("load imported world script"), LuaCallbackEvent::ScreenDraw, nullptr,
 				    false, false, 0, 0, [&followupCompleted](const bool ok) { followupCompleted = ok; });
 				QTRY_VERIFY_WITH_TIMEOUT(followupCompleted, 5000);
-				QTRY_COMPARE_WITH_TIMEOUT(
-				    runtime.variableSnapshot().value(QStringLiteral("imported-script-used-fresh-state")),
-				    QStringLiteral("true"), 5000);
+				QTRY_COMPARE_WITH_TIMEOUT(runtime.variableSnapshot()
+				                              .value(QStringLiteral("imported-script-used-fresh-state"))
+				                              .content,
+				                          QStringLiteral("true"), 5000);
 			}
 
 			/**
@@ -614,7 +615,7 @@ end
 				    QStringLiteral("verify rejected import script"), LuaCallbackEvent::ScreenDraw, nullptr,
 				    false, false, 0, 0, [&followupCompleted](const bool ok) { followupCompleted = ok; });
 				QTRY_VERIFY_WITH_TIMEOUT(followupCompleted, 5000);
-				QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("atomic-import-generation")),
+				QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("atomic-import-generation")).content,
 				         QStringLiteral("original"));
 				QVERIFY(!runtime.variableSnapshot().contains(QStringLiteral("rejected-import-loaded")));
 			}

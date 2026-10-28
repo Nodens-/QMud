@@ -697,8 +697,19 @@ bool WorldDocument::loadFromXmlWithPolicy(const QString &xmlText, const PluginPo
 							variable.attributes.insert(attr.name().toString(), attr.value().toString());
 						}
 						variable.content = reader.readElementText(QXmlStreamReader::IncludeChildElements);
-						appendNamedItem(m_variables, variableIndexByName, std::move(variable),
-						                duplicatePolicy);
+						const QMudVariableMapUtils::Name variableName(
+						    variable.attributes.value(QStringLiteral("name")));
+						if (!variableName.key().isEmpty())
+						{
+							const auto found = variableIndexByName.constFind(variableName.key());
+							if (found == variableIndexByName.cend())
+							{
+								variableIndexByName.insert(variableName.key(), m_variables.size());
+								m_variables.push_back(std::move(variable));
+							}
+							else
+								m_variables[*found] = std::move(variable);
+						}
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("variables"))
 						break;
@@ -1369,7 +1380,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 							return false;
 						}
 						if (!child.m_plugins.isEmpty())
-							mergePluginVariablesFrom(child.m_plugins.front(), stateDoc.variables(), true);
+							mergePluginVariablesFrom(child.m_plugins.front(), stateDoc.variables());
 					}
 				}
 			}
@@ -1685,7 +1696,7 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 
 	auto mergeVariables = [&](auto &dest, const auto &src)
 	{
-		QMap<QString, int> indexByName;
+		QHash<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
 			const QString name =
@@ -1696,9 +1707,10 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 
 		for (const auto &item : src)
 		{
-			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = QMudVariableMapUtils::Name(rawName).key();
-			if (key.isEmpty() || !indexByName.contains(key))
+			const QString rawName  = item.attributes.value(QStringLiteral("name")).trimmed();
+			const QString key      = QMudVariableMapUtils::Name(rawName).key();
+			const auto    existing = indexByName.constFind(key);
+			if (key.isEmpty() || existing == indexByName.cend())
 			{
 				dest.push_back(item);
 				if (!key.isEmpty())
@@ -1711,9 +1723,9 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 				warn(QStringLiteral("%1: duplicate variable ignored").arg(rawName));
 				continue;
 			}
-			if ((flags & IncludeMergeWarn) != 0 && dest[indexByName.value(key)].content != item.content)
+			if ((flags & IncludeMergeWarn) != 0 && dest[*existing].content != item.content)
 				warn(QStringLiteral("%1: overwriting existing variable contents").arg(rawName));
-			dest[indexByName.value(key)] = item;
+			dest[*existing] = item;
 		}
 		return true;
 	};
@@ -1737,66 +1749,27 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 	return true;
 }
 
-void WorldDocument::mergeVariablesFrom(const WorldDocument &other, bool overwrite)
+void WorldDocument::mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars)
 {
-	if (!overwrite)
-	{
-		m_variables.append(other.m_variables);
-		return;
-	}
-
-	QMap<QString, qsizetype> indexByName;
-	for (qsizetype i = 0; i < m_variables.size(); ++i)
-	{
-		const QString name = m_variables[i].attributes.value(QStringLiteral("name"));
-		if (!name.isEmpty())
-			indexByName.insert(name, i);
-	}
-
-	for (const auto &v : other.m_variables)
-	{
-		const QString name = v.attributes.value(QStringLiteral("name"));
-		if (!name.isEmpty() && indexByName.contains(name))
-			m_variables[indexByName.value(name)] = v;
-		else
-		{
-			m_variables.append(v);
-			if (!name.isEmpty())
-				indexByName.insert(name, m_variables.size() - 1);
-		}
-	}
-}
-
-void WorldDocument::mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars, bool overwrite)
-{
-	if (!overwrite)
-	{
-		plugin.variables.append(vars);
-		return;
-	}
-
-	QMap<QString, qsizetype> indexByName;
+	QHash<QString, qsizetype> indexByName;
+	indexByName.reserve(plugin.variables.size() + vars.size());
 	for (qsizetype i = 0; i < plugin.variables.size(); ++i)
 	{
-		const QString name =
-		    QMudVariableMapUtils::Name(plugin.variables[i].attributes.value(QStringLiteral("name"))).key();
-		if (!name.isEmpty())
-			indexByName.insert(name, i);
+		const QMudVariableMapUtils::Name name(
+		    plugin.variables.at(i).attributes.value(QStringLiteral("name")));
+		if (!name.key().isEmpty())
+			indexByName.insert(name.key(), i);
 	}
-
-	for (const auto &v : vars)
+	for (const auto &variable : vars)
 	{
-		const QString key = QMudVariableMapUtils::Name(v.attributes.value(QStringLiteral("name"))).key();
-		if (!key.isEmpty() && indexByName.contains(key))
-		{
-			plugin.variables[indexByName.value(key)] = v;
-		}
+		const QMudVariableMapUtils::Name name(variable.attributes.value(QStringLiteral("name")));
+		if (name.key().isEmpty())
+			continue;
+		auto [it, inserted] = indexByName.tryEmplace(name.key(), plugin.variables.size());
+		if (inserted)
+			plugin.variables.push_back(variable);
 		else
-		{
-			plugin.variables.append(v);
-			if (!key.isEmpty())
-				indexByName.insert(key, plugin.variables.size() - 1);
-		}
+			plugin.variables[*it] = variable;
 	}
 }
 

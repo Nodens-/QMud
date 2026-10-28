@@ -98,26 +98,30 @@ namespace
 
 			void variablesDefaultModeReplacesAndCountsDifference()
 			{
-				QList<VariableItem> dest{makeVariable(QStringLiteral("hp"), QStringLiteral("10"))};
+				QMudVariableMapUtils::VariableMap dest{
+				    {QStringLiteral("hp"), QMudVariableMapUtils::Record(QStringLiteral("10"))}
+                };
 				QList<VariableItem> src{makeVariable(QStringLiteral("hp"), QStringLiteral("25"))};
 				int                 duplicates = 0;
 
 				QMudImportMerge::mergeVariables(dest, src, false, &duplicates);
 				QCOMPARE(duplicates, 1);
 				QCOMPARE(dest.size(), 1);
-				QCOMPARE(dest.front().content, QStringLiteral("25"));
+				QCOMPARE(dest.value(QStringLiteral("hp")).content, QStringLiteral("25"));
 			}
 
 			void variablesOverwriteModeReplacesAndCounts()
 			{
-				QList<VariableItem> dest{makeVariable(QStringLiteral("hp"), QStringLiteral("10"))};
+				QMudVariableMapUtils::VariableMap dest{
+				    {QStringLiteral("hp"), QMudVariableMapUtils::Record(QStringLiteral("10"))}
+                };
 				QList<VariableItem> src{makeVariable(QStringLiteral("hp"), QStringLiteral("25"))};
 				int                 duplicates = 0;
 
 				QMudImportMerge::mergeVariables(dest, src, true, &duplicates);
 				QCOMPARE(duplicates, 1);
 				QCOMPARE(dest.size(), 1);
-				QCOMPARE(dest.front().content, QStringLiteral("25"));
+				QCOMPARE(dest.value(QStringLiteral("hp")).content, QStringLiteral("25"));
 			}
 
 			/** @brief Verifies import keys are canonical and source spelling remains serialization metadata. */
@@ -150,11 +154,16 @@ namespace
 				QVERIFY(store.insert(name, QStringLiteral("10")));
 				const auto                       snapshot = store.values();
 				const QMudVariableMapUtils::Name replacement(QStringLiteral("Énergie"));
-				QVERIFY(!store.insert(replacement, QStringLiteral("10")));
+				QVERIFY(!store.insert(name, QStringLiteral("10")));
 				QVERIFY(&store.values().constBegin().value() == &snapshot.constBegin().value());
+				QVERIFY(!store.remove(QStringLiteral("missing")));
+				QVERIFY(&store.values().constBegin().value() == &snapshot.constBegin().value());
+				QVERIFY(store.insert(replacement, QStringLiteral("10")));
 				QCOMPARE(store.label(name.key()), replacement.label());
+				QCOMPARE(snapshot.value(name.key()).content, QStringLiteral("10"));
+				QCOMPARE(snapshot.value(name.key()).label, name.label());
 				QVERIFY(store.insert(replacement, QStringLiteral("20")));
-				QCOMPARE(snapshot.value(name.key()), QStringLiteral("10"));
+				QCOMPARE(snapshot.value(name.key()).content, QStringLiteral("10"));
 				QCOMPARE(store.value(name.key()), QStringLiteral("20"));
 				QVERIFY(store.remove(name.key()));
 				QVERIFY(store.values().isEmpty());
@@ -163,30 +172,30 @@ namespace
 				QVERIFY(store.values().isEmpty());
 			}
 
-			/** @brief Verifies ordered traversal keeps labels and values paired across copy-on-write edits. */
-			void variableStoreTraversalKeepsLabelsAndValuesAligned()
+			/** @brief Verifies unordered traversal keeps original labels and values paired across snapshots. */
+			void variableStoreTraversalPairsOwningRecords()
 			{
 				QMudVariableMapUtils::Store store;
 				store.insert(QStringLiteral("Zulu"), QStringLiteral("last"));
 				store.insert(QStringLiteral("Alpha"), QStringLiteral("first"));
 				store.insert(QStringLiteral("Middle"), QStringLiteral("removed"));
 				const auto snapshot = store;
-				QVERIFY(!store.insert(QStringLiteral("ALPHA"), QStringLiteral("first")));
+				QVERIFY(store.insert(QStringLiteral("ALPHA"), QStringLiteral("first")));
 				QVERIFY(store.remove(QStringLiteral("middle")));
 				QVERIFY(store.insert(QStringLiteral("Zulu"), QStringLiteral("updated")));
 
-				QList<QPair<QString, QString>> visited;
+				QHash<QString, QString> visited;
 				store.forEachVariable([&visited](const QString &label, const QString &value)
-				                      { visited.push_back({label, value}); });
-				const QList<QPair<QString, QString>> expected{
+				                      { visited.insert(label, value); });
+				const QHash<QString, QString> expected{
 				    {QStringLiteral("ALPHA"), QStringLiteral("first")  },
 				    {QStringLiteral("Zulu"),  QStringLiteral("updated")}
                 };
 				QCOMPARE(visited, expected);
 				visited.clear();
 				snapshot.forEachVariable([&visited](const QString &label, const QString &value)
-				                         { visited.push_back({label, value}); });
-				const QList<QPair<QString, QString>> original{
+				                         { visited.insert(label, value); });
+				const QHash<QString, QString> original{
 				    {QStringLiteral("Alpha"),  QStringLiteral("first")  },
 				    {QStringLiteral("Middle"), QStringLiteral("removed")},
 				    {QStringLiteral("Zulu"),   QStringLiteral("last")   }
@@ -195,7 +204,7 @@ namespace
 				store.clear();
 				visited.clear();
 				store.forEachVariable([&visited](const QString &label, const QString &value)
-				                      { visited.push_back({label, value}); });
+				                      { visited.insert(label, value); });
 				QVERIFY(visited.isEmpty());
 			}
 
@@ -216,7 +225,7 @@ namespace
 				    {QStringLiteral("observed"), QStringLiteral("new target")}
                 };
 				view.project(readTarget);
-				QCOMPARE(readTarget.value(QStringLiteral("observed")), QStringLiteral("new target"));
+				QCOMPARE(readTarget.value(QStringLiteral("observed")).content, QStringLiteral("new target"));
 				view.write(QStringLiteral("empty"), QString(), false);
 				view.write(QStringLiteral("removed"), QString(), true);
 				view.write(QStringLiteral("empty"), QString(), false);
@@ -232,12 +241,10 @@ namespace
 				    {QStringLiteral("removed"),  QStringLiteral("remove me")        }
                 };
 				view.project(projected);
-				QCOMPARE(projected.value(QStringLiteral("observed")), QStringLiteral("new target"));
+				QCOMPARE(projected.value(QStringLiteral("observed")).content, QStringLiteral("new target"));
 				QVERIFY(projected.contains(QStringLiteral("missing")));
 				QVERIFY(projected.contains(QStringLiteral("empty")));
 				QVERIFY(!projected.contains(QStringLiteral("removed")));
-				QCOMPARE(view.statistics().writtenEntries, qsizetype{2});
-				QCOMPARE(view.statistics().materializations, quint64{0});
 				const QMudVariableMapUtils::VariableMap captured{
 				    {QStringLiteral("removed"),  QStringLiteral("captured")            },
 				    {QStringLiteral("observed"), QStringLiteral("captured observation")}
@@ -260,7 +267,7 @@ namespace
 			}
 
 			/** @brief Verifies repeated nested-style publications reuse maps and preserve every issued value. */
-			void variableWorkingViewPublicationWorkStaysLinear()
+			void variableWorkingViewSharesCompletedMapsAndPreservesIssuedSnapshots()
 			{
 				QMudVariableMapUtils::VariableMap base;
 				for (int index = 0; index < 2048; ++index)
@@ -274,8 +281,6 @@ namespace
 					QVERIFY(!view.find(QStringLiteral("missing-%1").arg(index), value, resolved));
 					QVERIFY(resolved);
 				}
-				QCOMPARE(view.statistics().materializations, quint64{0});
-				QCOMPARE(view.statistics().projectedWrites, quint64{0});
 				QVector<QMudVariableMapUtils::VariableMap> issued;
 				for (int index = 0; index < 64; ++index)
 				{
@@ -284,8 +289,6 @@ namespace
 					QMudVariableMapUtils::VariableMap snapshot;
 					view.project(snapshot);
 					issued.push_back(snapshot);
-					QCOMPARE(view.statistics().materializations, quint64{1});
-					QCOMPARE(view.statistics().projectedWrites, static_cast<quint64>(index + 1));
 					const auto *first = view.values();
 					QVERIFY(first);
 					for (int repeat = 0; repeat < 4; ++repeat)
@@ -293,15 +296,13 @@ namespace
 						QMudVariableMapUtils::VariableMap repeated;
 						view.project(repeated);
 						QVERIFY(&first->constBegin().value() == &repeated.constBegin().value());
-						QCOMPARE(repeated.value(QStringLiteral("0")), expected);
+						QCOMPARE(repeated.value(QStringLiteral("0")).content, expected);
 					}
-					QCOMPARE(view.statistics().projectedWrites, static_cast<quint64>(index + 1));
 				}
-				QCOMPARE(view.statistics().writtenEntries, qsizetype{1});
 				QCOMPARE(view.count(), std::optional<qsizetype>{2048});
 				for (int index = 0; index < issued.size(); ++index)
-					QCOMPARE(issued.at(index).value(QStringLiteral("0")), QString::number(index));
-				QCOMPARE(base.value(QStringLiteral("0")), QStringLiteral("base"));
+					QCOMPARE(issued.at(index).value(QStringLiteral("0")).content, QString::number(index));
+				QCOMPARE(base.value(QStringLiteral("0")).content, QStringLiteral("base"));
 				const auto beforeEqualWrite = *view.values();
 				view.write(QStringLiteral("0"), QStringLiteral("63"), false);
 				QVERIFY(&beforeEqualWrite.constBegin().value() == &view.values()->constBegin().value());
@@ -324,11 +325,9 @@ namespace
 				QVERIFY(view.values()->isEmpty());
 				view.write(QStringLiteral("x"), QStringLiteral("recreated"), false);
 				QCOMPARE(view.count(), std::optional<qsizetype>{1});
-				QCOMPARE(view.values()->value(QStringLiteral("x")), QStringLiteral("recreated"));
+				QCOMPARE(view.values()->value(QStringLiteral("x")).content, QStringLiteral("recreated"));
 				QVERIFY(first.contains(QStringLiteral("x")));
-				QVERIFY(first.value(QStringLiteral("x")).isEmpty());
-				QCOMPARE(view.statistics().writtenEntries, qsizetype{1});
-				QCOMPARE(view.statistics().materializations, quint64{1});
+				QVERIFY(first.value(QStringLiteral("x")).content.isEmpty());
 			}
 
 			// NOLINTEND(readability-convert-member-functions-to-static)

@@ -366,12 +366,6 @@ class WorldDocument : public QObject
 		                                 const QString &programDir, const QString &stateDir, bool wantPlugins,
 		                                 const QString &currentPluginDir, bool isIncludeContext);
 		/**
-		 * @brief Merges variable list from another document.
-		 * @param other Source document.
-		 * @param overwrite Overwrite existing variables when `true`.
-		 */
-		void          mergeVariablesFrom(const WorldDocument &other, bool overwrite);
-		/**
 		 * @brief Merges another document into this one.
 		 * @param other Source document.
 		 * @param fromInclude Merge as include context when `true`.
@@ -386,9 +380,8 @@ class WorldDocument : public QObject
 		 * @brief Merges plugin-scoped variables.
 		 * @param plugin Target plugin record.
 		 * @param vars Variables to merge.
-		 * @param overwrite Overwrite existing variables when `true`.
 		 */
-		static void   mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars, bool overwrite);
+		static void   mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars);
 
 		QString       m_errorString;
 		bool          m_loadedFromInclude{false};

@@ -989,6 +989,7 @@ namespace
 		applyCausalSnapshotValueDelta(target.attributes, before.attributes, after.attributes);
 		applyCausalSnapshotValueDelta(target.content, before.content, after.content);
 		applyCausalSnapshotValueDelta(target.key, before.key, after.key);
+		applyCausalSnapshotValueDelta(target.label, before.label, after.label);
 	}
 
 	void applyCausalSnapshotValueDelta(LuaCallbackTriggerSnapshot       &target,
@@ -1421,21 +1422,6 @@ namespace
 				break;
 			}
 		}
-	}
-
-	/**
-	 * @brief Applies world-variable row deltas using the keys captured at input boundaries.
-	 * @param target Causally rebased variable rows.
-	 * @param before Rows before the mutation.
-	 * @param after Rows after the mutation.
-	 */
-	void applyCausalVariableSequenceDelta(QList<LuaCallbackVariableSnapshot>       &target,
-	                                      const QList<LuaCallbackVariableSnapshot> &before,
-	                                      const QList<LuaCallbackVariableSnapshot> &after)
-	{
-		applyCausalSnapshotSequenceDelta(
-		    target, before, after, [](const LuaCallbackVariableSnapshot &value) { return value.key; },
-		    [](const LuaCallbackVariableSnapshot &value) { return !value.key.isEmpty(); }, true);
 	}
 
 	void applyCausalMiniWindowMutations(LuaCallbackSnapshot &target, const LuaCallbackSnapshot &before,
@@ -2069,22 +2055,11 @@ namespace
 		{
 			QMUD_CAUSAL_FIELD(hasWorldVariablesSnapshot);
 			QMUD_CAUSAL_FIELD(worldVariablesSnapshot);
-			QMUD_CAUSAL_FIELD(hasVariableEntriesSnapshot);
-			prepared->operations.push_back(
-			    [beforeSnapshot, afterSnapshot](LuaCallbackSnapshot &target)
-			    {
-				    applyCausalVariableSequenceDelta(target.variableEntriesSnapshot,
-				                                     beforeSnapshot->variableEntriesSnapshot,
-				                                     afterSnapshot->variableEntriesSnapshot);
-			    });
 			prepared->operations.push_back(
 			    [](LuaCallbackSnapshot &target)
 			    {
-				    const qsizetype variableCount = target.hasVariableEntriesSnapshot
-				                                        ? target.variableEntriesSnapshot.size()
-				                                        : target.worldVariablesSnapshot.size();
 				    setLuaCallbackRuntimeCounterValue(target, LuaCallbackRuntimeCounterField::VariableCount,
-				                                      variableCount);
+				                                      target.worldVariablesSnapshot.size());
 			    });
 		}
 		QMUD_CAUSAL_DOMAIN(PluginVariables)
@@ -13597,19 +13572,7 @@ bool WorldRuntime::saveStateMatchesSnapshot(const SaveSnapshot &snapshot) const
 	if (snapshot.serializeRuntimeMacros && !macrosEqual(m_macros, snapshot.macros))
 		return false;
 
-	auto variablesEqual = [&](const QList<Variable> &current, const QList<Variable> &saved) -> bool
-	{
-		if (current.size() != saved.size())
-			return false;
-		for (int i = 0; i < current.size(); ++i)
-		{
-			if (current.at(i).attributes != saved.at(i).attributes ||
-			    current.at(i).content != saved.at(i).content)
-				return false;
-		}
-		return true;
-	};
-	if (!variablesEqual(m_variables, snapshot.variables))
+	if (m_variables != snapshot.variables)
 		return false;
 
 	auto coloursEqual = [&](const QList<Colour> &current, const QList<Colour> &saved) -> bool
@@ -14400,13 +14363,10 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 	saveFooter("macros");
 
 	saveHeader("variables");
-	QList<Variable> variables = m_variables;
-	std::ranges::stable_sort(
-	    variables, [](const Variable &a, const Variable &b)
-	    { return a.attributes.value(QStringLiteral("name")) < b.attributes.value(QStringLiteral("name")); });
-	for (const auto &var : variables)
+
+	for (const auto &var : m_variables)
 	{
-		const QString name = var.attributes.value(QStringLiteral("name"));
+		const QString name = var.label;
 		out << "  <variable name=\"" << fixHtmlString(name) << "\">" << fixHtmlMultilineString(var.content)
 		    << "</variable>" << nl;
 	}
@@ -16587,17 +16547,6 @@ void WorldRuntime::populateLuaCallbackWorldVariableSnapshots(LuaCallbackSnapshot
 {
 	snapshot.worldVariablesSnapshot    = variableSnapshot();
 	snapshot.hasWorldVariablesSnapshot = true;
-	snapshot.variableEntriesSnapshot.clear();
-	snapshot.variableEntriesSnapshot.reserve(m_variables.size());
-	for (const Variable &variable : m_variables)
-	{
-		LuaCallbackVariableSnapshot row;
-		row.key        = variable.key;
-		row.attributes = variable.attributes;
-		row.content    = variable.content;
-		snapshot.variableEntriesSnapshot.push_back(std::move(row));
-	}
-	snapshot.hasVariableEntriesSnapshot = true;
 }
 
 void WorldRuntime::populateLuaCallbackPluginVariableSnapshots(
@@ -21474,20 +21423,13 @@ int WorldRuntime::deleteVariable(const QMudVariableMapUtils::Name &name)
 {
 	if (QThread::currentThread() != thread())
 		return qmudInvokeMethodOr(this, eVariableNotFound, [this, name] { return deleteVariable(name); });
-
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deleteVariable");
-	for (int i = 0; i < m_variables.size(); ++i)
-	{
-		if (m_variables.at(i).key == name.key())
-		{
-			m_variables.removeAt(i);
-			m_variableCount = safeQSizeToInt(m_variables.size());
-			setVariablesChanged(true);
-			patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
-			return eOK;
-		}
-	}
-	return eVariableNotFound;
+	if (!m_variables.remove(name.key()))
+		return eVariableNotFound;
+	m_variableCount = safeQSizeToInt(m_variables.size());
+	setVariablesChanged(true);
+	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
+	return eOK;
 }
 
 int WorldRuntime::discardQueuedCommands() const
@@ -28590,7 +28532,9 @@ static void applyVariableDefaults(WorldRuntime::Variable &variable)
 {
 	QMap<QString, QString> &a = variable.attributes;
 	setDefault(a, QStringLiteral("trim"), QStringLiteral("0"));
-	variable.key = QMudVariableMapUtils::Name(a.value(QStringLiteral("name"))).key();
+	const QMudVariableMapUtils::Name name(a.value(QStringLiteral("name"), variable.label));
+	variable.key   = name.key();
+	variable.label = name.label();
 }
 
 static void applyPrintingDefaults(WorldRuntime::PrintingStyle &style)
@@ -28728,7 +28672,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	m_triggerCount       = safeQSizeToInt(doc.triggers().size());
 	m_aliasCount         = safeQSizeToInt(doc.aliases().size());
 	m_timerCount         = safeQSizeToInt(doc.timers().size());
-	m_variableCount      = safeQSizeToInt(doc.variables().size());
+	m_variableCount      = 0;
 	m_colourCount        = safeQSizeToInt(doc.colours().size());
 	m_keypadCount        = safeQSizeToInt(doc.keypadEntries().size());
 	m_printingStyleCount = safeQSizeToInt(doc.printingStyles().size());
@@ -28798,8 +28742,13 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		rv.attributes = v.attributes;
 		rv.content    = v.content;
 		applyVariableDefaults(rv);
-		m_variables.push_back(rv);
+		if (!rv.key.isEmpty())
+		{
+			const QString key = rv.key;
+			m_variables.insert(key, std::move(rv));
+		}
 	}
+	m_variableCount = safeQSizeToInt(m_variables.size());
 	m_colours.clear();
 	for (const auto &c : doc.colours())
 	{
@@ -30183,7 +30132,7 @@ void WorldRuntime::setMacros(const QList<Macro> &macros)
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Macros);
 }
 
-const QList<WorldRuntime::Variable> &WorldRuntime::variables() const
+const QMudVariableMapUtils::VariableMap &WorldRuntime::variables() const
 {
 	return m_variables;
 }
@@ -30192,65 +30141,37 @@ bool WorldRuntime::findVariable(const QMudVariableMapUtils::Name &name, QString 
 {
 	if (QThread::currentThread() != thread())
 	{
-		const auto resolved =
-		    qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), std::pair<bool, QString>{false, {}},
-		                       [this, name]
-		                       {
-			                       QString    resolvedValue;
-			                       const bool found = findVariable(name, resolvedValue);
-			                       return std::pair<bool, QString>{found, resolvedValue};
-		                       });
+		const auto resolved = qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), std::pair<bool, QString>{},
+		                                         [this, name]
+		                                         {
+			                                         QString    foundValue;
+			                                         const bool found = findVariable(name, foundValue);
+			                                         return std::pair<bool, QString>{found, foundValue};
+		                                         });
 		if (resolved.first)
 			value = resolved.second;
 		return resolved.first;
 	}
-
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::findVariable");
-	for (const auto &var : m_variables)
-	{
-		if (var.key == name.key())
-		{
-			value = var.content;
-			return true;
-		}
-	}
-	return false;
+	return QMudVariableMapUtils::findValue(m_variables, name.key(), value);
 }
 
 QStringList WorldRuntime::variableList() const
 {
 	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), QStringList(),
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), QStringList{},
 		                          [this] { return variableList(); });
-
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::variableList");
-	QStringList names;
-	names.reserve(m_variables.size());
-	for (const auto &var : m_variables)
-	{
-		const QString name = var.key;
-		if (!name.isEmpty())
-			names.append(name);
-	}
-	return names;
+	return m_variables.keys();
 }
 
-QMap<QString, QString> WorldRuntime::variableSnapshot() const
+QMudVariableMapUtils::VariableMap WorldRuntime::variableSnapshot() const
 {
 	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), QMap<QString, QString>{},
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), QMudVariableMapUtils::VariableMap{},
 		                          [this] { return variableSnapshot(); });
-
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::variableSnapshot");
-	QMap<QString, QString> snapshot;
-	for (const auto &var : m_variables)
-	{
-		const QString name = var.key;
-		if (name.isEmpty())
-			continue;
-		snapshot.insert(name, var.content);
-	}
-	return snapshot;
+	return m_variables;
 }
 
 void WorldRuntime::setVariable(const QMudVariableMapUtils::Name &name, const QString &value)
@@ -30260,35 +30181,38 @@ void WorldRuntime::setVariable(const QMudVariableMapUtils::Name &name, const QSt
 		qmudInvokeMethodChecked(this, [this, name, value] { setVariable(name, value); });
 		return;
 	}
-
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setVariable");
-	for (auto &var : m_variables)
+	if (name.key().isEmpty())
+		return;
+	const bool changed = QMudVariableMapUtils::assign(m_variables, name, value, true);
+	m_variableCount    = safeQSizeToInt(m_variables.size());
+	setVariablesChanged(true);
+	if (changed)
+		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
+}
+
+void WorldRuntime::setVariables(const QList<Variable> &variables)
+{
+	QMudVariableMapUtils::VariableMap normalized;
+	normalized.reserve(variables.size());
+	for (auto variable : variables)
 	{
-		if (var.key == name.key())
+		applyVariableDefaults(variable);
+		if (!variable.key.isEmpty())
 		{
-			var.content = value;
-			var.attributes.insert(QStringLiteral("name"), name.label());
-			setVariablesChanged(true);
-			patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
-			return;
+			const QString key = variable.key;
+			normalized.insert(key, std::move(variable));
 		}
 	}
-
-	Variable variable;
-	variable.attributes.insert(QStringLiteral("name"), name.label());
-	variable.key     = name.key();
-	variable.content = value;
-	m_variables.push_back(variable);
+	m_variables     = std::move(normalized);
 	m_variableCount = safeQSizeToInt(m_variables.size());
 	setVariablesChanged(true);
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
 }
 
-void WorldRuntime::setVariables(const QList<Variable> &variables)
+void WorldRuntime::setVariables(const QMudVariableMapUtils::VariableMap &variables)
 {
-	m_variables = variables;
-	for (auto &var : m_variables)
-		applyVariableDefaults(var);
+	m_variables     = variables;
 	m_variableCount = safeQSizeToInt(m_variables.size());
 	setVariablesChanged(true);
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldVariables);
@@ -34887,18 +34811,19 @@ QStringList WorldRuntime::pluginVariableList(const QString &pluginId) const
 	return variables ? variables->values().keys() : QStringList{};
 }
 
-bool WorldRuntime::pluginVariableSnapshot(const QString &pluginId, QMap<QString, QString> &values) const
+bool WorldRuntime::pluginVariableSnapshot(const QString                     &pluginId,
+                                          QMudVariableMapUtils::VariableMap &values) const
 {
 	values.clear();
 	if (QThread::currentThread() != thread())
 	{
 		const auto resolved = qmudInvokeMethodOr(
-		    const_cast<WorldRuntime *>(this), std::pair<bool, QMap<QString, QString>>{false, {}},
+		    const_cast<WorldRuntime *>(this), std::pair<bool, QMudVariableMapUtils::VariableMap>{false, {}},
 		    [this, pluginId]
 		    {
-			    QMap<QString, QString> localValues;
-			    const bool             found = pluginVariableSnapshot(pluginId, localValues);
-			    return std::pair<bool, QMap<QString, QString>>{found, localValues};
+			    QMudVariableMapUtils::VariableMap localValues;
+			    const bool                        found = pluginVariableSnapshot(pluginId, localValues);
+			    return std::pair<bool, QMudVariableMapUtils::VariableMap>{found, localValues};
 		    });
 		if (resolved.first)
 			values = resolved.second;

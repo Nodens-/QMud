@@ -463,7 +463,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void variableXmlIngressNormalizesKeysAndAppliesStateOverrides();
 
 		void worldVariableCountTracksIndividualMutations();
-		void duplicateWorldVariablesPreserveCallbackEntrySemantics();
+		void corruptWorldVariablesNormalizeToUniqueNames();
 		void worldCollectionMutationsUpdateDerivedCallbackState();
 		void pluginRuleMutationsUpdateDerivedCallbackCounts();
 		void nestedCallPluginObservesCallbackRuleMutations();
@@ -692,6 +692,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void causalScopedWorldRuleMutationsRebaseCounts();
 		/** @brief Verifies a label-only causal variable delta retains the event's unrelated older value. */
 		void causalVariableLabelDeltaPreservesEventValue();
+		/** @brief Rebases a plugin spelling change without overwriting its event-time content. */
+		void causalPluginVariableLabelDeltaPreservesEventValue();
 		/** @brief Verifies sparse map edits are reused without leaking unrelated event-time state. */
 		void preparedCausalMapEditsReuseAcrossEventViews();
 		/** @brief Verifies ordered revisions are not collapsed into a net-zero endpoint difference. */
@@ -1460,7 +1462,7 @@ end
 	QVERIFY(activeStyle.startTag);
 
 	runtime.mxpShutDown();
-	QTRY_COMPARE_WITH_TIMEOUT(runtime.variableSnapshot().value(QStringLiteral("mxp_stop_style")),
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.variableSnapshot().value(QStringLiteral("mxp_stop_style")).content,
 	                          QStringLiteral("0||||false"), 5000);
 }
 
@@ -1478,11 +1480,11 @@ end
 )lua"));
 
 	runtime.mxpError(DBG_NONE, 42, QStringLiteral("disabled"));
-	QVERIFY(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")).isEmpty());
+	QVERIFY(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")).content.isEmpty());
 
 	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 	runtime.mxpError(DBG_NONE, 42, QStringLiteral("enabled"));
-	QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")),
+	QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")).content,
 	         QStringLiteral("enabled"));
 }
 
@@ -3699,11 +3701,10 @@ end
 	const QSharedPointer<const LuaCallbackSnapshot> completedSnapshot =
 	    engine.takeCompletedCallbackMutationSnapshot();
 	QVERIFY(completedSnapshot);
-	QVERIFY(completedSnapshot->hasVariableEntriesSnapshot);
-	const auto variable = std::ranges::find_if(
-	    completedSnapshot->variableEntriesSnapshot, [](const LuaCallbackVariableSnapshot &entry)
-	    { return entry.attributes.value(QStringLiteral("name")) == QStringLiteral("same_thread_value"); });
-	QVERIFY(variable != completedSnapshot->variableEntriesSnapshot.cend());
+	QVERIFY(completedSnapshot->hasWorldVariablesSnapshot);
+	const auto variable =
+	    completedSnapshot->worldVariablesSnapshot.constFind(QStringLiteral("same_thread_value"));
+	QVERIFY(variable != completedSnapshot->worldVariablesSnapshot.cend());
 	QCOMPARE(variable->content, QStringLiteral("committed"));
 
 	QVector<LuaDeferredRuntimeMutationBatch> batches = engine.takeDeferredRuntimeMutationBatches();
@@ -8139,7 +8140,8 @@ void tst_LuaCallbackEngine::deleteVariableIsReflectedInNextCallbackSnapshot()
 	const QSharedPointer<const LuaCallbackSnapshot> before = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(before);
 	QVERIFY(before->hasWorldVariablesSnapshot);
-	QCOMPARE(before->worldVariablesSnapshot.value(QStringLiteral("stale")), QStringLiteral("present"));
+	QCOMPARE(before->worldVariablesSnapshot.value(QStringLiteral("stale")).content,
+	         QStringLiteral("present"));
 
 	QCOMPARE(runtime.deleteVariable(QStringLiteral("stale")), eOK);
 
@@ -8212,7 +8214,7 @@ end
 
 	const auto before = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(before);
-	QCOMPARE(before->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("victim")),
+	QCOMPARE(before->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("victim")).content,
 	         QStringLiteral("plugin-value"));
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
@@ -8241,7 +8243,7 @@ end
 
 	runtime.setVariable(QStringLiteral("WorldVictim"), QStringLiteral("world-delete-value"));
 	const auto worldBefore = captureVariableDispatchSnapshotForTest(runtime);
-	QCOMPARE(worldBefore->worldVariablesSnapshot.value(QStringLiteral("worldvictim")),
+	QCOMPARE(worldBefore->worldVariablesSnapshot.value(QStringLiteral("worldvictim")).content,
 	         QStringLiteral("world-delete-value"));
 	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), QStringLiteral(R"lua(
 local before = GetVariable("worldvictim")
@@ -8302,9 +8304,10 @@ end
 	QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("MIXEDCASE")), QStringLiteral("captured"));
 	QCOMPARE(runtime.pluginForId(id)->variables.label(QStringLiteral("mixedcase")),
 	         QStringLiteral(" MiXeDcAsE "));
-	QCOMPARE(
-	    request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id).value(QStringLiteral("mixedcase")),
-	    QStringLiteral("captured"));
+	QCOMPARE(request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id)
+	             .value(QStringLiteral("mixedcase"))
+	             .content,
+	         QStringLiteral("captured"));
 	QVERIFY(teardownWorkerEngine(*executor, engine));
 }
 
@@ -8396,8 +8399,9 @@ end
 		QVERIFY(!runtime.findPluginVariable(callerId, QStringLiteral("before"), value));
 		QCOMPARE(runtime.pluginVariableValue(targetId, QStringLiteral("receipt")), QStringLiteral("nested"));
 		if (fullMap)
-			QCOMPARE(snapshot->pluginVariablesSnapshotById.value(callerId).value(QStringLiteral("before")),
-			         QStringLiteral("prior"));
+			QCOMPARE(
+			    snapshot->pluginVariablesSnapshotById.value(callerId).value(QStringLiteral("before")).content,
+			    QStringLiteral("prior"));
 	}
 }
 
@@ -8501,10 +8505,11 @@ void tst_LuaCallbackEngine::pluginStateSaveEscapesXmlAndPreservesVariableLabels(
 	runtime.setPluginVariableValue(id, QStringLiteral("Runs"), run + QChar(u'&') + run + QChar(u'<'));
 	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
 	runtime.setPluginVariableValue(id, QStringLiteral("MIXEDCASE"), QStringLiteral("initial"));
-	QCOMPARE(
-	    runtime.pluginVariableList(id),
-	    QStringList({QStringLiteral("controls"), QStringLiteral("empty"), QStringLiteral("escaped<&>\"name"),
-	                 QStringLiteral("mixedcase"), QStringLiteral("plain"), QStringLiteral("runs")}));
+	const auto          variableNames = runtime.pluginVariableList(id);
+	const QSet<QString> expectedNames{
+	    QStringLiteral("controls"),  QStringLiteral("empty"), QStringLiteral("escaped<&>\"name"),
+	    QStringLiteral("mixedcase"), QStringLiteral("plain"), QStringLiteral("runs")};
+	QCOMPARE(QSet<QString>(variableNames.cbegin(), variableNames.cend()), expectedNames);
 	QString error;
 	QCOMPARE(runtime.savePluginState(id, true, &error), eOK);
 	QFile state(QDir(directory.path())
@@ -8545,7 +8550,7 @@ void tst_LuaCallbackEngine::variableXmlIngressNormalizesKeysAndAppliesStateOverr
 	QVERIFY(runtime.findVariable(QStringLiteral(" WORLDMIXED "), value));
 	QCOMPARE(value, QStringLiteral("world value"));
 	QCOMPARE(runtime.variableList(), QStringList{QStringLiteral("worldmixed")});
-	QCOMPARE(runtime.variables().constFirst().attributes.value(QStringLiteral("name")),
+	QCOMPARE(runtime.variables().constBegin().value().attributes.value(QStringLiteral("name")),
 	         QStringLiteral("WorldMixed"));
 	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("variable-load-world"));
 	runtime.setStateFilesDirectory(directory.path());
@@ -8609,7 +8614,7 @@ void tst_LuaCallbackEngine::worldVariableCountTracksIndividualMutations()
 	QVERIFY(removed->worldVariablesSnapshot.isEmpty());
 }
 
-void tst_LuaCallbackEngine::duplicateWorldVariablesPreserveCallbackEntrySemantics()
+void tst_LuaCallbackEngine::corruptWorldVariablesNormalizeToUniqueNames()
 {
 	WorldRuntime           runtime;
 	WorldRuntime::Variable first;
@@ -8641,11 +8646,11 @@ return true
 
 	QString report;
 	QVERIFY(runtime.findVariable(QStringLiteral("duplicate_report"), report));
-	QCOMPARE(report, QStringLiteral("3|first|0|2|second|true|0|2|updated|true"));
+	QCOMPARE(report, QStringLiteral("1|second|0|0|<nil>|false|0|1|updated|true"));
 	QString survivingValue;
 	QVERIFY(runtime.findVariable(QStringLiteral("duplicate"), survivingValue));
 	QCOMPARE(survivingValue, QStringLiteral("updated"));
-	QCOMPARE(runtime.variableCount(), 3);
+	QCOMPARE(runtime.variableCount(), 2);
 	QVERIFY(runtime.variablesChanged());
 }
 
@@ -9663,7 +9668,7 @@ end
 	executeDeferredMutations(mutationResult);
 	const auto committedSnapshot = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(committedSnapshot);
-	QCOMPARE(committedSnapshot->worldVariablesSnapshot.value(QStringLiteral("stale-boundary")),
+	QCOMPARE(committedSnapshot->worldVariablesSnapshot.value(QStringLiteral("stale-boundary")).content,
 	         QStringLiteral("committed"));
 
 	request.functionName        = QStringLiteral("read_only");
@@ -12913,8 +12918,9 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsAreIndependent()
 	QCOMPARE(secondPresentation->mouseOverHotspot, QStringLiteral("new-over"));
 	QCOMPARE(first->soundState.statusByBuffer.value(1), 2);
 	QCOMPARE(second->soundState.statusByBuffer.value(1), -2);
-	QCOMPARE(first->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")), QStringLiteral("first"));
-	QCOMPARE(second->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")),
+	QCOMPARE(first->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")).content,
+	         QStringLiteral("first"));
+	QCOMPARE(second->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")).content,
 	         QStringLiteral("second"));
 }
 
@@ -12948,14 +12954,14 @@ void tst_LuaCallbackEngine::callbackDispatchReusesStableAggregateSnapshot()
 
 	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("dispatch-probe")),
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("dispatch-probe")).content,
 	         QStringLiteral("second"));
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
 
 	runtime.invalidateLuaCallbackDispatchSnapshot();
 	const auto rebuilt = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(rebuilt);
-	QCOMPARE(rebuilt->worldVariablesSnapshot.value(QStringLiteral("dispatch-probe")),
+	QCOMPARE(rebuilt->worldVariablesSnapshot.value(QStringLiteral("dispatch-probe")).content,
 	         QStringLiteral("second"));
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{2});
 }
@@ -13523,9 +13529,9 @@ void tst_LuaCallbackEngine::scopedStablePatchesDoNotRefreshUnrelatedState()
 
 	const auto patched = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(patched);
-	QCOMPARE(patched->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("value")),
+	QCOMPARE(patched->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("value")).content,
 	         QStringLiteral("first-new"));
-	QCOMPARE(patched->pluginVariablesSnapshotById.value(secondId).value(QStringLiteral("value")),
+	QCOMPARE(patched->pluginVariablesSnapshotById.value(secondId).value(QStringLiteral("value")).content,
 	         QStringLiteral("second-old"));
 	QCOMPARE(patched->pluginTriggerWildcardsSnapshotById.value(firstId)
 	             .value(QStringLiteral("trigger"))
@@ -22471,7 +22477,7 @@ SetVariable("top-level-snapshot-report",
                           prelude_value, code, target_report or "<missing>"))
 )lua"));
 	QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
-	QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("top-level-snapshot-report")),
+	QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("top-level-snapshot-report")).content,
 	         QStringLiteral("value|1|prelude|0|value|1|top-level-array|prelude"));
 
 	runtime.dispatchTeardownLuaEngines({target}, true);
@@ -23884,16 +23890,16 @@ void tst_LuaCallbackEngine::preparedCausalMapEditsReuseAcrossEventViews()
 			QCOMPARE(revision->preparedDelta.get(), prepared.get());
 		}
 		const auto complete = commands[0].request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id);
-		QCOMPARE(complete.value(QStringLiteral("changed")), QStringLiteral("causal"));
-		QCOMPARE(complete.value(QStringLiteral("stable")), QStringLiteral("event"));
+		QCOMPARE(complete.value(QStringLiteral("changed")).content, QStringLiteral("causal"));
+		QCOMPARE(complete.value(QStringLiteral("stable")).content, QStringLiteral("event"));
 		QVERIFY(!complete.contains(QStringLiteral("removed")));
 		QVERIFY(complete.contains(QStringLiteral("added")));
-		QVERIFY(complete.value(QStringLiteral("added")).isEmpty());
+		QVERIFY(complete.value(QStringLiteral("added")).content.isEmpty());
 		const auto partial = commands[1].request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id);
 		QVERIFY(!partial.contains(QStringLiteral("changed")));
-		QCOMPARE(partial.value(QStringLiteral("stable")), QStringLiteral("event"));
+		QCOMPARE(partial.value(QStringLiteral("stable")).content, QStringLiteral("event"));
 		QVERIFY(!commands[2].request.callbackSnapshotArg->pluginVariablesSnapshotById.contains(id));
-		QCOMPARE(event->pluginVariablesSnapshotById.value(id).value(QStringLiteral("changed")),
+		QCOMPARE(event->pluginVariablesSnapshotById.value(id).value(QStringLiteral("changed")).content,
 		         QStringLiteral("event"));
 		QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("stable")), QStringLiteral("later runtime"));
 	}
@@ -23932,8 +23938,9 @@ void tst_LuaCallbackEngine::preparedCausalMapEditsRetainRevisionOrder()
 	const auto firstRevision = cursor->next;
 	QVERIFY(firstRevision && firstRevision->preparedDelta);
 	const auto prepared = firstRevision->preparedDelta;
-	QCOMPARE(first.request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id).value(
-	             QStringLiteral("probe")),
+	QCOMPARE(first.request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id)
+	             .value(QStringLiteral("probe"))
+	             .content,
 	         QStringLiteral("added"));
 
 	LuaDeferredRuntimeMutationBatch removal;
@@ -24002,11 +24009,14 @@ void tst_LuaCallbackEngine::preparedCausalNestedRevisionsKeepCaptureBoundaries()
 	runtime.applyCausalPluginCallbackSnapshotDeltas(second);
 	for (int index = 0; index < revisions.size(); ++index)
 		QCOMPARE(revisions[index]->preparedDelta.get(), prepared[index].get());
-	QCOMPARE(second.request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("before_child")),
+	QCOMPARE(second.request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("before_child"))
+	             .content,
 	         QStringLiteral("outer"));
-	QCOMPARE(second.request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("child")),
-	         QStringLiteral("nested"));
-	QCOMPARE(second.request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("after_child")),
+	QCOMPARE(
+	    second.request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("child")).content,
+	    QStringLiteral("nested"));
+	QCOMPARE(second.request.callbackSnapshotArg->worldVariablesSnapshot.value(QStringLiteral("after_child"))
+	             .content,
 	         QStringLiteral("outer"));
 	QVERIFY(event->worldVariablesSnapshot.isEmpty());
 }
@@ -24030,12 +24040,48 @@ void tst_LuaCallbackEngine::causalVariableLabelDeltaPreservesEventValue()
 	runtime.applyCompletedPluginCallbackMutations(result);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(command);
 	const auto snapshot = command.request.callbackSnapshotArg;
-	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("mixed")), QStringLiteral("event value"));
-	QCOMPARE(snapshot->variableEntriesSnapshot.size(), 1);
-	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().content, QStringLiteral("event value"));
-	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().key, QStringLiteral("mixed"));
-	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().attributes.value(QStringLiteral("name")),
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("mixed")).content,
+	         QStringLiteral("event value"));
+	QCOMPARE(snapshot->worldVariablesSnapshot.size(), 1);
+	QCOMPARE(snapshot->worldVariablesSnapshot.constBegin().value().content, QStringLiteral("event value"));
+	QCOMPARE(snapshot->worldVariablesSnapshot.constBegin().value().key, QStringLiteral("mixed"));
+	QCOMPARE(snapshot->worldVariablesSnapshot.constBegin().value().attributes.value(QStringLiteral("name")),
 	         QStringLiteral("MIXED"));
+}
+
+void tst_LuaCallbackEngine::causalPluginVariableLabelDeltaPreservesEventValue()
+{
+	WorldRuntime         runtime;
+	const QString        id = QStringLiteral("variable.label.delta");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), id);
+	plugin.enabled = true;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.setPluginVariableValue(id, QStringLiteral("mixed"), QStringLiteral("event"));
+	LuaBatchDispatchRequest request;
+	request.kind = LuaBatchDispatchKind::NoArgs;
+	WorldRuntime::PluginCallbackDispatchCommand command;
+	command.request.callbackSnapshotArg = runtime.captureLuaCallbackSnapshotForRequest(request);
+	command.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
+	const auto issued                   = command.request.callbackSnapshotArg;
+	runtime.setPluginVariableValue(id, QStringLiteral("mixed"), QStringLiteral("later"));
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, id]
+	    { runtime.setPluginVariableValue(id, QStringLiteral("MIXED"), QStringLiteral("later")); });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(command);
+	const auto merged = command.request.callbackSnapshotArg->pluginVariablesSnapshotById.value(id).value(
+	    QStringLiteral("mixed"));
+	QCOMPARE(merged.content, QStringLiteral("event"));
+	QCOMPARE(merged.label, QStringLiteral("MIXED"));
+	QCOMPARE(issued->pluginVariablesSnapshotById.value(id).value(QStringLiteral("mixed")).label,
+	         QStringLiteral("mixed"));
+	QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("mixed")), QStringLiteral("later"));
 }
 
 void tst_LuaCallbackEngine::causalSnapshotDeltaMatchesVariableNamesCaseInsensitively()
@@ -24053,7 +24099,7 @@ void tst_LuaCallbackEngine::causalSnapshotDeltaMatchesVariableNamesCaseInsensiti
 	command.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
 	QVERIFY(command.request.callbackSnapshotArg);
 
-	QList<WorldRuntime::Variable> renamed = runtime.variables();
+	QList<WorldRuntime::Variable> renamed = runtime.variables().values();
 	renamed[0].attributes.insert(QStringLiteral("name"), QStringLiteral("CAUSAL_VARIABLE"));
 	runtime.setVariables(renamed);
 
@@ -24069,12 +24115,12 @@ void tst_LuaCallbackEngine::causalSnapshotDeltaMatchesVariableNamesCaseInsensiti
 
 	const auto snapshot = command.request.callbackSnapshotArg;
 	QVERIFY(snapshot);
-	QCOMPARE(snapshot->variableEntriesSnapshot.size(), 1);
-	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().attributes.value(QStringLiteral("name")),
-	         QStringLiteral("causal_variable"));
-	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().content, QStringLiteral("causal-value"));
 	QCOMPARE(snapshot->worldVariablesSnapshot.size(), 1);
-	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("causal_variable")),
+	QCOMPARE(snapshot->worldVariablesSnapshot.constBegin().value().attributes.value(QStringLiteral("name")),
+	         QStringLiteral("causal_variable"));
+	QCOMPARE(snapshot->worldVariablesSnapshot.constBegin().value().content, QStringLiteral("causal-value"));
+	QCOMPARE(snapshot->worldVariablesSnapshot.size(), 1);
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("causal_variable")).content,
 	         QStringLiteral("causal-value"));
 	QVERIFY(!snapshot->worldVariablesSnapshot.contains(QStringLiteral("CAUSAL_VARIABLE")));
 }
@@ -24108,11 +24154,11 @@ void tst_LuaCallbackEngine::causalSnapshotDeltaReplacesCaseInsensitiveVariableAd
 	const auto snapshot = command.request.callbackSnapshotArg;
 	QVERIFY(snapshot);
 	QCOMPARE(snapshot->worldVariablesSnapshot.size(), 1);
-	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("causal_variable")),
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("causal_variable")).content,
 	         QStringLiteral("causal-value"));
 	QVERIFY(!snapshot->worldVariablesSnapshot.contains(QStringLiteral("CAUSAL_VARIABLE")));
-	QCOMPARE(snapshot->variableEntriesSnapshot.size(), 1);
-	QCOMPARE(snapshot->variableEntriesSnapshot.constFirst().attributes.value(QStringLiteral("name")),
+	QCOMPARE(snapshot->worldVariablesSnapshot.size(), 1);
+	QCOMPARE(snapshot->worldVariablesSnapshot.constBegin().value().attributes.value(QStringLiteral("name")),
 	         QStringLiteral("CAUSAL_VARIABLE"));
 }
 

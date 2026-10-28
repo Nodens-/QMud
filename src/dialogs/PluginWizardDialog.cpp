@@ -207,10 +207,14 @@ void PluginWizardDialog::accept()
 	if (m_state.helpAlias.isEmpty() && !m_state.name.isEmpty())
 		m_state.helpAlias = m_state.name + QStringLiteral(":help");
 
-	m_state.selectedTriggers  = selectedIndices(m_triggerTable);
-	m_state.selectedAliases   = selectedIndices(m_aliasTable);
-	m_state.selectedTimers    = selectedIndices(m_timerTable);
-	m_state.selectedVariables = selectedIndices(m_variableTable);
+	m_state.selectedTriggers = selectedIndices(m_triggerTable);
+	m_state.selectedAliases  = selectedIndices(m_aliasTable);
+	m_state.selectedTimers   = selectedIndices(m_timerTable);
+	m_state.selectedVariables.clear();
+	if (m_variableTable && m_variableTable->selectionModel())
+		for (const QModelIndex &row : m_variableTable->selectionModel()->selectedRows())
+			if (const auto *item = m_variableTable->item(row.row(), 0))
+				m_state.selectedVariables.insert(item->data(Qt::UserRole + 1).toString());
 
 	m_state.saveState = m_saveState ? m_saveState->isChecked() : false;
 	m_state.language  = m_languageCombo ? m_languageCombo->currentText().trimmed() : QStringLiteral("Lua");
@@ -637,8 +641,8 @@ void PluginWizardDialog::populateVariables() const
 {
 	if (!m_runtime || !m_variableTable)
 		return;
-	const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-	QVector<int>                         order;
+	const QList<WorldRuntime::Variable> vars = m_runtime->variables().values();
+	QVector<int>                        order;
 	order.reserve(vars.size());
 	for (int i = 0; i < vars.size(); ++i)
 		order.push_back(i);
@@ -748,11 +752,11 @@ void PluginWizardDialog::fillTimerTable(const QVector<int> &order, const QSet<in
 	}
 }
 
-void PluginWizardDialog::fillVariableTable(const QVector<int> &order, const QSet<int> &selected) const
+void PluginWizardDialog::fillVariableTable(const QVector<int> &order, const QSet<QString> &selected) const
 {
 	if (!m_runtime || !m_variableTable)
 		return;
-	const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
+	const QList<WorldRuntime::Variable> vars = m_runtime->variables().values();
 	m_variableTable->setRowCount(0);
 	int row = 0;
 	for (int idx : order)
@@ -761,11 +765,12 @@ void PluginWizardDialog::fillVariableTable(const QVector<int> &order, const QSet
 			continue;
 		const auto &variable = vars.at(idx);
 		m_variableTable->insertRow(row);
-		auto name = std::make_unique<QTableWidgetItem>(variable.attributes.value(QStringLiteral("name")));
+		auto name = std::make_unique<QTableWidgetItem>(variable.label);
 		name->setData(Qt::UserRole, idx);
+		name->setData(Qt::UserRole + 1, variable.key);
 		setOwnedItem(m_variableTable, row, 0, std::move(name));
 		setOwnedItem(m_variableTable, row, 1, std::make_unique<QTableWidgetItem>(variable.content));
-		if (selected.contains(idx))
+		if (selected.contains(variable.key))
 			m_variableTable->selectRow(row);
 		++row;
 	}
@@ -974,9 +979,13 @@ void PluginWizardDialog::sortVariables(const int column)
 		m_variableSortReverse = false;
 	m_variableSortColumn = column;
 
-	const QSet<int>                      selected = selectedIndices(m_variableTable);
-	const QList<WorldRuntime::Variable> &vars     = m_runtime->variables();
-	QVector<int>                         order;
+	QSet<QString> selected;
+	if (m_variableTable && m_variableTable->selectionModel())
+		for (const QModelIndex &row : m_variableTable->selectionModel()->selectedRows())
+			if (const auto *item = m_variableTable->item(row.row(), 0))
+				selected.insert(item->data(Qt::UserRole + 1).toString());
+	const QList<WorldRuntime::Variable> vars = m_runtime->variables().values();
+	QVector<int>                        order;
 	for (int i = 0; i < vars.size(); ++i)
 		order.push_back(i);
 	auto cmp = [&](const int a, const int b)

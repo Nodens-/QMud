@@ -9,6 +9,7 @@
 
 #ifndef QMUD_LUAEXECUTOR_H
 #define QMUD_LUAEXECUTOR_H
+#include "helpers/VariableMapUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include "AnsiSgrParseUtils.h"
@@ -588,18 +589,7 @@ struct LuaCallbackAttributeContentSnapshot
 };
 
 /** @brief World variable snapshot retaining its canonical key and original XML attributes. */
-struct LuaCallbackVariableSnapshot
-{
-		QMap<QString, QString> attributes;
-		QString                content;
-		QString                key{};
-		/**
-		 * @brief Compares complete variable rows, including canonical identity and XML metadata.
-		 * @param other Row to compare.
-		 * @return Whether all row fields match.
-		 */
-		bool                   operator==(const LuaCallbackVariableSnapshot &other) const = default;
-};
+using LuaCallbackVariableSnapshot = QMudVariableMapUtils::Record;
 
 /**
  * @brief Trigger payload used by callback-scope rule-list snapshots.
@@ -2652,17 +2642,15 @@ luaCallbackStableSnapshotDomainBit(const LuaCallbackStableSnapshotDomain domain)
 
 struct LuaCallbackWorldVariablesSnapshotState
 {
-		bool                               hasWorldVariablesSnapshot{false};
-		QMap<QString, QString>             worldVariablesSnapshot;
-		bool                               hasVariableEntriesSnapshot{false};
-		QList<LuaCallbackVariableSnapshot> variableEntriesSnapshot;
+		bool                              hasWorldVariablesSnapshot{false};
+		QMudVariableMapUtils::VariableMap worldVariablesSnapshot;
 		bool operator==(const LuaCallbackWorldVariablesSnapshotState &) const = default;
 };
 
 struct LuaCallbackPluginVariablesSnapshotState
 {
-		QHash<QString, QMap<QString, QString>> pluginVariablesSnapshotById;
-		QSet<QString>                          unavailablePluginVariableSnapshotIds;
+		QHash<QString, QMudVariableMapUtils::VariableMap> pluginVariablesSnapshotById;
+		QSet<QString>                                     unavailablePluginVariableSnapshotIds;
 		bool operator==(const LuaCallbackPluginVariablesSnapshotState &) const = default;
 };
 

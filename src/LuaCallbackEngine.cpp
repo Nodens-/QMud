@@ -282,6 +282,31 @@ class LuaCallbackRuntimeMutationAccess final
 			return runtime.timerForRuntimeLocation(locationHandle, runtimeId, indexHint, resolvedIndex);
 		}
 		/**
+		 * @brief Applies one variable edit to the validated original plugin owner.
+		 * @param runtime Owning runtime thread.
+		 * @param pluginId Canonical captured plugin identity.
+		 * @param identity Captured location, runtime and engine generations.
+		 * @param name Boundary-normalized variable name and spelling.
+		 * @param value Assigned content.
+		 * @param remove Whether to delete the variable.
+		 */
+		static void mutatePluginVariable(WorldRuntime &runtime, const QString &pluginId,
+		                                 const LuaCallbackPluginsSnapshotState::RuntimeIdentity &identity,
+		                                 const QMudVariableMapUtils::Name &name, const QString &value,
+		                                 bool remove)
+		{
+			auto *plugin = pluginForLocation(runtime, identity);
+			if (!plugin || plugin->attributes.value(QStringLiteral("id")) != pluginId || !plugin->lua ||
+			    plugin->lua->instanceId() != identity.engineInstanceId)
+				return;
+			const bool changed =
+			    remove ? plugin->variables.remove(name.key()) : plugin->variables.insert(name, value);
+			if (changed)
+				runtime.patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables,
+				                                       pluginId);
+		}
+
+		/**
 		 * @brief Publishes sound visibility metadata without replaying its already-executed command.
 		 * @param runtime Owning world runtime.
 		 * @param changes Exact affected-channel state returned by the sound worker.
@@ -512,7 +537,7 @@ static bool resolveCommandUiSnapshotLightForApi(const LuaCallbackEngine *engine,
  * @return Whether the map and owner availability were resolved.
  */
 static bool resolveVariableSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                          const QString &pluginId, QMap<QString, QString> &values,
+                                          const QString &pluginId, QMudVariableMapUtils::VariableMap &values,
                                           bool &pluginAvailable);
 static bool resolveRuntimeCountersSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                                  WorldRuntime::RuntimeCountersSnapshot &snapshot);
@@ -950,8 +975,7 @@ namespace
 			bool                                       hasSpeedwalkFiller{false};
 			long                                       backgroundColour{0};
 			bool                                       hasBackgroundColour{false};
-			QMap<QString, QString>                     worldVariablesSnapshot;
-			bool                                       hasWorldVariablesSnapshot{false};
+			QMudVariableMapUtils::WorkingView          worldVariableView;
 			QMap<QString, QStringList>                 triggerWildcardsSnapshot;
 			QMap<QString, QMap<QString, QString>>      triggerNamedWildcardsSnapshot;
 			QMap<QString, QStringList>                 aliasWildcardsSnapshot;
@@ -962,8 +986,6 @@ namespace
 			QHash<QString, QMap<QString, QMap<QString, QString>>> pluginAliasNamedWildcardsSnapshotById;
 			QList<WorldRuntime::Macro>                            macroEntriesSnapshot;
 			bool                                                  hasMacroEntriesSnapshot{false};
-			QList<WorldRuntime::Variable>                         variableEntriesSnapshot;
-			bool                                                  hasVariableEntriesSnapshot{false};
 			QList<WorldRuntime::Keypad>                           keypadEntriesSnapshot;
 			bool                                                  hasKeypadEntriesSnapshot{false};
 			QHash<QString, QMudVariableMapUtils::WorkingView>     pluginVariableViews;
@@ -1044,7 +1066,6 @@ namespace
 			QHash<int, int>                                 usedUdpPortReferenceCountsSnapshot;
 			bool                                            hasUsedUdpPortsSnapshot{false};
 			bool                                            usedUdpPortsSnapshotDirty{false};
-			QHash<QString, std::optional<QString>>          worldVariableValuesByName;
 			QHash<QString, WorldRuntime::Trigger>           triggerSnapshotsByKey;
 			QSet<QString>                                   missingTriggerSnapshotKeys;
 			QSet<QString>                                   missingTriggerPluginIds;
@@ -3432,17 +3453,26 @@ namespace
 	}
 
 	/**
-	 * @brief Lazily obtains a plugin's working view from the owning immutable dispatch snapshot.
+	 * @brief Lazily obtains an owner's working view from the immutable dispatch snapshot.
 	 * @param engine Engine owning the active callback context.
-	 * @param pluginId Canonical nonempty variable owner identifier.
+	 * @param pluginId Canonical plugin identifier, or empty for world variables.
 	 * @return Lane-local working view, or null when no callback context is active.
 	 */
-	QMudVariableMapUtils::WorkingView *callbackPluginVariableView(const LuaCallbackEngine *engine,
-	                                                              const QString           &pluginId)
+	QMudVariableMapUtils::WorkingView *callbackVariableView(const LuaCallbackEngine *engine,
+	                                                        const QString           &pluginId)
 	{
 		auto *context = activeCallbackContext(engine);
-		if (!context || pluginId.isEmpty())
+		if (!context)
 			return nullptr;
+		if (pluginId.isEmpty())
+		{
+			auto &view = context->worldVariableView;
+			if (view.source() == QMudVariableMapUtils::WorkingView::Source::Uncaptured)
+				if (const auto *snapshot = engine->currentDispatchSnapshot();
+				    snapshot && snapshot->hasWorldVariablesSnapshot)
+					view.capture(snapshot->worldVariablesSnapshot);
+			return &view;
+		}
 		if (auto existing = context->pluginVariableViews.find(pluginId);
 		    existing != context->pluginVariableViews.end())
 			return &*existing;
@@ -3467,26 +3497,13 @@ namespace
 	 * @return Whether source availability and the complete map are resolved.
 	 */
 	bool tryResolveCallbackVariableSnapshotFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
-	                                                 QMap<QString, QString> &values, bool &pluginAvailable)
+	                                                 QMudVariableMapUtils::VariableMap &values,
+	                                                 bool                              &pluginAvailable)
 	{
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return false;
-		if (pluginId.isEmpty())
-		{
-			if (!context->hasWorldVariablesSnapshot)
-			{
-				const auto *snapshot = engine->currentDispatchSnapshot();
-				if (!snapshot || !snapshot->hasWorldVariablesSnapshot)
-					return false;
-				context->worldVariablesSnapshot    = snapshot->worldVariablesSnapshot;
-				context->hasWorldVariablesSnapshot = true;
-			}
-			values          = context->worldVariablesSnapshot;
-			pluginAvailable = true;
-			return true;
-		}
-		auto *view = callbackPluginVariableView(engine, pluginId);
+		auto *view = callbackVariableView(engine, pluginId);
 		if (view->source() == QMudVariableMapUtils::WorkingView::Source::Unavailable)
 		{
 			values.clear();
@@ -3502,36 +3519,6 @@ namespace
 	}
 
 	QString makeCallbackPluginInfoKey(const QString &pluginId, int infoType);
-	bool    tryResolveCallbackVariableEntriesFromSnapshot(const LuaCallbackEngine       *engine,
-	                                                      QList<WorldRuntime::Variable> &entries)
-	{
-		auto *context = activeCallbackContext(engine);
-		if (!context || !engine)
-			return false;
-		if (context->hasVariableEntriesSnapshot)
-		{
-			entries = context->variableEntriesSnapshot;
-			return true;
-		}
-		const LuaCallbackSnapshot *snapshot = engine->currentDispatchSnapshot();
-		if (!snapshot)
-			snapshot = context->callbackSnapshotBase.data();
-		if (!snapshot || !snapshot->hasVariableEntriesSnapshot)
-			return false;
-		entries.clear();
-		entries.reserve(snapshot->variableEntriesSnapshot.size());
-		for (const LuaCallbackVariableSnapshot &row : snapshot->variableEntriesSnapshot)
-		{
-			WorldRuntime::Variable entry;
-			entry.attributes = row.attributes;
-			entry.content    = row.content;
-			entry.key        = row.key;
-			entries.push_back(std::move(entry));
-		}
-		context->variableEntriesSnapshot    = entries;
-		context->hasVariableEntriesSnapshot = true;
-		return true;
-	}
 
 	/**
 	 * @brief Resolves a value or known miss without materializing a plugin's complete map.
@@ -3547,29 +3534,15 @@ namespace
 	                                              const QString &name, QString &value, bool &pluginAvailable,
 	                                              bool &cacheHit)
 	{
-		cacheHit            = false;
-		pluginAvailable     = false;
-		const auto *context = activeCallbackContextConst(engine);
-		if (!context)
+		cacheHit        = false;
+		pluginAvailable = false;
+		auto *view      = callbackVariableView(engine, pluginId);
+		if (!view)
 			return false;
-		if (!pluginId.isEmpty())
-		{
-			auto      *view  = callbackPluginVariableView(engine, pluginId);
-			const bool found = view->find(name, value, cacheHit);
-			pluginAvailable =
-			    cacheHit && view->source() != QMudVariableMapUtils::WorkingView::Source::Unavailable;
-			return found;
-		}
-		if (const auto entry = context->worldVariableValuesByName.constFind(name);
-		    entry != context->worldVariableValuesByName.cend())
-		{
-			cacheHit        = true;
-			pluginAvailable = true;
-			if (*entry)
-				value = **entry;
-			return entry->has_value();
-		}
-		return false;
+		const bool found = view->find(name, value, cacheHit);
+		pluginAvailable =
+		    cacheHit && view->source() != QMudVariableMapUtils::WorkingView::Source::Unavailable;
+		return found;
 	}
 
 	/**
@@ -3578,7 +3551,7 @@ namespace
 	 * @param name Canonical lookup key.
 	 * @return The key when present, otherwise an empty string.
 	 */
-	QString findVariableSnapshotKey(const QMap<QString, QString> &values, const QString &name);
+	QString findVariableSnapshotKey(const QMudVariableMapUtils::VariableMap &values, const QString &name);
 	/**
 	 * @brief Reads a callback variable without renormalizing its key.
 	 * @param values Canonical variable map.
@@ -3586,7 +3559,7 @@ namespace
 	 * @param value Output value when found.
 	 * @return Whether the variable exists.
 	 */
-	bool    resolveVariableSnapshotValue(const QMap<QString, QString> &values, const QString &name,
+	bool    resolveVariableSnapshotValue(const QMudVariableMapUtils::VariableMap &values, const QString &name,
 	                                     QString &value);
 
 	/**
@@ -3597,18 +3570,13 @@ namespace
 	 * @param pluginAvailable Whether the owner is available.
 	 */
 	void    cacheCallbackVariableSnapshot(const LuaCallbackEngine *engine, const QString &pluginId,
-	                                      const QMap<QString, QString> &values, const bool pluginAvailable)
+	                                      const QMudVariableMapUtils::VariableMap &values,
+	                                      const bool                               pluginAvailable)
 	{
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		if (pluginId.isEmpty())
-		{
-			context->worldVariablesSnapshot    = values;
-			context->hasWorldVariablesSnapshot = true;
-			return;
-		}
-		auto *view = callbackPluginVariableView(engine, pluginId);
+		auto *view = callbackVariableView(engine, pluginId);
 		if (pluginAvailable)
 			view->capture(values);
 		else
@@ -3633,13 +3601,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		if (pluginId.isEmpty())
-		{
-			context->worldVariableValuesByName.insert(name,
-			                                          found ? std::optional<QString>(value) : std::nullopt);
-			return;
-		}
-		auto *view = callbackPluginVariableView(engine, pluginId);
+		auto *view = callbackVariableView(engine, pluginId);
 		if (pluginAvailable)
 			view->remember(name, found, value);
 		else
@@ -3658,88 +3620,31 @@ namespace
 	                                         const QMudVariableMapUtils::Name &variableName,
 	                                         const QString &value, const bool removeValue)
 	{
-		const QString &name = variableName.key();
-		if (name.isEmpty())
+		if (variableName.key().isEmpty())
 			return;
-		auto *context = activeCallbackContext(engine);
-		if (!context)
+		auto *view = callbackVariableView(engine, pluginId);
+		if (!view)
 			return;
+		view->write(variableName, value, removeValue, pluginId.isEmpty());
 		if (pluginId.isEmpty())
 		{
-			QList<WorldRuntime::Variable> entries;
-			if (!tryResolveCallbackVariableEntriesFromSnapshot(engine, entries))
-			{
-				updateCallbackRuntimeSnapshot(engine, [](WorldRuntime::RuntimeCountersSnapshot &snapshot)
-				                              { snapshot.variablesChanged = true; });
-				return;
-			}
-
-			int matchingIndex = -1;
-			for (int index = 0; index < entries.size(); ++index)
-			{
-				if (entries.at(index).key == name)
-				{
-					matchingIndex = index;
-					break;
-				}
-			}
-			if (removeValue)
-			{
-				if (matchingIndex >= 0)
-					entries.removeAt(matchingIndex);
-			}
-			else if (matchingIndex >= 0)
-			{
-				entries[matchingIndex].content = value;
-				entries[matchingIndex].attributes.insert(QStringLiteral("name"), variableName.label());
-			}
-			else
-			{
-				WorldRuntime::Variable entry;
-				entry.attributes.insert(QStringLiteral("name"), variableName.label());
-				entry.key     = name;
-				entry.content = value;
-				entries.push_back(entry);
-			}
-
-			context->variableEntriesSnapshot    = entries;
-			context->hasVariableEntriesSnapshot = true;
-			context->worldVariablesSnapshot.clear();
-			for (const WorldRuntime::Variable &entry : std::as_const(entries))
-			{
-				const QString &entryName = entry.key;
-				if (!entryName.isEmpty())
-					context->worldVariablesSnapshot.insert(entryName, entry.content);
-			}
-			context->hasWorldVariablesSnapshot = true;
-
-			const auto remaining =
-			    std::ranges::find_if(std::as_const(entries), [&name](const WorldRuntime::Variable &entry)
-			                         { return entry.key == name; });
-			context->worldVariableValuesByName.insert(name, remaining == entries.cend()
-			                                                    ? std::nullopt
-			                                                    : std::optional<QString>(remaining->content));
-
-			const int variableCount = static_cast<int>(entries.size());
+			const auto count = view->count();
 			updateCallbackRuntimeSnapshot(engine,
-			                              [variableCount](WorldRuntime::RuntimeCountersSnapshot &snapshot)
+			                              [count](WorldRuntime::RuntimeCountersSnapshot &snapshot)
 			                              {
-				                              snapshot.variableCount    = variableCount;
+				                              if (count)
+					                              snapshot.variableCount = static_cast<int>(*count);
 				                              snapshot.variablesChanged = true;
 			                              });
-			return;
 		}
-
-		if (auto *view = callbackPluginVariableView(engine, pluginId))
-			view->write(name, value, removeValue);
 	}
 
-	QString findVariableSnapshotKey(const QMap<QString, QString> &values, const QString &name)
+	QString findVariableSnapshotKey(const QMudVariableMapUtils::VariableMap &values, const QString &name)
 	{
 		return values.contains(name) ? name : QString();
 	}
 
-	bool resolveVariableSnapshotValue(const QMap<QString, QString> &values, const QString &name,
+	bool resolveVariableSnapshotValue(const QMudVariableMapUtils::VariableMap &values, const QString &name,
 	                                  QString &value)
 	{
 		return !name.isEmpty() && QMudVariableMapUtils::findValue(values, name, value);
@@ -8917,16 +8822,6 @@ namespace
 		return snapshot;
 	}
 
-	/**
-	 * @brief Copies a world variable into an immutable callback row without renormalizing its key.
-	 * @param entry World variable with its input-boundary key.
-	 * @return Callback variable row.
-	 */
-	LuaCallbackVariableSnapshot callbackVariableSnapshotFromVariable(const WorldRuntime::Variable &entry)
-	{
-		return {entry.attributes, entry.content, entry.key};
-	}
-
 	LuaCallbackAttributeContentSnapshot
 	callbackAttributeContentSnapshotFromKeypad(const WorldRuntime::Keypad &entry)
 	{
@@ -9420,10 +9315,11 @@ namespace
 			}
 		}
 
-		if (context.hasWorldVariablesSnapshot)
+		if (context.worldVariableView.hasWrites())
 		{
-			snapshot.hasWorldVariablesSnapshot = true;
-			snapshot.worldVariablesSnapshot    = context.worldVariablesSnapshot;
+			context.worldVariableView.project(snapshot.worldVariablesSnapshot);
+			if (context.worldVariableView.count())
+				snapshot.hasWorldVariablesSnapshot = true;
 		}
 		if (!context.boldAnsiColoursByIndex.isEmpty())
 			snapshot.boldAnsiColoursByIndex = context.boldAnsiColoursByIndex;
@@ -9653,13 +9549,6 @@ namespace
 			snapshot.macroEntriesSnapshot.clear();
 			for (const WorldRuntime::Macro &entry : context.macroEntriesSnapshot)
 				snapshot.macroEntriesSnapshot.push_back(callbackAttributeChildrenSnapshotFromMacro(entry));
-		}
-		if (context.hasVariableEntriesSnapshot)
-		{
-			snapshot.hasVariableEntriesSnapshot = true;
-			snapshot.variableEntriesSnapshot.clear();
-			for (const WorldRuntime::Variable &entry : context.variableEntriesSnapshot)
-				snapshot.variableEntriesSnapshot.push_back(callbackVariableSnapshotFromVariable(entry));
 		}
 		if (context.hasKeypadEntriesSnapshot)
 		{
@@ -10207,10 +10096,8 @@ namespace
 		context->runtimeCountersSnapshotDirty          = false;
 
 		if (snapshot->hasWorldVariablesSnapshot)
-		{
-			context->worldVariablesSnapshot    = snapshot->worldVariablesSnapshot;
-			context->hasWorldVariablesSnapshot = true;
-		}
+			context->worldVariableView.capture(snapshot->worldVariablesSnapshot);
+
 		context->pluginVariableViews.clear();
 		context->triggerListCache                     = {};
 		context->triggerListCache.snapshotsByPluginId = snapshot->triggerListOverridesByPluginId;
@@ -18301,7 +18188,7 @@ static int luaDeleteVariable(lua_State *L)
 		bool present         = false;
 		if (pluginScoped)
 		{
-			auto *view = callbackPluginVariableView(engine, pluginId);
+			auto *view = callbackVariableView(engine, pluginId);
 			if (view->source() == QMudVariableMapUtils::WorkingView::Source::Available)
 			{
 				QString ignoredValue;
@@ -18311,7 +18198,7 @@ static int luaDeleteVariable(lua_State *L)
 		}
 		if (!resolved)
 		{
-			QMap<QString, QString> values;
+			QMudVariableMapUtils::VariableMap values;
 			resolved = resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable);
 			present  = !findVariableSnapshotKey(values, name).isEmpty();
 		}
@@ -18324,13 +18211,14 @@ static int luaDeleteVariable(lua_State *L)
 			}
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
-			    [variableName, pluginId, pluginScoped, originatingPluginIdentity](WorldRuntime &targetRuntime)
+			    [variableName = variableName, pluginId = pluginId, pluginScoped,
+			     originatingPluginIdentity](WorldRuntime &targetRuntime)
 			    {
 				    if (pluginScoped)
 				    {
-					    if (!deferredPluginOwnerIsCurrent(targetRuntime, pluginId, originatingPluginIdentity))
-						    return;
-					    static_cast<void>(targetRuntime.deletePluginVariable(pluginId, variableName));
+					    LuaCallbackRuntimeMutationAccess::mutatePluginVariable(targetRuntime, pluginId,
+					                                                           originatingPluginIdentity,
+					                                                           variableName, QString(), true);
 				    }
 				    else
 					    static_cast<void>(targetRuntime.deleteVariable(variableName));
@@ -18463,8 +18351,15 @@ static bool    fetchAliasListForContext(const LuaCallbackEngine *engine, WorldRu
 static bool    fetchTimerListForContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                         const QString &pluginId, QList<WorldRuntime::Timer> &timers,
                                         bool *pluginMissing = nullptr);
+/**
+ * @brief Obtains owning world variable records for XML export.
+ * @param engine Calling Lua engine.
+ * @param runtime Owning runtime.
+ * @param entries Receives immutable canonical records.
+ * @return Whether a complete world view is available.
+ */
 static bool    resolveVariableEntriesSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                                    QList<WorldRuntime::Variable> &entries);
+                                                    QMudVariableMapUtils::VariableMap &entries);
 static QString pluginIdFromLua(lua_State *L);
 static QString pluginIdArgumentFromLua(lua_State *L, int index);
 static bool    resolvePluginContextById(WorldRuntime *runtime, const QString &pluginId,
@@ -19514,7 +19409,7 @@ static void pushPublicNumericOptionValue(lua_State *L, const WorldNumericOption 
 }
 
 static bool resolveVariableSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                          const QString &pluginId, QMap<QString, QString> &values,
+                                          const QString &pluginId, QMudVariableMapUtils::VariableMap &values,
                                           bool &pluginAvailable)
 {
 	if (!engine || !runtime)
@@ -19565,30 +19460,13 @@ static bool resolveVariableValueForApi(const LuaCallbackEngine *engine, WorldRun
 	if (!engine || !runtime || name.isEmpty())
 		return false;
 
-	if (pluginId.isEmpty() && activeCallbackContextConst(engine))
-	{
-		QList<WorldRuntime::Variable> entries;
-		if (resolveVariableEntriesSnapshotForApi(engine, runtime, entries))
-		{
-			pluginAvailable = true;
-			const auto entry =
-			    std::ranges::find_if(std::as_const(entries), [&name](const WorldRuntime::Variable &candidate)
-			                         { return candidate.key == name; });
-			const bool found = entry != entries.cend();
-			if (found)
-				value = entry->content;
-			cacheCallbackVariableValue(engine, pluginId, name, found, value, true);
-			return found;
-		}
-	}
-
 	bool cacheHit = false;
 	if (tryResolveCallbackVariableValueFromCache(engine, pluginId, name, value, pluginAvailable, cacheHit))
 		return true;
 	if (cacheHit)
 		return false;
 
-	QMap<QString, QString> valuesSnapshot;
+	QMudVariableMapUtils::VariableMap valuesSnapshot;
 	if (tryResolveCallbackVariableSnapshotFromCache(engine, pluginId, valuesSnapshot, pluginAvailable))
 	{
 		const bool found = pluginAvailable && resolveVariableSnapshotValue(valuesSnapshot, name, value);
@@ -21016,66 +20894,18 @@ static bool resolveMacroEntriesSnapshotForApi(const LuaCallbackEngine *engine, W
 	return true;
 }
 
+/**
+ * @brief Obtains owning world variable records for XML export.
+ * @param engine Calling Lua engine.
+ * @param runtime Owning runtime.
+ * @param entries Receives immutable canonical records.
+ * @return Whether a complete world view is available.
+ */
 static bool resolveVariableEntriesSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-                                                 QList<WorldRuntime::Variable> &entries)
+                                                 QMudVariableMapUtils::VariableMap &entries)
 {
-	if (!engine || !runtime)
-		return false;
-	if (const auto *context = activeCallbackContextConst(engine);
-	    context && context->hasVariableEntriesSnapshot)
-	{
-		entries = context->variableEntriesSnapshot;
-		return true;
-	}
-	const bool inCallback = activeCallbackContextConst(engine) != nullptr;
-	if (inCallback)
-	{
-		if (const auto *dispatchSnapshot = engine->currentDispatchSnapshot();
-		    dispatchSnapshot && dispatchSnapshot->hasVariableEntriesSnapshot)
-		{
-			entries.clear();
-			for (const LuaCallbackVariableSnapshot &row : dispatchSnapshot->variableEntriesSnapshot)
-			{
-				WorldRuntime::Variable entry;
-				entry.attributes = row.attributes;
-				entry.content    = row.content;
-				entry.key        = row.key;
-				entries.push_back(entry);
-			}
-			if (auto *context = activeCallbackContext(engine))
-			{
-				context->variableEntriesSnapshot    = entries;
-				context->hasVariableEntriesSnapshot = true;
-			}
-			return true;
-		}
-	}
-	if (callbackNoFlushRuntimeReadBridgeForbidden(engine, inCallback))
-		return false;
-	const bool resolved = inCallback ? runOnRuntimeThreadNoDeferredFlush(
-	                                       runtime,
-	                                       [&]() -> bool
-	                                       {
-		                                       entries = runtime->variables();
-		                                       return true;
-	                                       },
-	                                       false)
-	                                 : runOnRuntimeThread(
-	                                       runtime,
-	                                       [&]() -> bool
-	                                       {
-		                                       entries = runtime->variables();
-		                                       return true;
-	                                       },
-	                                       false);
-	if (!resolved)
-		return false;
-	if (auto *context = activeCallbackContext(engine))
-	{
-		context->variableEntriesSnapshot    = entries;
-		context->hasVariableEntriesSnapshot = true;
-	}
-	return true;
+	bool available = false;
+	return resolveVariableSnapshotForApi(engine, runtime, QString(), entries, available) && available;
 }
 
 static bool resolveKeypadEntriesSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
@@ -22075,20 +21905,15 @@ static int luaExportXML(lua_State *L)
 		}
 		case 4: // variable
 		{
-			QList<WorldRuntime::Variable> entries;
+			QMudVariableMapUtils::VariableMap entries;
 			if (!resolveVariableEntriesSnapshotForApi(engine, runtime, entries))
 				break;
-			for (const auto &variable : entries)
+			if (const auto found = entries.constFind(targetName); found != entries.cend())
 			{
-				const auto &attributes = variable.attributes;
-				const auto &content    = variable.content;
-				if (variable.key != targetName)
-					continue;
 				out << "<variables>" << nl;
-				out << "  <variable name=\"" << fixXmlString(attributes.value(QStringLiteral("name")))
-				    << "\">" << fixXmlMultiline(content) << "</variable>" << nl;
+				out << "  <variable name=\"" << fixXmlString(found->label) << "\">"
+				    << fixXmlMultiline(found->content) << "</variable>" << nl;
 				out << "</variables>" << nl;
-				break;
 			}
 			break;
 		}
@@ -22214,15 +22039,12 @@ static int luaExportXML(lua_State *L)
 		    }
 		    case 4: // variable
 		    {
-			    for (const auto &variable : runtime->variables())
+			    if (const auto found = runtime->variables().constFind(targetName);
+			        found != runtime->variables().cend())
 			    {
-				    const auto &attributes = variable.attributes;
-				    const auto &content    = variable.content;
-				    if (variable.key != targetName)
-					    continue;
 				    out << "<variables>" << nl;
-				    out << "  <variable name=\"" << fixXmlString(attributes.value(QStringLiteral("name")))
-				        << "\">" << fixXmlMultiline(content) << "</variable>" << nl;
+				    out << "  <variable name=\"" << fixXmlString(found->label) << "\">"
+				        << fixXmlMultiline(found->content) << "</variable>" << nl;
 				    out << "</variables>" << nl;
 				    return xmlOut;
 			    }
@@ -39306,7 +39128,7 @@ static QVariant resolvePluginInfoValueForApi(const LuaCallbackEngine *engine, Wo
 		return engine->currentCallingPluginId();
 	if (inCallback && infoType == 12)
 	{
-		if (auto *view = callbackPluginVariableView(engine, effectivePluginId))
+		if (auto *view = callbackVariableView(engine, effectivePluginId))
 		{
 			if (view->source() == QMudVariableMapUtils::WorkingView::Source::Unavailable)
 				return {};
@@ -43874,14 +43696,13 @@ static int luaSetVariable(lua_State *L)
 	{
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
-		    [pluginScoped, pluginId, originatingPluginIdentity, variableName,
-		     value](WorldRuntime &targetRuntime)
+		    [pluginScoped, pluginId = pluginId, originatingPluginIdentity, variableName = variableName,
+		     value = value](WorldRuntime &targetRuntime)
 		    {
 			    if (pluginScoped)
 			    {
-				    if (!deferredPluginOwnerIsCurrent(targetRuntime, pluginId, originatingPluginIdentity))
-					    return;
-				    targetRuntime.setPluginVariableValue(pluginId, variableName, value);
+				    LuaCallbackRuntimeMutationAccess::mutatePluginVariable(
+				        targetRuntime, pluginId, originatingPluginIdentity, variableName, value, false);
 			    }
 			    else
 				    targetRuntime.setVariable(variableName, value);
@@ -43930,9 +43751,9 @@ static int luaGetVariableList(lua_State *L)
 		return 1;
 	}
 
-	const QString          pluginId = pluginScoped ? engine->pluginId() : QString();
-	QMap<QString, QString> values;
-	bool                   pluginAvailable = false;
+	const QString                     pluginId = pluginScoped ? engine->pluginId() : QString();
+	QMudVariableMapUtils::VariableMap values;
+	bool                              pluginAvailable = false;
 	if (!resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable) ||
 	    !pluginAvailable)
 	{
@@ -43944,7 +43765,7 @@ static int luaGetVariableList(lua_State *L)
 	for (auto it = values.constBegin(); it != values.constEnd(); ++it)
 	{
 		pushLuaUtf8String(L, it.key());
-		pushLuaUtf8String(L, it.value());
+		pushLuaUtf8String(L, it->content);
 		lua_rawset(L, -3);
 	}
 	return 1;
@@ -46460,8 +46281,8 @@ static int luaGetPluginVariableList(lua_State *L)
 		lua_pushnil(L);
 		return 1;
 	}
-	QMap<QString, QString> values;
-	bool                   pluginAvailable = false;
+	QMudVariableMapUtils::VariableMap values;
+	bool                              pluginAvailable = false;
 	if (!resolveVariableSnapshotForApi(engine, runtime, pluginId, values, pluginAvailable))
 	{
 		lua_pushnil(L);
@@ -46474,7 +46295,7 @@ static int luaGetPluginVariableList(lua_State *L)
 	for (auto it = values.constBegin(); it != values.constEnd(); ++it)
 	{
 		pushLuaUtf8String(L, it.key());
-		pushLuaUtf8String(L, it.value());
+		pushLuaUtf8String(L, it->content);
 		lua_rawset(L, -3);
 	}
 	return 1;
