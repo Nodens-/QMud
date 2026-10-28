@@ -9,8 +9,10 @@
 #include "AcceleratorUtils.h"
 #include "AnsiSgrParseUtils.h"
 #include "AppController.h"
+#include "LuaCallbackEngine.h"
 #include "MiniWindowUtils.h"
 #include "NativePluginRegistry.h"
+#include "PluginStatePersistenceTestAccess.h"
 #include "TelnetProcessor.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
@@ -45,7 +47,9 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScopeGuard>
 #include <QScrollBar>
+#include <QSemaphore>
 #include <QShortcut>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QSplitter>
@@ -1288,6 +1292,129 @@ class tst_WorldView_Basic : public QObject
 
 		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+		/** @brief Lua saves and rendered output progress during blocked I/O; final state seals once. */
+		void pluginSaveStormKeepsOutputResponsiveAndSealsOnce()
+		{
+			PluginStateTestDirectory directory(QDir::current().filePath(QStringLiteral("view-save-XXXXXX")));
+			QVERIFY(directory.isValid());
+			const QString pluginId = QStringLiteral("1234567890abcdef12345678");
+			const QString statePath =
+			    QDir(directory.path())
+			        .filePath(QStringLiteral("world-") + pluginId + QStringLiteral("-state.xml"));
+			auto                          &service = PluginStatePersistence::instance();
+			QSemaphore                     started, release;
+			bool                           first = true;
+			PluginStatePersistence::Writer original;
+			original = PluginStatePersistenceTestAccess::replaceWriter(
+			    service,
+			    [&](const PluginStatePersistence::Snapshot &snapshot, QString &error)
+			    {
+				    if (snapshot.targetFilePath == statePath && first)
+				    {
+					    first = false;
+					    started.release();
+					    release.acquire();
+				    }
+				    return original(snapshot, error);
+			    });
+			const auto restoreWriter = qScopeGuard(
+			    [&]
+			    { static_cast<void>(PluginStatePersistenceTestAccess::replaceWriter(service, original)); });
+			const auto unblock = qScopeGuard([&] { release.release(); });
+			WorldView  view;
+			view.resize(640, 480);
+			view.show();
+			auto runtime = std::make_unique<WorldRuntime>();
+			runtime->setStartupDirectory(QDir::currentPath());
+			runtime->setStateFilesDirectory(directory.path());
+			runtime->setWorldAttribute(QStringLiteral("id"), QStringLiteral("world"));
+			view.setRuntime(runtime.get());
+			auto                 engine = QSharedPointer<LuaCallbackEngine>::create();
+			WorldRuntime::Plugin plugin;
+			plugin.attributes.insert(QStringLiteral("id"), pluginId);
+			plugin.enabled   = true;
+			plugin.saveState = true;
+			plugin.lua       = engine;
+			WorldRuntimeTestAccess::plugins(*runtime).push_back(plugin);
+			WorldRuntimeTestAccess::commitPluginStructure(*runtime);
+			LuaEngineObservedInitializationRequest initialization;
+			initialization.engine              = engine.data();
+			initialization.workerLifetimeOwner = engine;
+			initialization.runtime             = runtime.get();
+			initialization.pluginId            = pluginId;
+			initialization.pluginName          = pluginId;
+			initialization.scriptText          = QStringLiteral(R"lua(
+local saves, closes = 0, 0
+function OnPluginEnable()
+  for i = 1, 5 do
+    assert(SetVariable("Value", tostring(i)) == 0)
+    local status, request_id = SaveState()
+    assert(status == 0 and request_id == nil)
+    Note("step-" .. i)
+  end
+  SetVariable("Value", "unsaved")
+end
+function OnPluginSaveState()
+  saves = saves + 1
+  SetVariable("saves", tostring(saves))
+  SetVariable("saved_value", GetVariable("value"))
+end
+function OnPluginClose()
+  closes = closes + 1
+  SetVariable("closes", tostring(closes))
+  SetVariable("Value", "closed")
+end
+function OnPluginAsyncResult()
+  SetVariable("unexpected_result", "yes")
+end
+)lua");
+			WorldRuntimeTestAccess::dispatchInitializeLuaEnginesWithObservedCallbacks(*runtime,
+			                                                                          {initialization}, true);
+			LuaBatchDispatchRequest request;
+			request.kind          = LuaBatchDispatchKind::NoArgs;
+			request.callbackEvent = LuaCallbackEvent::Enable;
+			request.functionName  = QStringLiteral("OnPluginEnable");
+			request.engines       = {engine};
+			static_cast<void>(WorldRuntimeTestAccess::queuePluginCallbackDispatchResult(*runtime, request));
+			QVERIFY(started.tryAcquire(1, 5000));
+			QCOMPARE(runtime->pluginVariableValue(pluginId, QStringLiteral("saves")), QStringLiteral("5"));
+			QCOMPARE(runtime->pluginVariableValue(pluginId, QStringLiteral("value")),
+			         QStringLiteral("unsaved"));
+			QCOMPARE(runtime->pluginVariableValue(pluginId, QStringLiteral("saved_value")),
+			         QStringLiteral("5"));
+			bool guiProgress = false;
+			QTimer::singleShot(0, &view, [&] { guiProgress = true; });
+			QCoreApplication::processEvents();
+			QVERIFY(guiProgress);
+			QVERIFY(!view.grab().isNull());
+			QVERIFY(std::ranges::any_of(runtime->lines(), [](const auto &line)
+			                            { return line.text.contains(QStringLiteral("step-5")); }));
+			QVERIFY(runtime->pluginVariableValue(pluginId, QStringLiteral("unexpected_result")).isEmpty());
+			release.release();
+			service.flush(statePath);
+			QFile stateFile(statePath);
+			QVERIFY(stateFile.open(QIODevice::ReadOnly));
+			QVERIFY(stateFile.readAll().contains("name=\"Value\">5</variable>"));
+			stateFile.close();
+			runtime->finalizePluginStateForClose();
+			runtime->finalizePluginStateForClose();
+			QVERIFY(runtime->isSessionStateOutputBufferSealed());
+			QCOMPARE(runtime->pluginVariableValue(pluginId, QStringLiteral("closes")), QStringLiteral("1"));
+			QCOMPARE(runtime->pluginVariableValue(pluginId, QStringLiteral("saves")), QStringLiteral("6"));
+			runtime->setPluginVariableValue(pluginId, QStringLiteral("Value"), QStringLiteral("after-seal"));
+			QCOMPARE(runtime->savePluginState(pluginId, true), eOK);
+			runtime.reset();
+			service.flush(statePath);
+			QVERIFY(stateFile.open(QIODevice::ReadOnly));
+			const QByteArray finalState = stateFile.readAll();
+			QVERIFY(finalState.contains("name=\"Value\">closed</variable>"));
+			QVERIFY(finalState.contains("name=\"saves\">6</variable>"));
+			QVERIFY(finalState.contains("name=\"closes\">1</variable>"));
+			QVERIFY(!finalState.contains("after-seal"));
+		}
+#endif
+
 		void parseColorNamedAndHex()
 		{
 			QCOMPARE(WorldView::parseColor(QStringLiteral("red")), QColor(Qt::red));

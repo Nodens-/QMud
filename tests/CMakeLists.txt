@@ -78,6 +78,13 @@ qmud_add_qtest(tst_QTestSmoke
         TIMEOUT
         10)
 
+qmud_add_qtest(tst_PluginStatePersistence
+        SOURCES
+        unit/tst_PluginStatePersistence.cpp
+        "${CMAKE_SOURCE_DIR}/src/PluginStatePersistence.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_StringUtils
         SOURCES
         unit/tst_StringUtils.cpp

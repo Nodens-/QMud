@@ -7,6 +7,7 @@
  */
 
 #include "WorldDocument.h"
+#include "PluginStatePersistence.h"
 #include "helpers/VariableMapUtils.h"
 
 #include "NativePluginRegistry.h"
@@ -1344,7 +1345,8 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 				if (!base.endsWith('/') && !base.endsWith('\\'))
 					base += '/';
 				const QString stateFile = base + worldId + "-" + pluginId + "-state.xml";
-				QFileInfo     info(stateFile);
+				PluginStatePersistence::instance().flush(QFileInfo(stateFile).absoluteFilePath());
+				QFileInfo info(stateFile);
 				if (info.exists())
 				{
 					if (info.size() == 0)

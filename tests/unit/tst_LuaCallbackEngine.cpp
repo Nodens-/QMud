@@ -16,6 +16,7 @@
 #include "MainFrame.h"
 #include "MiniWindow.h"
 #include "NativePluginRegistry.h"
+#include "PluginStatePersistenceTestAccess.h"
 #include "SoundEngine.h"
 #include "SoundEngineTestAccess.h"
 #include "TestSoundData.h"
@@ -3242,7 +3243,7 @@ restricted_seen = package.loadlib == nil and
 
 void tst_LuaCallbackEngine::scriptWatcherTracksInitiallyMissingAndRecreatedFile()
 {
-	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("script-watcher-XXXXXX")));
+	PluginStateTestDirectory directory(QDir::current().filePath(QStringLiteral("script-watcher-XXXXXX")));
 	QVERIFY(directory.isValid());
 
 	WorldRuntime runtime;
@@ -7104,7 +7105,7 @@ function OnPluginEnable()
     tostring(position_status == eOK),
     tostring(hotspot_status == eOK),
     tostring(save_status == eOK),
-    tostring(save_request_id ~= nil)
+    tostring(save_request_id == nil)
   }, "|")
 end
 function batch_status(value)
@@ -8402,7 +8403,7 @@ end
 
 void tst_LuaCallbackEngine::pluginVariableSaveRetainsIntermediateJournalValues()
 {
-	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("variable-order-XXXXXX")));
+	PluginStateTestDirectory directory(QDir::current().filePath(QStringLiteral("variable-order-XXXXXX")));
 	QVERIFY(directory.isValid());
 	WorldRuntime runtime;
 	runtime.setStartupDirectory(QDir::currentPath());
@@ -8460,6 +8461,7 @@ end
 	QVERIFY(snapshot->pluginVariablesSnapshotById.value(id).isEmpty());
 	QFile state(QDir(directory.path())
 	                .filePath(QStringLiteral("ordered-variable-save-") + id + QStringLiteral("-state.xml")));
+	PluginStatePersistence::instance().flush(state.fileName());
 	QVERIFY(state.open(QIODevice::ReadOnly));
 	const auto xml = QString::fromUtf8(state.readAll());
 	QVERIFY(xml.contains(QStringLiteral("name=\"Phase\">A</variable>")));
@@ -8470,7 +8472,7 @@ end
 
 void tst_LuaCallbackEngine::pluginStateSaveEscapesXmlAndPreservesVariableLabels()
 {
-	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("variable-state-XXXXXX")));
+	PluginStateTestDirectory directory(QDir::current().filePath(QStringLiteral("variable-state-XXXXXX")));
 	QVERIFY(directory.isValid());
 	WorldRuntime runtime;
 	runtime.setStartupDirectory(QDir::currentPath());
@@ -8507,6 +8509,7 @@ void tst_LuaCallbackEngine::pluginStateSaveEscapesXmlAndPreservesVariableLabels(
 	QCOMPARE(runtime.savePluginState(id, true, &error), eOK);
 	QFile state(QDir(directory.path())
 	                .filePath(QStringLiteral("variable-save-world-") + id + QStringLiteral("-state.xml")));
+	PluginStatePersistence::instance().flush(state.fileName());
 	QVERIFY(state.open(QIODevice::ReadOnly));
 	const auto xml = QString::fromUtf8(state.readAll());
 	state.close();
@@ -8529,7 +8532,7 @@ void tst_LuaCallbackEngine::pluginStateSaveEscapesXmlAndPreservesVariableLabels(
 
 void tst_LuaCallbackEngine::variableXmlIngressNormalizesKeysAndAppliesStateOverrides()
 {
-	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("variable-ingress-XXXXXX")));
+	PluginStateTestDirectory directory(QDir::current().filePath(QStringLiteral("variable-ingress-XXXXXX")));
 	QVERIFY(directory.isValid());
 	WorldRuntime runtime;
 	runtime.setStartupDirectory(QDir::currentPath());
@@ -9287,7 +9290,7 @@ void tst_LuaCallbackEngine::callbackLoadPublishesFreshTopologyToAsyncResult()
 {
 	const QString temporaryTemplate = QDir(QCoreApplication::applicationDirPath())
 	                                      .filePath(QStringLiteral("callback-load-snapshot-XXXXXX"));
-	QTemporaryDir temporaryDirectory(temporaryTemplate);
+	PluginStateTestDirectory temporaryDirectory(temporaryTemplate);
 	QVERIFY(temporaryDirectory.isValid());
 	const QString callerId   = QStringLiteral("511111111111111111111111");
 	const QString loadedId   = QStringLiteral("522222222222222222222222");
@@ -9765,7 +9768,7 @@ void tst_LuaCallbackEngine::nestedBroadcastPrunesLifecycleMutatedRecipients()
 		Reload,
 	};
 
-	QTemporaryDir temporaryDirectory;
+	PluginStateTestDirectory temporaryDirectory;
 	QVERIFY(temporaryDirectory.isValid());
 	const QString callerId = QStringLiteral("711111111111111111111111");
 	const QString firstId  = QStringLiteral("722222222222222222222222");
@@ -12281,8 +12284,8 @@ void tst_LuaCallbackEngine::worldOneShotRuleApisDirtyOnCreationAndDeletion()
 	QFETCH(QString, createCall);
 	QFETCH(QString, deleteCall);
 
-	WorldRuntime  runtime;
-	QTemporaryDir temporaryDirectory;
+	WorldRuntime             runtime;
+	PluginStateTestDirectory temporaryDirectory;
 	QVERIFY(temporaryDirectory.isValid());
 	runtime.setStartupDirectory(temporaryDirectory.path());
 	auto engine =
@@ -14343,7 +14346,7 @@ void tst_LuaCallbackEngine::directPluginPatchSuppressesExpandedTargetedRulePatch
 
 void tst_LuaCallbackEngine::pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndUnload()
 {
-	QTemporaryDir temporaryDirectory;
+	PluginStateTestDirectory temporaryDirectory;
 	QVERIFY(temporaryDirectory.isValid());
 	const QString pluginId   = QStringLiteral("89abcdef0123456789abcdef");
 	const QString pluginPath = QDir(temporaryDirectory.path()).filePath(QStringLiteral("snapshot.xml"));
@@ -14450,7 +14453,7 @@ void tst_LuaCallbackEngine::pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndU
 
 void tst_LuaCallbackEngine::existingPluginGlobalPromotionPatchesMetadata()
 {
-	QTemporaryDir temporaryDirectory;
+	PluginStateTestDirectory temporaryDirectory;
 	QVERIFY(temporaryDirectory.isValid());
 	const QString pluginId   = QStringLiteral("fedcba9876543210fedcba98");
 	const QString pluginPath = QDir(temporaryDirectory.path()).filePath(QStringLiteral("promote.xml"));
@@ -15347,7 +15350,7 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 		return 0;
 	};
 	runtime.setSoundBackendForTest(std::move(soundBackend));
-	QTemporaryDir soundRoot;
+	PluginStateTestDirectory soundRoot;
 	QVERIFY(soundRoot.isValid());
 	QVERIFY(QDir(soundRoot.path()).mkpath(QStringLiteral("sounds")));
 	QFile soundFile(QDir(soundRoot.path()).filePath(QStringLiteral("sounds/coin.wav")));
@@ -24808,7 +24811,7 @@ end
 
 void tst_LuaCallbackEngine::closeLogCompressesFileOpenedByPostambleRotation()
 {
-	QTemporaryDir directory(QDir::current().filePath(QStringLiteral("close-log-rotation-XXXXXX")));
+	PluginStateTestDirectory directory(QDir::current().filePath(QStringLiteral("close-log-rotation-XXXXXX")));
 	QVERIFY(directory.isValid());
 
 	WorldRuntime runtime;
@@ -29277,11 +29280,12 @@ void tst_LuaCallbackEngine::runtimeDestructionCancelsSuspendedDeferredMutationPl
 
 void tst_LuaCallbackEngine::destructorCancelsResultOperationsBeforePluginClose()
 {
-	bool          continuationCancelled = false;
-	bool          queuedTraceCancelled  = false;
+	bool                     continuationCancelled = false;
+	bool                     queuedTraceCancelled  = false;
 
-	const QString testRoot = QDir::currentPath();
-	QTemporaryDir stateDirectory(QDir(testRoot).filePath(QStringLiteral("destructor-close-XXXXXX")));
+	const QString            testRoot = QDir::currentPath();
+	PluginStateTestDirectory stateDirectory(
+	    QDir(testRoot).filePath(QStringLiteral("destructor-close-XXXXXX")));
 	QVERIFY(stateDirectory.isValid());
 	const QString worldId  = QStringLiteral("aaaaaaaaaaaaaaaaaaaaaaaa");
 	const QString pluginId = QStringLiteral("decafbaddecafbaddecafbad");
@@ -29350,6 +29354,7 @@ end
 	QVERIFY(continuationCancelled);
 	QVERIFY(queuedTraceCancelled);
 	QFile stateFile(statePath);
+	PluginStatePersistence::instance().flush(stateFile.fileName());
 	QVERIFY(stateFile.open(QIODevice::ReadOnly | QIODevice::Text));
 	const QString savedState = QString::fromUtf8(stateFile.readAll());
 	QVERIFY(savedState.contains(QStringLiteral("<variable name=\"close_saw_cancellation\">yes</variable>")));
@@ -30137,7 +30142,7 @@ end
 /** @brief Verifies a handler runs and cancels pending preparation without waiting for catalog completion. */
 void tst_LuaCallbackEngine::interceptedSoundCancelsPendingFilePreparation()
 {
-	QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-intercept-XXXXXX")));
+	PluginStateTestDirectory root(QDir::current().filePath(QStringLiteral("sound-pending-intercept-XXXXXX")));
 	QVERIFY(root.isValid());
 	QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds/Erion/relocated")));
 	QFile original(QDir(root.path()).filePath(QStringLiteral("sounds/Erion/relocated/cue.wav")));
@@ -30352,7 +30357,7 @@ void tst_LuaCallbackEngine::workerQueuedRetainedScreendrawAppendDoesNotDeadlock(
 		return;
 	}
 
-	QTemporaryDir qmudHome;
+	PluginStateTestDirectory qmudHome;
 	QVERIFY(qmudHome.isValid());
 	MainWindow frame;
 	frame.resize(900, 700);
@@ -30444,7 +30449,7 @@ end
 
 void tst_LuaCallbackEngine::workerDrawOutputWindowOutputDoesNotQueueRecursiveCallback()
 {
-	QTemporaryDir tempDir;
+	PluginStateTestDirectory tempDir;
 	QVERIFY(tempDir.isValid());
 	const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
 	QVERIFY(QDir().mkpath(pluginsDir));
@@ -32562,7 +32567,7 @@ end
 
 void tst_LuaCallbackEngine::workerNotepadCachesPreserveGlobalAndOwnerLists()
 {
-	QTemporaryDir qmudHome;
+	PluginStateTestDirectory qmudHome;
 	QVERIFY(qmudHome.isValid());
 	MainWindow frame;
 	frame.resize(900, 700);

@@ -13,9 +13,12 @@
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
+#include "helpers/WorldSessionStateUtils.h"
 
 #include <QAbstractScrollArea>
 #include <QClipboard>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
 #include <QFile>
 #include <QGuiApplication>
 #include <QMdiArea>
@@ -25,6 +28,7 @@
 #include <QSplitter>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
@@ -178,6 +182,62 @@ end
 			const QVector<int> selected = AppController::selectSessionStateSaveCandidateIndexes(candidates);
 			QCOMPARE(selected.size(), 2);
 			QVERIFY(candidates.at(selected.at(0)).filePath != candidates.at(selected.at(1)).filePath);
+		}
+
+		/** @brief Closing an unselected duplicate world preserves the selected session checkpoint. */
+		static void closingWorldsPreservesSelectedSessionCheckpoint()
+		{
+			QTemporaryDir directory(QDir::current().filePath(QStringLiteral("selected-session-XXXXXX")));
+			QVERIFY(directory.isValid());
+			AppController app;
+			app.m_workingDir = directory.path();
+			MainWindow frame;
+			app.setMainWindow(&frame);
+			auto *unselectedRuntime = new WorldRuntime(&frame);
+			auto *selectedRuntime   = new WorldRuntime(&frame);
+			for (WorldRuntime *runtime : {unselectedRuntime, selectedRuntime})
+			{
+				runtime->setWorldAttribute(QStringLiteral("id"), QStringLiteral("shared-close-checkpoint"));
+				runtime->setWorldAttribute(QStringLiteral("save_world_automatically"), QStringLiteral("0"));
+			}
+			unselectedRuntime->setWorldAttribute(QStringLiteral("persist_output_buffer"),
+			                                     QStringLiteral("0"));
+			unselectedRuntime->setWorldAttribute(QStringLiteral("persist_command_history"),
+			                                     QStringLiteral("0"));
+			selectedRuntime->setWorldAttribute(QStringLiteral("persist_output_buffer"), QStringLiteral("1"));
+			selectedRuntime->setWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("20"));
+			selectedRuntime->setWorldAttribute(QStringLiteral("persist_command_history"),
+			                                   QStringLiteral("1"));
+			auto *unselected = new WorldChildWindow(QStringLiteral("Unselected"));
+			auto *selected   = new WorldChildWindow(QStringLiteral("Selected"));
+			unselected->setRuntime(unselectedRuntime);
+			selected->setRuntime(selectedRuntime);
+			frame.addMdiSubWindow(unselected, false);
+			frame.addMdiSubWindow(selected, false);
+			selectedRuntime->addLine(QStringLiteral("selected output"), WorldRuntime::LineOutput, true);
+			selected->view()->setCommandHistoryList({QStringLiteral("selected command")});
+			QString error;
+			QVERIFY2(app.saveOpenWorldStateBeforeShutdown(&error), qPrintable(error));
+			const QString path = app.worldSessionStateFilePath(selectedRuntime);
+			QMudWorldSessionState::WorldSessionStateData checkpoint;
+			QVERIFY2(QMudWorldSessionState::readSessionStateFile(path, &checkpoint, &error),
+			         qPrintable(error));
+			QCOMPARE(checkpoint.commandHistory, QStringList({QStringLiteral("selected command")}));
+			QVERIFY(unselected->close());
+			QThreadPool::globalInstance()->waitForDone();
+			QVERIFY(unselectedRuntime->isSessionStateOutputBufferSealed());
+			QVERIFY(!selectedRuntime->isSessionStateOutputBufferSealed());
+			QMudWorldSessionState::WorldSessionStateData afterClose;
+			QVERIFY2(QMudWorldSessionState::readSessionStateFile(path, &afterClose, &error),
+			         qPrintable(error));
+			QCOMPARE(afterClose.commandHistory, checkpoint.commandHistory);
+			QCOMPARE(afterClose.outputLines.size(), checkpoint.outputLines.size());
+			QVERIFY(selected->close());
+			QThreadPool::globalInstance()->waitForDone();
+			QVERIFY(selectedRuntime->isSessionStateOutputBufferSealed());
+			QVERIFY2(QMudWorldSessionState::readSessionStateFile(path, &afterClose, &error),
+			         qPrintable(error));
+			QCOMPARE(afterClose.commandHistory, checkpoint.commandHistory);
 		}
 
 		static void newObserverPreservesWindowedPresentation()

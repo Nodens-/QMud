@@ -873,7 +873,10 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 	if (!event->isAccepted())
 		return;
 	if (runtime)
+	{
 		runtime->beginWorldSessionClose();
+		runtime->finalizePluginStateForClose();
+	}
 
 	for (const QPointer<WorldChildWindow> &observer : std::as_const(observers))
 		if (observer)

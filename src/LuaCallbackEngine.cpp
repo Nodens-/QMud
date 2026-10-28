@@ -47351,33 +47351,14 @@ static int luaSaveState(lua_State *L)
 		const auto originatingPluginIdentity = originatingPluginRuntimeIdentity(engine);
 		if (callbackScopeSyncBridgeForbidden())
 		{
-			const LuaPluginAsyncResultRequest requestId = nextPluginAsyncResultRequest(engine);
-			const bool                        accepted  = enqueueRuntimeThreadDeferredMutationNoResult(
+			const bool accepted = enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
-			    [pluginId, originatingPluginIdentity, requestId](WorldRuntime &targetRuntime)
+			    [pluginId, originatingPluginIdentity](WorldRuntime &targetRuntime)
 			    {
-				    if (!deferredPluginOwnerIsCurrent(targetRuntime, pluginId, originatingPluginIdentity))
-				    {
-					    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("SaveState"), false,
-					                          eNoSuchPlugin, QString());
-					    return;
-				    }
-				    const QPointer<WorldRuntime> runtimeGuard(&targetRuntime);
-				    targetRuntime.savePluginStateAsync(
-				        pluginId, true,
-				        [runtimeGuard, requestId](const int status)
-				        {
-					        if (runtimeGuard)
-						        emitPluginAsyncResult(*runtimeGuard, requestId, QStringLiteral("SaveState"),
-						                              status == eOK, status, QString());
-				        });
+				    if (deferredPluginOwnerIsCurrent(targetRuntime, pluginId, originatingPluginIdentity))
+					    targetRuntime.savePluginStateAsync(pluginId, true);
 			    });
 			lua_pushnumber(L, accepted ? eOK : ePluginCouldNotSaveState);
-			if (accepted && requestId.isValid())
-			{
-				lua_pushnumber(L, static_cast<lua_Number>(requestId.requestId));
-				return 2;
-			}
 			return 1;
 		}
 		if (!resolvePluginInstalledForApi(engine, runtime, pluginId))

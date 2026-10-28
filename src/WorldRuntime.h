@@ -1920,21 +1920,21 @@ class WorldRuntime : public QObject
 		 */
 		int                       chatSetOption(long id, const QString &optionName, const QString &value);
 		/**
-		 * @brief Saves plugin state to plugin-state file.
+		 * @brief Queues complete plugin state for throttled background persistence.
 		 * @param pluginId Plugin id to save.
 		 * @param scripted Mark save as scripted when `true`.
 		 * @param error Optional output error message.
-		 * @return Save status code.
+		 * @return Save request acceptance status code.
 		 */
 		int  savePluginState(const QString &pluginId, bool scripted = false, QString *error = nullptr);
 		/**
-		 * @brief Saves plugin state after any nested save callback completes.
+		 * @brief Queues plugin state after any nested save callback completes.
 		 * @param pluginId Plugin id to save.
 		 * @param scripted Mark save as scripted when `true`.
-		 * @param completion Completion callback receiving the save status code.
 		 */
-		void savePluginStateAsync(const QString &pluginId, bool scripted,
-		                          std::function<void(int)> completion);
+		void savePluginStateAsync(const QString &pluginId, bool scripted);
+		/** @brief Runs final plugin close/save callbacks once and seals further state publication. */
+		void finalizePluginStateForClose();
 		/**
 		 * @brief Returns plugin metadata value by info selector code.
 		 * @param pluginId Plugin id to query.
@@ -8449,12 +8449,19 @@ class WorldRuntime : public QObject
 		 * @brief Saves one plugin state snapshot.
 		 * @param pluginId Stable identifier of the plugin to save.
 		 * @param scripted Scripted-save flag.
-		 * @param error Optional output error message.
+		 * @param finalSave Make the final snapshot immediately eligible without waiting for I/O.
 		 * @return API status code.
 		 */
-		int  savePluginStateForPlugin(const QString &pluginId, bool scripted, QString *error);
+		int  savePluginStateForPlugin(const QString &pluginId, bool scripted, bool finalSave = false);
+		/**
+		 * @brief Completes the ordered save callback and queues its owning state.
+		 * @param pluginId Canonical plugin identity.
+		 * @param scripted Whether the save is explicit.
+		 * @param completion Optional capture completion, independent of disk I/O.
+		 * @param finalSave Make the final snapshot immediately eligible without waiting for I/O.
+		 */
 		void savePluginStateForPluginContinuable(const QString &pluginId, bool scripted,
-		                                         std::function<void(int)> completion);
+		                                         std::function<void(int)> completion, bool finalSave = false);
 		/**
 		 * @brief Resolves the authoritative variable map for a plugin or native shim.
 		 * @param pluginId Plugin identifier or supported native shim name.
@@ -8484,10 +8491,29 @@ class WorldRuntime : public QObject
 		 * @param variables Replacement variables.
 		 */
 		void               replaceLuaAudioVariables(QMudVariableMapUtils::Store variables);
+		/**
+		 * @brief Validates a request and enters its callback-recursion guard.
+		 * @param pluginId Requested plugin identifier.
+		 * @param scripted Whether this is an explicit save.
+		 * @param resolvedPluginId Receives canonical plugin identity.
+		 * @param callbackEngine Receives the original callback owner.
+		 * @param revision Receives ordered save identity on acceptance.
+		 * @return Early status, or no value when capture should continue.
+		 */
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
-		                            QSharedPointer<LuaCallbackEngine> &callbackEngine);
-		int  finishPluginStateSave(const QString &resolvedPluginId, bool scripted, QString *error);
+		                            QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
+		/**
+		 * @brief Captures and queues state belonging to the original save callback owner.
+		 * @param resolvedPluginId Canonical plugin identifier.
+		 * @param callbackEngine Original engine, or empty for native state.
+		 * @param revision Save order assigned before callback execution.
+		 * @param finalSave Make this captured snapshot immediately eligible.
+		 * @return Request acceptance status.
+		 */
+		int  finishPluginStateSave(const QString                           &resolvedPluginId,
+		                           const QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 revision,
+		                           bool finalSave);
 		/**
 		 * @brief Generates a missing world identity through the authoritative attribute mutation path.
 		 */
@@ -9230,6 +9256,8 @@ class WorldRuntime : public QObject
 		QString                                     m_comments;
 		IndexedRingBuffer<LineEntry>                m_lines;
 		QHash<qint64, LineEntry>                    m_pendingOutputLogLines;
+		bool                                        m_pluginStateFinalizationStarted{false};
+		bool                                        m_pluginStateFinalized{false};
 		bool                                        m_sessionStateOutputBufferSealed{false};
 		QMap<qint64, int>                           m_acceleratorKeyToCommand;
 		QMap<int, AcceleratorEntry>                 m_commandToAcceleratorEntry;

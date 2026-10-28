@@ -26,6 +26,7 @@
 #include "MainWindowHostResolver.h"
 #include "MushclientImportUtils.h"
 #include "NameGeneration.h"
+#include "PluginStatePersistence.h"
 #include "ReloadUtils.h"
 #include "SoundEngine.h"
 #include "SqliteCompat.h"
@@ -2412,6 +2413,7 @@ AppController::AppController(const bool disableAutoConnectForExecution, QObject 
 
 AppController::~AppController()
 {
+	PluginStatePersistence::instance().flush();
 	if (QCoreApplication *application = QCoreApplication::instance())
 		application->removeEventFilter(this);
 #ifdef QMUD_ENABLE_LUA_I18N
@@ -2893,6 +2895,7 @@ bool AppController::saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage
 		}
 	}
 
+	PluginStatePersistence::instance().flush();
 	return true;
 }
 
@@ -2995,7 +2998,7 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 		        qApp,
 		        [completionFn, runtimeGuard, persistOutputBuffer, ok, error]
 		        {
-			        if (persistOutputBuffer && runtimeGuard)
+			        if (persistOutputBuffer && runtimeGuard && !runtimeGuard->runtimeDestructionStarted())
 				        runtimeGuard->setSessionStateOutputBufferSealed(false);
 			        if (completionFn && *completionFn)
 				        (*completionFn)(ok, error);
@@ -6470,6 +6473,13 @@ void AppController::handleUpdateQmudNow()
 					            .arg(restartLogCloseError));
 					    return false;
 				    }
+				    QString pluginStateError;
+				    if (!saveOpenWorldPluginStatesBeforeRestart(&pluginStateError))
+				    {
+					    QMessageBox::warning(resolveUiOwner(), QStringLiteral("QMud Update"),
+					                         pluginStateError);
+					    return false;
+				    }
 				    QString restartSessionStateError;
 				    if (!saveOpenWorldSessionStatesBeforeRestart(&restartSessionStateError))
 				    {
@@ -6481,6 +6491,7 @@ void AppController::handleUpdateQmudNow()
 					            .arg(restartSessionStateError));
 					    return false;
 				    }
+				    PluginStatePersistence::instance().flush();
 				    return true;
 			    };
 
@@ -14715,6 +14726,7 @@ bool AppController::prepareForApplicationRestart(const QString &title, const boo
 		    QStringLiteral("Failed to persist world session state before restart.\n%1").arg(error));
 		return false;
 	}
+	PluginStatePersistence::instance().flush();
 	return true;
 }
 
@@ -15253,6 +15265,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 		argv.push_back(arg.data());
 	argv.push_back(nullptr);
 
+	PluginStatePersistence::instance().flush();
 	execv(executablePathBytes.constData(), argv.data());
 
 	const int savedErrno = errno;

@@ -8,6 +8,8 @@
  */
 
 #include "WorldRuntime.h"
+#include "PluginStatePersistence.h"
+#include "helpers/XmlEscapeUtils.h"
 
 #include "AnsiSgrParseUtils.h"
 #include "AppController.h"
@@ -7110,70 +7112,6 @@ namespace
 		return result;
 	}
 
-	/** @brief Selects the established XML attribute or element-text escaping rules. */
-	enum class XmlEscapeContext
-	{
-		Attribute,
-		Text
-	};
-
-	/**
-	 * @brief Escapes changed XML spans in one pass, sharing inputs that need no changes.
-	 * @param source Unescaped UTF-16 input.
-	 * @param context Attribute or element-text escaping rules.
-	 * @return Escaped XML preserving the existing whitespace and character handling.
-	 */
-	QString escapeXml(const QString &source, const XmlEscapeContext context)
-	{
-		QString           result;
-		const QStringView view(source);
-		qsizetype         runStart = 0;
-		bool              changed  = false;
-		for (qsizetype index = 0; index < view.size(); ++index)
-		{
-			const ushort      code = view.at(index).unicode();
-			QLatin1StringView replacement;
-			switch (code)
-			{
-			case '<':
-				replacement = QLatin1StringView("&lt;");
-				break;
-			case '>':
-				replacement = QLatin1StringView("&gt;");
-				break;
-			case '&':
-				replacement = QLatin1StringView("&amp;");
-				break;
-			case '"':
-				if (context != XmlEscapeContext::Attribute)
-					continue;
-				replacement = QLatin1StringView("&quot;");
-				break;
-			case '\t':
-				if (context != XmlEscapeContext::Text)
-					continue;
-				replacement = QLatin1StringView("&#9;");
-				break;
-			default:
-				if (code >= 0x20 || code == '\n' || code == '\r')
-					continue;
-				break;
-			}
-			if (!changed)
-			{
-				result.reserve(source.size());
-				changed = true;
-			}
-			result += view.sliced(runStart, index - runStart);
-			result += replacement;
-			runStart = index + 1;
-		}
-		if (!changed)
-			return source;
-		result += view.sliced(runStart);
-		return result;
-	}
-
 	/**
 	 * @brief Escapes an XML attribute using the shared single-pass implementation.
 	 * @param source Unescaped attribute value.
@@ -7181,7 +7119,7 @@ namespace
 	 */
 	QString fixHtmlString(const QString &source)
 	{
-		return escapeXml(source, XmlEscapeContext::Attribute);
+		return QMudXmlEscapeUtils::escapeXml(source, QMudXmlEscapeUtils::XmlEscapeContext::Attribute);
 	}
 
 	/**
@@ -7191,7 +7129,7 @@ namespace
 	 */
 	QString fixHtmlMultilineString(const QString &source)
 	{
-		return escapeXml(source, XmlEscapeContext::Text);
+		return QMudXmlEscapeUtils::escapeXml(source, QMudXmlEscapeUtils::XmlEscapeContext::Text);
 	}
 
 	QString replaceNewlines(const QString &value)
@@ -7887,39 +7825,7 @@ WorldRuntime::~WorldRuntime()
 {
 	beginRuntimeDestruction();
 
-	const QString luaAudioId = QMudNativePluginRegistry::luaAudioPluginId();
-	QStringList   closingPluginIds;
-	closingPluginIds.reserve(m_plugins.size());
-	QVector<QSharedPointer<LuaCallbackEngine>> initiallyLoadedEngines;
-	initiallyLoadedEngines.reserve((m_luaCallbacks ? 1 : 0) + m_plugins.size());
-	for (const Plugin &plugin : std::as_const(m_plugins))
-	{
-		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
-		if (!pluginId.isEmpty())
-			closingPluginIds.push_back(pluginId);
-		if (plugin.lua)
-			initiallyLoadedEngines.push_back(plugin.lua);
-	}
-	if (m_luaCallbacks)
-		initiallyLoadedEngines.push_back(makeNonOwningLuaEngineRef(m_luaCallbacks));
-
-	cancelSuspendedPluginCallbackDispatchesForEngines(initiallyLoadedEngines);
-
-	for (const QString &pluginId : std::as_const(closingPluginIds))
-	{
-		const int pluginIndex = findPluginIndex(m_plugins, pluginId);
-		if (pluginIndex < 0)
-			continue;
-		const QSharedPointer<LuaCallbackEngine> engine =
-		    hasValidPluginId(m_plugins.at(pluginIndex)) ? m_plugins.at(pluginIndex).lua : nullptr;
-		if (engine)
-			dispatchSingleEngineNoArgPluginCallback(
-			    engine, LuaCallbackEvent::Close,
-			    WorldRuntime::PluginCallbackCompletionPolicy::CompletionRequired);
-		if (pluginId != luaAudioId)
-			savePluginStateForPlugin(pluginId, false, nullptr);
-	}
-	savePluginStateForPlugin(luaAudioId, false, nullptr);
+	finalizePluginStateForClose();
 	m_pluginCallbackDispatchShuttingDown = true;
 
 	if (m_viewDestroyedConnection)
@@ -7979,6 +7885,51 @@ WorldRuntime::~WorldRuntime()
 	if (!m_udpListeners.isEmpty())
 		invalidateLuaCallbackUdpPresentationSnapshot();
 	m_udpListeners.clear();
+}
+
+void WorldRuntime::finalizePluginStateForClose()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::finalizePluginStateForClose");
+	if (m_pluginStateFinalizationStarted)
+		return;
+	m_pluginStateFinalizationStarted = true;
+	setSessionStateOutputBufferSealed(true);
+	beginRuntimeDestruction();
+
+	const QString luaAudioId = QMudNativePluginRegistry::luaAudioPluginId();
+	QStringList   closingPluginIds;
+	closingPluginIds.reserve(m_plugins.size());
+	QVector<QSharedPointer<LuaCallbackEngine>> initiallyLoadedEngines;
+	initiallyLoadedEngines.reserve((m_luaCallbacks ? 1 : 0) + m_plugins.size());
+	for (const Plugin &plugin : std::as_const(m_plugins))
+	{
+		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
+		if (!pluginId.isEmpty())
+			closingPluginIds.push_back(pluginId);
+		if (plugin.lua)
+			initiallyLoadedEngines.push_back(plugin.lua);
+	}
+	if (m_luaCallbacks)
+		initiallyLoadedEngines.push_back(makeNonOwningLuaEngineRef(m_luaCallbacks));
+
+	cancelSuspendedPluginCallbackDispatchesForEngines(initiallyLoadedEngines);
+
+	for (const QString &pluginId : std::as_const(closingPluginIds))
+	{
+		const int pluginIndex = findPluginIndex(m_plugins, pluginId);
+		if (pluginIndex < 0)
+			continue;
+		const QSharedPointer<LuaCallbackEngine> engine =
+		    hasValidPluginId(m_plugins.at(pluginIndex)) ? m_plugins.at(pluginIndex).lua : nullptr;
+		if (engine)
+			dispatchSingleEngineNoArgPluginCallback(
+			    engine, LuaCallbackEvent::Close,
+			    WorldRuntime::PluginCallbackCompletionPolicy::CompletionRequired);
+		if (pluginId != luaAudioId)
+			savePluginStateForPlugin(pluginId, false);
+	}
+	savePluginStateForPlugin(luaAudioId, false);
+	m_pluginStateFinalized = true;
 }
 
 void WorldRuntime::beginRuntimeDestruction()
@@ -29032,7 +28983,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 				QString base = m_stateFilesDirectory;
 				if (!base.endsWith('/') && !base.endsWith('\\'))
 					base += '/';
-				const QString   stateFile = base + worldId + "-" + pluginId + "-state.xml";
+				const QString stateFile = base + worldId + "-" + pluginId + "-state.xml";
+				PluginStatePersistence::instance().flush(QFileInfo(stateFile).absoluteFilePath());
 				QFileInfo const stateInfo(stateFile);
 				if (stateInfo.exists() && stateInfo.size() > 0)
 				{
@@ -32009,7 +31961,8 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 			QString base = m_stateFilesDirectory;
 			if (!base.endsWith('/') && !base.endsWith('\\'))
 				base += '/';
-			const QString   stateFile = base + worldId + "-" + pluginId + "-state.xml";
+			const QString stateFile = base + worldId + "-" + pluginId + "-state.xml";
+			PluginStatePersistence::instance().flush(QFileInfo(stateFile).absoluteFilePath());
 			QFileInfo const stateInfo(stateFile);
 			if (stateInfo.exists())
 			{
@@ -32206,16 +32159,18 @@ void WorldRuntime::continueUnloadPluginAfterClose(const QSharedPointer<PendingPl
 	}
 	if (!operation->continuable)
 	{
-		savePluginStateForPlugin(operation->pluginId, false, nullptr);
+		savePluginStateForPlugin(operation->pluginId, false, true);
 		finishUnloadPluginRemoval(operation);
 		return;
 	}
-	savePluginStateForPluginContinuable(operation->pluginId, false,
-	                                    [operation](const int /*result*/)
-	                                    {
-		                                    if (operation->runtime)
-			                                    operation->runtime->finishUnloadPluginRemoval(operation);
-	                                    });
+	savePluginStateForPluginContinuable(
+	    operation->pluginId, false,
+	    [operation](const int /*result*/)
+	    {
+		    if (operation->runtime)
+			    operation->runtime->finishUnloadPluginRemoval(operation);
+	    },
+	    true);
 }
 
 void WorldRuntime::finishUnloadPluginRemoval(const QSharedPointer<PendingPluginUnload> &operation)
@@ -35235,6 +35190,7 @@ bool WorldRuntime::loadLuaAudioStateVariables(QMudVariableMapUtils::Store &varia
 		base += '/';
 	const QString stateFile =
 	    base + worldId + "-" + QMudNativePluginRegistry::luaAudioPluginId() + "-state.xml";
+	PluginStatePersistence::instance().flush(QFileInfo(stateFile).absoluteFilePath());
 	const QFileInfo stateInfo(stateFile);
 	if (!stateInfo.exists() || stateInfo.size() <= 0)
 		return true;
@@ -35291,63 +35247,44 @@ int WorldRuntime::savePluginState(const QString &pluginId, bool scripted, QStrin
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::savePluginState");
+	if (error)
+		error->clear();
 	if (pluginId.isEmpty())
 		return eNotAPlugin;
 	if (isLuaAudioPluginIdentifier(pluginId))
-		return savePluginStateForPlugin(QMudNativePluginRegistry::luaAudioPluginId(), scripted, error);
+		return savePluginStateForPlugin(QMudNativePluginRegistry::luaAudioPluginId(), scripted);
 	const int index = findPluginIndex(m_plugins, pluginId);
 	if (index < 0)
 		return eNoSuchPlugin;
 	const QString resolvedPluginId = m_plugins.at(index).attributes.value(QStringLiteral("id"));
-	return savePluginStateForPlugin(resolvedPluginId, scripted, error);
+	return savePluginStateForPlugin(resolvedPluginId, scripted);
 }
 
-void WorldRuntime::savePluginStateAsync(const QString &pluginId, const bool scripted,
-                                        std::function<void(int)> completion)
+void WorldRuntime::savePluginStateAsync(const QString &pluginId, const bool scripted)
 {
 	if (QThread::currentThread() != thread())
 	{
 		const QPointer<WorldRuntime> runtime(this);
 		qmudInvokeMethodQueued(this,
-		                       [runtime, pluginId, scripted, completion = std::move(completion)]() mutable
+		                       [runtime, pluginId, scripted]
 		                       {
 			                       if (runtime)
-				                       runtime->savePluginStateAsync(pluginId, scripted,
-				                                                     std::move(completion));
+				                       runtime->savePluginStateAsync(pluginId, scripted);
 		                       });
 		return;
 	}
-
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::savePluginStateAsync");
-	if (pluginId.isEmpty())
-	{
-		if (completion)
-			completion(eNotAPlugin);
-		return;
-	}
-	if (isLuaAudioPluginIdentifier(pluginId))
-	{
-		savePluginStateForPluginContinuable(QMudNativePluginRegistry::luaAudioPluginId(), scripted,
-		                                    std::move(completion));
-		return;
-	}
-	const int index = findPluginIndex(m_plugins, pluginId);
-	if (index < 0)
-	{
-		if (completion)
-			completion(eNoSuchPlugin);
-		return;
-	}
-	const QString resolvedPluginId = m_plugins.at(index).attributes.value(QStringLiteral("id"));
-	savePluginStateForPluginContinuable(resolvedPluginId, scripted, std::move(completion));
+	if (!pluginId.isEmpty())
+		savePluginStateForPluginContinuable(pluginId, scripted, {});
 }
 
-int WorldRuntime::savePluginStateForPlugin(const QString &pluginId, const bool scripted, QString *error)
+int WorldRuntime::savePluginStateForPlugin(const QString &pluginId, const bool scripted, const bool finalSave)
 {
 	QString                           resolvedPluginId;
 	QSharedPointer<LuaCallbackEngine> callbackEngine;
+	quint64                           revision = 0;
 	if (const std::optional<int> earlyResult =
-	        preparePluginStateSave(pluginId, scripted, resolvedPluginId, callbackEngine))
+	        preparePluginStateSave(pluginId, scripted, resolvedPluginId, callbackEngine, revision))
 	{
 		return *earlyResult;
 	}
@@ -35355,13 +35292,17 @@ int WorldRuntime::savePluginStateForPlugin(const QString &pluginId, const bool s
 		dispatchSingleEngineNoArgPluginCallback(
 		    callbackEngine, LuaCallbackEvent::SaveState,
 		    WorldRuntime::PluginCallbackCompletionPolicy::CompletionRequired);
-	return finishPluginStateSave(resolvedPluginId, scripted, error);
+	const int result = finishPluginStateSave(resolvedPluginId, callbackEngine, revision, finalSave);
+	return scripted ? result : eOK;
 }
 
 std::optional<int> WorldRuntime::preparePluginStateSave(const QString &pluginId, const bool scripted,
                                                         QString                           &resolvedPluginId,
-                                                        QSharedPointer<LuaCallbackEngine> &callbackEngine)
+                                                        QSharedPointer<LuaCallbackEngine> &callbackEngine,
+                                                        quint64                           &revision)
 {
+	if (m_pluginStateFinalized)
+		return eOK;
 	const int  initialIndex = findPluginIndex(m_plugins, pluginId);
 	const bool nativeLuaAudio =
 	    isLuaAudioPluginIdentifier(pluginId) &&
@@ -35384,6 +35325,7 @@ std::optional<int> WorldRuntime::preparePluginStateSave(const QString &pluginId,
 	{
 		resolvedPluginId = QMudNativePluginRegistry::luaAudioPluginId();
 		callbackEngine.clear();
+		revision = PluginStatePersistence::instance().reserveRevision();
 		return std::nullopt;
 	}
 	else
@@ -35398,37 +35340,42 @@ std::optional<int> WorldRuntime::preparePluginStateSave(const QString &pluginId,
 			return scripted ? ePluginCouldNotSaveState : eOK;
 		plugin.savingStateNow = true;
 		callbackEngine        = plugin.lua;
+		revision              = PluginStatePersistence::instance().reserveRevision();
 	}
 	return std::nullopt;
 }
 
 void WorldRuntime::savePluginStateForPluginContinuable(const QString &pluginId, const bool scripted,
-                                                       std::function<void(int)> completion)
+                                                       std::function<void(int)> completion,
+                                                       const bool               finalSave)
 {
 	QString                           resolvedPluginId;
 	QSharedPointer<LuaCallbackEngine> callbackEngine;
+	quint64                           revision = 0;
 	if (const std::optional<int> earlyResult =
-	        preparePluginStateSave(pluginId, scripted, resolvedPluginId, callbackEngine))
+	        preparePluginStateSave(pluginId, scripted, resolvedPluginId, callbackEngine, revision))
 	{
 		if (completion)
 			completion(*earlyResult);
 		return;
 	}
 	const QPointer<WorldRuntime> runtime(this);
-	auto                         finish = [runtime, resolvedPluginId, scripted,
-	                                       completion = std::move(completion)](const bool cancelled) mutable
+	auto finish = [runtime, resolvedPluginId, scripted, callbackEngine, revision, finalSave,
+	               completion = std::move(completion)](const bool cancelled) mutable
 	{
 		if (!runtime)
 			return;
 		if (cancelled)
 		{
-			if (const int index = findPluginIndex(runtime->m_plugins, resolvedPluginId); index >= 0)
+			if (const int index = findPluginIndex(runtime->m_plugins, resolvedPluginId);
+			    index >= 0 && runtime->m_plugins[index].lua == callbackEngine)
 				runtime->m_plugins[index].savingStateNow = false;
 		}
-		const int result = cancelled ? (scripted ? ePluginCouldNotSaveState : eOK)
-		                             : runtime->finishPluginStateSave(resolvedPluginId, scripted, nullptr);
+		const int result =
+		    cancelled ? (scripted ? ePluginCouldNotSaveState : eOK)
+		              : runtime->finishPluginStateSave(resolvedPluginId, callbackEngine, revision, finalSave);
 		if (completion)
-			completion(result);
+			completion(scripted ? result : eOK);
 	};
 	if (callbackEngine)
 	{
@@ -35444,81 +35391,42 @@ void WorldRuntime::savePluginStateForPluginContinuable(const QString &pluginId, 
 	finish(false);
 }
 
-int WorldRuntime::finishPluginStateSave(const QString &resolvedPluginId, const bool scripted, QString *error)
+int WorldRuntime::finishPluginStateSave(const QString                           &resolvedPluginId,
+                                        const QSharedPointer<LuaCallbackEngine> &callbackEngine,
+                                        const quint64 revision, const bool finalSave)
 {
+	if (m_pluginStateFinalized)
+		return eOK;
+	const bool nativeLuaAudio = isLuaAudioPluginIdentifier(resolvedPluginId) &&
+	                            nativeShimVisibleForPluginApi(m_plugins, resolvedPluginId);
+	const int  index          = findPluginIndex(m_plugins, resolvedPluginId);
+	PluginStatePersistence::Snapshot snapshot;
+	if (nativeLuaAudio)
+		snapshot.variables = m_luaAudioVariables;
+	else
+	{
+		if (index < 0 || m_plugins.at(index).lua != callbackEngine)
+			return ePluginCouldNotSaveState;
+		m_plugins[index].savingStateNow = false;
+		snapshot.variables              = m_plugins.at(index).variables;
+	}
 	const QString worldId = m_worldAttributes.value(QStringLiteral("id")).trimmed();
 	if (worldId.isEmpty() || m_stateFilesDirectory.isEmpty())
-		return scripted ? ePluginCouldNotSaveState : eOK;
+		return ePluginCouldNotSaveState;
 	QString base = m_stateFilesDirectory;
 	if (!base.endsWith('/') && !base.endsWith('\\'))
 		base += '/';
 	if (!QDir(base).exists())
-		return scripted ? ePluginCouldNotSaveState : eOK;
-
-	const bool nativeLuaAudio =
-	    isLuaAudioPluginIdentifier(resolvedPluginId) &&
-	    nativeShimVisibleForPluginApi(m_plugins, QMudNativePluginRegistry::luaAudioPluginId());
-	const int currentIndex = findPluginIndex(m_plugins, resolvedPluginId);
-	if (currentIndex < 0 && !nativeLuaAudio)
-		return scripted ? ePluginCouldNotSaveState : eOK;
-	QMudVariableMapUtils::Store variables;
-	if (nativeLuaAudio)
-	{
-		variables = m_luaAudioVariables;
-		if (currentIndex >= 0)
-			m_plugins[currentIndex].savingStateNow = false;
-	}
-	else
-	{
-		Plugin &currentPlugin        = m_plugins[currentIndex];
-		currentPlugin.savingStateNow = false;
-		variables                    = currentPlugin.variables;
-	}
-
+		return ePluginCouldNotSaveState;
 	const QString stateFile = base + worldId + "-" + resolvedPluginId + "-state.xml";
-	QSaveFile     file(stateFile);
-	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-	{
-		if (error)
-			*error = QStringLiteral("Unable to create plugin state file: %1").arg(stateFile);
-		return scripted ? ePluginCouldNotSaveState : eOK;
-	}
+	snapshot.targetFilePath = QFileInfo(stateFile).absoluteFilePath();
 
-	QTextStream out(&file);
-	out.setEncoding(QStringConverter::Utf8);
-	const auto      nl = QStringLiteral("\r\n");
-
-	const QDateTime now     = QDateTime::currentDateTime();
-	const QString   savedOn = QLocale::system().toString(now, QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
-
-	out << QStringLiteral(R"(<?xml version="1.0" encoding="utf-8"?>)") << nl;
-	out << QStringLiteral("<!DOCTYPE qmud>") << nl;
-	out << QStringLiteral("<!-- Saved on ") << fixHtmlString(savedOn) << QStringLiteral(" -->") << nl;
-	out << QStringLiteral("<!-- QMud version ") << kVersionString << QStringLiteral(" -->") << nl;
-	out << QStringLiteral("<!-- Written by Panagiotis Kalogiratos -->") << nl;
-	out << QStringLiteral("<!-- Home Page: https://github.com/Nodens-/QMud -->") << nl;
-	out << QStringLiteral("<qmud>") << nl;
-	out << nl << QStringLiteral("<!-- variables -->") << nl;
-	out << QStringLiteral("<variables>") << nl;
-
-	variables.forEachVariable(
-	    [&out, &nl](const QString &label, const QString &value)
-	    {
-		    out << QStringLiteral("  <variable name=\"") << fixHtmlString(label) << QStringLiteral("\">")
-		        << fixHtmlMultilineString(value) << QStringLiteral("</variable>") << nl;
-	    });
-
-	out << QStringLiteral("</variables>") << nl;
-	out << QStringLiteral("</qmud>") << nl;
-
-	if (!file.commit())
-	{
-		if (error)
-			*error = QStringLiteral("Unable to write plugin state file: %1").arg(stateFile);
-		return scripted ? ePluginCouldNotSaveState : eOK;
-	}
-
-	return eOK;
+	snapshot.savedAt  = QDateTime::currentDateTime();
+	snapshot.revision = revision;
+	return PluginStatePersistence::instance().submit(std::move(snapshot),
+	                                                 finalSave || m_pluginStateFinalizationStarted)
+	           ? eOK
+	           : ePluginCouldNotSaveState;
 }
 
 void WorldRuntime::sortPluginsBySequence()

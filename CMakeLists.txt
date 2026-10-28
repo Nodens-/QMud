@@ -360,6 +360,7 @@ set(QMUD_SOURCES
         NativePluginRegistry.cpp
         SqliteCompat.cpp
         WorldRuntime.cpp
+        PluginStatePersistence.cpp
         WorldCommandProcessor.cpp
         SpeedwalkParser.cpp
         helpers/TimerSchedulingUtils.cpp
@@ -459,6 +460,8 @@ set(QMUD_HEADERS
         ActivityWindow.h
         dialogs/ImportXmlDialog.h
         WorldDocument.h
+        PluginStatePersistence.h
+        helpers/XmlEscapeUtils.h
         XmlImportResult.h
         NativePluginRegistry.h
         WorldRuntime.h
