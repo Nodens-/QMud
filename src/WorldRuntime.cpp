@@ -4250,9 +4250,20 @@ void WorldRuntime::resumeLuaDeferredRuntimeMutationPlayback(
 			       playback->nextMutation < playback->mutations.size())
 			{
 				m_luaCallbackTurnChatSnapshotCache.reset();
-				if (std::function<void()> mutation = std::move(playback->mutations[playback->nextMutation++]);
-				    mutation)
-					mutation();
+				const qsizetype index = playback->nextMutation++;
+				if (playback->mutations.isDetached())
+				{
+					if (std::function<void()> mutation = std::move(playback->mutations[index]); mutation)
+						mutation();
+				}
+				else
+				{
+					// Pin shared storage without detaching it. Reentrant cancellation may clear playback's
+					// handle while this callable is still executing.
+					const auto journal = playback->mutations;
+					if (const auto &mutation = journal.at(index); mutation)
+						mutation();
+				}
 			}
 		}
 

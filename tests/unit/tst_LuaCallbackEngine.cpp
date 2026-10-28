@@ -88,6 +88,44 @@ extern "C"
 
 namespace
 {
+	/** @brief Counts copies of a deferred callable without relying on allocator or timing behavior. */
+	class CopyTrackedDeferredMutation
+	{
+		public:
+			/**
+			 * @brief Creates a callable whose later copies increment the supplied counter.
+			 * @param copies Shared copy counter.
+			 * @param action Work to execute on the runtime thread.
+			 */
+			CopyTrackedDeferredMutation(std::shared_ptr<std::atomic_int> copies, std::function<void()> action)
+			    : m_copies(std::move(copies)), m_action(std::move(action))
+			{
+			}
+			/**
+			 * @brief Records a copy of a deferred callable and its captured work.
+			 * @param other Callable to copy.
+			 */
+			CopyTrackedDeferredMutation(const CopyTrackedDeferredMutation &other)
+			    : m_copies(other.m_copies), m_action(other.m_action)
+			{
+				m_copies->fetch_add(1, std::memory_order_relaxed);
+			}
+			/**
+			 * @brief Transfers a callable without counting a copy.
+			 * @param other Callable to move.
+			 */
+			CopyTrackedDeferredMutation(CopyTrackedDeferredMutation &&other) noexcept = default;
+			/** @brief Executes the captured work. */
+			void operator()() const
+			{
+				m_action();
+			}
+
+		private:
+			std::shared_ptr<std::atomic_int> m_copies;
+			std::function<void()>            m_action;
+	};
+
 	QVariant runtimeCounterValue(const LuaCallbackSnapshot &snapshot, const QString &name)
 	{
 #define QMUD_READ_TYPED_RUNTIME_COUNTER(enumName, member, type, key, policy)                                 \
@@ -385,6 +423,14 @@ class tst_LuaCallbackEngine final : public QObject
 		void luaVisiblePathApisReturnRelativePosix();
 		void utilsMultiListBoxAcceptsMushclientArgumentOrder();
 		void deferredRuntimeMutationBatchesPreserveOrderAndOwnership();
+		/** @brief Verifies asynchronous journal delivery executes shared closures without copying them. */
+		void sharedMutationPlaybackAvoidsClosureCopies();
+		/** @brief Verifies cancellation can clear every journal owner while its current callable remains alive. */
+		void sharedMutationPlaybackPinsStorageDuringCancellation();
+		/** @brief Verifies nested suspended journals resume in order without copying shared callables. */
+		void sharedMutationPlaybackResumesAfterNestedChild();
+		/** @brief Verifies uniquely owned journals release each callable's captures before the next call. */
+		void uniqueMutationPlaybackReleasesCompletedCaptures();
 		void directCallbackDefersSameThreadMutationPlayback();
 		void directNestedDispatchBoundaryUsesDeferredMutationOverlay();
 		void workerExecutorDispatchesRealEngines();
@@ -3644,6 +3690,196 @@ multilistbox_no_host_returns_nil = result == nil
 	const QByteArray multilistboxError = luaGlobalString(engine.luaState(), "multilistbox_error").toUtf8();
 	QVERIFY2(luaGlobalBoolean(engine.luaState(), "multilistbox_signature_ok"), multilistboxError.constData());
 	QVERIFY(luaGlobalBoolean(engine.luaState(), "multilistbox_no_host_returns_nil"));
+}
+
+void tst_LuaCallbackEngine::sharedMutationPlaybackAvoidsClosureCopies()
+{
+	WorldRuntime      runtime;
+	const auto        copies = std::make_shared<std::atomic_int>(0);
+	QVector<int>      order;
+	std::atomic_bool  appended{false};
+	bool              completed = false;
+	// Captured state must outlive executor shutdown and recovery after an assertion failure.
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	const auto        engine = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(executor, engine, QStringLiteral("function retained() end"), &runtime));
+	LuaBatchDispatchRequest request;
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.engines      = {engine};
+	request.functionName = QStringLiteral("retained");
+	executor.dispatchBatchAsync(
+	    request, nullptr,
+	    [&, engine, copies](const LuaBatchDispatchResult &)
+	    {
+		    QVector<std::function<void()>> mutations;
+		    for (int index = 0; index < 32; ++index)
+			    mutations.push_back(
+			        CopyTrackedDeferredMutation(copies, [&, index] { order.push_back(index); }));
+		    engine->appendDeferredRuntimeMutationBatch(&runtime, std::move(mutations));
+		    copies->store(0, std::memory_order_relaxed);
+		    appended.store(true, std::memory_order_release);
+	    });
+	QTRY_VERIFY_WITH_TIMEOUT(appended.load(std::memory_order_acquire), 3000);
+	QObject target;
+	executor.dispatchBatchAsync(request, &target,
+	                            [&](const LuaBatchDispatchResult &dispatchResult)
+	                            {
+		                            QVERIFY(dispatchResult.deferredRuntimeMutationDelivery);
+		                            LuaBatchDispatchResult result = dispatchResult;
+		                            runtime.applyCompletedPluginCallbackMutations(result,
+		                                                                          [&](const bool success)
+		                                                                          {
+			                                                                          QVERIFY(success);
+			                                                                          completed = true;
+		                                                                          });
+	                            });
+	QTRY_VERIFY_WITH_TIMEOUT(completed, 3000);
+	QCOMPARE(copies->load(std::memory_order_relaxed), 0);
+	QCOMPARE(order.size(), 32);
+	for (int index = 0; index < order.size(); ++index)
+		QCOMPARE(order.at(index), index);
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::sharedMutationPlaybackPinsStorageDuringCancellation()
+{
+	WorldRuntime                             runtime;
+	const auto                               copies   = std::make_shared<std::atomic_int>(0);
+	auto                                     payload  = std::make_shared<int>(42);
+	const std::weak_ptr<int>                 lifetime = payload;
+	QVector<LuaDeferredRuntimeMutationBatch> retained;
+	QStringList                              order;
+	bool                                     completed = false;
+	LuaDeferredRuntimeMutationBatch          batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(CopyTrackedDeferredMutation(
+	    copies,
+	    [&, payload = std::move(payload)]
+	    {
+		    order.push_back(QStringLiteral("executing"));
+		    retained.clear();
+		    const auto cancel = runtime.retainLuaDeferredRuntimeMutationPlayback();
+		    QVERIFY(cancel);
+		    cancel(true);
+		    QVERIFY(!lifetime.expired());
+		    QCOMPARE(*payload, 42);
+		    order.push_back(QStringLiteral("returned"));
+	    }));
+	batch.mutations.push_back([&] { order.push_back(QStringLiteral("must not execute")); });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	retained = result.deferredRuntimeMutationBatches;
+	copies->store(0, std::memory_order_relaxed);
+	runtime.applyCompletedPluginCallbackMutations(result,
+	                                              [&](const bool success)
+	                                              {
+		                                              QVERIFY(!success);
+		                                              order.push_back(QStringLiteral("cancelled"));
+		                                              completed = true;
+	                                              });
+	QVERIFY(completed);
+	QCOMPARE(order, QStringList({QStringLiteral("executing"), QStringLiteral("cancelled"),
+	                             QStringLiteral("returned")}));
+	QCOMPARE(copies->load(std::memory_order_relaxed), 0);
+	QVERIFY(lifetime.expired());
+}
+
+void tst_LuaCallbackEngine::sharedMutationPlaybackResumesAfterNestedChild()
+{
+	WorldRuntime                             runtime;
+	const auto                               copies = std::make_shared<std::atomic_int>(0);
+	QStringList                              order;
+	std::function<void(bool)>                releaseChild;
+	QVector<LuaDeferredRuntimeMutationBatch> retainedChild;
+	bool                                     completed = false;
+	LuaDeferredRuntimeMutationBatch          parent;
+	parent.runtime = &runtime;
+	parent.mutations.push_back(CopyTrackedDeferredMutation(
+	    copies,
+	    [&]
+	    {
+		    order.push_back(QStringLiteral("parent first"));
+		    LuaDeferredRuntimeMutationBatch child;
+		    child.runtime = &runtime;
+		    child.mutations.push_back(CopyTrackedDeferredMutation(
+		        copies,
+		        [&]
+		        {
+			        order.push_back(QStringLiteral("child first"));
+			        releaseChild = runtime.retainLuaDeferredRuntimeMutationPlayback();
+		        }));
+		    child.mutations.push_back(CopyTrackedDeferredMutation(
+		        copies, [&] { order.push_back(QStringLiteral("child second")); }));
+		    LuaBatchDispatchResult childResult;
+		    childResult.deferredRuntimeMutationBatches.push_back(std::move(child));
+		    retainedChild = childResult.deferredRuntimeMutationBatches;
+		    QVERIFY(retainedChild.constFirst().mutations.isSharedWith(
+		        childResult.deferredRuntimeMutationBatches.constFirst().mutations));
+		    runtime.applyCompletedPluginCallbackMutations(childResult);
+	    }));
+	parent.mutations.push_back(
+	    CopyTrackedDeferredMutation(copies, [&] { order.push_back(QStringLiteral("parent second")); }));
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(parent));
+	const auto retainedParent = result.deferredRuntimeMutationBatches;
+	QVERIFY(retainedParent.constFirst().mutations.isSharedWith(
+	    result.deferredRuntimeMutationBatches.constFirst().mutations));
+	copies->store(0, std::memory_order_relaxed);
+	runtime.applyCompletedPluginCallbackMutations(result,
+	                                              [&](const bool success)
+	                                              {
+		                                              QVERIFY(success);
+		                                              completed = true;
+	                                              });
+	QVERIFY(releaseChild);
+	QVERIFY(!completed);
+	QCOMPARE(retainedChild.size(), 1);
+	QCOMPARE(retainedChild.constFirst().mutations.size(), 2);
+	QCOMPARE(order, QStringList({QStringLiteral("parent first"), QStringLiteral("child first")}));
+	QCOMPARE(copies->load(std::memory_order_relaxed), 0);
+	releaseChild(false);
+	QVERIFY(completed);
+	QCOMPARE(order, QStringList({QStringLiteral("parent first"), QStringLiteral("child first"),
+	                             QStringLiteral("child second"), QStringLiteral("parent second")}));
+	QCOMPARE(copies->load(std::memory_order_relaxed), 0);
+	releaseChild(false);
+	QCOMPARE(order.size(), 4);
+}
+
+void tst_LuaCallbackEngine::uniqueMutationPlaybackReleasesCompletedCaptures()
+{
+	WorldRuntime                    runtime;
+	const auto                      copies        = std::make_shared<std::atomic_int>(0);
+	auto                            payload       = std::make_shared<int>(42);
+	const std::weak_ptr<int>        lifetime      = payload;
+	bool                            firstExecuted = false;
+	bool                            completed     = false;
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(CopyTrackedDeferredMutation(copies,
+	                                                      [&, payload = std::move(payload)]
+	                                                      {
+		                                                      QCOMPARE(*payload, 42);
+		                                                      firstExecuted = true;
+	                                                      }));
+	batch.mutations.push_back(
+	    [&]
+	    {
+		    QVERIFY(firstExecuted);
+		    QVERIFY(lifetime.expired());
+	    });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	copies->store(0, std::memory_order_relaxed);
+	runtime.applyCompletedPluginCallbackMutations(result,
+	                                              [&](const bool success)
+	                                              {
+		                                              QVERIFY(success);
+		                                              completed = true;
+	                                              });
+	QVERIFY(completed);
+	QCOMPARE(copies->load(std::memory_order_relaxed), 0);
+	QVERIFY(lifetime.expired());
 }
 
 void tst_LuaCallbackEngine::deferredRuntimeMutationBatchesPreserveOrderAndOwnership()
