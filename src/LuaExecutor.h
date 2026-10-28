@@ -1796,6 +1796,16 @@ template <typename Value> class LuaCallbackPersistentStringMap
 			return result;
 		}
 
+		/**
+		 * @brief Checks immutable storage identity without comparing entries.
+		 * @param other Map whose storage is compared.
+		 * @return Whether both maps share the same root and entry count.
+		 */
+		[[nodiscard]] bool sharesStorageWith(const LuaCallbackPersistentStringMap &other) const noexcept
+		{
+			return m_root == other.m_root && m_size == other.m_size;
+		}
+
 		bool operator==(const LuaCallbackPersistentStringMap &other) const
 		{
 			if (m_root == other.m_root)

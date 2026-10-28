@@ -714,6 +714,16 @@ class tst_LuaCallbackEngine final : public QObject
 		void queuedScriptReloadIsAnAtomicOrderingFence();
 		void worldSessionCloseCancelsQueuedAndFutureScriptReloads();
 		void causalArrayMutationPreservesUnrelatedLaterKey();
+		/** @brief Reuses identical array projections and releases an evicted input/result pair. */
+		void causalArrayReplayCacheReusesAndEvictsEventViews();
+		/** @brief Includes the independent array-name index in projection reuse. */
+		void causalArrayReplayCacheKeepsIndependentNameLists();
+		/** @brief Reuses each nested revision without collapsing its ordered array operations. */
+		void causalArrayReplayCachePreservesNestedRevisionOrder();
+		/** @brief Releases cached event-time input and output storage with their causal revision. */
+		void causalArrayReplayCacheReleasesStorageWithRevision();
+		/** @brief Retains existing full-domain array replay instead of operation projection reuse. */
+		void causalArrayReplayCachePreservesFullDomainFallback();
 		void causalArrayMutationSurvivesMatchingLaterRuntimeValue();
 		void causalSameValueArrayWritesSurviveLaterRuntimeChanges();
 		void causalArrayClearPreservesLaterKey();
@@ -14120,6 +14130,9 @@ void tst_LuaCallbackEngine::persistentStringMapPreservesImmutableVersions()
 		     QSharedPointer<const QString>::create(QStringLiteral("value-%1").arg(index))});
 	}
 	const PersistentMap initial = empty.withUpdates(initialUpdates);
+	PersistentMap       updated = initial;
+	QVERIFY(initial.sharesStorageWith(updated));
+	QVERIFY(empty.sharesStorageWith(PersistentMap{}));
 	QCOMPARE(initial.size(), qsizetype{entryCount});
 	for (int index = 0; index < entryCount; ++index)
 	{
@@ -14135,7 +14148,8 @@ void tst_LuaCallbackEngine::persistentStringMapPreservesImmutableVersions()
 	    {QStringLiteral("new-key"),     QSharedPointer<const QString>::create(QStringLiteral("new-value"))    },
 	    {QStringLiteral("missing-key"), {}	                                                                }
     };
-	const PersistentMap updated = initial.withUpdates(laterUpdates);
+	updated = updated.withUpdates(laterUpdates);
+	QVERIFY(!updated.sharesStorageWith(initial));
 	QCOMPARE(updated.size(), qsizetype{entryCount});
 	const auto changedValue = updated.value(QStringLiteral("key-0"));
 	QVERIFY(changedValue);
@@ -14171,6 +14185,7 @@ void tst_LuaCallbackEngine::persistentStringMapPreservesImmutableVersions()
 	PersistentMap equivalent;
 	equivalent = equivalent.withUpdates(initialUpdates);
 	QVERIFY(equivalent == initial);
+	QVERIFY(!equivalent.sharesStorageWith(initial));
 	QVERIFY(equivalent != updated);
 }
 
@@ -22894,6 +22909,275 @@ void tst_LuaCallbackEngine::worldSessionCloseCancelsQueuedAndFutureScriptReloads
 	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
 }
 
+void tst_LuaCallbackEngine::causalArrayReplayCacheReusesAndEvictsEventViews()
+{
+	WorldRuntime  runtime;
+	const QString name = QStringLiteral("cached-array");
+	QCOMPARE(runtime.arrayCreate(name), eOK);
+	QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("before")), eOK);
+	runtime.setVariable(QStringLiteral("view"), QStringLiteral("first"));
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	const auto cursor = runtime.m_causalPluginCallbackSnapshotRevision;
+	QCOMPARE(runtime.arraySet(name, QStringLiteral("event-only"), QStringLiteral("preserved")), eOK);
+	QCOMPARE(runtime.arrayCreate(QStringLiteral("other-array")), eOK);
+	QCOMPARE(runtime.arraySet(QStringLiteral("other-array"), QString(), QStringLiteral("")), eOK);
+	runtime.setVariable(QStringLiteral("view"), QStringLiteral("divergent"));
+	auto divergent = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(divergent);
+	const QWeakPointer<const LuaCallbackArraySnapshot> evictedInput = divergent->arraysByName.value(name);
+	QCOMPARE(runtime.arrayDeleteKey(name, QStringLiteral("event-only")), eOK);
+	QCOMPARE(runtime.arrayDelete(QStringLiteral("other-array")), eOK);
+
+	QVector<WorldRuntime::PluginCallbackDispatchCommand> commands(5);
+	for (int index = 0; index < commands.size(); ++index)
+	{
+		commands[index].request.callbackSnapshotArg = index == 2 || index == 3 ? divergent : initial;
+		commands[index].causalSnapshotRevision      = cursor;
+	}
+	divergent.clear();
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, name]
+	    { static_cast<void>(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("causal"))); });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	const auto revision = cursor->next;
+	QVERIFY(revision && !revision->preparedDelta);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(commands[0]);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(commands[1]);
+	QVERIFY(commands[0].request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    commands[1].request.callbackSnapshotArg->arraysByName));
+	const QWeakPointer<const LuaCallbackArraySnapshot> evictedOutput =
+	    commands[0].request.callbackSnapshotArg->arraysByName.value(name);
+	commands[0].request.callbackSnapshotArg.clear();
+	commands[1].request.callbackSnapshotArg.clear();
+	QVERIFY(!evictedOutput.isNull());
+
+	runtime.applyCausalPluginCallbackSnapshotDeltas(commands[2]);
+	QVERIFY(evictedOutput.isNull());
+	runtime.applyCausalPluginCallbackSnapshotDeltas(commands[3]);
+	QVERIFY(commands[2].request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    commands[3].request.callbackSnapshotArg->arraysByName));
+	QVERIFY(!evictedInput.isNull());
+	const auto preserved = commands[2].request.callbackSnapshotArg;
+	QCOMPARE(arraySnapshotValue(*preserved, name, QStringLiteral("event-only")), QStringLiteral("preserved"));
+	QVERIFY(preserved->arraysByName.contains(QStringLiteral("other-array")));
+	QCOMPARE(preserved->worldVariablesSnapshot.value(QStringLiteral("view")).content,
+	         QStringLiteral("divergent"));
+
+	runtime.applyCausalPluginCallbackSnapshotDeltas(commands[4]);
+	QVERIFY(evictedInput.isNull());
+	const auto replayed = commands[4].request.callbackSnapshotArg;
+	QCOMPARE(arraySnapshotValue(*replayed, name, QStringLiteral("probe")), QStringLiteral("causal"));
+	QVERIFY(!replayed->arraysByName.value(name)->contains(QStringLiteral("event-only")));
+	QVERIFY(!replayed->arrayNamesSnapshot.contains(QStringLiteral("other-array")));
+	QCOMPARE(replayed->worldVariablesSnapshot.value(QStringLiteral("view")).content, QStringLiteral("first"));
+	QCOMPARE(arraySnapshotValue(*initial, name, QStringLiteral("probe")), QStringLiteral("before"));
+
+	QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("later live value")),
+	         eSetReplacingExistingValue);
+	WorldRuntime::PluginCallbackDispatchCommand later;
+	later.request.callbackSnapshotArg = initial;
+	later.causalSnapshotRevision      = cursor;
+	runtime.applyCausalPluginCallbackSnapshotDeltas(later);
+	QVERIFY(later.request.callbackSnapshotArg->arraysByName.sharesStorageWith(replayed->arraysByName));
+	QCOMPARE(arraySnapshotValue(*later.request.callbackSnapshotArg, name, QStringLiteral("probe")),
+	         QStringLiteral("causal"));
+}
+
+void tst_LuaCallbackEngine::causalArrayReplayCacheKeepsIndependentNameLists()
+{
+	WorldRuntime  runtime;
+	const QString name = QStringLiteral("cached-names");
+	QCOMPARE(runtime.arrayCreate(name), eOK);
+	QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("before")), eOK);
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	const auto                                  cursor = runtime.m_causalPluginCallbackSnapshotRevision;
+	WorldRuntime::PluginCallbackDispatchCommand first;
+	first.request.callbackSnapshotArg = initial;
+	first.causalSnapshotRevision      = cursor;
+	auto second                       = first;
+	auto third                        = first;
+	auto separateIndex                = QSharedPointer<LuaCallbackSnapshot>::create(*initial);
+	// The name index is independently projected; sharing values must not overwrite a different index.
+	separateIndex->arrayNamesSnapshot.push_back(QStringLiteral("event-name"));
+	separateIndex->hasArraySnapshot    = false;
+	second.request.callbackSnapshotArg = separateIndex;
+	auto enabledSnapshot               = QSharedPointer<LuaCallbackSnapshot>::create(*separateIndex);
+	enabledSnapshot->hasArraySnapshot  = true;
+	third.request.callbackSnapshotArg  = enabledSnapshot;
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, name]
+	    { static_cast<void>(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("after"))); });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(first);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(second);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(third);
+	QCOMPARE(first.request.callbackSnapshotArg->arrayNamesSnapshot, initial->arrayNamesSnapshot);
+	QCOMPARE(second.request.callbackSnapshotArg->arrayNamesSnapshot, separateIndex->arrayNamesSnapshot);
+	QCOMPARE(third.request.callbackSnapshotArg->arrayNamesSnapshot, separateIndex->arrayNamesSnapshot);
+	QVERIFY(!second.request.callbackSnapshotArg->hasArraySnapshot);
+	QVERIFY(third.request.callbackSnapshotArg->hasArraySnapshot);
+	QVERIFY(second.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    third.request.callbackSnapshotArg->arraysByName));
+	QCOMPARE(arraySnapshotValue(*third.request.callbackSnapshotArg, name, QStringLiteral("probe")),
+	         QStringLiteral("after"));
+	QCOMPARE(arraySnapshotValue(*separateIndex, name, QStringLiteral("probe")), QStringLiteral("before"));
+}
+
+void tst_LuaCallbackEngine::causalArrayReplayCachePreservesNestedRevisionOrder()
+{
+	WorldRuntime  runtime;
+	const QString name = QStringLiteral("nested-cached-array");
+	QCOMPARE(runtime.arrayCreate(name), eOK);
+	QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("before")), eOK);
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	const auto                                  cursor = runtime.m_causalPluginCallbackSnapshotRevision;
+	WorldRuntime::PluginCallbackDispatchCommand first;
+	first.request.callbackSnapshotArg      = initial;
+	first.causalSnapshotRevision           = cursor;
+	auto                            second = first;
+	LuaDeferredRuntimeMutationBatch parent;
+	parent.runtime = &runtime;
+	parent.mutations.push_back(
+	    [&runtime, name]
+	    {
+		    static_cast<void>(
+		        runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("parent before")));
+		    static_cast<void>(runtime.arrayCreate(QString()));
+		    static_cast<void>(runtime.arraySet(QString(), QString(), QString()));
+		    LuaDeferredRuntimeMutationBatch child;
+		    child.runtime = &runtime;
+		    child.mutations.push_back(
+		        [&runtime, name]
+		        {
+			        static_cast<void>(runtime.arrayClear(name));
+			        static_cast<void>(
+			            runtime.arraySet(name, QStringLiteral("child"), QStringLiteral("kept")));
+		        });
+		    LuaBatchDispatchResult childResult;
+		    childResult.deferredRuntimeMutationBatches.push_back(std::move(child));
+		    runtime.applyCompletedPluginCallbackMutations(childResult);
+		    static_cast<void>(
+		        runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("parent after")));
+	    });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(parent));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	int revisions = 0;
+	for (auto revision = cursor->next; revision; revision = revision->next)
+	{
+		QVERIFY(revision->before && revision->after);
+		++revisions;
+	}
+	QCOMPARE(revisions, 3);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(first);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(second);
+	QVERIFY(first.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    second.request.callbackSnapshotArg->arraysByName));
+	QCOMPARE(arraySnapshotValue(*second.request.callbackSnapshotArg, name, QStringLiteral("probe")),
+	         QStringLiteral("parent after"));
+	QCOMPARE(arraySnapshotValue(*second.request.callbackSnapshotArg, name, QStringLiteral("child")),
+	         QStringLiteral("kept"));
+	QCOMPARE(arraySnapshotValue(*initial, name, QStringLiteral("probe")), QStringLiteral("before"));
+	QCOMPARE(second.request.callbackSnapshotArg->arrayNamesSnapshot, (QStringList{QString(), name}));
+	const auto unnamed = second.request.callbackSnapshotArg->arraysByName.value(QString());
+	QVERIFY(unnamed);
+	QVERIFY(unnamed->contains(QString()));
+	QCOMPARE(*unnamed->value(QString()), QString());
+	QCOMPARE(initial->arrayNamesSnapshot, QStringList{name});
+}
+
+void tst_LuaCallbackEngine::causalArrayReplayCacheReleasesStorageWithRevision()
+{
+	QWeakPointer<const LuaCallbackArraySnapshot>                input;
+	QWeakPointer<const LuaCallbackArraySnapshot>                output;
+	std::weak_ptr<const LuaCallbackPreparedCausalSnapshotDelta> prepared;
+	{
+		WorldRuntime  runtime;
+		const QString name = QStringLiteral("cached-lifetime");
+		QCOMPARE(runtime.arrayCreate(name), eOK);
+		QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("event")), eOK);
+		auto event = captureVariableDispatchSnapshotForTest(runtime);
+		QVERIFY(event);
+		input                                              = event->arraysByName.value(name);
+		const auto                                  cursor = runtime.m_causalPluginCallbackSnapshotRevision;
+		WorldRuntime::PluginCallbackDispatchCommand command;
+		command.request.callbackSnapshotArg = event;
+		command.causalSnapshotRevision      = cursor;
+		event.clear();
+		QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("live before")),
+		         eSetReplacingExistingValue);
+		LuaDeferredRuntimeMutationBatch batch;
+		batch.runtime = &runtime;
+		batch.mutations.push_back(
+		    [&runtime, name]
+		    {
+			    static_cast<void>(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("causal")));
+		    });
+		LuaBatchDispatchResult result;
+		result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+		runtime.applyCompletedPluginCallbackMutations(result);
+		runtime.applyCausalPluginCallbackSnapshotDeltas(command);
+		QVERIFY(cursor->next && cursor->next->preparedDelta);
+		prepared = cursor->next->preparedDelta;
+		output   = command.request.callbackSnapshotArg->arraysByName.value(name);
+		command.request.callbackSnapshotArg.clear();
+		QVERIFY(!input.isNull());
+		QVERIFY(!output.isNull());
+	}
+	QVERIFY(prepared.expired());
+	QVERIFY(input.isNull());
+	QVERIFY(output.isNull());
+}
+
+void tst_LuaCallbackEngine::causalArrayReplayCachePreservesFullDomainFallback()
+{
+	WorldRuntime  runtime;
+	const QString name = QStringLiteral("full-domain-array");
+	QCOMPARE(runtime.arrayCreate(name), eOK);
+	QCOMPARE(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("before")), eOK);
+	const auto event = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(event);
+	const auto                                  cursor = runtime.m_causalPluginCallbackSnapshotRevision;
+	WorldRuntime::PluginCallbackDispatchCommand first;
+	first.request.callbackSnapshotArg      = event;
+	first.causalSnapshotRevision           = cursor;
+	auto                            second = first;
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, name]
+	    {
+		    static_cast<void>(runtime.arraySet(name, QStringLiteral("probe"), QStringLiteral("after")));
+		    runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Arrays);
+	    });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	QVERIFY(cursor->next && cursor->next->after);
+	QVERIFY((cursor->next->fullStableDomainMask &
+	         luaCallbackStableSnapshotDomainBit(WorldRuntime::LuaCallbackStableSnapshotDomain::Arrays)) !=
+	        0U);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(first);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(second);
+	QVERIFY(
+	    first.request.callbackSnapshotArg->arraysByName.sharesStorageWith(cursor->next->after->arraysByName));
+	QVERIFY(second.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    cursor->next->after->arraysByName));
+	QCOMPARE(arraySnapshotValue(*second.request.callbackSnapshotArg, name, QStringLiteral("probe")),
+	         QStringLiteral("after"));
+}
+
 void tst_LuaCallbackEngine::causalArrayMutationPreservesUnrelatedLaterKey()
 {
 	WorldRuntime  runtime;
@@ -22908,6 +23192,8 @@ function mutate_array()
   assert(ArraySet("causal-array", "changed", "intermediate") == eSetReplacingExistingValue)
   assert(ArraySet("causal-array", "temporary", "removed") == eOK)
   assert(ArrayDeleteKey("causal-array", "temporary") == eOK)
+  assert(ArrayImport("causal-array", { ["changed"] = "imported", ["import-key"] = "one", [""] = "" }) == eImportedWithDuplicates)
+  assert(ArrayDeleteKey("causal-array", "import-key") == eOK)
   assert(ArraySet("causal-array", "changed", "callback") == eSetReplacingExistingValue)
 end
 )lua"),
@@ -22925,12 +23211,16 @@ end
 	WorldRuntime::PluginCallbackDispatchCommand queuedCommand;
 	queuedCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
 	queuedCommand.causalSnapshotRevision      = revisionBefore;
+	auto repeatedCommand                      = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	QVERIFY(revisionBefore->next);
-	QCOMPARE(revisionBefore->next->arrayMutations.size(), 4);
+	QCOMPARE(revisionBefore->next->arrayMutations.size(), 6);
 	QVERIFY(!revisionBefore->next->scopedStableSnapshotPatches.contains(
 	    WorldRuntime::LuaCallbackStableSnapshotDomain::Arrays));
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QVERIFY(queuedCommand.request.callbackSnapshotArg);
 	QCOMPARE(
@@ -22939,6 +23229,13 @@ end
 	QCOMPARE(
 	    arraySnapshotValue(*queuedCommand.request.callbackSnapshotArg, arrayName, QStringLiteral("later")),
 	    QStringLiteral("preserved"));
+	const auto replayedArray = repeatedCommand.request.callbackSnapshotArg->arraysByName.value(arrayName);
+	QVERIFY(replayedArray);
+	QVERIFY(!replayedArray->contains(QStringLiteral("temporary")));
+	QVERIFY(!replayedArray->contains(QStringLiteral("import-key")));
+	QVERIFY(replayedArray->contains(QString()));
+	QCOMPARE(arraySnapshotValue(*repeatedCommand.request.callbackSnapshotArg, arrayName, QString()),
+	         QString());
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -22969,8 +23266,12 @@ end
 	WorldRuntime::PluginCallbackDispatchCommand queuedCommand;
 	queuedCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
 	queuedCommand.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
+	auto repeatedCommand                      = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QString value;
 	QVERIFY(!runtime.arrayGet(arrayName, QStringLiteral("captured"), value));
@@ -23077,10 +23378,14 @@ end
 	queuedCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
 	queuedCommand.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
 	const auto revisionBefore                 = queuedCommand.causalSnapshotRevision;
+	auto       repeatedCommand                = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	QVERIFY(revisionBefore->next);
 	QCOMPARE(revisionBefore->next->arrayMutations.size(), 2);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QString value;
 	QVERIFY(runtime.arrayGet(arrayName, QStringLiteral("set-key"), value));
@@ -23124,8 +23429,12 @@ end
 	queuedCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
 	queuedCommand.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
 	QCOMPARE(runtime.arrayDeleteKey(arrayName, QStringLiteral("captured")), eOK);
+	auto repeatedCommand = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QVERIFY(queuedCommand.request.callbackSnapshotArg);
 	const auto queuedArray = queuedCommand.request.callbackSnapshotArg->arraysByName.value(arrayName);
@@ -23160,8 +23469,12 @@ end
 	queuedCommand.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
 	QCOMPARE(runtime.arrayCreate(arrayName), eOK);
 	QCOMPARE(runtime.arraySet(arrayName, QStringLiteral("replacement"), QStringLiteral("kept")), eOK);
+	auto repeatedCommand = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QString value;
 	QVERIFY(runtime.arrayGet(arrayName, QStringLiteral("replacement"), value));
@@ -23201,8 +23514,16 @@ end
 	QCOMPARE(runtime.arrayDelete(arrayName), eOK);
 	QCOMPARE(runtime.arrayCreate(arrayName), eOK);
 	QCOMPARE(runtime.arraySet(arrayName, QStringLiteral("replacement"), QStringLiteral("kept")), eOK);
+	WorldRuntime::PluginCallbackDispatchCommand replacementCommand;
+	replacementCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	replacementCommand.causalSnapshotRevision      = queuedCommand.causalSnapshotRevision;
+	const auto replacementView                     = replacementCommand.request.callbackSnapshotArg;
+	auto       repeatedCommand                     = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QString value;
 	QVERIFY(!runtime.arrayGet(arrayName, QStringLiteral("stale"), value));
@@ -23215,6 +23536,14 @@ end
 	const auto queuedArray = queuedCommand.request.callbackSnapshotArg->arraysByName.value(arrayName);
 	QVERIFY(queuedArray);
 	QVERIFY(!queuedArray->contains(QStringLiteral("replacement")));
+	runtime.applyCausalPluginCallbackSnapshotDeltas(replacementCommand);
+	QVERIFY(replacementCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    replacementView->arraysByName));
+	QVERIFY(!replacementCommand.request.callbackSnapshotArg->arraysByName.value(arrayName)->contains(
+	    QStringLiteral("stale")));
+	QCOMPARE(arraySnapshotValue(*replacementCommand.request.callbackSnapshotArg, arrayName,
+	                            QStringLiteral("replacement")),
+	         QStringLiteral("kept"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -23247,8 +23576,12 @@ end
 	queuedCommand.request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
 	queuedCommand.causalSnapshotRevision      = runtime.m_causalPluginCallbackSnapshotRevision;
 	QCOMPARE(runtime.arraySet(arrayName, QStringLiteral("later"), QStringLiteral("discarded")), eOK);
+	auto repeatedCommand = queuedCommand;
 	runtime.applyCompletedPluginCallbackMutations(result);
 	runtime.applyCausalPluginCallbackSnapshotDeltas(queuedCommand);
+	runtime.applyCausalPluginCallbackSnapshotDeltas(repeatedCommand);
+	QVERIFY(queuedCommand.request.callbackSnapshotArg->arraysByName.sharesStorageWith(
+	    repeatedCommand.request.callbackSnapshotArg->arraysByName));
 
 	QVERIFY(queuedCommand.request.callbackSnapshotArg);
 	const auto recreated = queuedCommand.request.callbackSnapshotArg->arraysByName.value(arrayName);

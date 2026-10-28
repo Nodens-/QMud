@@ -171,7 +171,7 @@ void OutboundCommandTransaction::resolve(const Outcome resolvedOutcome)
 		callback();
 }
 
-/** @brief Immutable replay work owned by one completed causal revision. */
+/** @brief Prepared replay work and runtime-thread projection caches owned by one completed causal revision. */
 struct LuaCallbackPreparedCausalSnapshotDelta
 {
 		QVector<std::function<void(LuaCallbackSnapshot &)>> operations;
@@ -937,6 +937,54 @@ namespace
 			mergedNames.push_back(*addition++);
 		target.arrayNamesSnapshot = std::move(mergedNames);
 	}
+
+	/** @brief Revision-owned array replay with one reusable projection for an exact event-time input. */
+	class PreparedCausalArrayReplay
+	{
+		public:
+			/**
+			 * @brief Retains the closed revision's ordered array operations.
+			 * @param mutations Accepted operations, including physical no-ops and generation mismatches.
+			 */
+			explicit PreparedCausalArrayReplay(const QVector<LuaCallbackArrayMutation> &mutations)
+			    : m_mutations(mutations)
+			{
+			}
+
+			/**
+			 * @brief Reuses an identical input's projection or replays into a different event-time view.
+			 * @param target Private callback snapshot's array fields, accessed on the owning runtime thread.
+			 */
+			void apply(LuaCallbackArraysSnapshotState &target)
+			{
+				if (m_cached && target.arraysByName.sharesStorageWith(m_cached->inputArrays) &&
+				    target.arrayNamesSnapshot.isSharedWith(m_cached->inputNames))
+				{
+					target.arraysByName       = m_cached->outputArrays;
+					target.arrayNamesSnapshot = m_cached->outputNames;
+					return;
+				}
+
+				CacheEntry next{target.arraysByName, target.arrayNamesSnapshot, {}, {}};
+				applyCausalArrayMutations(target, m_mutations);
+				next.outputArrays = target.arraysByName;
+				next.outputNames  = target.arrayNamesSnapshot;
+				m_cached          = std::move(next);
+			}
+
+		private:
+			/** @brief Owning immutable input and output handles for the most recently projected view. */
+			struct CacheEntry
+			{
+					LuaCallbackPersistentStringMap<LuaCallbackArraySnapshot> inputArrays;
+					QStringList                                              inputNames;
+					LuaCallbackPersistentStringMap<LuaCallbackArraySnapshot> outputArrays;
+					QStringList                                              outputNames;
+			};
+
+			QVector<LuaCallbackArrayMutation> m_mutations;
+			std::optional<CacheEntry>         m_cached;
+	};
 
 	template <typename T>
 	void applyCausalSnapshotSetEntryDelta(QSet<T> &target, const QSet<T> &before, const QSet<T> &after,
@@ -2186,8 +2234,9 @@ namespace
 			}
 			else if (!arrayMutations.isEmpty())
 			{
-				prepared->operations.push_back([arrayMutations](LuaCallbackSnapshot &target)
-				                               { applyCausalArrayMutations(target, arrayMutations); });
+				prepared->operations.push_back(
+				    [replay = PreparedCausalArrayReplay(arrayMutations)](LuaCallbackSnapshot &target) mutable
+				    { replay.apply(target); });
 			}
 		}
 		QMUD_CAUSAL_DOMAIN(Colours)
