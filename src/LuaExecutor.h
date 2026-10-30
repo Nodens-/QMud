@@ -2277,66 +2277,66 @@ enum class LuaCallbackOrderingDomain : quint8
  * completion requirements are deliberately represented separately by the runtime dispatch API.
  */
 #define QMUD_LUA_CALLBACK_EVENT_REGISTRY(X)                                                                  \
-	X(None, "", Deferrable)                                                                                  \
-	X(TriggerRoutine, "", InputCritical)                                                                     \
-	X(TriggerScript, "", InputCritical)                                                                      \
-	X(AliasRoutine, "", InputCritical)                                                                       \
-	X(AliasScript, "", InputCritical)                                                                        \
-	X(TimerRoutine, "", Deferrable)                                                                          \
-	X(TimerScript, "", Deferrable)                                                                           \
-	X(Hotspot, "", InputCritical)                                                                            \
-	X(AsyncResult, "OnPluginAsyncResult", Deferrable)                                                        \
-	X(Broadcast, "OnPluginBroadcast", Deferrable)                                                            \
-	X(ChatAccept, "OnPluginChatAccept", Deferrable)                                                          \
-	X(ChatDisplay, "OnPluginChatDisplay", Deferrable)                                                        \
-	X(ChatMessage, "OnPluginChatMessage", Deferrable)                                                        \
-	X(ChatMessageOut, "OnPluginChatMessageOut", Deferrable)                                                  \
-	X(ChatNewUser, "OnPluginChatNewUser", Deferrable)                                                        \
-	X(ChatUserDisconnect, "OnPluginChatUserDisconnect", Deferrable)                                          \
-	X(Close, "OnPluginClose", InputCritical)                                                                 \
-	X(Command, "OnPluginCommand", InputCritical)                                                             \
-	X(CommandChanged, "OnPluginCommandChanged", Deferrable)                                                  \
-	X(CommandEntered, "OnPluginCommandEntered", InputCritical)                                               \
-	X(Connect, "OnPluginConnect", Deferrable)                                                                \
-	X(Disable, "OnPluginDisable", Deferrable)                                                                \
-	X(Disconnect, "OnPluginDisconnect", Deferrable)                                                          \
-	X(DrawOutputWindow, "OnPluginDrawOutputWindow", Deferrable)                                              \
-	X(Enable, "OnPluginEnable", Deferrable)                                                                  \
-	X(GetFocus, "OnPluginGetFocus", Deferrable)                                                              \
-	X(IacGa, "OnPluginIacGa", TelnetNotification)                                                            \
-	X(Install, "OnPluginInstall", Deferrable)                                                                \
-	X(LineReceived, "OnPluginLineReceived", InputCritical)                                                   \
-	X(ListChanged, "OnPluginListChanged", Deferrable)                                                        \
-	X(LoseFocus, "OnPluginLoseFocus", Deferrable)                                                            \
-	X(MouseMoved, "OnPluginMouseMoved", Deferrable)                                                          \
-	X(MxpCloseTag, "OnPluginMXPcloseTag", InputCritical)                                                     \
-	X(MxpError, "OnPluginMXPerror", Deferrable)                                                              \
-	X(MxpOpenTag, "OnPluginMXPopenTag", InputCritical)                                                       \
-	X(MxpSetEntity, "OnPluginMXPsetEntity", InputCritical)                                                   \
-	X(MxpSetVariable, "OnPluginMXPsetVariable", InputCritical)                                               \
-	X(MxpStart, "OnPluginMXPstart", Deferrable)                                                              \
-	X(MxpStop, "OnPluginMXPstop", Deferrable)                                                                \
-	X(PacketReceived, "OnPluginPacketReceived", InputCritical)                                               \
-	X(PartialLine, "OnPluginPartialLine", Deferrable)                                                        \
-	X(PlaySound, "OnPluginPlaySound", Deferrable)                                                            \
-	X(SaveState, "OnPluginSaveState", InputCritical)                                                         \
-	X(ScreenDraw, "OnPluginScreendraw", Deferrable)                                                          \
-	X(SelectionChanged, "OnPluginSelectionChanged", Deferrable)                                              \
-	X(Send, "OnPluginSend", InputCritical)                                                                   \
-	X(Sent, "OnPluginSent", InputCritical)                                                                   \
-	X(TabComplete, "OnPluginTabComplete", InputCritical)                                                     \
-	X(TelnetOption, "OnPluginTelnetOption", TelnetNotification)                                              \
-	X(TelnetRequest, "OnPluginTelnetRequest", InputCritical)                                                 \
-	X(TelnetSubnegotiation, "OnPluginTelnetSubnegotiation", TelnetNotification)                              \
-	X(Tick, "OnPluginTick", Deferrable)                                                                      \
-	X(Trace, "OnPluginTrace", Deferrable)                                                                    \
-	X(PacketDebug, "OnPluginPacketDebug", Deferrable)                                                        \
-	X(WorldOutputResized, "OnPluginWorldOutputResized", Deferrable)                                          \
-	X(WorldSave, "OnPluginWorldSave", Deferrable)
+	X(None, "", Deferrable, false)                                                                           \
+	X(TriggerRoutine, "", InputCritical, false)                                                              \
+	X(TriggerScript, "", InputCritical, false)                                                               \
+	X(AliasRoutine, "", InputCritical, false)                                                                \
+	X(AliasScript, "", InputCritical, false)                                                                 \
+	X(TimerRoutine, "", Deferrable, false)                                                                   \
+	X(TimerScript, "", Deferrable, false)                                                                    \
+	X(Hotspot, "", InputCritical, false)                                                                     \
+	X(AsyncResult, "OnPluginAsyncResult", Deferrable, false)                                                 \
+	X(Broadcast, "OnPluginBroadcast", Deferrable, false)                                                     \
+	X(ChatAccept, "OnPluginChatAccept", Deferrable, false)                                                   \
+	X(ChatDisplay, "OnPluginChatDisplay", Deferrable, false)                                                 \
+	X(ChatMessage, "OnPluginChatMessage", Deferrable, false)                                                 \
+	X(ChatMessageOut, "OnPluginChatMessageOut", Deferrable, false)                                           \
+	X(ChatNewUser, "OnPluginChatNewUser", Deferrable, false)                                                 \
+	X(ChatUserDisconnect, "OnPluginChatUserDisconnect", Deferrable, false)                                   \
+	X(Close, "OnPluginClose", InputCritical, false)                                                          \
+	X(Command, "OnPluginCommand", InputCritical, false)                                                      \
+	X(CommandChanged, "OnPluginCommandChanged", Deferrable, false)                                           \
+	X(CommandEntered, "OnPluginCommandEntered", InputCritical, false)                                        \
+	X(Connect, "OnPluginConnect", Deferrable, false)                                                         \
+	X(Disable, "OnPluginDisable", Deferrable, false)                                                         \
+	X(Disconnect, "OnPluginDisconnect", Deferrable, false)                                                   \
+	X(DrawOutputWindow, "OnPluginDrawOutputWindow", Deferrable, false)                                       \
+	X(Enable, "OnPluginEnable", Deferrable, false)                                                           \
+	X(GetFocus, "OnPluginGetFocus", Deferrable, false)                                                       \
+	X(IacGa, "OnPluginIacGa", TelnetNotification, true)                                                      \
+	X(Install, "OnPluginInstall", Deferrable, false)                                                         \
+	X(LineReceived, "OnPluginLineReceived", InputCritical, false)                                            \
+	X(ListChanged, "OnPluginListChanged", Deferrable, false)                                                 \
+	X(LoseFocus, "OnPluginLoseFocus", Deferrable, false)                                                     \
+	X(MouseMoved, "OnPluginMouseMoved", Deferrable, false)                                                   \
+	X(MxpCloseTag, "OnPluginMXPcloseTag", InputCritical, true)                                               \
+	X(MxpError, "OnPluginMXPerror", Deferrable, true)                                                        \
+	X(MxpOpenTag, "OnPluginMXPopenTag", InputCritical, true)                                                 \
+	X(MxpSetEntity, "OnPluginMXPsetEntity", InputCritical, true)                                             \
+	X(MxpSetVariable, "OnPluginMXPsetVariable", InputCritical, true)                                         \
+	X(MxpStart, "OnPluginMXPstart", Deferrable, true)                                                        \
+	X(MxpStop, "OnPluginMXPstop", Deferrable, true)                                                          \
+	X(PacketReceived, "OnPluginPacketReceived", InputCritical, true)                                         \
+	X(PartialLine, "OnPluginPartialLine", Deferrable, false)                                                 \
+	X(PlaySound, "OnPluginPlaySound", Deferrable, false)                                                     \
+	X(SaveState, "OnPluginSaveState", InputCritical, false)                                                  \
+	X(ScreenDraw, "OnPluginScreendraw", Deferrable, false)                                                   \
+	X(SelectionChanged, "OnPluginSelectionChanged", Deferrable, false)                                       \
+	X(Send, "OnPluginSend", InputCritical, false)                                                            \
+	X(Sent, "OnPluginSent", InputCritical, false)                                                            \
+	X(TabComplete, "OnPluginTabComplete", InputCritical, false)                                              \
+	X(TelnetOption, "OnPluginTelnetOption", TelnetNotification, true)                                        \
+	X(TelnetRequest, "OnPluginTelnetRequest", InputCritical, true)                                           \
+	X(TelnetSubnegotiation, "OnPluginTelnetSubnegotiation", TelnetNotification, true)                        \
+	X(Tick, "OnPluginTick", Deferrable, false)                                                               \
+	X(Trace, "OnPluginTrace", Deferrable, false)                                                             \
+	X(PacketDebug, "OnPluginPacketDebug", Deferrable, false)                                                 \
+	X(WorldOutputResized, "OnPluginWorldOutputResized", Deferrable, false)                                   \
+	X(WorldSave, "OnPluginWorldSave", Deferrable, false)
 
 enum class LuaCallbackEvent : quint8
 {
-#define QMUD_DECLARE_LUA_CALLBACK_EVENT(name, functionName, orderingDomain) name,
+#define QMUD_DECLARE_LUA_CALLBACK_EVENT(name, functionName, orderingDomain, incomingProtocol) name,
 	QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_DECLARE_LUA_CALLBACK_EVENT)
 #undef QMUD_DECLARE_LUA_CALLBACK_EVENT
 	    Count
@@ -2346,18 +2346,36 @@ inline constexpr std::size_t kLuaCallbackEventCount = static_cast<std::size_t>(L
 
 inline constexpr std::array<LuaCallbackOrderingDomain, kLuaCallbackEventCount>
     kLuaCallbackEventOrderingDomains = {
-#define QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN(name, functionName, orderingDomain)                   \
+#define QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN(name, functionName, orderingDomain, incomingProtocol) \
 	LuaCallbackOrderingDomain::orderingDomain,
         QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN)
 #undef QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN
 };
 
 inline const std::array<QString, kLuaCallbackEventCount> kLuaCallbackEventFunctionNames = {
-#define QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME(name, functionName, orderingDomain)                     \
+#define QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME(name, functionName, orderingDomain, incomingProtocol)   \
 	QStringLiteral(functionName),
     QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME)
 #undef QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME
 };
+
+/** @brief Registry-defined incoming protocol callback roles. */
+inline constexpr std::array<bool, kLuaCallbackEventCount> kLuaCallbackEventIncomingProtocol = {
+#define QMUD_APPEND_INCOMING_PROTOCOL(name, functionName, orderingDomain, incomingProtocol) incomingProtocol,
+    QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_APPEND_INCOMING_PROTOCOL)
+#undef QMUD_APPEND_INCOMING_PROTOCOL
+};
+
+/**
+ * @brief Identifies callbacks that process an admitted incoming protocol event.
+ * @param event Authoritative callback identity.
+ * @return Whether the event is an incoming protocol handler.
+ */
+[[nodiscard]] constexpr bool luaCallbackEventIsIncomingProtocol(const LuaCallbackEvent event) noexcept
+{
+	const auto index = static_cast<std::size_t>(event);
+	return index < kLuaCallbackEventIncomingProtocol.size() && kLuaCallbackEventIncomingProtocol[index];
+}
 
 [[nodiscard]] constexpr LuaCallbackOrderingDomain
 luaCallbackEventOrderingDomain(const LuaCallbackEvent event) noexcept

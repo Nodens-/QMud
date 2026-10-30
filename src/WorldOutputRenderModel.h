@@ -9,7 +9,7 @@
 #ifndef QMUD_WORLDOUTPUTRENDERMODEL_H
 #define QMUD_WORLDOUTPUTRENDERMODEL_H
 
-#include "IndexedRingBuffer.h"
+#include "ProjectedIndexedRingBuffer.h"
 #include "WorldRuntime.h"
 
 #include <QDateTime>
@@ -115,7 +115,26 @@ class WorldOutputRenderModel final
 				QVector<TextEdit> textEdits;
 		};
 
-		using RenderLines = IndexedRingBuffer<RenderLine>;
+		/** @brief Accesses absolute runtime-entry indexes carried by projected render ranges. */
+		struct RenderLineIndexMetadata
+		{
+				/** @brief Reads a row's stored index. @param row Render row. @return Stored absolute index. */
+				static qint64 index(const RenderLine &row)
+				{
+					return row.firstRuntimeLineIndex;
+				}
+				/**
+				 * @brief Applies an index adjustment to a materialized row, preserving negative sentinels.
+				 * @param row Owned row whose metadata is normalized.
+				 * @param adjustment Uniform runtime-entry displacement.
+				 */
+				static void adjust(RenderLine &row, qint64 adjustment)
+				{
+					if (row.firstRuntimeLineIndex >= 0)
+						row.firstRuntimeLineIndex += adjustment;
+				}
+		};
+		using RenderLines = ProjectedIndexedRingBuffer<RenderLine, RenderLineIndexMetadata>;
 
 		RenderLines                      m_nativeRenderLineCache;
 		bool                             m_nativeRenderLineCacheValid{false};

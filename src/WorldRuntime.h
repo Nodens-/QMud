@@ -816,6 +816,8 @@ class WorldRuntime : public QObject
 				QString            text;
 				int                flags{0};
 				bool               hardReturn{true};
+				/** @brief Marks a reserved incoming row until its line processing ends. */
+				bool               incomingPresentationPending{false};
 				QVector<StyleSpan> spans;
 				QDateTime          time;
 				qint64             lineNumber{0};
@@ -5691,6 +5693,13 @@ class WorldRuntime : public QObject
 		 */
 		void outputRenderDeltaCommitted() const;
 		/**
+		 * @brief Announces settled incoming work and the presentation requests it actually produced.
+		 * @param outputRequested Whether the settled prefix requested output presentation.
+		 * @param miniWindowsRequested Whether it requested graphics or miniwindow presentation.
+		 * @param drawRequested Whether it accepted an explicit draw notification request.
+		 */
+		void incomingPresentationReady(bool outputRequested, bool miniWindowsRequested, bool drawRequested);
+		/**
 		 * @brief Emitted when the outermost output presentation batch begins.
 		 * @param suppressDrawNotifications Whether draw callback notifications are suppressed.
 		 */
@@ -6409,7 +6418,51 @@ class WorldRuntime : public QObject
 		struct RawDataProcessingTask;
 		struct MxpCallbackAwaiter;
 		struct MxpPayloadProcessingState;
-		struct IncomingStreamPresentationBatch;
+		struct IncomingLinePresentationBatch;
+		struct IncomingPresentationChunk;
+		/** @brief Owns one admitted unit of stream or protocol work until terminal completion. */
+		struct IncomingPresentationWork
+		{
+				QPointer<WorldRuntime>                    runtime;
+				QSharedPointer<IncomingPresentationChunk> chunk;
+				/** @brief Settles the unit on its runtime thread after its last owner releases it. */
+				~IncomingPresentationWork();
+		};
+		/**
+		 * @brief Admits work to the current chunk.
+		 * @return Shared terminal owner, or empty outside incoming work.
+		 */
+		[[nodiscard]] QSharedPointer<IncomingPresentationWork> acquireIncomingPresentationWork();
+		/**
+		 * @brief Settles one admitted unit.
+		 * @param chunk Chunk owning the terminal unit.
+		 */
+		void finishIncomingPresentationWork(const QSharedPointer<IncomingPresentationChunk> &chunk);
+		/**
+		 * @brief Records actual presentation demand before mutation batches combine chunk origins.
+		 * @param outputRequested Whether output synchronization or semantic repaint was requested.
+		 * @param miniWindowsRequested Whether graphics or miniwindow presentation was requested.
+		 * @param drawRequested Whether a draw notification was accepted.
+		 */
+		void recordIncomingPresentationRequests(bool outputRequested, bool miniWindowsRequested,
+		                                        bool drawRequested) const;
+
+		/**
+		 * @brief Creates the parser's chunk owner.
+		 * @param identity Ingress identity.
+		 * @return Parser admission owner.
+		 */
+		[[nodiscard]] QSharedPointer<IncomingPresentationWork>
+		beginIncomingPresentationChunk(quint64 identity);
+		/**
+		 * @brief Selects callback origin without adopting unrelated notifications.
+		 * @param event Callback identity.
+		 * @param preserveOperation Whether the request explicitly joins required logical work.
+		 * @return Scoped chunk association.
+		 */
+		[[nodiscard]] QWeakPointer<IncomingPresentationChunk>
+		incomingPresentationOrigin(LuaCallbackEvent event, bool preserveOperation) const;
+
 		struct PluginCallbackDispatchCommand;
 		struct SuspendedPluginCallbackDispatch;
 		struct PendingPluginCallbackResultContinuation;
@@ -6445,13 +6498,13 @@ class WorldRuntime : public QObject
 		 */
 		void               finishRawIngressOperation(quint64 operationId, const QByteArray &payload);
 		void               completeRawDataPayload(quint64 operationId);
-		[[nodiscard]] QSharedPointer<IncomingStreamPresentationBatch>
-		acquireIncomingStreamPresentationBatch();
-		void
-		activateIncomingStreamPresentationBatch(const QSharedPointer<IncomingStreamPresentationBatch> &batch);
-		void renewIncomingStreamPresentationBatch(quint64 operationId);
-		void sealIncomingStreamPresentationBatch(quint64 operationId);
-		void finishIncomingStreamPresentationBatch();
+		/**
+		 * @brief Opens presentation batching for an incoming line that is starting execution.
+		 * @return Owning lease closed after the line and its nested work finish, or empty during destruction.
+		 */
+		[[nodiscard]] QSharedPointer<IncomingLinePresentationBatch> acquireIncomingLinePresentationBatch();
+		/** @brief Closes one completed active-line presentation lease. */
+		void                                                        finishIncomingLinePresentationBatch();
 		/**
 		 * @brief Parses one raw ingress payload within its active operation context.
 		 * @param data Raw payload bytes to process.
@@ -7348,6 +7401,10 @@ class WorldRuntime : public QObject
 		void resetIncomingLineLuaContext();
 		struct IncomingLineLuaContextState;
 		[[nodiscard]] IncomingLineLuaContextState captureIncomingLineLuaContextState() const;
+		/**
+		 * @brief Restores a saved incoming context and reconciles positions changed by nested work.
+		 * @param state Captured parent line context.
+		 */
 		void              restoreIncomingLineLuaContextState(const IncomingLineLuaContextState &state);
 		void              removeDeferredHiddenIncomingLine();
 		[[nodiscard]] int deferredHiddenIncomingLineIndex() const;
@@ -7521,13 +7578,11 @@ class WorldRuntime : public QObject
 		 * @param request Structured callback command payload.
 		 * @param completion Optional callback receiving dispatch result after worker completion.
 		 * @param preserveLogicalOperationContext Join the callback and its mutations to the current logical operation.
-		 * @param initialPresentationCommitCompletion One-shot completion after the initial callback journal commits.
 		 */
 		void
 		queuePluginCallbackDispatchAsync(const LuaBatchDispatchRequest                      &request,
 		                                 std::function<void(const LuaBatchDispatchResult &)> completion = {},
-		                                 bool                  preserveLogicalOperationContext     = false,
-		                                 std::function<void()> initialPresentationCommitCompletion = {});
+		                                 bool preserveLogicalOperationContext = false);
 		/**
 		 * @brief Dispatches a result-dependent callback or suspends its owning runtime operation.
 		 * @param request Structured callback command payload.
@@ -7781,15 +7836,13 @@ class WorldRuntime : public QObject
 		 * @param dispatchSynchronously Use synchronous executor dispatch when `true`.
 		 * @param resumeSuspendedCommandAtFront Preserve an internally suspended command's existing lane position.
 		 * @param preserveLogicalOperationContext Join the callback and its mutations to the current logical operation.
-		 * @param initialPresentationCommitCompletion One-shot completion after the initial callback journal commits.
 		 * @return `true` when the command was accepted for dispatch.
 		 */
 		[[nodiscard]] bool tryQueuePluginCallbackDispatchOnRuntimeThread(
 		    const LuaBatchDispatchRequest                      &request,
 		    std::function<void(const LuaBatchDispatchResult &)> completion = {},
 		    bool dispatchSynchronously = false, bool resumeSuspendedCommandAtFront = false,
-		    bool                  preserveLogicalOperationContext     = false,
-		    std::function<void()> initialPresentationCommitCompletion = {});
+		    bool preserveLogicalOperationContext = false);
 		/**
 		 * @brief Applies the current runtime action source to a callback request when no explicit source exists.
 		 * @param request Callback request to update.
@@ -7903,11 +7956,6 @@ class WorldRuntime : public QObject
 		 * @param command Dispatch command that may carry protected execution state.
 		 */
 		void endPluginCallbackDispatchCommandGuard(PluginCallbackDispatchCommand &command);
-		/**
-		 * @brief Releases presentation retained through the command's initial mutation commit.
-		 * @param command Dispatch command carrying the optional one-shot completion.
-		 */
-		static void completeInitialPluginCallbackPresentation(PluginCallbackDispatchCommand &command);
 		/**
 		 * @brief Applies a completed command journal under callback-specific replay guards.
 		 * @param command Command whose callback produced the journal.
@@ -8054,10 +8102,8 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Publishes one telnet protocol notification callback.
 		 * @param event Parsed telnet plugin event whose stream position is ready.
-		 * @param presentationBatch Presentation ownership retained until callback mutations commit.
 		 */
-		void dispatchTelnetStreamEvent(const TelnetProcessor::TelnetStreamEvent       &event,
-		                               QSharedPointer<IncomingStreamPresentationBatch> presentationBatch);
+		void dispatchTelnetStreamEvent(const TelnetProcessor::TelnetStreamEvent &event);
 		/**
 		 * @brief Increments the total completed incoming-line count.
 		 */
@@ -8858,14 +8904,14 @@ class WorldRuntime : public QObject
 				PluginCallbackDispatchOptions                                options;
 				std::function<void(const LuaBatchDispatchResult &)>          completion;
 				QVector<std::function<void(const LuaBatchDispatchResult &)>> coalescedCompletions;
-				std::function<void()>     initialPresentationCommitCompletion;
-				RuntimeCallerContext      callerContext;
-				CausalOutboundScopeHandle causalOutboundScope;
-				bool                      ownsCausalOutboundScope{false};
-				qint64                    enqueuedAtNs{0};
-				int                       queueDepthAtEnqueue{0};
-				bool                      miniWindowExecutionGuardActive{false};
-				bool                      drawOutputWindowExecutionGuardActive{false};
+				RuntimeCallerContext                                         callerContext;
+				QSharedPointer<IncomingPresentationWork>                     incomingPresentationWork;
+				CausalOutboundScopeHandle                                    causalOutboundScope;
+				bool                                                         ownsCausalOutboundScope{false};
+				qint64                                                       enqueuedAtNs{0};
+				int                                                          queueDepthAtEnqueue{0};
+				bool miniWindowExecutionGuardActive{false};
+				bool drawOutputWindowExecutionGuardActive{false};
 				std::shared_ptr<CausalPluginCallbackSnapshotRevision> causalSnapshotRevision;
 				bool                                                  recipientDispatchStarted{false};
 				quint64                                               recipientEligibilityRevisionAtStart{0};
@@ -9182,6 +9228,7 @@ class WorldRuntime : public QObject
 		};
 		struct ActiveRawIngressOperation
 		{
+				QSharedPointer<IncomingPresentationWork>                presentationWork;
 				quint64                                                 id{0};
 				quint64                                                 connectionEpoch{0};
 				quint64                                                 continuationTicket{0};
@@ -9189,7 +9236,6 @@ class WorldRuntime : public QObject
 				bool                                                    processingComplete{false};
 				std::coroutine_handle<>                                 rawDataCoroutine;
 				std::function<void(bool)>                               mutationCompletion;
-				QSharedPointer<IncomingStreamPresentationBatch>         presentationBatch;
 				std::shared_ptr<LuaCallbackConnectionCancellationState> connectionCancellationState;
 				int                                                     executionDepth{0};
 				bool                                                    cancellationRequested{false};
@@ -9247,6 +9293,9 @@ class WorldRuntime : public QObject
 		bool                                                    m_drainingPendingRawIngressPayloads{false};
 		bool                                                    m_pendingRawIngressPayloadDrainQueued{false};
 		int                                                     m_incomingStreamPresentationBatchDepth{0};
+		QWeakPointer<IncomingPresentationChunk>                 m_currentIncomingPresentationChunk;
+		QQueue<QSharedPointer<IncomingPresentationChunk>>       m_incomingPresentationChunks;
+		quint64                                                 m_incomingPresentationReadyRevision{0};
 		int                                                     m_pendingMiniWindowMouseX{0};
 		int                                                     m_pendingMiniWindowMouseY{0};
 		QString                                                 m_pendingMiniWindowMouseWindowName;

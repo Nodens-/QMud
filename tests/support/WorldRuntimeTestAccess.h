@@ -21,6 +21,15 @@ class WorldRuntimeTestAccess final
 {
 	public:
 		/**
+		 * @brief Publishes pending output descriptors without closing the active presentation batch.
+		 * @param runtime Runtime whose exact pending render ranges are inspected by a regression test.
+		 */
+		static void flushOutputViewMutationBatch(WorldRuntime &runtime)
+		{
+			runtime.flushOutputViewMutationBatch();
+		}
+
+		/**
 		 * @brief Returns the runtime's current sound-engine session.
 		 * @param runtime Runtime whose session is inspected.
 		 * @return Current session, or an empty pointer when sound is detached.

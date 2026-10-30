@@ -3793,7 +3793,6 @@ end
 			callbackRequest.callbackSnapshotArg =
 			    runtime.captureLuaCallbackSnapshotForRequest(callbackRequest);
 			bool                   completionCalled                        = false;
-			bool                   presentationCommitCalled                = false;
 			bool                   presentationCommittedBeforeCancellation = false;
 			bool                   finalCompletionCalledBeforeCancellation = false;
 			bool                   suspensionObserved                      = false;
@@ -3806,7 +3805,9 @@ end
 			    {
 				    if (runtime.m_suspendedPluginCallbackDispatches.size() != 1)
 					    return false;
-				    presentationCommittedBeforeCancellation = presentationCommitCalled;
+				    presentationCommittedBeforeCancellation =
+				        std::ranges::any_of(runtime.lines(), [](const WorldRuntime::LineEntry &line)
+				                            { return line.text == QStringLiteral("cancellation output"); });
 				    finalCompletionCalledBeforeCancellation = completionCalled;
 				    const auto suspendedIt = runtime.m_suspendedPluginCallbackDispatches.constBegin();
 				    runtimeResumeId        = suspendedIt.key();
@@ -3827,7 +3828,7 @@ end
 				    completionCalled = true;
 				    completionResult = result;
 			    },
-			    false, false, false, [&presentationCommitCalled] { presentationCommitCalled = true; }));
+			    false, false, false));
 
 			QTRY_VERIFY_WITH_TIMEOUT(modalDeliveryObserver.observed(), 5000);
 			QVERIFY(suspensionObserved);

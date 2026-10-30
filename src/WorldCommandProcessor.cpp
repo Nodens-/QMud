@@ -3273,12 +3273,12 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
                                                          const bool    serverSideWrapActive)
 {
 	PendingIncomingStreamItem request;
+	request.presentationWork     = m_runtime ? m_runtime->acquireIncomingPresentationWork() : nullptr;
 	request.line                 = line;
 	request.spans                = spans;
 	request.partialLineRevision  = partialLineRevision;
 	request.serverSideWrapActive = serverSideWrapActive;
-	request.presentationBatch    = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
-	adoptIncomingStreamBacklogPresentationBatch(request);
+
 	request.observation =
 	    m_runtime ? m_runtime->captureIncomingLineLuaObservation() : LuaCallbackIncomingLineObservation{};
 	if (m_processingInputCriticalOperation || m_processingIncomingLine || m_processingIncomingStreamAction)
@@ -3303,8 +3303,16 @@ void WorldCommandProcessor::startIncomingLine(
     PendingIncomingStreamItem request, const QSharedPointer<PendingIncomingLineOperation> &parent,
     const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback)
 {
+	std::optional<QScopedValueRollback<QWeakPointer<WorldRuntime::IncomingPresentationChunk>>> incomingOrigin;
 	if (m_runtime)
-		m_runtime->activateIncomingStreamPresentationBatch(request.presentationBatch);
+		incomingOrigin.emplace(
+		    m_runtime->m_currentIncomingPresentationChunk,
+		    request.presentationWork
+		        ? QWeakPointer<WorldRuntime::IncomingPresentationChunk>(request.presentationWork->chunk)
+		        : m_runtime->m_currentIncomingPresentationChunk);
+	auto presentationBatch = parent
+	                             ? parent->presentationBatch
+	                             : (m_runtime ? m_runtime->acquireIncomingLinePresentationBatch() : nullptr);
 	WorldRuntime::IncomingLineLuaObservationScope observationScope(m_runtime, request.observation);
 	m_processingIncomingLine = true;
 	const auto isEnabled     = [](const QString &value)
@@ -3372,15 +3380,6 @@ void WorldCommandProcessor::startIncomingLine(
 	if (m_runtime)
 		logOutput = isEnabled(m_runtime->worldAttributes().value(QStringLiteral("log_output")));
 
-	if (m_runtime)
-		m_runtime->beginOutputViewMutationBatch();
-	[[maybe_unused]] const auto flushOutputViewMutations = qScopeGuard(
-	    [this]
-	    {
-		    if (m_runtime)
-			    m_runtime->endOutputViewMutationBatch();
-	    });
-
 	std::optional<WorldRuntime::IncomingLineLuaContextState> parentLineContext;
 	if (m_runtime)
 	{
@@ -3395,7 +3394,8 @@ void WorldCommandProcessor::startIncomingLine(
 	operation->processor         = this;
 	operation->parent            = parent;
 	operation->nestingPlayback   = nestingPlayback;
-	operation->presentationBatch = std::move(request.presentationBatch);
+	operation->presentationBatch = std::move(presentationBatch);
+	operation->presentationWork  = std::move(request.presentationWork);
 	operation->inputCriticalOperationScope =
 	    parent ? parent->inputCriticalOperationScope : request.inputCriticalOperationScope;
 	operation->observation = request.observation;
@@ -3460,15 +3460,6 @@ void WorldCommandProcessor::continueIncomingLineAfterPluginDecision(
 		defaultBack         = m_paletteCacheDefaultBack;
 		defaultColorsLoaded = true;
 	};
-	if (m_runtime)
-		m_runtime->beginOutputViewMutationBatch();
-	[[maybe_unused]] const auto flushOutputViewMutations = qScopeGuard(
-	    [this]
-	    {
-		    if (m_runtime)
-			    m_runtime->endOutputViewMutationBatch();
-	    });
-
 	TriggerEvaluationResult triggerResult = processTriggersForLine(line, normalizedSpans);
 	if (!accepted)
 	{
@@ -3809,10 +3800,10 @@ void WorldCommandProcessor::finishIncomingLine(const QSharedPointer<PendingIncom
 		m_activeIncomingLineOperation = parent;
 	operation->processor.clear();
 	operation->presentationBatch.clear();
+	operation->presentationWork.clear();
 	if (parent)
 	{
 		drainNestedIncomingLines(parent, nestingPlayback);
-		finishIncomingStreamBacklogPresentationBatchIfIdle();
 		return;
 	}
 	m_processingIncomingLine = false;
@@ -3824,38 +3815,19 @@ void WorldCommandProcessor::cancelIncomingLine(const QSharedPointer<PendingIncom
 	if (!operation || operation->processor != this)
 		return;
 	WorldRuntime::IncomingLineLuaObservationScope observationScope(m_runtime, operation->observation);
-	if (m_runtime)
-		m_runtime->endIncomingLineLuaContext();
 	m_processingIncomingLine = false;
 	for (QSharedPointer<PendingIncomingLineOperation> current = operation; current; current = current->parent)
 	{
+		if (m_runtime)
+			m_runtime->endIncomingLineLuaContext();
+		if (current->restoreParentLineContext)
+			current->restoreParentLineContext();
 		current->processor.clear();
 		current->presentationBatch.clear();
+		current->presentationWork.clear();
 	}
 	m_activeIncomingLineOperation.clear();
-	m_incomingStreamBacklogPresentationBatch.clear();
 	cancelInputCriticalOperations();
-}
-
-void WorldCommandProcessor::adoptIncomingStreamBacklogPresentationBatch(PendingIncomingStreamItem &item)
-{
-	if (m_incomingStreamBacklogPresentationBatch)
-	{
-		item.presentationBatch = m_incomingStreamBacklogPresentationBatch;
-		return;
-	}
-	if (item.presentationBatch)
-		m_incomingStreamBacklogPresentationBatch = item.presentationBatch;
-}
-
-void WorldCommandProcessor::finishIncomingStreamBacklogPresentationBatchIfIdle()
-{
-	if (m_processingInputCriticalOperation || m_processingIncomingLine || m_processingIncomingStreamAction ||
-	    !m_pendingIncomingStreamItems.isEmpty())
-	{
-		return;
-	}
-	m_incomingStreamBacklogPresentationBatch.clear();
 }
 
 WorldCommandProcessor::InputCriticalOperationScopePtr
@@ -3907,7 +3879,6 @@ void WorldCommandProcessor::completeInputCriticalOperation(const InputCriticalOp
 	m_activeInputCriticalOperationScope.clear();
 	m_processingInputCriticalOperation = false;
 	drainPendingIncomingLines();
-	finishIncomingStreamBacklogPresentationBatchIfIdle();
 }
 
 void WorldCommandProcessor::cancelInputCriticalOperations()
@@ -3946,8 +3917,6 @@ void WorldCommandProcessor::enqueueOrRunInputCriticalAction(
 	item.inputCriticalActionContext  = captureCommandExecutionContext();
 	item.inputCriticalActionContext.inputCriticalOperationScope = item.inputCriticalOperationScope;
 	item.inputCriticalActionContext.operationCompletion         = item.inputCriticalOperationScope;
-	// External commands divide presentation produced by earlier and later network deliveries.
-	m_incomingStreamBacklogPresentationBatch.clear();
 	if (m_processingInputCriticalOperation || m_processingIncomingLine || m_processingIncomingStreamAction)
 	{
 		item.inputCriticalCallerContext = captureRuntimeCallerContextRunner();
@@ -3956,7 +3925,6 @@ void WorldCommandProcessor::enqueueOrRunInputCriticalAction(
 	}
 	static_cast<void>(processPendingIncomingStreamItem(std::move(item), {}, {}));
 	drainPendingIncomingLines();
-	finishIncomingStreamBacklogPresentationBatchIfIdle();
 }
 
 void WorldCommandProcessor::enqueueOrRunIncomingStreamAction(PendingIncomingStreamItem::OrderedAction action)
@@ -3964,11 +3932,11 @@ void WorldCommandProcessor::enqueueOrRunIncomingStreamAction(PendingIncomingStre
 	if (!action)
 		return;
 	PendingIncomingStreamItem item;
-	item.kind              = PendingIncomingStreamItem::Kind::OrderedAction;
-	item.action            = std::move(action);
-	item.nestingPlayback   = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
-	item.presentationBatch = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
-	adoptIncomingStreamBacklogPresentationBatch(item);
+	item.presentationWork = m_runtime ? m_runtime->acquireIncomingPresentationWork() : nullptr;
+	item.kind             = PendingIncomingStreamItem::Kind::OrderedAction;
+	item.action           = std::move(action);
+	item.nestingPlayback  = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
+
 	item.observation =
 	    m_runtime ? m_runtime->captureIncomingLineLuaObservation() : LuaCallbackIncomingLineObservation{};
 	item.actionSource  = m_runtime ? m_runtime->currentActionSource()
@@ -3981,13 +3949,19 @@ void WorldCommandProcessor::enqueueOrRunIncomingStreamAction(PendingIncomingStre
 	}
 	static_cast<void>(processPendingIncomingStreamItem(std::move(item), {}, {}));
 	drainPendingIncomingLines();
-	finishIncomingStreamBacklogPresentationBatchIfIdle();
 }
 
 bool WorldCommandProcessor::processPendingIncomingStreamItem(
     PendingIncomingStreamItem item, const QSharedPointer<PendingIncomingLineOperation> &parent,
     const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback)
 {
+	std::optional<QScopedValueRollback<QWeakPointer<WorldRuntime::IncomingPresentationChunk>>> incomingOrigin;
+	if (m_runtime)
+		incomingOrigin.emplace(
+		    m_runtime->m_currentIncomingPresentationChunk,
+		    item.presentationWork
+		        ? QWeakPointer<WorldRuntime::IncomingPresentationChunk>(item.presentationWork->chunk)
+		        : QWeakPointer<WorldRuntime::IncomingPresentationChunk>{});
 	const bool topLevel = !parent;
 	if (topLevel)
 	{
@@ -4010,8 +3984,6 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 			    parent ? m_activeIncomingLineOperation != parent : m_processingIncomingLine;
 			return;
 		case PendingIncomingStreamItem::Kind::PartialLine:
-			if (m_runtime)
-				m_runtime->activateIncomingStreamPresentationBatch(item.presentationBatch);
 			if (!m_runtime || item.partialLineRevision == m_runtime->m_incomingPartialLineRevision)
 				presentIncomingPartialLine(item.line, item.spans, item.partialLineRevision,
 				                           item.serverSideWrapActive);
@@ -4019,7 +3991,20 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 		case PendingIncomingStreamItem::Kind::OrderedAction:
 		{
 			if (m_runtime)
-				m_runtime->activateIncomingStreamPresentationBatch(item.presentationBatch);
+			{
+				m_runtime->beginMiniWindowMutationBatch();
+				m_runtime->beginOutputViewMutationBatch();
+			}
+			const auto finishPresentation = qScopeGuard(
+			    [runtime = QPointer<WorldRuntime>(m_runtime)]
+			    {
+				    if (runtime)
+				    {
+					    runtime->endMiniWindowMutationBatch();
+					    runtime->endOutputViewMutationBatch();
+				    }
+			    });
+
 			WorldRuntime::IncomingLineLuaObservationScope observationScope(m_runtime, item.observation);
 			const unsigned short                          previousActionSource =
 			    m_runtime ? m_runtime->currentActionSource()
@@ -4115,12 +4100,7 @@ void WorldCommandProcessor::drainPendingIncomingStreamItems(
 		}
 	}
 	m_pendingIncomingStreamDrainStack.push_back(frame);
-	const auto finishDrain = qScopeGuard(
-	    [this]
-	    {
-		    m_pendingIncomingStreamDrainStack.removeLast();
-		    finishIncomingStreamBacklogPresentationBatchIfIdle();
-	    });
+	const auto finishDrain = qScopeGuard([this] { m_pendingIncomingStreamDrainStack.removeLast(); });
 	Q_UNUSED(finishDrain);
 	while (!m_pendingIncomingStreamItems.isEmpty())
 	{
@@ -4149,32 +4129,29 @@ void WorldCommandProcessor::onIncomingStyledLinePartialReceived(const QString   
                                                                 const bool    serverSideWrapActive)
 {
 	PendingIncomingStreamItem request;
+	request.presentationWork     = m_runtime ? m_runtime->acquireIncomingPresentationWork() : nullptr;
 	request.kind                 = PendingIncomingStreamItem::Kind::PartialLine;
 	request.line                 = line;
 	request.spans                = spans;
 	request.partialLineRevision  = partialLineRevision;
 	request.serverSideWrapActive = serverSideWrapActive;
-	request.nestingPlayback   = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
-	request.presentationBatch = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
-	adoptIncomingStreamBacklogPresentationBatch(request);
+	request.nestingPlayback = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
+
 	if (m_processingInputCriticalOperation || m_processingIncomingLine || m_processingIncomingStreamAction)
 	{
 		if (!m_pendingIncomingStreamItems.isEmpty() &&
 		    m_pendingIncomingStreamItems.constLast().kind == PendingIncomingStreamItem::Kind::PartialLine &&
 		    m_pendingIncomingStreamItems.constLast().partialLineRevision == request.partialLineRevision &&
-		    m_pendingIncomingStreamItems.constLast().nestingPlayback == request.nestingPlayback &&
-		    m_pendingIncomingStreamItems.constLast().presentationBatch == request.presentationBatch)
+		    m_pendingIncomingStreamItems.constLast().nestingPlayback == request.nestingPlayback)
 			m_pendingIncomingStreamItems.last() = std::move(request);
 		else
 			m_pendingIncomingStreamItems.enqueue(std::move(request));
 		return;
 	}
-	if (m_runtime)
-		m_runtime->activateIncomingStreamPresentationBatch(request.presentationBatch);
+
 	if (!m_runtime || request.partialLineRevision == m_runtime->m_incomingPartialLineRevision)
 		presentIncomingPartialLine(request.line, request.spans, request.partialLineRevision,
 		                           request.serverSideWrapActive);
-	finishIncomingStreamBacklogPresentationBatchIfIdle();
 }
 
 void WorldCommandProcessor::presentIncomingPartialLine(const QString                          &line,
@@ -4184,6 +4161,21 @@ void WorldCommandProcessor::presentIncomingPartialLine(const QString            
 {
 	if (!m_view)
 		return;
+
+	if (m_runtime)
+	{
+		m_runtime->beginMiniWindowMutationBatch();
+		m_runtime->beginOutputViewMutationBatch();
+	}
+	const auto finishPresentation = qScopeGuard(
+	    [runtime = QPointer<WorldRuntime>(m_runtime)]
+	    {
+		    if (runtime)
+		    {
+			    runtime->endMiniWindowMutationBatch();
+			    runtime->endOutputViewMutationBatch();
+		    }
+	    });
 
 	QString                          displayLine  = line;
 	QVector<WorldRuntime::StyleSpan> displaySpans = spans;

@@ -698,7 +698,6 @@ class WorldView : public QWidget
 
 		friend class InputTextEdit;
 		friend class WrapTextBrowser;
-		friend class MiniWindowLayer;
 		friend class WorldOutputAccessible;
 		/**
 		 * @brief Extended editing/selection/output APIs used by runtime and widgets.
@@ -949,7 +948,7 @@ class WorldView : public QWidget
 		 */
 		int  setOutputScroll(int position, bool visible);
 		/**
-		 * @brief Applies pending output presentation work and returns the resulting scroll position.
+		 * @brief Synchronizes pending presentation and scroll geometry before handling a scroll request.
 		 * @return Current output scroll position after pending layout and tail-follow work.
 		 */
 		[[nodiscard]] int   synchronizePendingOutputScrollPosition();
@@ -1198,9 +1197,9 @@ class WorldView : public QWidget
 		 */
 		void paintMiniWindows(class QPainter *painter, bool underneath, const QRegion &updateRegion) const;
 		/**
-		 * @brief Marks a miniwindow layer dirty region as painted.
+		 * @brief Retires miniwindow damage reconstructed by native canvas composition.
 		 * @param underneath Consume the underneath layer when `true`; overlay otherwise.
-		 * @param paintedRegion Region actually delivered to the layer paint event.
+		 * @param paintedRegion Canvas region whose composition has completed.
 		 */
 		void miniWindowLayerPainted(bool underneath, const QRegion &paintedRegion) const;
 		/**
@@ -1384,7 +1383,7 @@ class WorldView : public QWidget
 		 */
 		void requestNativeOutputRepaintRegion(const QRegion &region) const;
 		/**
-		 * @brief Flushes a coalesced native output repaint request.
+		 * @brief Synchronizes scroll geometry and submits coalesced visible native-output damage.
 		 */
 		void flushQueuedNativeOutputRepaint() const;
 		/**
@@ -1640,13 +1639,12 @@ class WorldView : public QWidget
 		                                      const QRegion &paintedRegion, int scrollY, int scrollMax,
 		                                      const NativeOutputRenderLines &lines) const;
 		/**
-		 * @brief Queues a native canvas region and records whether it was requested independently of scroll-copy damage.
-		 * @param region Canvas region to repaint.
-		 * @param independentOfScrollBlit Whether the request must receive ordinary background painting.
+		 * @brief Accumulates compatible render changes from this view's last reusable canvas state.
+		 * @param delta Committed render change consumed synchronously by this view.
 		 */
-		void queueNativeOutputRepaintRegion(const QRegion &region, bool independentOfScrollBlit) const;
+		void accumulateNativeOutputScrollChanges(const NativeRenderCacheDelta &delta) const;
 		/**
-		 * @brief Clears an unconfirmed native-output scroll-copy transaction.
+		 * @brief Discards scroll-copy damage and invalidates its reusable canvas baseline.
 		 */
 		void clearNativeOutputScrollBlitState() const;
 		/**
@@ -1658,11 +1656,17 @@ class WorldView : public QWidget
 		[[nodiscard]] int  nativeWrapWidthPixels(int viewportWidth, bool wrapEnabled) const;
 		[[nodiscard]] int  nativeLocalWrapWidthPixels(int viewportWidth, bool wrapEnabled) const;
 		/**
-		 * @brief Paints baseline native output text to the overlay canvas.
+		 * @brief Composes visible background, miniwindows, and output on the native canvas.
 		 * @param painter Painter bound to native canvas.
 		 * @param updateRegion Dirty region from paint event.
 		 */
 		void               paintNativeOutputCanvas(QPainter *painter, const QRegion &updateRegion) const;
+		/**
+		 * @brief Paints background, underneath miniwindows, and text through the visible base region.
+		 * @param painter Destination painter.
+		 * @param updateRegion Visible base damage in output-stack coordinates.
+		 */
+		void               paintNativeOutputTextCanvas(QPainter *painter, const QRegion &updateRegion) const;
 		void paintTextRectangleCompatibilityFrame(QPainter *painter, const QRegion &updateRegion) const;
 		/**
 		 * @brief Returns the final-layout ranges whose content or initial height changed for a render delta.
@@ -2179,16 +2183,25 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] bool hasActiveCallbackOutputSelection() const;
 		/**
-		 * @brief Applies pending render-model deltas needed by callback-visible selection coordinates.
+		 * @brief Samples selection coordinates without publishing pending runtime output.
+		 * @return Start line/column and end line/column in the current callback view.
 		 */
-		void               synchronizeCallbackOutputSelectionPresentation();
+		[[nodiscard]] std::array<int, 4> callbackOutputSelectionBounds();
+		/**
+		 * @brief Resolves an internal query against a synchronous sparse projection.
+		 * @param query Internal reader of the projected render rows.
+		 */
+		void withCallbackOutputProjection(const std::function<void(const NativeOutputRenderLines &)> &query);
+		/** @brief Materializes completed logical rows before another batch can modify runtime storage. */
+		void materializeCompletedOutputPresentation();
+
 		/**
 		 * @brief Returns whether the runtime tail advanced beyond the cached presentation tail.
 		 * @return `true` when the current runtime tail has not yet been presented.
 		 */
 		[[nodiscard]] bool runtimeOutputTailAdvanced() const;
 		/**
-		 * @brief Detaches the partial-line overlay before applying a runtime buffer mutation.
+		 * @brief Stages a runtime mutation, detaching its partial overlay when no output batch is active.
 		 * @param tailAdvanced Whether the runtime acquired a new presented tail line.
 		 */
 		void               prepareRuntimeOutputMutationPresentation(bool tailAdvanced) const;
@@ -2199,9 +2212,10 @@ class WorldView : public QWidget
 		[[nodiscard]] bool hasPendingOutputPresentationWork() const;
 		/**
 		 * @brief Releases pending draw callbacks before requesting the repaint for completed presentation work.
-		 * @param repaintVisiblePanes `true` to repaint all visible output panes.
+		 * @param outputRevision Eligible output generation captured for this presentation pass.
+		 * @param miniWindowsReady Whether this pass releases recorded graphics requests.
 		 */
-		void               finalizeNativeOutputPresentationUpdate(bool repaintVisiblePanes);
+		void finalizeNativeOutputPresentationUpdate(quint64 outputRevision, bool miniWindowsReady);
 		enum class SemanticOutputRepaint
 		{
 			None,
@@ -2210,14 +2224,42 @@ class WorldView : public QWidget
 			PresentationVisible,
 			Full
 		};
-		void requestSemanticOutputRepaint(SemanticOutputRepaint repaint,
-		                                  bool                  preserveDuringCallbackSuppression = false);
-		void queueSemanticOutputRepaint(SemanticOutputRepaint repaint);
-		void releaseSemanticOutputRepaint();
+		void               requestSemanticOutputRepaint(SemanticOutputRepaint repaint,
+		                                                bool                  preserveDuringCallbackSuppression = false);
+		void               queueSemanticOutputRepaint(SemanticOutputRepaint repaint);
+		void               releaseSemanticOutputRepaint();
+		/**
+		 * @brief Checks whether automatic output must wait for its incoming chunk.
+		 * @return Whether no newly ready chunk permits physical presentation.
+		 */
+		[[nodiscard]] bool shouldDeferIncomingPresentation() const;
+		/**
+		 * @brief Releases presentation demand recorded by a settled incoming prefix.
+		 * @param outputRequested Whether the prefix requested output presentation.
+		 * @param miniWindowsRequested Whether the prefix requested graphics presentation.
+		 * @param drawRequested Whether the prefix accepted a draw notification.
+		 */
+		void presentReadyIncomingChunk(bool outputRequested, bool miniWindowsRequested, bool drawRequested);
+		/**
+		 * @brief Schedules already-recorded presentation requirements without creating draw demand.
+		 * @param releaseOutputRequests Whether output requirements may be promoted to ready work.
+		 */
+		void scheduleNativeRuntimeOutputPresentationSync(bool releaseOutputRequests);
+
+		/**
+		 * @brief Tests row visibility while retaining pending rows for callback projections.
+		 * @param entry Runtime or standalone row.
+		 * @param runtimeIndex Index used to reconcile an excluded provisional row later.
+		 * @return Whether the row belongs to the current render checkpoint.
+		 */
+		[[nodiscard]] bool    nativeOutputEntryVisible(const WorldRuntime::LineEntry &entry,
+		                                               int                            runtimeIndex) const;
+
+		SemanticOutputRepaint m_batchedSemanticOutputRepaint{SemanticOutputRepaint::None};
 		/**
 		 * @brief Invalidates queued output-presentation work from the previous runtime binding.
 		 */
-		void resetNativeOutputPresentationRequestState();
+		void                  resetNativeOutputPresentationRequestState();
 		/**
 		 * @brief Records one native append/rebuild diagnostic sample.
 		 * @param kind Append caller classification.
@@ -2374,7 +2416,15 @@ class WorldView : public QWidget
 				NativeOutputSourceAnchor     cursorSource;
 				bool                         anchorSourceResolutionPending{false};
 				bool                         cursorSourceResolutionPending{false};
+				/** @brief Coordinates describe pending output until resolved against a published model. */
+				bool                         usesPendingOutputCoordinates{false};
 				quint64                      renderRevision{0};
+		};
+		/** @brief Selection owned only by the current synchronous output projection. */
+		struct NativeOutputProjectionState
+		{
+				NativeOutputSelectionState selection;
+				bool                       followsCompletedDeltas{false};
 		};
 		/**
 		 * @brief Result of transforming one tracked endpoint through a render-cache delta.
@@ -2397,6 +2447,13 @@ class WorldView : public QWidget
 		 * @param delta Render-cache delta to apply.
 		 */
 		void transformNativeOutputSelectionForNativeRenderDelta(const NativeRenderCacheDelta &delta) const;
+		/**
+		 * @brief Advances matching selection coordinates or requests source validation for a different basis.
+		 * @param selection Selection whose coordinates and source-resolution flags are advanced.
+		 * @param delta Render delta whose source revision identifies its coordinate basis.
+		 */
+		static void transformNativeOutputSelectionStateForDelta(NativeOutputSelectionState   &selection,
+		                                                        const NativeRenderCacheDelta &delta);
 		/**
 		 * @brief Existing word selection captured across Qt's double-click mouse sequence.
 		 */
@@ -2555,6 +2612,17 @@ class WorldView : public QWidget
 		resolveNativeOutputSelectionStateForLines(const NativeOutputRenderLines &lines,
 		                                          NativeOutputSelectionState    &selection) const;
 		/**
+		 * @brief Resolves an explicit selection against the active model without mutating its source.
+		 * @param lines Logical rows in the active completed or projected model.
+		 * @param source Selection captured in the corresponding coordinate basis.
+		 * @param selection Receives resolved coordinates and owned source anchors.
+		 * @return Resolution status for the supplied rows.
+		 */
+		[[nodiscard]] NativeOutputSelectionResolveResult
+		resolveNativeOutputSelectionStateForLines(const NativeOutputRenderLines    &lines,
+		                                          const NativeOutputSelectionState &source,
+		                                          NativeOutputSelectionState       &selection) const;
+		/**
 		 * @brief Captures stable line identity for a native output position.
 		 * @param lines Current native render lines.
 		 * @param position Native output position.
@@ -2630,6 +2698,16 @@ class WorldView : public QWidget
 		 */
 		void setNativeOutputSelection(const WrapTextBrowser *sourceView, const NativeOutputPosition &anchor,
 		                              const NativeOutputPosition &cursor, bool dragging);
+		/**
+		 * @brief Publishes selection side effects after any borrowed query projection has ended.
+		 * @param previousSelection Selection before the semantic change.
+		 */
+		void publishNativeOutputSelectionChange(const NativeOutputSelectionState &previousSelection);
+		/**
+		 * @brief Builds owned clipboard HTML without publishing selection or render changes.
+		 * @return Complete clipboard HTML, or an empty string when no output is selected.
+		 */
+		[[nodiscard]] QString nativeOutputSelectionClipboardHtml() const;
 		/**
 		 * @brief Resolves native output selection bounds using legacy API coordinate semantics.
 		 * @param startLine Receives the one-based selection start line.
@@ -3042,26 +3120,109 @@ class WorldView : public QWidget
 				quint64 runtimeId{0};
 				quint64 surfaceRevision{0};
 				QRect   bounds;
+				QRect   drawRect;
+				qint64  sourceKey{0};
 				QRgb    transparentKey{0};
 				int     position{0};
 				int     zOrder{0};
 				bool    absoluteLocation{false};
 				bool    underneath{false};
 				bool    transparent{false};
+				bool    scaled{false};
+				bool    tiled{false};
 
-				bool    operator==(const MiniWindowPaintState &) const = default;
+				/** @brief Compares the complete painted surface identity and placement.
+				 * @param other Surface state to compare.
+				 * @return Whether both states describe the same drawing.
+				 */
+				bool    operator==(const MiniWindowPaintState &other) const = default;
 		};
 		struct MiniWindowPaintBoundsSnapshot
 		{
 				QHash<QString, MiniWindowPaintState> windows;
-				QRegion                              underlayRegion;
+				QVector<QString>                     order;
 				QSize                                clientSize;
 				QSize                                ownerSize;
 				qint64                               backgroundImageKey{0};
 				qint64                               foregroundImageKey{0};
 				int                                  backgroundImageMode{0};
 				int                                  foregroundImageMode{0};
+				qreal                                devicePixelRatio{1.0};
+				bool                                 interactive{false};
+				bool                                 bleedBackground{false};
+				bool                                 opaqueBleedBackground{false};
+				QRgb                                 foregroundBaseColour{0};
+				/** @brief Compares surface identities and all shared composition settings.
+				 * @param other Composition state to compare.
+				 * @return Whether the cached visibility plan remains applicable.
+				 */
+				bool operator==(const MiniWindowPaintBoundsSnapshot &other) const = default;
 		};
+		/** @brief Caches source-pixel coverage and its current placement without retaining source images. */
+		struct NativeSurfaceCoverageCache
+		{
+				qint64              sourceKey{0};
+				std::optional<QRgb> colourKey;
+				QRegion             sourceCoverage;
+				QRegion             sourceOpaque;
+				bool                sourceFullyOpaque{false};
+				QRect               drawRect;
+				QRect               clientRect;
+				qreal               sourceRatio{0.0};
+				qreal               displayRatio{0.0};
+				bool                scaled{false};
+				bool                tiled{false};
+				bool                placementValid{false};
+				QRegion             coverage;
+				QRegion             opaque;
+		};
+		/** @brief Records one miniwindow's visible contribution in painter order. */
+		struct NativeMiniWindowPaintEntry
+		{
+				QString name;
+				quint64 runtimeId{0};
+				bool    underneath{false};
+				QRegion visible;
+		};
+		/** @brief Owns the per-view visibility plan shared by scrolling and all composition passes. */
+		struct NativeOutputPaintPlan
+		{
+				MiniWindowPaintBoundsSnapshot       state;
+				QVector<NativeMiniWindowPaintEntry> windows;
+				QRegion                             foregroundOpaque;
+				QRegion                             foregroundImageVisible;
+				QRegion                             foregroundBaseVisible;
+				QRegion                             underlayOpaque;
+				QRegion                             backgroundImageVisible;
+				QRegion                             backgroundImageOpaque;
+				QRegion                             stationaryForeground;
+				QRegion                             stationaryBackground;
+				QRegion                             baseVisible;
+				bool                                valid{false};
+		};
+		/**
+		 * @brief Updates cached source coverage and placement for an image.
+		 * @param cache Per-view source and placement cache.
+		 * @param source Current source image, borrowed for this call only.
+		 * @param drawRect Unclipped drawing rectangle in output-stack coordinates.
+		 * @param scaled Whether drawing explicitly scales the source into drawRect.
+		 * @param tiled Whether drawing repeats the source across the client rectangle.
+		 * @param colourKey Optional RGB colour treated as transparent.
+		 */
+		void updateNativeSurfaceCoverage(NativeSurfaceCoverageCache &cache, const QImage &source,
+		                                 const QRect &drawRect, bool scaled, bool tiled,
+		                                 std::optional<QRgb> colourKey = std::nullopt) const;
+		/** @brief Publishes queued miniwindow layout and damage before choosing pixels to reuse. */
+		void synchronizePendingMiniWindowPresentation();
+		/** @brief Prepares the current view's coverage caches and ordered visibility plan. */
+		void prepareNativeOutputPaintPlan() const;
+		/**
+		 * @brief Builds ordered visibility from the supplied surface identities and placements.
+		 * @param state Current composition metadata.
+		 * @return Complete plan with coverage caches updated for the supplied state.
+		 */
+		[[nodiscard]] NativeOutputPaintPlan
+		buildNativeOutputPaintPlan(const MiniWindowPaintBoundsSnapshot &state) const;
 		/**
 		 * @brief Captures miniwindow paint bounds for dirty-rect native repainting.
 		 * @return Current miniwindow layer bounds and global-image identity.
@@ -3084,9 +3245,7 @@ class WorldView : public QWidget
 		QSplitter                                  *m_outputSplitter{nullptr};
 		QWidget                                    *m_outputContainer{nullptr};
 		QWidget                                    *m_outputStack{nullptr};
-		QWidget                                    *m_miniUnderlay{nullptr};
 		QWidget                                    *m_nativeOutputCanvas{nullptr};
-		QWidget                                    *m_miniOverlay{nullptr};
 		QScrollBar                                 *m_outputScrollBar{nullptr};
 		bool                                        m_outputScrollBarWanted{true};
 		bool                                        m_outputPresentationExposed{true};
@@ -3097,26 +3256,41 @@ class WorldView : public QWidget
 		mutable bool                                m_nativeOutputRepaintQueued{false};
 		mutable bool                                m_nativeOutputRepaintAll{false};
 		mutable QRegion                             m_nativeOutputRepaintRegion;
-		SemanticOutputRepaint                 m_pendingSemanticOutputRepaint{SemanticOutputRepaint::None};
-		int                                   m_drawCallbackCompletionsPending{0};
-		mutable NativeOutputPanePaintState    m_nativePrimaryPaintState;
-		mutable NativeOutputPanePaintState    m_nativeLivePaintState;
-		mutable NativeOutputPanePaintState    m_nativeOutputScrollBlitTargetState;
-		mutable bool                          m_nativeOutputScrollBlitPending{false};
-		mutable QRegion                       m_nativeOutputScrollBlitExposedRegion;
-		mutable QRegion                       m_nativeOutputScrollBlitBackgroundRegion;
-		mutable QRegion                       m_nativeOutputScrollBlitRepaintRegion;
-		mutable QRegion                       m_nativeOutputScrollBlitIndependentRepaintRegion;
-		mutable bool                          m_miniWindowPaintBoundsValid{false};
-		mutable MiniWindowPaintBoundsSnapshot m_miniWindowPaintBounds;
-		mutable QRegion                       m_pendingMiniWindowUnderlayDirtyRegion;
-		mutable QRegion                       m_pendingMiniWindowOverlayDirtyRegion;
+		SemanticOutputRepaint              m_pendingSemanticOutputRepaint{SemanticOutputRepaint::None};
+		int                                m_drawCallbackCompletionsPending{0};
+		mutable NativeOutputPanePaintState m_nativePrimaryPaintState;
+		mutable NativeOutputPanePaintState m_nativeLivePaintState;
+		mutable NativeOutputPanePaintState m_nativeOutputScrollBlitTargetState;
+		/** @brief Constant-size description of unpresented tail changes in current render coordinates. */
+		struct NativeOutputScrollChanges
+		{
+				quint64 fromRevision{0};
+				quint64 revision{0};
+				int     lineCount{0};
+				int     firstDirtyLine{0};
+		};
+		mutable NativeOutputScrollChanges                    m_nativeOutputScrollChanges;
+		mutable bool                                         m_nativeOutputScrollBlitPending{false};
+		mutable QRegion                                      m_nativeOutputScrollBlitRepaintRegion;
+		mutable QHash<QString, NativeSurfaceCoverageCache>   m_nativeMiniWindowCoverage;
+		mutable NativeSurfaceCoverageCache                   m_nativeForegroundImageCoverage;
+		mutable NativeSurfaceCoverageCache                   m_nativeBackgroundImageCoverage;
+		mutable NativeOutputPaintPlan                        m_nativeOutputPaintPlan;
+		bool                                                 m_synchronizingMiniWindowPresentation{false};
+		mutable bool                                         m_preparingNativeOutputPaintPlan{false};
+		mutable bool                                         m_nativeOutputCompositionActive{false};
+		mutable bool                                         m_miniWindowPaintBoundsValid{false};
+		mutable MiniWindowPaintBoundsSnapshot                m_miniWindowPaintBounds;
+		mutable QRegion                                      m_pendingMiniWindowUnderlayDirtyRegion;
+		mutable QRegion                                      m_pendingMiniWindowOverlayDirtyRegion;
 		mutable std::optional<WrapMarginReservationCacheKey> m_wrapMarginReservationCacheKey;
 		mutable int                                          m_wrapMarginReservationPixels{0};
 		QSize                                                m_lastQueuedOutputClientSize;
 		bool                                                 m_lastQueuedOutputClientSizeValid{false};
 		bool                                                 m_nawsOutputGeometryEstablished{false};
 		std::shared_ptr<WorldOutputRenderModel>              m_nativeRenderModel;
+		bool                                                 m_outputProjectionActive{false};
+		NativeOutputProjectionState                         *m_outputProjectionState{nullptr};
 		mutable int                                          m_accessibleOutputCharacterCount{-1};
 		mutable quint64                                      m_accessibleOutputRevision{0};
 		mutable QMudAccessibleTextUtils::LineOffsetIndex     m_accessibleOutputLineIndex;
@@ -3382,6 +3556,20 @@ class WorldView : public QWidget
 		bool                                    m_nativeRuntimeOutputPresentationNeedsLayoutSync{false};
 		bool                                    m_nativeRuntimeOutputPresentationFollowTail{false};
 		bool                                    m_nativeRuntimeOutputPresentationDeferredUntilBatchEnd{false};
+		bool                                    m_readyOutputPresentationPending{false};
+		bool                                    m_readyIncomingMiniWindowPresentation{false};
+		bool                                    m_readyOutputPresentationNeedsLayout{false};
+		bool                                    m_readyOutputPresentationFollowTail{false};
+		bool                                    m_materializingOutputPresentation{false};
+		bool                                    m_presentingCompletedOutput{false};
+		mutable bool                            m_forceOutputPresentation{false};
+		bool                                    m_incomingOutputCheckpoint{false};
+		mutable int                             m_incomingCheckpointFirstExcludedIndex{-1};
+		bool                                    m_forceMiniWindowPresentationPending{false};
+		quint64                                 m_presentedIncomingReadyRevision{0};
+		quint64                                 m_eligibleIncomingOutputRevision{0};
+		quint64                                 m_eligibleIncomingDrawRevision{0};
+		quint64                                 m_presentedIncomingDrawRevision{0};
 		quint64                                 m_nativeOutputPresentationBindingGeneration{0};
 		int                                     m_runtimeOutputMutationBatchDepth{0};
 		bool    m_runtimeOutputMutationBatchSuppressesDrawNotifications{false};

@@ -19,7 +19,7 @@ function(qmud_add_qtest target_name)
     target_compile_definitions(${target_name}
             PRIVATE
             QMUD_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    # Shared support supplies the mandatory silent-output definition even for direct binary launches.
+    # Shared support supplies startup configuration and silent output even for direct binary launches.
     target_link_libraries(${target_name}
             PRIVATE
             Qt6::Core
@@ -59,7 +59,8 @@ function(qmud_add_qtest target_name)
             ENVIRONMENT "${QMUD_TEST_DEFAULT_ENVIRONMENT}")
 endfunction()
 
-add_library(qmud_test_support STATIC
+# Link support objects into every test so their startup initializer cannot be discarded by archive extraction.
+add_library(qmud_test_support OBJECT
         support/TestEnvironment.cpp
         support/TelnetCallbackSpy.cpp)
 target_link_libraries(qmud_test_support PUBLIC Qt6::Core)
