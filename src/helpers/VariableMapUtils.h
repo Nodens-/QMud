@@ -23,10 +23,10 @@ namespace QMudVariableMapUtils
 	{
 		public:
 			/**
-			 * @brief Normalizes an external lookup key by trimming and lowercasing it.
-			 * @param input External variable name; its original spelling is retained for serialization.
+			 * @brief Owns an external name and normalizes its lookup key by trimming and lowercasing it.
+			 * @param input External variable name transferred or copied, retaining its spelling for serialization.
 			 */
-			Name(const QString &input) : m_key(normalizeKey(input)), m_label(input)
+			Name(QString input) : m_key(normalizeKey(input)), m_label(std::move(input))
 			{
 			}
 			/**
@@ -287,7 +287,29 @@ namespace QMudVariableMapUtils
 				m_source = Source::Unavailable;
 			}
 			/**
-			 * @brief Reads a complete hash directly, or resolves explicit sparse knowledge.
+			 * @brief Borrows a complete or sparse value until the next mutation or destruction of this view.
+			 * @param name Canonical identity.
+			 * @param resolved Receives whether presence is known, including known misses and unavailable owners.
+			 * @return Borrowed content when present, including empty strings, or null for a miss or unknown value.
+			 */
+			[[nodiscard]] const QString *find(const QString &name, bool &resolved) const
+			{
+				resolved = m_source != Source::Uncaptured;
+				if (m_source == Source::Unavailable)
+					return nullptr;
+				if (m_source == Source::Available)
+				{
+					const auto it = m_current.constFind(name);
+					return it != m_current.cend() ? &it->content : nullptr;
+				}
+				const auto it = m_sparse.constFind(name);
+				if (it == m_sparse.cend())
+					return nullptr;
+				resolved = true;
+				return it->value ? &it->value->content : nullptr;
+			}
+			/**
+			 * @brief Copies a complete or sparse value into an owning string when present.
 			 * @param name Canonical identity.
 			 * @param value Receives existing content.
 			 * @param resolved Receives whether presence is known.
@@ -295,18 +317,10 @@ namespace QMudVariableMapUtils
 			 */
 			bool find(const QString &name, QString &value, bool &resolved) const
 			{
-				resolved = m_source != Source::Uncaptured;
-				if (m_source == Source::Unavailable)
-					return false;
-				if (m_source == Source::Available)
-					return findValue(m_current, name, value);
-				const auto it = m_sparse.constFind(name);
-				if (it == m_sparse.cend())
-					return false;
-				resolved = true;
-				if (it->value)
-					value = it->value->content;
-				return it->value.has_value();
+				const QString *found = find(name, resolved);
+				if (found)
+					value = *found;
+				return found != nullptr;
 			}
 			/**
 			 * @brief Remembers fallback observations only while a complete map is absent.

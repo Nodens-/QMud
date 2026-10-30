@@ -61,6 +61,12 @@ namespace
 					QCOMPARE(name.key().isNull(), expected.isNull());
 					QCOMPARE(name.label(), input);
 					QCOMPARE(name.label().isNull(), input.isNull());
+					QString                          transferred = input;
+					const QMudVariableMapUtils::Name movedName(std::move(transferred));
+					QCOMPARE(movedName.key(), expected);
+					QCOMPARE(movedName.key().isNull(), expected.isNull());
+					QCOMPARE(movedName.label(), input);
+					QCOMPARE(movedName.label().isNull(), input.isNull());
 				};
 				check(QString());
 				check(QStringLiteral(""));
@@ -292,6 +298,58 @@ namespace
 				QVERIFY(!view.count());
 				QVERIFY(!view.values());
 				QVERIFY(!view.hasWrites());
+			}
+
+			/** @brief Checks borrowed presence and owning conversions across sparse and complete view mutations. */
+			void variableWorkingViewBorrowsValuesUntilMutation()
+			{
+				for (const bool complete : {false, true})
+				{
+					QMudVariableMapUtils::WorkingView view;
+					if (complete)
+						view.capture({});
+					bool resolved = false;
+					QVERIFY(!view.find(QStringLiteral("absent"), resolved));
+					QCOMPARE(resolved, complete);
+					view.remember(QStringLiteral("known_miss"), false, {});
+					QVERIFY(!view.find(QStringLiteral("known_miss"), resolved));
+					QVERIFY(resolved);
+
+					view.write(QStringLiteral("empty"), {}, false);
+					const QString *empty = view.find(QStringLiteral("empty"), resolved);
+					QVERIFY(resolved);
+					QVERIFY(empty);
+					QVERIFY(empty->isEmpty());
+					const QString content = QStringLiteral("énergie\0tail\U0001f600");
+					view.write(QStringLiteral("text"), content, false);
+					const QString *borrowed = view.find(QStringLiteral("text"), resolved);
+					QVERIFY(resolved);
+					QVERIFY(borrowed);
+					QCOMPARE(*borrowed, content);
+					const QByteArray encoded = borrowed->toUtf8();
+					QString          owned;
+					QVERIFY(view.find(QStringLiteral("text"), owned, resolved));
+					view.write(QStringLiteral("text"), QStringLiteral("replacement"), false);
+					QCOMPARE(encoded, content.toUtf8());
+					QCOMPARE(owned, content);
+					const QString *replacement = view.find(QStringLiteral("text"), resolved);
+					QVERIFY(replacement);
+					QCOMPARE(*replacement, QStringLiteral("replacement"));
+					view.write(QStringLiteral("text"), {}, true);
+					QVERIFY(!view.find(QStringLiteral("text"), resolved));
+					QVERIFY(resolved);
+					const auto captured =
+					    view.values() ? *view.values() : QMudVariableMapUtils::VariableMap{};
+					view.capture(captured);
+					QVERIFY(view.find(QStringLiteral("empty"), resolved));
+					QVERIFY(!view.find(QStringLiteral("text"), resolved));
+					QVERIFY(resolved);
+					view.makeUnavailable();
+					QVERIFY(!view.find(QStringLiteral("empty"), resolved));
+					QVERIFY(resolved);
+					QCOMPARE(encoded, content.toUtf8());
+					QCOMPARE(owned, content);
+				}
 			}
 
 			/** @brief Verifies repeated nested-style publications reuse maps and preserve every issued value. */

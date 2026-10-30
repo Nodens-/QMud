@@ -497,6 +497,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void emptyPluginVariableIdReadsWorldVariables();
 		void deleteVariableIsReflectedInNextCallbackSnapshot();
 		void pluginDeleteVariableUsesPluginScopeAndPatchedSnapshot();
+		/** @brief Checks variable read encoding, presence, and ownership for complete and sparse world/plugin views. */
+		void callbackVariableReadsPreserveValuesAcrossMutations();
 		/** @brief Verifies ordered writes survive equality against a stale callback snapshot. */
 		void unchangedPluginWriteStillAppliesToNewerRuntimeState();
 		/** @brief Verifies full and sparse variable overlays survive nested calls and deletion. */
@@ -8577,6 +8579,128 @@ end
 	             .content,
 	         QStringLiteral("captured"));
 	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
+void tst_LuaCallbackEngine::callbackVariableReadsPreserveValuesAcrossMutations()
+{
+	for (const bool pluginScoped : {false, true})
+	{
+		for (const bool fullMap : {false, true})
+		{
+			WorldRuntime  runtime;
+			const QString pluginId = pluginScoped ? QStringLiteral("abcdefabcdefabcdefabcdea") : QString();
+			const QString unavailableId = QStringLiteral("abcdefabcdefabcdefabcdeb");
+			auto          engine        = QSharedPointer<LuaCallbackEngine>::create();
+			if (pluginScoped)
+			{
+				WorldRuntime::Plugin plugin;
+				plugin.attributes.insert(QStringLiteral("id"), pluginId);
+				plugin.enabled = true;
+				plugin.lua     = engine;
+				WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+				WorldRuntimeTestAccess::commitPluginStructure(runtime);
+				runtime.setPluginVariableValue(pluginId, QStringLiteral("Present"),
+				                               QStringLiteral("captured\0énergie\U0001f600"));
+			}
+			else
+				runtime.setVariable(QStringLiteral("Present"), QStringLiteral("captured\0énergie\U0001f600"));
+
+			LuaEngineObservedInitializationRequest initialization;
+			initialization.engine              = engine.data();
+			initialization.workerLifetimeOwner = engine;
+			initialization.runtime             = &runtime;
+			initialization.pluginId            = pluginId;
+			initialization.pluginName          = pluginId;
+			initialization.scriptText          = QStringLiteral(R"lua(
+function exercise(mode)
+  local owner = "%1"
+  local captured = mode == "full" and "captured\0énergie😀" or nil
+  assert(GetVariable(" PrEsEnT ") == captured)
+  assert(GetPluginVariable(owner, "PRESENT") == captured)
+  assert(GetVariable("missing") == nil)
+  assert(GetPluginVariable(owner, "missing") == nil)
+  assert(GetPluginVariable("%2", "present") == nil)
+  assert(GetVariable("") == nil)
+  assert(GetPluginVariable(owner, "  ") == nil)
+  assert(SetVariable("  ", {}) == error_code.eInvalidObjectLabel)
+  assert(not pcall(GetVariable, {}))
+  assert(SetVariable(42, 123) == 0)
+  assert(GetVariable(42) == "123")
+  assert(GetPluginVariable(owner, 42) == "123")
+  assert(SetVariable("ÉNERGIE", "") == 0)
+  assert(GetVariable("énergie") == "")
+  assert(GetPluginVariable(owner, " énergie ") == "")
+  local content = string.rep("énergie😀", 1024)
+  assert(SetVariable(" ÉNERGIE ", content) == 0)
+  local retained = GetVariable("énergie")
+  local peer_retained = GetPluginVariable(owner, " ÉNERGIE ")
+  assert(retained == content and peer_retained == content)
+  assert(GetVariable("énergie\0ignored") == content)
+  assert(SetVariable("ÉNERGIE", "replacement") == 0)
+  assert(GetVariable("énergie") == "replacement")
+  if mode == "full" then
+    assert(DeleteVariable("énergie") == 0)
+    assert(GetVariable("énergie") == nil)
+    assert(GetPluginVariable(owner, "énergie") == nil)
+  end
+  collectgarbage("collect")
+  assert(retained == content and peer_retained == content)
+  assert(SetVariable("nul_name\0ignored", "prefix\0ignored") == 0)
+  assert(GetVariable("nul_name") == "prefix")
+  assert(GetVariable("nul_name\0ignored") == "prefix")
+  return "ok"
+end
+)lua")
+			                                         .arg(pluginId, unavailableId);
+			runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+			auto snapshot = captureMutableDispatchSnapshotForTest(runtime);
+			QVERIFY(snapshot);
+			snapshot->unavailablePluginVariableSnapshotIds.insert(unavailableId);
+			if (!fullMap)
+			{
+				if (pluginScoped)
+					snapshot->pluginVariablesSnapshotById.remove(pluginId);
+				else
+				{
+					snapshot->hasWorldVariablesSnapshot = false;
+					snapshot->worldVariablesSnapshot.clear();
+				}
+			}
+			LuaBatchDispatchRequest request;
+			request.engines             = {engine};
+			request.kind                = LuaBatchDispatchKind::StringInOut;
+			request.functionName        = QStringLiteral("exercise");
+			request.stringArg           = fullMap ? QStringLiteral("full") : QStringLiteral("sparse");
+			request.callbackSnapshotArg = snapshot;
+			const auto result           = runtime.queuePluginCallbackDispatch(
+			    request, WorldRuntime::PluginCallbackCompletionPolicy::ResultRequired);
+			QCOMPARE(result.stringResult, QStringLiteral("ok"));
+			QString value;
+			if (pluginScoped)
+			{
+				QVERIFY(runtime.findPluginVariable(pluginId, QStringLiteral("nul_name"), value));
+				QCOMPARE(value, QStringLiteral("prefix"));
+				QCOMPARE(runtime.findPluginVariable(pluginId, QStringLiteral("énergie"), value), !fullMap);
+			}
+			else
+			{
+				QVERIFY(runtime.findVariable(QStringLiteral("nul_name"), value));
+				QCOMPARE(value, QStringLiteral("prefix"));
+				QCOMPARE(runtime.findVariable(QStringLiteral("énergie"), value), !fullMap);
+			}
+			if (!fullMap)
+				QCOMPARE(value, QStringLiteral("replacement"));
+			if (fullMap)
+			{
+				const auto original = pluginScoped ? snapshot->pluginVariablesSnapshotById.value(pluginId)
+				                                   : snapshot->worldVariablesSnapshot;
+				QCOMPARE(original.value(QStringLiteral("present")).content,
+				         QStringLiteral("captured\0énergie\U0001f600"));
+				QVERIFY(!original.contains(QStringLiteral("nul_name")));
+			}
+			runtime.dispatchTeardownLuaEngines({engine}, true);
+		}
+	}
 }
 
 void tst_LuaCallbackEngine::nestedPluginVariablesUseCanonicalFullAndSparseOverlays()
