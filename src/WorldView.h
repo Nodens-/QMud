@@ -1685,11 +1685,11 @@ class WorldView : public QWidget
 		 * @param first First layout index to replace.
 		 * @param removeCount Number of existing entries to remove.
 		 * @param insertCount Number of default entries to insert.
-		 * @param defaultHeight Initial height assigned to inserted entries.
+		 * @param defaultVisualRows Initial visual-row count assigned to inserted entries.
 		 * @return `true` when both topology containers remain aligned at the expected size.
 		 */
 		bool        replaceNativeLayoutTopology(int first, int removeCount, int insertCount,
-		                                        qreal defaultHeight) const;
+		                                        int defaultVisualRows = 1) const;
 		/**
 		 * @brief Advances cached native layout topology immediately with one render-cache mutation.
 		 * @param delta Render-cache delta whose source revision matches the current layout topology.
@@ -1861,18 +1861,57 @@ class WorldView : public QWidget
 		[[nodiscard]] static int estimateNativeLineRows(const NativeOutputRenderLine &line,
 		                                                int                           effectiveWrapWidth,
 		                                                const QFontMetrics           &fontMetrics);
+		/** @brief Exact logical row advance derived from integer font metrics and spacing percent. */
+		struct NativeRowAdvance
+		{
+				qint64              hundredths{0};
+				/**
+				 * @brief Converts an exact row offset to logical pixels.
+				 * @param rows Visual-row offset.
+				 * @return Canonical pixel coordinate.
+				 */
+				[[nodiscard]] qreal yForRows(qint64 rows) const;
+				/**
+				 * @brief Returns one row's logical height.
+				 * @return Row advance in logical pixels.
+				 */
+				[[nodiscard]] qreal pixels() const
+				{
+					return yForRows(1);
+				}
+				/**
+				 * @brief Resolves a pixel coordinate against canonical row boundaries.
+				 * @param y Logical pixel coordinate.
+				 * @param totalRows Total visual-row count.
+				 * @return Clamped visual-row offset, or zero when empty.
+				 */
+				[[nodiscard]] qint64 rowAtY(qreal y, qint64 totalRows) const;
+				/**
+				 * @brief Compares exact geometry bases.
+				 * @param other Geometry to compare.
+				 * @return Whether both advances match.
+				 */
+				[[nodiscard]] bool   operator==(const NativeRowAdvance &other) const = default;
+		};
+		/**
+		 * @brief Builds exact row geometry for the current renderer.
+		 * @param font Output font.
+		 * @param lineSpacingSetting Extra spacing percentage.
+		 * @return Exact logical row advance.
+		 */
+		[[nodiscard]] static NativeRowAdvance nativeRowAdvance(const QFont &font, int lineSpacingSetting);
 		/**
 		 * @brief Commits the authoritative native-layout cache key and its derived content salt.
 		 * @param wrapWidthPixels Effective wrap width for runtime output.
 		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
 		 * @param lineSpacingSetting Current line-spacing percentage delta.
 		 * @param styleKey Current native-layout style key.
-		 * @param defaultLineAdvance Cached height of one visual row.
+		 * @param defaultLineAdvance Exact visual-row geometry.
 		 * @param layoutFont Current output font.
 		 */
 		void commitNativeLayoutCacheState(int wrapWidthPixels, int localWrapWidthPixels,
-		                                  int lineSpacingSetting, quint64 styleKey, qreal defaultLineAdvance,
-		                                  const QFont &layoutFont) const;
+		                                  int lineSpacingSetting, quint64 styleKey,
+		                                  NativeRowAdvance defaultLineAdvance, const QFont &layoutFont) const;
 		/**
 		 * @brief Refreshes approximate layout metadata for normalized line ranges.
 		 * @param lines Current native render lines.
@@ -1880,13 +1919,12 @@ class WorldView : public QWidget
 		 * @param wrapWidthPixels Effective wrap width for runtime output.
 		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
 		 * @param layoutFont Current output font.
-		 * @param defaultLineAdvance Cached height of one visual row.
 		 * @param layoutContentSalt Content salt committed with the native-layout cache key.
 		 */
 		void refreshNativeLayoutMetadataRanges(const NativeOutputRenderLines  &lines,
 		                                       const QVector<QPair<int, int>> &ranges, int wrapWidthPixels,
 		                                       int localWrapWidthPixels, const QFont &layoutFont,
-		                                       qreal defaultLineAdvance, quint64 layoutContentSalt) const;
+		                                       quint64 layoutContentSalt) const;
 		/**
 		 * @brief Ensures exact native layouts for a bounded line range.
 		 * @param lines Current native render lines.
@@ -1916,13 +1954,14 @@ class WorldView : public QWidget
 		/**
 		 * @brief Computes split-pane head-trim adjustment from pre-trim layout state.
 		 * @param delta Render cache delta that trimmed head lines.
-		 * @param defaultLineAdvance Fallback line advance for exact-row metadata.
+		 * @param defaultLineAdvance Fallback exact row geometry.
 		 * @param targetRevision Render revision that will consume the adjustment.
 		 * @return Deferred adjustment; invalid when current layout state cannot produce one.
 		 */
 		[[nodiscard]] NativeSplitTopHeadTrimAdjustment
-		nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
-		                                         qreal defaultLineAdvance, quint64 targetRevision = 0) const;
+		                  nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
+		                                                           NativeRowAdvance              defaultLineAdvance,
+		                                                           quint64                       targetRevision = 0) const;
 		/**
 		 * @brief Clears pending split-pane head-trim compensation.
 		 */
@@ -1957,8 +1996,18 @@ class WorldView : public QWidget
 		 * @param adjustment Deferred adjustment to commit.
 		 */
 		void applyNativeSplitTopHeadTrimAdjustment(const NativeSplitTopHeadTrimAdjustment &adjustment) const;
+		/** @brief Measures one native text layout using canonical row positions.
+		 * @param lines Current render lines.
+		 * @param index Logical line to measure.
+		 * @param wrapWidthPixels Runtime-output wrap width.
+		 * @param localWrapWidthPixels Local-output wrap width.
+		 * @param defaultLineAdvance Exact visual-row geometry.
+		 * @param layoutFont Output font.
+		 * @param layoutContentSalt Current content cache salt.
+		 * @return Measured visual-row count.
+		 */
 		int  ensureNativeLineLayout(const NativeOutputRenderLines &lines, int index, int wrapWidthPixels,
-		                            int localWrapWidthPixels, qreal defaultLineAdvance,
+		                            int localWrapWidthPixels, NativeRowAdvance defaultLineAdvance,
 		                            const QFont &layoutFont, quint64 layoutContentSalt) const;
 		void ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, int wrapWidthPixels,
 		                              int localWrapWidthPixels, int lineSpacingSetting,
@@ -2010,11 +2059,11 @@ class WorldView : public QWidget
 		 */
 		struct NativeLayoutTopologyReplacement
 		{
-				int   first{0};
-				int   removeCount{0};
-				int   insertCount{0};
-				int   expectedSize{0};
-				qreal defaultHeight{0.0};
+				int first{0};
+				int removeCount{0};
+				int insertCount{0};
+				int expectedSize{0};
+				int defaultVisualRows{1};
 		};
 		/**
 		 * @brief Slot topology and exact geometry retained by stable runtime-line identity during reconciliation.
@@ -2022,7 +2071,6 @@ class WorldView : public QWidget
 		struct NativeExactLayoutSlotSnapshot
 		{
 				NativeLayoutSlot slot;
-				qreal            height{0.0};
 				int              originalIndex{-1};
 		};
 		/**
@@ -2070,47 +2118,258 @@ class WorldView : public QWidget
 		restoreNativeExactLayoutSlots(const NativeOutputRenderLines &lines, int wrapWidthPixels,
 		                              int localWrapWidthPixels, quint64 layoutContentSalt,
 		                              const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots) const;
+		/**
+		 * @brief Indexes exact visual-row counts in stable circular segment-tree slots.
+		 *
+		 * Interior blocks contain 128..256 lines; edge blocks may be shorter. Unused
+		 * leaves are zero. Head eviction and wraparound never relocate surviving blocks.
+		 */
 		struct NativeLayoutHeightIndex
 		{
-				[[nodiscard]] qsizetype size() const;
-				[[nodiscard]] bool      isEmpty() const;
-				[[nodiscard]] qreal     heightAt(int index) const;
-				[[nodiscard]] qreal     prefixHeightAt(int index) const;
-				[[nodiscard]] qreal     totalHeight() const;
-				[[nodiscard]] int       lineAtY(qreal y) const;
-				void                    clear();
-				void                    reserve(qsizetype count);
-				void                    append(qreal height);
-				void                    resize(qsizetype count, qreal defaultHeight);
-				void                    assign(qsizetype count, qreal defaultHeight);
-				void                    removeFront(qsizetype count);
-				void                    replace(const NativeLayoutTopologyReplacement &replacement);
-				void                    setHeight(int index, qreal height);
-				void setLayoutSlotHeightRange(int firstLine, int lastLineExclusive,
-				                              const PagedIndexedRingBuffer<NativeLayoutSlot> &layoutSlots,
-				                              qreal                                           lineAdvance);
+				/**
+				 * @brief Returns the stored line count.
+				 * @return Number of line heights.
+				 */
+				[[nodiscard]] qsizetype        size() const;
+				/**
+				 * @brief Tests whether no heights are stored.
+				 * @return Whether the index is empty.
+				 */
+				[[nodiscard]] bool             isEmpty() const;
+				/**
+				 * @brief Reads a height.
+				 * @param index Logical line index.
+				 * @return Height, or zero outside the index.
+				 */
+				[[nodiscard]] qreal            heightAt(int index) const;
+				/**
+				 * @brief Reads a visual-row count.
+				 * @param index Logical line index.
+				 * @return Visual rows, or zero outside the index.
+				 */
+				[[nodiscard]] int              rowCountAt(int index) const;
+				/**
+				 * @brief Sums rows before a logical line.
+				 * @param index Exclusive logical line end.
+				 * @return Exact visual-row prefix.
+				 */
+				[[nodiscard]] qint64           rowPrefixAt(int index) const;
+				/**
+				 * @brief Resolves a coordinate to a visual row.
+				 * @param y Logical pixel coordinate.
+				 * @return Clamped visual-row offset, or zero when empty.
+				 */
+				[[nodiscard]] qint64           rowAtY(qreal y) const;
+				/**
+				 * @brief Reads the geometry basis.
+				 * @return Exact row advance.
+				 */
+				[[nodiscard]] NativeRowAdvance rowAdvance() const
+				{
+					return m_rowAdvance;
+				}
+				/**
+				 * @brief Sums preceding heights.
+				 * @param index Exclusive logical end.
+				 * @return Bounded prefix height.
+				 */
+				[[nodiscard]] qreal prefixHeightAt(int index) const;
+				/**
+				 * @brief Returns the document height.
+				 * @return Sum of all stored heights.
+				 */
+				[[nodiscard]] qreal totalHeight() const;
+				/**
+				 * @brief Finds a line by height.
+				 * @param y Document coordinate.
+				 * @return Clamped line index, or zero when empty.
+				 */
+				[[nodiscard]] int   lineAtY(qreal y) const;
+				/** @brief Releases storage and resets all logical state. */
+				void                clear();
+				/**
+				 * @brief Reserves height and block storage.
+				 * @param count Anticipated line count.
+				 */
+				void                reserve(qsizetype count);
+				/**
+				 * @brief Appends one visual-row count incrementally.
+				 * @param rows Visual-row count clamped to nonnegative.
+				 */
+				void                append(int rows);
+				/**
+				 * @brief Resizes the logical tail.
+				 * @param count Required line count.
+				 * @param defaultRows Visual-row count of added lines.
+				 */
+				void                resize(qsizetype count, int defaultRows = 1);
+				/**
+				 * @brief Initializes uniform visual-row counts and their geometry basis.
+				 * @param count Required line count.
+				 * @param advance Exact row geometry.
+				 * @param defaultRows Initial visual-row count.
+				 */
+				void                assign(qsizetype count, NativeRowAdvance advance, int defaultRows = 1);
+				/**
+				 * @brief Evicts oldest heights incrementally.
+				 * @param count Maximum number of lines to remove.
+				 */
+				void                removeFront(qsizetype count);
+				/**
+				 * @brief Replaces a logical range while retaining unaffected blocks.
+				 * @param replacement Validated replacement dimensions and default visual-row count.
+				 */
+				void                replace(const NativeLayoutTopologyReplacement &replacement);
+				/**
+				 * @brief Updates one stored visual-row count.
+				 * @param index Logical line index.
+				 * @param rows Nonnegative visual-row count.
+				 */
+				void                setRowCount(int index, int rows);
+				/**
+				 * @brief Refreshes block row counts from changed layout slots.
+				 * @param firstLine First logical line to refresh.
+				 * @param lastLineExclusive Exclusive logical end.
+				 * @param layoutSlots Current visual-row metadata.
+				 */
+				void setLayoutSlotRowRange(int firstLine, int lastLineExclusive,
+				                           const PagedIndexedRingBuffer<NativeLayoutSlot> &layoutSlots);
+				/**
+				 * @brief Exchanges complete index ownership.
+				 * @param other Index to exchange with.
+				 */
 				void swap(NativeLayoutHeightIndex &other) noexcept;
 
 			private:
 				friend class ::tst_WorldView_Basic;
 
-				static constexpr int          kBlockSize = 256;
+				static constexpr int kBlockSize        = 256;
+				static constexpr int kMinimumBlockSize = kBlockSize / 2;
+				/** @brief Stores line-count and height aggregates for a block or subtree. */
+				struct BlockAggregate
+				{
+						int    lines{0};
+						qint64 rows{0};
+				};
+				/** @brief Selects the aggregate used when locating a block. */
+				enum class BlockMetric
+				{
+					Lines,
+					Rows
+				};
+				/**
+				 * @brief Maps a logical block to its slot.
+				 * @param block Logical block index.
+				 * @return Physical leaf slot.
+				 */
+				[[nodiscard]] int            blockSlot(int block) const;
+				/**
+				 * @brief Reads a logical block.
+				 * @param block Logical block index.
+				 * @return Block aggregate by value.
+				 */
+				[[nodiscard]] BlockAggregate blockAt(int block) const;
+				/**
+				 * @brief Grows storage only when necessary.
+				 * @param count Required leaf capacity including spare slots.
+				 */
+				void                         ensureBlockCapacity(int count);
+				/**
+				 * @brief Recomputes one ancestor from its children.
+				 * @param node Internal tree-node index.
+				 */
+				void                         updateBlockParent(int node);
+				/**
+				 * @brief Sets a leaf and its ancestors.
+				 * @param slot Physical leaf slot.
+				 * @param value Complete replacement aggregate.
+				 */
+				void                         setBlockSlot(int slot, BlockAggregate value);
+				/**
+				 * @brief Splices logical blocks by moving the smaller retained side.
+				 * @param first First logical block to replace.
+				 * @param removeCount Number of old blocks to remove.
+				 * @param inserted Replacement block aggregates, independent of tree storage.
+				 */
+				void replaceBlocks(int first, int removeCount, std::span<const BlockAggregate> inserted);
+				/**
+				 * @brief Sums a physical leaf range.
+				 * @param first First slot.
+				 * @param last Exclusive end.
+				 * @return Combined aggregate.
+				 */
+				[[nodiscard]] BlockAggregate physicalBlockRange(int first, int last) const;
+				/**
+				 * @brief Sums a logical block prefix across wraparound.
+				 * @param count Exclusive block end.
+				 * @return Combined aggregate.
+				 */
+				[[nodiscard]] BlockAggregate blockPrefix(int count) const;
+				/**
+				 * @brief Finds the first leaf exceeding an offset in a physical range.
+				 * @param first First physical slot in the search.
+				 * @param last Exclusive physical end.
+				 * @param remaining Offset reduced by skipped aggregates.
+				 * @param metric Aggregate used for selection.
+				 * @param node Current tree node.
+				 * @param low First slot covered by the node.
+				 * @param high Exclusive end covered by the node.
+				 * @return Physical slot, or `-1` if the range was skipped.
+				 */
+				[[nodiscard]] int findBlockInRange(int first, int last, qint64 &remaining, BlockMetric metric,
+				                                   int node, int low, int high) const;
+				/**
+				 * @brief Selects in logical order.
+				 * @param offset Nonnegative offset.
+				 * @param metric Selection aggregate.
+				 * @return Clamped logical block index.
+				 */
+				[[nodiscard]] int findBlock(qint64 offset, BlockMetric metric) const;
+				/**
+				 * @brief Sums stored visual-row counts in a bounded block.
+				 * @param first First line.
+				 * @param count Number of lines.
+				 * @return Exact visual-row total.
+				 */
+				[[nodiscard]] qint64        sumRows(int first, int count) const;
+				/**
+				 * @brief Reads a line-count prefix.
+				 * @param blockCount Exclusive block end.
+				 * @return Number of preceding lines.
+				 */
+				[[nodiscard]] int           blockLengthPrefix(int blockCount) const;
+				/**
+				 * @brief Reads an exact visual-row prefix.
+				 * @param blockCount Exclusive block end.
+				 * @return Visual rows of preceding blocks.
+				 */
+				[[nodiscard]] qint64        blockRowPrefix(int blockCount) const;
+				/**
+				 * @brief Locates a line's block.
+				 * @param lineIndex Logical line.
+				 * @param prefixLines Optional preceding-line result.
+				 * @return Logical block index.
+				 */
+				[[nodiscard]] int           blockForLine(int lineIndex, int *prefixLines) const;
+				/**
+				 * @brief Locates a visual row's block.
+				 * @param row Visual-row offset.
+				 * @param prefixRows Optional preceding-row result.
+				 * @return Logical block index.
+				 */
+				[[nodiscard]] int           blockForRow(qint64 row, qint64 *prefixRows) const;
 
-				void                          rebuildBlockSums();
-				void                          rebuildBlockSumsFromBlock(int firstBlock, int firstLine);
-				void                          rebuildFenwick();
-				void                          addBlockLengthDelta(int blockIndex, int delta);
-				void                          addBlockSumDelta(int blockIndex, qreal delta);
-				[[nodiscard]] int             blockLengthPrefix(int blockCount) const;
-				[[nodiscard]] qreal           blockSumPrefix(int blockCount) const;
-				[[nodiscard]] int             blockForLine(int lineIndex, int *prefixLines) const;
-				[[nodiscard]] int             blockForY(qreal y, qreal *prefixHeight) const;
-
-				PagedIndexedRingBuffer<qreal> m_heights;
-				IndexedRingBuffer<int>        m_blockLengths;
-				IndexedRingBuffer<qreal>      m_blockSums;
-				QVector<int>                  m_lengthFenwick;
-				QVector<qreal>                m_sumFenwick;
+				PagedIndexedRingBuffer<int> m_visualRows;
+				NativeRowAdvance            m_rowAdvance{100};
+				QVector<BlockAggregate>     m_blockTree;
+				int                         m_blockCapacity{0};
+				int                         m_firstBlockSlot{0};
+				int                         m_blockCount{0};
+#ifndef NDEBUG
+				quint64         m_blockTreeBuilds{0};
+				quint64         m_blockTreeWrites{0};
+				mutable quint64 m_blockQueryNodes{0};
+#endif
 		};
 		[[nodiscard]] qreal              nativeLayoutCumulativeHeightAt(int index) const;
 		[[nodiscard]] int                nativeLayoutLineAtY(qreal y) const;
@@ -3357,7 +3616,7 @@ class WorldView : public QWidget
 		mutable int                                m_nativeLayoutCachedLocalWrapWidth{0};
 		mutable int                                m_nativeLayoutCachedLineSpacing{0};
 		mutable quint64                            m_nativeLayoutCachedStyleKey{0};
-		mutable qreal                              m_nativeLayoutCachedLineAdvance{0.0};
+		mutable NativeRowAdvance                   m_nativeLayoutCachedRowAdvance;
 		mutable QFont                              m_nativeLayoutCachedFont;
 		mutable quint64                            m_nativeLayoutCachedContentSalt{0};
 		mutable quint64                            m_nativeLayoutCachedRenderRevision{0};

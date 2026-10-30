@@ -74,6 +74,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <map>
@@ -2022,30 +2023,30 @@ end
 			for (int line = 0; line < lineCount; ++line)
 				layoutSlots[line].visualRows = 1;
 
-			heightIndex.assign(lineCount, lineAdvance);
+			heightIndex.assign(lineCount, WorldView::NativeRowAdvance{1000});
 			QCOMPARE(heightIndex.totalHeight(), static_cast<qreal>(lineCount) * lineAdvance);
 
 			for (int line = 8; line < 14; ++line)
 				layoutSlots[line].visualRows = 2;
-			heightIndex.setLayoutSlotHeightRange(8, 14, layoutSlots, lineAdvance);
+			heightIndex.setLayoutSlotRowRange(8, 14, layoutSlots);
 			QCOMPARE(heightIndex.heightAt(7), lineAdvance);
 			QCOMPARE(heightIndex.heightAt(8), lineAdvance * 2.0);
 			QCOMPARE(heightIndex.prefixHeightAt(14), (static_cast<qreal>(14) + 6.0) * lineAdvance);
 
 			const qreal afterSingleBlockUpdate = heightIndex.totalHeight();
-			heightIndex.setLayoutSlotHeightRange(8, 14, layoutSlots, lineAdvance);
+			heightIndex.setLayoutSlotRowRange(8, 14, layoutSlots);
 			QCOMPARE(heightIndex.totalHeight(), afterSingleBlockUpdate);
 
 			for (int line = blockSize - 2; line < blockSize + 3; ++line)
 				layoutSlots[line].visualRows = 3;
-			heightIndex.setLayoutSlotHeightRange(blockSize - 2, blockSize + 3, layoutSlots, lineAdvance);
+			heightIndex.setLayoutSlotRowRange(blockSize - 2, blockSize + 3, layoutSlots);
 			QCOMPARE(heightIndex.heightAt(blockSize - 3), lineAdvance);
 			QCOMPARE(heightIndex.heightAt(blockSize - 2), lineAdvance * 3.0);
 			QCOMPARE(heightIndex.heightAt(blockSize + 2), lineAdvance * 3.0);
 
 			for (int line = blockSize + 10; line < blockSize + 14; ++line)
 				layoutSlots[line].visualRows = 4;
-			heightIndex.setLayoutSlotHeightRange(blockSize + 11, blockSize + 13, layoutSlots, lineAdvance);
+			heightIndex.setLayoutSlotRowRange(blockSize + 11, blockSize + 13, layoutSlots);
 			QCOMPARE(heightIndex.heightAt(blockSize + 10), lineAdvance);
 			QCOMPARE(heightIndex.heightAt(blockSize + 11), lineAdvance * 4.0);
 			QCOMPARE(heightIndex.heightAt(blockSize + 12), lineAdvance * 4.0);
@@ -2065,7 +2066,7 @@ end
 			constexpr int                      blockSize   = WorldView::NativeLayoutHeightIndex::kBlockSize;
 			constexpr int                      lineCount   = blockSize * 3 + 19;
 			constexpr qreal                    lineAdvance = 10.0;
-			heightIndex.assign(lineCount, lineAdvance);
+			heightIndex.assign(lineCount, WorldView::NativeRowAdvance{1000});
 			heightIndex.removeFront(blockSize + 7);
 
 			constexpr int expectedCount = lineCount - blockSize - 7;
@@ -2079,6 +2080,416 @@ end
 			QCOMPARE(sizeToInt(heightIndex.size()), secondExpectedCount);
 			QCOMPARE(heightIndex.totalHeight(), static_cast<qreal>(secondExpectedCount) * lineAdvance);
 			QCOMPARE(heightIndex.prefixHeightAt(secondExpectedCount), heightIndex.totalHeight());
+		}
+
+		/** @brief Supplies exact geometry bases for mixed row-count mutations. */
+		void nativeLayoutHeightIndexMixedMutations_data()
+		{
+			QTest::addColumn<qint64>("advanceUnits");
+			QTest::newRow("quarter-unit") << qint64{25};
+			QTest::newRow("decimal-unit") << qint64{10};
+			QTest::newRow("reported-spacing") << qint64{1313};
+		}
+
+		/** @brief Checks exact row mutations and canonical pixel lookups against a flat boundary oracle. */
+		void nativeLayoutHeightIndexMixedMutations()
+		{
+			QFETCH(qint64, advanceUnits);
+			WorldView::NativeLayoutHeightIndex index;
+			WorldView::NativeLayoutHeightIndex other;
+			QVector<int>                       expected;
+			QVector<int>                       otherExpected;
+			qint64                             basis      = advanceUnits;
+			qint64                             otherBasis = advanceUnits + 7;
+			index.assign(0, {basis});
+			other.assign(0, {otherBasis});
+			quint32 state = 0x514d5544U;
+			auto    next  = [&state](const int bound)
+			{
+				state = state * 1664525U + 1013904223U;
+				return static_cast<int>(state % static_cast<quint32>(bound));
+			};
+			auto verify = [](const WorldView::NativeLayoutHeightIndex &actual, const QVector<int> &rows,
+			                 const qint64 units)
+			{
+				QCOMPARE(actual.size(), rows.size());
+				QCOMPARE(actual.isEmpty(), rows.isEmpty());
+				QCOMPARE(actual.rowAdvance().hundredths, units);
+				QVector<qreal> ends;
+				qint64         total = 0;
+				for (const int count : rows)
+				{
+					total += count;
+					ends.push_back((static_cast<qreal>(total) * static_cast<qreal>(units)) / 100.0);
+				}
+				auto expectedLine = [&ends](const qreal y)
+				{
+					if (ends.isEmpty())
+						return 0;
+					const qreal bounded = qBound<qreal>(0.0, y, ends.constLast());
+					if (bounded >= ends.constLast())
+						return sizeToInt(ends.size()) - 1;
+					return static_cast<int>(std::ranges::upper_bound(std::as_const(ends), bounded) -
+					                        ends.cbegin());
+				};
+				qint64    prefix = 0;
+				const int stride = qMax(1, sizeToInt(rows.size()) / 64);
+				for (int line = 0; line < sizeToInt(rows.size()); ++line)
+				{
+					QCOMPARE(actual.rowCountAt(line), rows.at(line));
+					if (line % stride == 0 || line + 1 == rows.size())
+					{
+						QCOMPARE(actual.rowPrefixAt(line), prefix);
+						const qreal y = (static_cast<qreal>(prefix) * static_cast<qreal>(units)) / 100.0;
+						QCOMPARE(actual.prefixHeightAt(line), y);
+						for (const qreal point :
+						     {y, std::nextafter(y, -std::numeric_limits<qreal>::infinity()),
+						      std::nextafter(y, std::numeric_limits<qreal>::infinity()), std::floor(y),
+						      std::ceil(y)})
+							QCOMPARE(actual.lineAtY(point), expectedLine(point));
+					}
+					prefix += rows.at(line);
+				}
+				QCOMPARE(actual.rowPrefixAt(sizeToInt(rows.size())), total);
+				QCOMPARE(actual.totalHeight(), ends.isEmpty() ? 0.0 : ends.constLast());
+				QCOMPARE(actual.lineAtY(actual.totalHeight()), qMax(0, sizeToInt(rows.size()) - 1));
+				QCOMPARE(actual.rowCountAt(-1), 0);
+				QCOMPARE(actual.rowCountAt(sizeToInt(rows.size())), 0);
+				QCOMPARE(actual.prefixHeightAt(-1), 0.0);
+				int           first = 0;
+				QVector<bool> live(actual.m_blockCapacity, false);
+				for (int block = 0; block < actual.m_blockCount; ++block)
+				{
+					const auto value = actual.blockAt(block);
+					QVERIFY(value.lines > 0 && value.lines <= actual.kBlockSize);
+					if (block > 0 && block + 1 < actual.m_blockCount)
+						QVERIFY(value.lines >= actual.kMinimumBlockSize);
+					qint64 sum = 0;
+					for (int line = first; line < first + value.lines; ++line)
+						sum += rows.at(line);
+					QCOMPARE(value.rows, sum);
+					QCOMPARE(actual.rowPrefixAt(first), actual.blockPrefix(block).rows);
+					live[actual.blockSlot(block)] = true;
+					first += value.lines;
+				}
+				QCOMPARE(first, sizeToInt(rows.size()));
+				for (int slot = 0; slot < actual.m_blockCapacity; ++slot)
+				{
+					if (live.at(slot))
+						continue;
+					const auto value = actual.m_blockTree.at(actual.m_blockCapacity + slot);
+					QCOMPARE(value.lines, 0);
+					QCOMPARE(value.rows, qint64{0});
+				}
+			};
+			for (int step = 0; step < 900; ++step)
+			{
+				const int count   = sizeToInt(expected.size());
+				const int value   = next(34) - 2;
+				const int bounded = qMax(0, value);
+				switch (next(11))
+				{
+				case 0:
+				{
+					const int length = next(1025);
+					basis            = advanceUnits + next(8);
+					index.assign(length, {basis}, value);
+					expected = QVector<int>(length, bounded);
+					break;
+				}
+				case 1:
+				{
+					const int length = next(2049);
+					index.resize(length, value);
+					expected.resize(length);
+					for (int line = count; line < length; ++line)
+						expected[line] = bounded;
+					break;
+				}
+				case 2:
+				{
+					const int removed = next(count + 1);
+					index.removeFront(removed);
+					expected.remove(0, removed);
+					break;
+				}
+				case 3:
+					if (count > 0)
+					{
+						const int line = next(count);
+						index.setRowCount(line, value);
+						expected[line] = bounded;
+					}
+					break;
+				case 4:
+					index.reserve(next(8193));
+					break;
+				case 5:
+					index.append(value);
+					expected.push_back(bounded);
+					break;
+				case 6:
+					index.swap(other);
+					expected.swap(otherExpected);
+					std::swap(basis, otherBasis);
+					break;
+				case 7:
+					index.clear();
+					expected.clear();
+					basis = 100;
+					break;
+				case 8:
+					if (count > 0)
+					{
+						const int first = next(count);
+						const int last  = first + next(count - first + 1);
+						PagedIndexedRingBuffer<WorldView::NativeLayoutSlot> layoutRows;
+						layoutRows.assign(count, WorldView::NativeLayoutSlot{});
+						for (int line = first; line < last; ++line)
+						{
+							const int rows              = next(4) + 1;
+							layoutRows[line].visualRows = rows;
+							expected[line]              = rows;
+						}
+						index.setLayoutSlotRowRange(first, last, layoutRows);
+					}
+					break;
+				default:
+				{
+					const int first    = next(count + 1);
+					const int removed  = step % 3 == 0 ? count - first : next(count - first + 1);
+					const int inserted = step % 3 == 1 ? removed : next(600);
+					index.replace({first, removed, inserted, count - removed + inserted, value});
+					expected.remove(first, removed);
+					for (int line = 0; line < inserted; ++line)
+						expected.insert(first + line, bounded);
+					break;
+				}
+				}
+				verify(index, expected, basis);
+				if (QTest::currentTestFailed())
+					return;
+				verify(other, otherExpected, otherBasis);
+				if (QTest::currentTestFailed())
+					return;
+			}
+		}
+
+		/** @brief Supplies small and profiled-scale full histories for repeated circular rotation. */
+		void nativeLayoutHeightIndexFullHistoryRotation_data()
+		{
+			QTest::addColumn<int>("lineCount");
+			QTest::addColumn<qint64>("advanceUnits");
+			QTest::newRow("small") << 17 * 256 + 3 << qint64{125};
+			QTest::newRow("profile-scale") << 1864 * 256 << qint64{1313};
+		}
+
+		/** @brief Verifies bounded work through individual evictions and complete circular wraps. */
+		void nativeLayoutHeightIndexFullHistoryRotation()
+		{
+			QFETCH(int, lineCount);
+			QFETCH(qint64, advanceUnits);
+			WorldView::NativeLayoutHeightIndex index;
+			index.assign(lineCount, {advanceUnits});
+			const int capacity = index.m_blockCapacity;
+			int       depth    = 1;
+			for (int leaves = capacity; leaves > 1; leaves /= 2)
+				++depth;
+#ifndef NDEBUG
+			const quint64 builds = index.m_blockTreeBuilds;
+#endif
+			const qreal totalHeight =
+			    (static_cast<qreal>(lineCount) * static_cast<qreal>(advanceUnits)) / 100.0;
+			for (int iteration = 0; iteration < capacity * 3; ++iteration)
+			{
+#ifndef NDEBUG
+				const quint64 writes = index.m_blockTreeWrites;
+#endif
+				index.removeFront(256);
+				index.resize(lineCount);
+				QCOMPARE(index.size(), lineCount);
+				QCOMPARE(index.totalHeight(), totalHeight);
+				QCOMPARE(index.m_blockCapacity, capacity);
+#ifndef NDEBUG
+				QCOMPARE(index.m_blockTreeBuilds, builds);
+				QVERIFY(index.m_blockTreeWrites - writes <= static_cast<quint64>(depth * 6));
+#endif
+				if (iteration % 127 == 0)
+				{
+#ifndef NDEBUG
+					const quint64 queries = index.m_blockQueryNodes;
+#endif
+					QCOMPARE(index.lineAtY(index.prefixHeightAt(lineCount / 2)), lineCount / 2);
+#ifndef NDEBUG
+					QVERIFY(index.m_blockQueryNodes - queries <= static_cast<quint64>(depth * 12));
+#endif
+				}
+			}
+			for (int iteration = 0; iteration < 20000; ++iteration)
+			{
+#ifndef NDEBUG
+				const quint64 writes = index.m_blockTreeWrites;
+#endif
+				index.removeFront(1);
+				index.append(1);
+				QCOMPARE(index.totalHeight(), totalHeight);
+				QCOMPARE(index.m_blockCapacity, capacity);
+#ifndef NDEBUG
+				QCOMPARE(index.m_blockTreeBuilds, builds);
+				QVERIFY(index.m_blockTreeWrites - writes <= static_cast<quint64>(depth * 2));
+#endif
+			}
+		}
+
+		/** @brief Checks that small replacements touch only their block ancestor paths. */
+		void nativeLayoutHeightIndexLocalReplacementIsBounded()
+		{
+			WorldView::NativeLayoutHeightIndex index;
+			constexpr int                      count = 1864 * 256;
+			index.assign(count, {125});
+			for (const int first : {count - 3, count / 2 - 2, 0})
+			{
+#ifndef NDEBUG
+				const quint64 builds = index.m_blockTreeBuilds;
+				const quint64 writes = index.m_blockTreeWrites;
+#endif
+				index.replace({first, 3, 3, count, 2});
+				QCOMPARE(index.heightAt(first), 2.5);
+				QCOMPARE(index.heightAt(first + 2), 2.5);
+				QCOMPARE(index.lineAtY(index.prefixHeightAt(first + 1)), first + 1);
+#ifndef NDEBUG
+				QCOMPARE(index.m_blockTreeBuilds, builds);
+				QVERIFY(index.m_blockTreeWrites - writes < 64);
+#endif
+			}
+		}
+
+		/** @brief Keeps canonical row boundaries invertible near the largest supported document row counts. */
+		void nativeOutputRowAdvanceLargeOffsets()
+		{
+			constexpr qint64 totalRows = qint64{500000} * std::numeric_limits<int>::max();
+			for (const qint64 units : {qint64{101}, qint64{1313}, qint64{1870}, qint64{429496729400}})
+			{
+				const WorldView::NativeRowAdvance advance{units};
+				for (const qint64 row : {qint64{0}, qint64{1}, qint64{4600}, totalRows / 2, totalRows - 2})
+				{
+					const qreal y = advance.yForRows(row);
+					QCOMPARE(advance.rowAtY(y, totalRows), row);
+					if (row > 0)
+						QCOMPARE(advance.rowAtY(std::nextafter(y, -std::numeric_limits<qreal>::infinity()),
+						                        totalRows),
+						         row - 1);
+					QCOMPARE(
+					    advance.rowAtY(std::nextafter(y, std::numeric_limits<qreal>::infinity()), totalRows),
+					    row);
+				}
+			}
+		}
+
+		/** @brief Reproduces fractional-spacing capped output and checks painted rows and hit testing. */
+		void fractionalLineSpacingCappedBoundaryRemainsVisible()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("5000"));
+			setTestWorldAttribute(QStringLiteral("line_spacing"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("output_font_name"), QStringLiteral("DejaVu Sans Mono"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("8"));
+			WorldView view;
+			view.resize(720, 420);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			runtimeForTest()->replaceOutputLines(
+			    makeBenchmarkLines(QStringLiteral("fractional-probe"), 5000));
+			QCoreApplication::processEvents();
+			for (int i = 0; i < 9; ++i)
+			{
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("fractional-next"), true);
+				QCoreApplication::processEvents();
+			}
+			auto *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const auto advance = view.m_nativeLayoutHeightIndex.rowAdvance();
+			QCOMPARE(advance.hundredths,
+			         static_cast<qint64>(QFontMetrics(browser->font()).lineSpacing()) * 101);
+			const qreal y = advance.yForRows(4600);
+			QCOMPARE(view.nativeLayoutLineAtY(y), 4600);
+			if (advance.hundredths == 1313)
+				QCOMPARE(y, 60398.0);
+			browser->verticalScrollBar()->setValue(static_cast<int>(y));
+			QCoreApplication::processEvents();
+			view.requestNativeOutputRepaint();
+			view.m_nativeOutputCanvas->repaint();
+			QVERIFY(!view.m_nativePrimaryPaintState.visibleLineIndexes.isEmpty());
+			QCOMPARE(view.m_nativePrimaryPaintState.visibleLineIndexes.constFirst(), 4600);
+			WorldView::NativeOutputPosition hit;
+			QVERIFY(view.nativeOutputHitTest(reinterpret_cast<WrapTextBrowser *>(browser), {12, 0}, hit,
+			                                 nullptr, nullptr, true));
+			QCOMPARE(hit.line, 4600);
+			// A DPI change must invalidate and rebuild the geometry through the existing path.
+			QEvent changed(QEvent::DevicePixelRatioChange);
+			QCoreApplication::sendEvent(&view, &changed);
+			QCoreApplication::processEvents();
+			view.m_nativeOutputCanvas->repaint();
+			QCOMPARE(view.nativeLayoutLineAtY(y), 4600);
+			QVERIFY(!view.m_nativePrimaryPaintState.visibleLineIndexes.isEmpty());
+		}
+
+		/** @brief Checks fractional wrapped-row boundaries through hit testing and character geometry. */
+		void fractionalWrappedRowsUseCanonicalGeometry()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("line_spacing"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("output_font_name"), QStringLiteral("DejaVu Sans Mono"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("8"));
+			WorldView view;
+			view.resize(360, 240);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			runtimeForTest()->replaceOutputLines({makeRuntimeLine(
+			    QStringLiteral("wrapped words\n").repeated(2000), WorldRuntime::LineOutput, true, 1)});
+			QCoreApplication::processEvents();
+			auto *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QTextLayout *layout = view.nativeLayoutForLine(0);
+			QVERIFY(layout);
+			QVERIFY(layout->lineCount() > 103);
+			const auto    advance  = view.m_nativeLayoutHeightIndex.rowAdvance();
+			constexpr int rowIndex = 101;
+			const qreal   rowY     = advance.yForRows(rowIndex);
+			browser->verticalScrollBar()->setValue(static_cast<int>(std::floor(rowY)));
+			QCoreApplication::processEvents();
+			layout = view.nativeLayoutForLine(0);
+			QVERIFY(layout);
+			const QTextLine row     = layout->lineAt(rowIndex);
+			const int       column  = row.textStart() + 2;
+			const int       scrollY = browser->verticalScrollBar()->value();
+			const int       x       = static_cast<int>(std::ceil(row.cursorToX(column)));
+			const int       y       = static_cast<int>(std::ceil(rowY)) - scrollY;
+			QVERIFY(browser->viewport()->rect().contains({x, y}));
+			WorldView::NativeOutputPosition hit;
+			QVERIFY(view.nativeOutputHitTest(reinterpret_cast<WrapTextBrowser *>(browser), {x, y}, hit,
+			                                 nullptr, nullptr, true));
+			QCOMPARE(hit.line, 0);
+			QVERIFY(hit.column >= row.textStart());
+			QVERIFY(hit.column < row.textStart() + row.textLength());
+			QRect globalRect;
+			QVERIFY(view.nativeOutputCharacterRect(reinterpret_cast<WrapTextBrowser *>(browser), {0, column},
+			                                       globalRect));
+			const QPoint localTop = browser->viewport()->mapFromGlobal(globalRect.topLeft());
+			QCOMPARE(localTop.y(), static_cast<int>(std::floor(rowY - scrollY)));
+			const QPoint localCenter = browser->viewport()->mapFromGlobal(globalRect.center());
+			QVERIFY(view.nativeOutputHitTest(reinterpret_cast<WrapTextBrowser *>(browser), localCenter, hit,
+			                                 nullptr, nullptr, true));
+			QCOMPARE(hit.line, 0);
+			QVERIFY(hit.column >= column && hit.column <= column + 1);
 		}
 
 		void nativeLayoutContentSaltTracksOnlyItsAuthoritativeKey()
@@ -2378,7 +2789,7 @@ end
 				QVERIFY(slot.visualRows > 1);
 				QVERIFY(!view.nativeLayoutForLine(insertedIndex));
 				QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(insertedIndex),
-				         static_cast<qreal>(slot.visualRows) * view.m_nativeLayoutCachedLineAdvance);
+				         static_cast<qreal>(slot.visualRows) * view.m_nativeLayoutCachedRowAdvance.pixels());
 				QCOMPARE(view.nativeLayoutForLine(kRetainedOriginalIndex + mutation + 1), retainedLayout);
 				QCOMPARE(view.m_nativeLayoutMetadataRefreshes,
 				         metadataRefreshesBefore + static_cast<quint64>((mutation + 1) * 2));
@@ -2593,7 +3004,7 @@ end
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			makeNativeLayoutCacheExact(view, view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                           layoutFont);
@@ -2686,7 +3097,7 @@ end
 			                              layoutFont);
 			makeNativeLayoutCacheExact(view, view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                           layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			QVector<qreal> oldHeights;
 			oldHeights.reserve(initialLineCount);
@@ -2696,7 +3107,7 @@ end
 				view.m_nativeLayoutSlots[index].visualRows = visualRows;
 				view.m_nativeLayoutSlots[index].rowsExact  = 1;
 				const qreal height                         = static_cast<qreal>(visualRows) * lineAdvance;
-				view.m_nativeLayoutHeightIndex.setHeight(index, height);
+				view.m_nativeLayoutHeightIndex.setRowCount(index, visualRows);
 				oldHeights.push_back(height);
 			}
 			view.m_nativeLayoutExactPrefixCount = initialLineCount;
@@ -2790,14 +3201,14 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[0].visualRows = 9;
 			view.m_nativeLayoutSlots[0].rowsExact  = 1;
 			view.m_nativeLayoutSlots[1].visualRows = 11;
 			view.m_nativeLayoutSlots[1].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(0, 9.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.setHeight(1, 11.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(0, 9);
+			view.m_nativeLayoutHeightIndex.setRowCount(1, 11);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
 			WorldView::NativeOutputRenderLines restitchedLines;
@@ -2855,7 +3266,7 @@ end
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 5);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			makeNativeLayoutCacheExact(view, view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                           layoutFont);
@@ -3647,7 +4058,7 @@ end
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			makeNativeLayoutCacheExact(view, view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                           layoutFont);
@@ -3806,11 +4217,11 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[2].visualRows = 12;
 			view.m_nativeLayoutSlots[2].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(2, 12);
 
 			int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 2);
@@ -3869,11 +4280,11 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[0].visualRows = 7;
 			view.m_nativeLayoutSlots[0].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(0, 7.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(0, 7);
 			view.m_nativeLayoutSlots.removeLast();
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
@@ -3923,12 +4334,12 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[0].visualRows = 7;
 			view.m_nativeLayoutSlots[0].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(0, 7.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.resize(4, lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(0, 7);
+			view.m_nativeLayoutHeightIndex.resize(4);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 1);
@@ -4038,11 +4449,11 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[0].visualRows = 9;
 			view.m_nativeLayoutSlots[0].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(0, 9.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(0, 9);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 1);
@@ -4087,11 +4498,11 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[0].visualRows = 9;
 			view.m_nativeLayoutSlots[0].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(0, 9.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(0, 9);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 1);
@@ -4139,11 +4550,11 @@ end
 			const QFont layoutFont;
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 140, 0,
 			                              layoutFont);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			view.m_nativeLayoutSlots[0].visualRows = 4;
 			view.m_nativeLayoutSlots[0].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(0, 4.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setRowCount(0, 4);
 
 			const int oldLineCount = sizeToInt(view.m_nativeRenderModel->m_nativeRenderLineCache.size());
 			view.m_nativeRenderModel->m_nativeRenderLineCache.remove(0, 1);
@@ -4301,7 +4712,7 @@ end
 			view.ensureNativeLayoutCaches(view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                              layoutFont);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
-			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			const qreal lineAdvance = view.m_nativeLayoutCachedRowAdvance.pixels();
 			QVERIFY(lineAdvance > 0.0);
 			makeNativeLayoutCacheExact(view, view.m_nativeRenderModel->m_nativeRenderLineCache, 400, 400, 0,
 			                           layoutFont);
