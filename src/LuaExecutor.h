@@ -947,19 +947,19 @@ template <typename Value> class LuaCallbackPersistentSlotMap
 		};
 
 		/**
-		 * @brief Finds one immutable value.
+		 * @brief Finds one immutable value while borrowing the root-owned directory nodes.
 		 * @param key Stable slot key.
-		 * @return Stored value, or an empty pointer when absent.
+		 * @return Owning stored-value pointer, or an empty pointer when absent.
 		 */
 		[[nodiscard]] QSharedPointer<const Value> value(const quint32 key) const
 		{
-			QSharedPointer<const Node> node = m_root;
+			const Node *node = m_root.data();
 			for (int level = kLevels - 1; level > 0; --level)
 			{
 				if (!node)
 					return {};
 				const int branch = static_cast<int>((key >> (level * 4)) & 0x0fU);
-				node             = node->children[branch];
+				node             = node->children[branch].data();
 			}
 			return node ? node->values[static_cast<int>(key & 0x0fU)] : QSharedPointer<const Value>{};
 		}

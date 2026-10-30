@@ -574,6 +574,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void batchedArrayMemberPatchesUpdateBaseOnce();
 		void emptyArrayAndDatabaseIdentifiersRemainScoped();
 		void persistentStringMapPreservesImmutableVersions();
+		/** @brief Keeps lookup results alive after temporary and persistent source directories are destroyed. */
+		void persistentSlotMapLookupRetainsReturnedValues();
 		void persistentGenerationalDenseSlotMapPreservesImmutableVersions();
 		void causalRuleReplacementRetainsQueuedRecycledSlotGeneration();
 		void ruleSnapshotStoreRetainsRecycledPluginOwnerGeneration();
@@ -752,6 +754,8 @@ class tst_LuaCallbackEngine final : public QObject
 		void causalPluginVariableLabelDeltaPreservesEventValue();
 		/** @brief Verifies exact-base variable replay shares immutable results across queued events. */
 		void causalVariableReplaySharesMatchingRevisionEndpoints();
+		/** @brief Reuses one variable revision across matching endpoints and distinct older event views. */
+		void causalVariableReplayMixesSharedAndDivergentEndpoints();
 		/** @brief Verifies sparse map edits are reused without leaking unrelated event-time state. */
 		void preparedCausalMapEditsReuseAcrossEventViews();
 		/** @brief Verifies ordered revisions are not collapsed into a net-zero endpoint difference. */
@@ -14205,6 +14209,45 @@ void tst_LuaCallbackEngine::persistentStringMapPreservesImmutableVersions()
 	QVERIFY(equivalent != updated);
 }
 
+void tst_LuaCallbackEngine::persistentSlotMapLookupRetainsReturnedValues()
+{
+	using SlotMap = LuaCallbackPersistentSlotMap<QString>;
+	QSharedPointer<const QString> retained;
+	QWeakPointer<const QString>   weak;
+	{
+		constexpr quint32 key = 0xfedcba98U;
+		SlotMap           map;
+		QVERIFY(!map.value(key));
+		map                    = map.withUpdates({
+		    {0,		                           QSharedPointer<const QString>::create(QStringLiteral("zero"))    },
+		    {key,		                         QSharedPointer<const QString>::create(QStringLiteral("original"))},
+		    {std::numeric_limits<quint32>::max(),
+		     QSharedPointer<const QString>::create(QStringLiteral("last"))                                         }
+        });
+		const SlotMap snapshot = map;
+		retained =
+		    map.withUpdates({
+		                        {key, QSharedPointer<const QString>::create(QStringLiteral("replacement"))}
+        })
+		        .value(key);
+		weak = retained.toWeakRef();
+		QVERIFY(retained);
+		QCOMPARE(*retained, QStringLiteral("replacement"));
+		map = map.withUpdates({
+		    {key, {}}
+        });
+		QVERIFY(!map.value(key));
+		QVERIFY(!map.value(key - 1));
+		QCOMPARE(*snapshot.value(key), QStringLiteral("original"));
+		QCOMPARE(*map.value(0), QStringLiteral("zero"));
+		QCOMPARE(*map.value(std::numeric_limits<quint32>::max()), QStringLiteral("last"));
+	}
+	QVERIFY(!weak.isNull());
+	QCOMPARE(*retained, QStringLiteral("replacement"));
+	retained.clear();
+	QVERIFY(weak.isNull());
+}
+
 void tst_LuaCallbackEngine::persistentGenerationalDenseSlotMapPreservesImmutableVersions()
 {
 	using PersistentMap = LuaCallbackPersistentGenerationalDenseSlotMap<LuaCallbackAliasSnapshot>;
@@ -24506,6 +24549,106 @@ void tst_LuaCallbackEngine::causalVariableReplaySharesMatchingRevisionEndpoints(
 	             .value(QStringLiteral("probe"))
 	             .content,
 	         QStringLiteral("after"));
+}
+
+void tst_LuaCallbackEngine::causalVariableReplayMixesSharedAndDivergentEndpoints()
+{
+	WorldRuntime         runtime;
+	const QString        id = QStringLiteral("variable.lazy.replay");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), id);
+	plugin.enabled = true;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	for (const QString &name : {QStringLiteral("changed"), QStringLiteral("kept"), QStringLiteral("label"),
+	                            QStringLiteral("removed")})
+	{
+		runtime.setVariable(name, QStringLiteral("before"));
+		runtime.setPluginVariableValue(id, name, QStringLiteral("before"));
+	}
+	const auto event = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(event);
+	const auto cursor        = runtime.m_causalPluginCallbackSnapshotRevision;
+	auto       divergentView = [event, id](const QString &oldValue, const bool omitChanged)
+	{
+		auto snapshot = QSharedPointer<LuaCallbackSnapshot>::create(*event);
+		snapshot->worldVariablesSnapshot[QStringLiteral("kept")].content           = oldValue;
+		snapshot->worldVariablesSnapshot[QStringLiteral("label")].content          = oldValue;
+		snapshot->pluginVariablesSnapshotById[id][QStringLiteral("kept")].content  = oldValue;
+		snapshot->pluginVariablesSnapshotById[id][QStringLiteral("label")].content = oldValue;
+		if (omitChanged)
+		{
+			snapshot->worldVariablesSnapshot.remove(QStringLiteral("changed"));
+			snapshot->pluginVariablesSnapshotById[id].remove(QStringLiteral("changed"));
+		}
+		return snapshot;
+	};
+	const auto older  = divergentView(QStringLiteral("older"), false);
+	const auto oldest = divergentView(QStringLiteral("oldest"), true);
+	QVector<WorldRuntime::PluginCallbackDispatchCommand> commands(5);
+	for (auto &command : commands)
+	{
+		command.request.callbackSnapshotArg = event;
+		command.causalSnapshotRevision      = cursor;
+	}
+	commands[1].request.callbackSnapshotArg = older;
+	commands[2].request.callbackSnapshotArg = oldest;
+	LuaDeferredRuntimeMutationBatch batch;
+	batch.runtime = &runtime;
+	batch.mutations.push_back(
+	    [&runtime, id]
+	    {
+		    runtime.setVariable(QStringLiteral("changed"), QStringLiteral("after"));
+		    runtime.setVariable(QStringLiteral("LABEL"), QStringLiteral("before"));
+		    static_cast<void>(runtime.deleteVariable(QStringLiteral("removed")));
+		    runtime.setVariable(QStringLiteral("added"), QString());
+		    runtime.setPluginVariableValue(id, QStringLiteral("changed"), QStringLiteral("after"));
+		    runtime.setPluginVariableValue(id, QStringLiteral("LABEL"), QStringLiteral("before"));
+		    static_cast<void>(runtime.deletePluginVariable(id, QStringLiteral("removed")));
+		    runtime.setPluginVariableValue(id, QStringLiteral("added"), QString());
+	    });
+	LuaBatchDispatchResult result;
+	result.deferredRuntimeMutationBatches.push_back(std::move(batch));
+	runtime.applyCompletedPluginCallbackMutations(result);
+	const auto revision = cursor->next;
+	QVERIFY(revision && revision->before && revision->after);
+	commands[4].request.callbackSnapshotArg = revision->after;
+	for (auto &command : commands)
+	{
+		runtime.applyCausalPluginCallbackSnapshotDeltas(command);
+		QVERIFY(revision->preparedDelta);
+	}
+	for (const int index : {0, 3, 4})
+	{
+		const auto &snapshot = *commands.at(index).request.callbackSnapshotArg;
+		QVERIFY(snapshot.worldVariablesSnapshot.isSharedWith(revision->after->worldVariablesSnapshot));
+		QVERIFY(snapshot.pluginVariablesSnapshotById.value(id).isSharedWith(
+		    revision->after->pluginVariablesSnapshotById.value(id)));
+	}
+	for (const int index : {1, 2})
+	{
+		const auto   &snapshot = *commands.at(index).request.callbackSnapshotArg;
+		const QString oldValue = index == 1 ? QStringLiteral("older") : QStringLiteral("oldest");
+		for (const auto &variables :
+		     {snapshot.worldVariablesSnapshot, snapshot.pluginVariablesSnapshotById.value(id)})
+		{
+			QCOMPARE(variables.value(QStringLiteral("kept")).content, oldValue);
+			QCOMPARE(variables.value(QStringLiteral("label")).content, oldValue);
+			QCOMPARE(variables.value(QStringLiteral("label")).label, QStringLiteral("LABEL"));
+			QCOMPARE(variables.contains(QStringLiteral("changed")), index == 1);
+			if (index == 1)
+				QCOMPARE(variables.value(QStringLiteral("changed")).content, QStringLiteral("after"));
+			QVERIFY(!variables.contains(QStringLiteral("removed")));
+			QVERIFY(variables.contains(QStringLiteral("added")));
+			QVERIFY(variables.value(QStringLiteral("added")).content.isEmpty());
+		}
+	}
+	QCOMPARE(event->worldVariablesSnapshot.value(QStringLiteral("changed")).content,
+	         QStringLiteral("before"));
+	QVERIFY(event->worldVariablesSnapshot.contains(QStringLiteral("removed")));
+	QCOMPARE(older->worldVariablesSnapshot.value(QStringLiteral("label")).label, QStringLiteral("label"));
+	QCOMPARE(oldest->pluginVariablesSnapshotById.value(id).value(QStringLiteral("label")).content,
+	         QStringLiteral("oldest"));
 }
 
 void tst_LuaCallbackEngine::preparedCausalMapEditsReuseAcrossEventViews()
