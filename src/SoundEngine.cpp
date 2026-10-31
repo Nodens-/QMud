@@ -58,6 +58,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #if QMUD_ENABLE_SOUND
 #include <QAudioBufferOutput>
@@ -3095,6 +3096,78 @@ namespace
 					return session->pendingFiles.size();
 				return std::ranges::count_if(session->pendingFiles, [](const PendingFileCommand &pending)
 				                             { return pending.commit.has_value(); });
+			}
+
+			/**
+			 * @brief Stops physical delivery and installs an empty PCM clock without changing assignment ownership.
+			 * @param sessionId Session owning the active channel.
+			 * @param buffer One-based channel receiving the controlled clock.
+			 * @return Current assignment generation, or zero when no live PCM assignment exists.
+			 */
+			[[nodiscard]] quint64 controlPcmClockForTest(const quint64 sessionId, const int buffer)
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				auto session = m_sessions.find(sessionId);
+				if (session == m_sessions.end() || buffer < 1 || buffer > SoundEngineSession::kChannelCount)
+					return 0;
+				SoundChannel &channel = session->channels[static_cast<std::size_t>(buffer - 1)];
+				SoundBackend *backend = channel.backend;
+				if (!channel.playing || !backend || !backend->stream || !backend->sink || !backend->player)
+					return 0;
+				updatePcmChannelParameters(channel);
+				backend->disconnectPlaybackSignals();
+				const QSignalBlocker blockPlayerSignals(backend->player.get());
+				backend->sink->reset();
+				backend->player->stop();
+				backend->stream = std::make_shared<SoundPcmStream>(backend->sink->format(), channel.volume,
+				                                                   channel.pan, channel.pitch);
+				backend->lastPcmFrame             = 0;
+				backend->flowPaused               = false;
+				backend->decodingFinished         = false;
+				backend->decoderEndBufferReceived = false;
+				return channel.assignmentGeneration;
+			}
+
+			/**
+			 * @brief Renders silence through a stopped assignment's PCM clock before its normal worker control tick.
+			 * @param sessionId Session owning the controlled channel.
+			 * @param buffer One-based channel to advance.
+			 * @param generation Expected assignment generation.
+			 * @param duration Sample-clock interval to render.
+			 * @return Whether the controlled assignment was still current and its PCM clock advanced.
+			 */
+			[[nodiscard]] bool advancePcmClockForTest(const quint64 sessionId, const int buffer,
+			                                          const quint64                   generation,
+			                                          const std::chrono::milliseconds duration)
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				const auto session = m_sessions.constFind(sessionId);
+				if (session == m_sessions.cend() || buffer < 1 ||
+				    buffer > SoundEngineSession::kChannelCount || generation == 0 || duration.count() <= 0)
+					return false;
+				const SoundChannel &channel = session->channels[static_cast<std::size_t>(buffer - 1)];
+				const SoundBackend *backend = channel.backend;
+				if (!channel.playing || channel.assignmentGeneration != generation || !backend ||
+				    !backend->stream || !backend->sink || !backend->player ||
+				    backend->sink->state() != QtAudio::StoppedState ||
+				    backend->player->playbackState() != QMediaPlayer::StoppedState)
+					return false;
+				const QAudioFormat format = backend->sink->format();
+				if (!format.isValid() ||
+				    duration.count() > std::numeric_limits<qint64>::max() / format.sampleRate())
+					return false;
+				qint64             frames = duration.count() * format.sampleRate() / 1000;
+				const auto         stream = backend->stream;
+				std::vector<float> output(static_cast<std::size_t>(format.channelCount()) * 256);
+				while (frames > 0)
+				{
+					const qint64 count = std::min<qint64>(frames, 256);
+					stream->render(
+					    QSpan<float>(output.data(), static_cast<qsizetype>(count * format.channelCount())));
+					frames -= count;
+				}
+				updatePcmPlayback();
+				return true;
 			}
 
 			/**
@@ -8210,6 +8283,49 @@ bool SoundEngine::completeActiveChannelForTest(const std::shared_ptr<SoundEngine
 #else
 	Q_UNUSED(session);
 	Q_UNUSED(buffer);
+	return false;
+#endif
+}
+
+quint64 SoundEngine::controlPcmClockForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                            const int                                  buffer) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return 0;
+	quint64 generation = 0;
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, sessionId = session->id(), buffer, &generation]
+	    { generation = worker->controlPcmClockForTest(sessionId, buffer); }, Qt::BlockingQueuedConnection);
+	return generation;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(buffer);
+	return 0;
+#endif
+}
+
+bool SoundEngine::advancePcmClockForTest(const std::shared_ptr<SoundEngineSession> &session, const int buffer,
+                                         const quint64                   generation,
+                                         const std::chrono::milliseconds duration) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !session->m_state || session->m_state->ingress != m_private->ingress ||
+	    session->m_state->closed.load(std::memory_order_acquire))
+		return false;
+	bool advanced = false;
+	QMetaObject::invokeMethod(
+	    m_private->worker,
+	    [worker = m_private->worker, sessionId = session->id(), buffer, generation, duration, &advanced]
+	    { advanced = worker->advancePcmClockForTest(sessionId, buffer, generation, duration); },
+	    Qt::BlockingQueuedConnection);
+	return advanced;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(buffer);
+	Q_UNUSED(generation);
+	Q_UNUSED(duration);
 	return false;
 #endif
 }

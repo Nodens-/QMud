@@ -296,14 +296,33 @@ class SoundEngine final : public QObject
 		[[nodiscard]] bool completeActiveChannelForTest(const std::shared_ptr<SoundEngineSession> &session,
 		                                                int buffer) const;
 		/**
+		 * @brief Replaces an active assignment's audio delivery with a worker-driven sample clock.
+		 * @param session Session owning the active assignment.
+		 * @param buffer One-based channel whose decoder and sink are stopped before clock replacement.
+		 * @return Assignment generation identifying the controlled clock, or zero when unavailable.
+		 */
+		[[nodiscard]] quint64 controlPcmClockForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                             int                                        buffer) const;
+		/**
+		 * @brief Advances a controlled sample clock and applies the production PCM control transition.
+		 * @param session Session owning the controlled assignment.
+		 * @param buffer One-based controlled channel.
+		 * @param generation Assignment generation returned when the clock was controlled.
+		 * @param duration Sample-clock interval to render.
+		 * @return Whether the stopped backend still owned that generation and its clock was advanced.
+		 */
+		[[nodiscard]] bool    advancePcmClockForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                             int buffer, quint64 generation,
+		                                             std::chrono::milliseconds duration) const;
+		/**
 		 * @brief Checks ordered decoder continuation and lifecycle transitions on the worker.
 		 * @param session Session receiving an isolated decoder fixture.
 		 * @param ordering Placement of the loop update relative to terminal notifications.
 		 * @param transition Subsequent repeat, ownership, failure, or backpressure transition.
 		 * @return Whether the production transitions preserve the expected assignment and PCM state.
 		 */
-		[[nodiscard]] bool decoderContinuationForTest(const std::shared_ptr<SoundEngineSession> &session,
-		                                              int ordering, int transition) const;
+		[[nodiscard]] bool    decoderContinuationForTest(const std::shared_ptr<SoundEngineSession> &session,
+		                                                 int ordering, int transition) const;
 		/**
 		 * @brief Expires one active assignment through the production playback-progress watchdog.
 		 * @param session Session owning the active channel.

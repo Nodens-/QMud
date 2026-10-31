@@ -170,6 +170,34 @@ namespace
 				QCOMPARE(muted.state().volume, 1.0);
 			}
 
+			/** @brief Verifies flat stop envelopes retain their exact deadline for all integer and fractional gains. */
+			static void flatGlobalVolumeNoOpPreservesStopEnvelopes()
+			{
+				for (int index = 0; index <= 103; ++index)
+				{
+					const double   percent = index <= 100   ? static_cast<double>(index)
+					                         : index == 101 ? 34.25
+					                         : index == 102 ? 41.125
+					                                        : 0.00125;
+					const double   gain    = percent / 100.0;
+					SoundPcmStream stream(format(1000), gain, 0.0, 0.0);
+					stream.setAttribute(QMudSoundAttribute::Volume, gain, std::chrono::milliseconds{100},
+					                    true);
+					stream.setGlobalVolume(gain);
+					std::array<float, 100> midpoint{};
+					stream.render(QSpan<float>(midpoint));
+					QVERIFY(!stream.state().faded);
+					stream.setGlobalVolume(gain);
+					std::array<float, 98> beforeEnd{};
+					stream.render(QSpan<float>(beforeEnd));
+					QVERIFY(!stream.state().faded);
+					std::array<float, 2> finalFrame{};
+					stream.render(QSpan<float>(finalFrame));
+					QVERIFY2(stream.state().faded, qPrintable(QString::number(percent)));
+					QCOMPARE(stream.state().volume, gain);
+				}
+			}
+
 			/** @brief Verifies reopening decoder input retains queued samples, resampling phase, and all control envelopes. */
 			static void reopenedInputPreservesQueuedAudioAndControls()
 			{

@@ -93,6 +93,27 @@ namespace
 	}
 
 	/**
+	 * @brief Observes asynchronous state using Qt's deadline-based wait and returns its last sampled value.
+	 * @tparam Probe Callable reading the state under test.
+	 * @tparam Expected Expected state type.
+	 * @param probe State reader invoked while Qt events continue to be processed.
+	 * @param expected State that completes the wait.
+	 * @return Last observed state for the caller's assertion, including on timeout or an earlier test failure.
+	 */
+	template <typename Probe, typename Expected> auto waitForSoundValue(Probe probe, const Expected &expected)
+	{
+		auto observed = probe();
+		if (observed != expected)
+			static_cast<void>(QTest::qWaitFor(
+			    [&]
+			    {
+				    observed = probe();
+				    return observed == expected || (QTest::runningTest() && QTest::currentTestResolved());
+			    }));
+		return observed;
+	}
+
+	/**
 	 * @brief Configures the production sounds catalog around the repository fixture and waits for its lazy scan.
 	 * @param engine Sound engine whose worker owns the catalog.
 	 */
@@ -100,7 +121,8 @@ namespace
 	{
 		engine.initializePlayback();
 		engine.configureSoundDirectory(testSoundHome());
-		QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+		QVERIFY(waitForSoundValue(
+		    [&] { return static_cast<bool>(SoundEngineTestAccess::fileCatalogState(engine).ready); }, true));
 	}
 
 	/**
@@ -1459,7 +1481,9 @@ namespace
 				SoundEngine engine;
 				engine.initializePlayback();
 				engine.configureSoundDirectory(root.path());
-				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(SoundEngineTestAccess::fileCatalogState(engine).ready); },
+				    true));
 				const auto first  = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				const auto second = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(first && second);
@@ -1471,10 +1495,12 @@ namespace
 				request.volume      = 0;
 				QVERIFY(first->submitNativeSound(request));
 				QVERIFY(second->submitNativeSound(request));
-				QTRY_VERIFY(server.hasPendingConnections());
+				QVERIFY(waitForSoundValue([&] { return static_cast<bool>(server.hasPendingConnections()); },
+				                          true));
 				const std::unique_ptr<QTcpSocket> socket(server.nextPendingConnection());
 				QVERIFY(socket);
-				QTRY_VERIFY(socket->bytesAvailable() > 0);
+				QVERIFY(
+				    waitForSoundValue([&] { return static_cast<bool>(socket->bytesAvailable() > 0); }, true));
 				const auto firstNative = SoundEngineTestAccess::nativePlaybackState(
 				    engine, first, request.protocol, request.media);
 				const auto secondNative = SoundEngineTestAccess::nativePlaybackState(
@@ -1483,7 +1509,9 @@ namespace
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/change.wav"))
 				             .isEmpty());
-				QTRY_VERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(!SoundEngineTestAccess::fileCatalogState(engine).ready); },
+				    true));
 				const QString    file        = QStringLiteral("legacy/cue.wav");
 				const auto       firstToken  = prepared ? first->prepareFile(file) : 0;
 				const auto       secondToken = prepared ? second->prepareFile(file) : 0;
@@ -1503,8 +1531,14 @@ namespace
 					                                             -100.0, 0.0)
 					                    : second->playFile(secondNative.buffer, file, true, -100.0, 0.0);
 				    });
-				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, first, prepared), 1);
-				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, second, prepared), 1);
+				QCOMPARE(
+				    waitForSoundValue(
+				        [&] { return SoundEngineTestAccess::pendingFileCount(engine, first, prepared); }, 1),
+				    1);
+				QCOMPARE(
+				    waitForSoundValue(
+				        [&] { return SoundEngineTestAccess::pendingFileCount(engine, second, prepared); }, 1),
+				    1);
 				QVERIFY(!server.hasPendingConnections());
 				if (disconnect)
 				{
@@ -1518,12 +1552,22 @@ namespace
 					    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
 					socket->disconnectFromHost();
 				}
-				QTRY_VERIFY(!SoundEngineTestAccess::nativePlaybackState(engine, first, request.protocol,
-				                                                        request.media)
-				                 .current);
-				QTRY_VERIFY(!SoundEngineTestAccess::nativePlaybackState(engine, second, request.protocol,
-				                                                        request.media)
-				                 .current);
+				QVERIFY(waitForSoundValue(
+				    [&]
+				    {
+					    return static_cast<bool>(!SoundEngineTestAccess::nativePlaybackState(
+					                                  engine, first, request.protocol, request.media)
+					                                  .current);
+				    },
+				    true));
+				QVERIFY(waitForSoundValue(
+				    [&]
+				    {
+					    return static_cast<bool>(!SoundEngineTestAccess::nativePlaybackState(
+					                                  engine, second, request.protocol, request.media)
+					                                  .current);
+				    },
+				    true));
 				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, first, prepared), 1);
 				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, second, prepared), 1);
 				QVERIFY(!firstCall.finished.load(std::memory_order_acquire));
@@ -1563,8 +1607,12 @@ namespace
 					QFAIL("Unknown pending transition");
 				}
 				SoundEngineTestAccess::setCatalogPaused(engine, false);
-				QTRY_VERIFY(firstCall.finished.load(std::memory_order_acquire));
-				QTRY_VERIFY(secondCall.finished.load(std::memory_order_acquire));
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(firstCall.finished.load(std::memory_order_acquire)); },
+				    true));
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(secondCall.finished.load(std::memory_order_acquire)); },
+				    true));
 				QCOMPARE(firstCall.result, transition == 0 ? eOK : eCannotPlaySound);
 				QCOMPARE(secondCall.result, transition == 0 ? eOK : eCannotPlaySound);
 				QCOMPARE(SoundEngineTestAccess::pendingFileCount(engine, first), 0);
@@ -1934,7 +1982,9 @@ namespace
 				engine.configureSoundDirectory(root.path());
 				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
-				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(SoundEngineTestAccess::fileCatalogState(engine).ready); },
+				    true));
 				for (const QString &file : expected)
 					QVERIFY(SoundEngineTestAccess::cacheFileRequest(engine, session, file, file));
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
@@ -1947,8 +1997,13 @@ namespace
 				for (const QString &file : removed)
 					QVERIFY(!QFileInfo::exists(file));
 				SoundEngineTestAccess::setCatalogPaused(engine, false);
-				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
-				QTRY_COMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, survivors.size() + 1);
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(SoundEngineTestAccess::fileCatalogState(engine).ready); },
+				    true));
+				QCOMPARE(waitForSoundValue(
+				             [&] { return SoundEngineTestAccess::fileCatalogState(engine).fileCount; },
+				             survivors.size() + 1),
+				         survivors.size() + 1);
 				if (mode == 0)
 				{
 					QCOMPARE(session->playFile(1, request, true, -100.0, 0.0),
@@ -2189,10 +2244,17 @@ namespace
 							                    : session->playFile(buffer, nextRequest, true, -80.0, 0.0);
 						    });
 					}
-					QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session), index + 1);
+					QCOMPARE(waitForSoundValue(
+					             [&] { return SoundEngineTestAccess::pendingFileCount(*engine, session); },
+					             index + 1),
+					         index + 1);
 				}
 				if (prepared)
-					QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(*engine, session, true), 1);
+					QCOMPARE(waitForSoundValue(
+					             [&]
+					             { return SoundEngineTestAccess::pendingFileCount(*engine, session, true); },
+					             1),
+					         1);
 				QVERIFY(!start->finished.load(std::memory_order_acquire));
 				QVERIFY(!next->finished.load(std::memory_order_acquire));
 				switch (transition)
@@ -2200,7 +2262,9 @@ namespace
 				case 2:
 				case 22:
 					session->cancelPrepared(token);
-					QTRY_VERIFY(next->finished.load(std::memory_order_acquire));
+					QVERIFY(waitForSoundValue(
+					    [&] { return static_cast<bool>(next->finished.load(std::memory_order_acquire)); },
+					    true));
 					QVERIFY(!start->finished.load(std::memory_order_acquire));
 					if (transition == 22)
 						QCOMPARE(session->playFile(buffer, {}, true, -39.0, -25.0), eOK);
@@ -2270,7 +2334,9 @@ namespace
 				                           transition == 20 || transition == 21;
 				if (canceledOwner)
 				{
-					QTRY_VERIFY(start->finished.load(std::memory_order_acquire));
+					QVERIFY(waitForSoundValue(
+					    [&] { return static_cast<bool>(start->finished.load(std::memory_order_acquire)); },
+					    true));
 					QCOMPARE(start->result, eCannotPlaySound);
 					QCOMPARE(released.load(), 1);
 					if (!canceledBoth)
@@ -2281,8 +2347,11 @@ namespace
 				}
 				if (engine && transition != 8)
 					SoundEngineTestAccess::setCatalogPaused(*engine, false);
-				QTRY_VERIFY(start->finished.load(std::memory_order_acquire));
-				QTRY_VERIFY(next->finished.load(std::memory_order_acquire));
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(start->finished.load(std::memory_order_acquire)); },
+				    true));
+				QVERIFY(waitForSoundValue(
+				    [&] { return static_cast<bool>(next->finished.load(std::memory_order_acquire)); }, true));
 				const bool canceledPrepared = transition == 2 || transition == 22;
 				QCOMPARE(next->result, canceledBoth || canceledPrepared ? eCannotPlaySound
 				                       : missing                        ? eFileNotFound
@@ -2930,19 +2999,18 @@ namespace
 				QFETCH(int, ordering);
 				QFETCH(int, transition);
 				SoundEngine engine;
-				configureTestSoundCatalog(engine);
+				engine.initializePlayback();
 				const auto session = engine.registerSession({});
 				QVERIFY(session);
 				QVERIFY(SoundEngineTestAccess::decoderContinuation(engine, session, ordering, transition));
 			}
 
-			/** @brief Supplies gains previously rounded differently on initial playback and reserved starts. */
+			/** @brief Supplies representative integer and fractional gains for real direct and reserved playback. */
 			void globalVolumeNoOpPreservesStopEnvelope_data()
 			{
 				QTest::addColumn<double>("percent");
 				QTest::addColumn<bool>("reserved");
-				for (const double value :
-				     {20.0, 30.0, 34.0, 41.0, 42.0, 43.0, 44.0, 45.0, 70.0, 100.0, 34.25})
+				for (const double value : {34.0, 34.25})
 					for (const bool delayed : {false, true})
 						QTest::newRow(
 						    qPrintable(QString::number(value) + (delayed ? "-reserved" : "-direct")))
@@ -2976,7 +3044,7 @@ namespace
 				QTRY_COMPARE(session->status(1), -2);
 			}
 
-			/** @brief Verifies audible controls, published reads, cancellation, and backend reuse share one generation. */
+			/** @brief Verifies sample-clock controls, published reads, cancellation, and backend reuse share one generation. */
 			void luaAudioControlsPublishAndCancelAcrossAssignments()
 			{
 				std::atomic<quint64>          released{0};
@@ -3004,16 +3072,22 @@ namespace
 				QCOMPARE(
 				    SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pitch),
 				    7.0);
+				const quint64 firstClock = SoundEngineTestAccess::controlPcmClock(engine, session, 1);
+				QVERIFY(firstClock != 0);
 				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Volume, 0.0,
 				                                       std::chrono::milliseconds{1000}),
 				         eOK);
-				QTRY_COMPARE(session->snapshot()->volume[0], 0.0);
+				QVERIFY(SoundEngineTestAccess::advancePcmClock(engine, session, 1, firstClock,
+				                                               std::chrono::milliseconds{1000}));
+				QCOMPARE(session->snapshot()->volume[0], 0.0);
 				QCOMPARE(session->status(1), 2);
 				QCOMPARE(session->stopLuaAudioChannel(1, 11), eOK);
 				QCOMPARE(released.load(std::memory_order_acquire), 11);
 				const auto backendCount = SoundEngineTestAccess::cacheState(engine).backendCount;
 				QCOMPARE(session->playFile(1, testSoundFileName(), true, 0.0, 0.0, 22), eOK);
 				QVERIFY(session->confirmLuaAudioOwnership(1, 22));
+				QVERIFY(!SoundEngineTestAccess::advancePcmClock(engine, session, 1, firstClock,
+				                                                std::chrono::milliseconds{1000}));
 				QCOMPARE(SoundEngineTestAccess::cacheState(engine).backendCount, backendCount);
 				QCOMPARE(SoundEngineTestAccess::activeAttribute(engine, session, 1, QMudSoundAttribute::Pan),
 				         0.0);
@@ -3023,10 +3097,14 @@ namespace
 				QCOMPARE(session->setLuaAudioAttribute(1, 11, QMudSoundAttribute::Volume, 10.0),
 				         eCannotPlaySound);
 				QCOMPARE(session->snapshot()->volume[0], 100.0);
+				const quint64 secondClock = SoundEngineTestAccess::controlPcmClock(engine, session, 1);
+				QVERIFY(secondClock != 0);
 				QCOMPARE(session->setLuaAudioAttribute(1, 22, QMudSoundAttribute::Volume, 0.0,
 				                                       std::chrono::milliseconds{1000}, true),
 				         eOK);
-				QTRY_COMPARE(session->status(1), -2);
+				QVERIFY(SoundEngineTestAccess::advancePcmClock(engine, session, 1, secondClock,
+				                                               std::chrono::milliseconds{1000}));
+				QCOMPARE(session->status(1), -2);
 				QCOMPARE(released.load(std::memory_order_acquire), 22);
 				const int reserved =
 				    session->reserveLuaAudioChannel(testSoundFileName(), 33, 70.0, 20.0, 2.0);

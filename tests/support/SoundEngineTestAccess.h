@@ -186,6 +186,37 @@ class SoundEngineTestAccess final
 		}
 
 		/**
+		 * @brief Stops physical delivery while preserving an assignment for sample-clock control tests.
+		 * @param engine Sound engine whose worker owns the assignment.
+		 * @param session Session containing the assignment.
+		 * @param buffer One-based channel to control.
+		 * @return Assignment generation of the controlled clock, or zero when unavailable.
+		 */
+		[[nodiscard]] static quint64 controlPcmClock(const SoundEngine                         &engine,
+		                                             const std::shared_ptr<SoundEngineSession> &session,
+		                                             const int                                  buffer)
+		{
+			return engine.controlPcmClockForTest(session, buffer);
+		}
+
+		/**
+		 * @brief Advances one still-current controlled assignment through the production PCM control tick.
+		 * @param engine Sound engine whose worker owns the assignment.
+		 * @param session Session containing the assignment.
+		 * @param buffer One-based controlled channel.
+		 * @param generation Assignment generation returned when the clock was controlled.
+		 * @param duration Sample-clock interval to render.
+		 * @return Whether the stopped assignment still owned that generation and was advanced.
+		 */
+		[[nodiscard]] static bool advancePcmClock(const SoundEngine                         &engine,
+		                                          const std::shared_ptr<SoundEngineSession> &session,
+		                                          const int buffer, const quint64 generation,
+		                                          const std::chrono::milliseconds duration)
+		{
+			return engine.advancePcmClockForTest(session, buffer, generation, duration);
+		}
+
+		/**
 		 * @brief Expires one active assignment through the production playback-progress watchdog.
 		 * @param engine Sound engine whose worker owns the session.
 		 * @param session Session containing the active channel.
