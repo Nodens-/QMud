@@ -6209,7 +6209,7 @@ void tst_LuaCallbackEngine::setOptionUpdatesOnlyTabCompletionSymbolBehaviors()
 	WorldRuntime runtime;
 	runtime.applyDefaultWorldOptions();
 	runtime.setWorldAttribute(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
-	runtime.addLine(QStringLiteral("Nodens:"), WorldRuntime::LineOutput);
+	runtime.addLine(QStringLiteral("PlayerOne:"), WorldRuntime::LineOutput);
 
 	WorldView view;
 	view.resize(860, 520);
@@ -6223,9 +6223,9 @@ void tst_LuaCallbackEngine::setOptionUpdatesOnlyTabCompletionSymbolBehaviors()
 	// Leave an unrelated runtime option deliberately out of sync with the view. SetOption must not
 	// reapply it while changing either symbol-exclusion option.
 	runtime.setWorldAttribute(QStringLiteral("lower_case_tab_completion"), QStringLiteral("1"));
-	view.setInputText(QStringLiteral("@node"), true);
+	view.setInputText(QStringLiteral("@play"), true);
 	QTest::keyClick(input, Qt::Key_Tab);
-	QCOMPARE(view.inputText(), QStringLiteral("@Nodens"));
+	QCOMPARE(view.inputText(), QStringLiteral("@PlayerOne"));
 
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
@@ -6251,9 +6251,9 @@ end
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
 	         QStringLiteral("0"));
 
-	view.setInputText(QStringLiteral("@node"), true);
+	view.setInputText(QStringLiteral("@play"), true);
 	QTest::keyClick(input, Qt::Key_Tab);
-	QCOMPARE(view.inputText(), QStringLiteral("@Nodens:"));
+	QCOMPARE(view.inputText(), QStringLiteral("@PlayerOne:"));
 
 	request.functionName        = QStringLiteral("disable_symbol_prefix_exclusion");
 	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
@@ -6262,13 +6262,13 @@ end
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
 	         QStringLiteral("0"));
 
-	view.setInputText(QStringLiteral("@node"), true);
+	view.setInputText(QStringLiteral("@play"), true);
 	QTest::keyClick(input, Qt::Key_Tab);
-	QCOMPARE(view.inputText(), QStringLiteral("@node"));
+	QCOMPARE(view.inputText(), QStringLiteral("@play"));
 
-	view.setInputText(QStringLiteral("node"), true);
+	view.setInputText(QStringLiteral("play"), true);
 	QTest::keyClick(input, Qt::Key_Tab);
-	QCOMPARE(view.inputText(), QStringLiteral("Nodens:"));
+	QCOMPARE(view.inputText(), QStringLiteral("PlayerOne:"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -17119,16 +17119,16 @@ void tst_LuaCallbackEngine::triggerAnchoredColourOutputFollowsNativePromptText()
 	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 function prompt_cb(name, line)
   Tell("[")
-  ColourTell("white", "black", "435")
+  ColourTell("white", "black", "123")
   Tell(", ")
-  ColourTell("white", "black", "1226")
+  ColourTell("white", "black", "4567")
   Note("]")
 end
 )lua"),
 	                            &runtime))
 		QFAIL("Worker engine initialization failed");
 
-	const QString           prompt = QStringLiteral("[Library][SAFE]<2084hp 1806sp 1695st> ");
+	const QString           prompt = QStringLiteral("[Fixture][TEST]<1000aa 2000bb 3000cc> ");
 	WorldRuntime::LineEntry promptEntry;
 	promptEntry.text       = prompt;
 	promptEntry.flags      = WorldRuntime::LineOutput;
@@ -17157,7 +17157,7 @@ end
 	executeDeferredMutations(result);
 
 	const auto &lines = runtime.lines();
-	QCOMPARE(logicalOutputLinesFromEntries(lines), QStringList({prompt, QStringLiteral("[435, 1226]")}));
+	QCOMPARE(logicalOutputLinesFromEntries(lines), QStringList({prompt, QStringLiteral("[123, 4567]")}));
 	QCOMPARE(runtime.luaCallbackOutputCursorCount(), qsizetype{0});
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
@@ -31951,8 +31951,8 @@ void tst_LuaCallbackEngine::interceptedSoundCancelsPendingFilePreparation()
 {
 	PluginStateTestDirectory root(QDir::current().filePath(QStringLiteral("sound-pending-intercept-XXXXXX")));
 	QVERIFY(root.isValid());
-	QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds/Erion/relocated")));
-	QFile original(QDir(root.path()).filePath(QStringLiteral("sounds/Erion/relocated/cue.wav")));
+	QVERIFY(QDir(root.path()).mkpath(QStringLiteral("sounds/TestWorld/relocated")));
+	QFile original(QDir(root.path()).filePath(QStringLiteral("sounds/TestWorld/relocated/cue.wav")));
 	QVERIFY(original.open(QIODevice::WriteOnly));
 	QVERIFY(original.write(QMudTestSoundData::silentPcmWave(300)) > 0);
 	original.close();
@@ -31964,7 +31964,7 @@ void tst_LuaCallbackEngine::interceptedSoundCancelsPendingFilePreparation()
 	runtime.setStartupDirectory(root.path());
 	runtime.applyDefaultWorldOptions();
 	runtime.setWorldAttribute(QStringLiteral("default_world_sound_directory"),
-	                          QStringLiteral("sounds/Erion"));
+	                          QStringLiteral("sounds/TestWorld"));
 	runtime.attachSoundEngine(&sound);
 	const auto session = WorldRuntimeTestAccess::soundSession(runtime);
 	QVERIFY(session);

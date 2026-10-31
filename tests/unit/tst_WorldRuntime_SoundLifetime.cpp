@@ -1452,7 +1452,7 @@ namespace
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-download-owner-XXXXXX")));
 				QVERIFY(root.isValid());
 				const QString preferred =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/cue.wav"));
 				QVERIFY(!preferred.isEmpty());
 				QTcpServer server;
 				QVERIFY(server.listen(QHostAddress::LocalHost));
@@ -1460,8 +1460,8 @@ namespace
 				engine.initializePlayback();
 				engine.configureSoundDirectory(root.path());
 				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
-				const auto first  = engine.registerSession({}, QStringLiteral("sounds/Erion"));
-				const auto second = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto first  = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
+				const auto second = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(first && second);
 				auto request =
 				    nativeSoundRequest(QStringLiteral("download.wav"),
@@ -1481,7 +1481,7 @@ namespace
 				    engine, second, request.protocol, request.media);
 				QVERIFY(firstNative.current && secondNative.current);
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
-				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/change.wav"))
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/change.wav"))
 				             .isEmpty());
 				QTRY_VERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
 				const QString    file        = QStringLiteral("legacy/cue.wav");
@@ -1869,11 +1869,11 @@ namespace
 				QStringList   removed;
 				QStringList   survivors;
 				QStringList   expected;
-				const QString worldExact  = QStringLiteral("sounds/Erion/legacy/alerts/cue.wav");
-				const QString worldBest   = QStringLiteral("sounds/Erion/a/legacy/alerts/cue.wav");
-				const QString worldTie    = QStringLiteral("sounds/Erion/b/legacy/alerts/cue.wav");
-				const QString worldNext   = QStringLiteral("sounds/Erion/moved/alerts/cue.wav");
-				const QString worldPlain  = QStringLiteral("sounds/Erion/cue.wav");
+				const QString worldExact  = QStringLiteral("sounds/TestWorld/legacy/alerts/cue.wav");
+				const QString worldBest   = QStringLiteral("sounds/TestWorld/a/legacy/alerts/cue.wav");
+				const QString worldTie    = QStringLiteral("sounds/TestWorld/b/legacy/alerts/cue.wav");
+				const QString worldNext   = QStringLiteral("sounds/TestWorld/moved/alerts/cue.wav");
+				const QString worldPlain  = QStringLiteral("sounds/TestWorld/cue.wav");
 				const QString sharedExact = QStringLiteral("sounds/legacy/alerts/cue.wav");
 				const QString sharedBest  = QStringLiteral("sounds/moved/legacy/alerts/cue.wav");
 				const QString sharedNext  = QStringLiteral("sounds/moved/alerts/cue.wav");
@@ -1905,7 +1905,7 @@ namespace
 					break;
 				case 5:
 					removed   = {worldBest};
-					survivors = {worldTie, QStringLiteral("sounds/Erion/c/legacy/alerts/cue.wav"),
+					survivors = {worldTie, QStringLiteral("sounds/TestWorld/c/legacy/alerts/cue.wav"),
 					             sharedExact};
 					expected  = mode == 0 ? QStringList{survivors.at(1)} : survivors.first(2);
 					break;
@@ -1921,7 +1921,7 @@ namespace
 					QFAIL("Unknown ranking scenario");
 				}
 				const QString unrelated =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/legacy/alerts/different.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/legacy/alerts/different.wav"));
 				QVERIFY(!unrelated.isEmpty());
 				for (const QString &file : removed + survivors)
 					QVERIFY(!soundFixture(root.path(), file).isEmpty());
@@ -1932,7 +1932,7 @@ namespace
 				SoundEngine engine;
 				engine.initializePlayback();
 				engine.configureSoundDirectory(root.path());
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
 				for (const QString &file : expected)
@@ -2022,7 +2022,7 @@ namespace
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-priority-XXXXXX")));
 				QVERIFY(root.isValid());
 				const QString preferred =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/cue.wav"));
 				const QString shared = soundFixture(root.path(), QStringLiteral("sounds/legacy/cue.wav"));
 				QVERIFY(!preferred.isEmpty() && !shared.isEmpty());
 				QVERIFY(!soundFixture(root.path(), QStringLiteral("worlds/plugins/AddOn/cue.wav")).isEmpty());
@@ -2033,7 +2033,7 @@ namespace
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				engine.configureSoundDirectory(root.path());
 				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				QVERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
 				if (entry >= 3)
@@ -2123,9 +2123,10 @@ namespace
 				QFETCH(int, transition);
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-owned-lookup-XXXXXX")));
 				QVERIFY(root.isValid());
-				const QString old = soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/old.wav"));
+				const QString old =
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/moved/old.wav"));
 				const QString replacement =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/new.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/moved/new.wav"));
 				QVERIFY(!old.isEmpty());
 				QVERIFY(!replacement.isEmpty());
 				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("plugins")));
@@ -2143,7 +2144,7 @@ namespace
 				engine->configureSoundDirectory(root.path());
 				engine->configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("plugins")));
 				const auto session =
-				    engine->registerSession(std::move(callbacks), QStringLiteral("sounds/Erion"));
+				    engine->registerSession(std::move(callbacks), QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				const int buffer = session->reserveLuaAudioChannel(old, 91, 34.0);
 				QCOMPARE(buffer, 1);
@@ -2345,15 +2346,15 @@ namespace
 				QFETCH(int, transition);
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-life-XXXXXX")));
 				QVERIFY(root.isValid());
-				const QString old = soundFixture(root.path(), QStringLiteral("sounds/Erion/keep.wav"));
+				const QString old = soundFixture(root.path(), QStringLiteral("sounds/TestWorld/keep.wav"));
 				QVERIFY(!old.isEmpty());
-				QVERIFY(
-				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav")).isEmpty());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/cue.wav"))
+				             .isEmpty());
 				auto engine = std::make_unique<SoundEngine>();
 				engine->initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(*engine, true);
 				engine->configureSoundDirectory(root.path());
-				const auto session = engine->registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine->registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				QCOMPARE(session->playFile(1, QStringLiteral("keep.wav"), true, -100.0, 0.0), eOK);
 				const QString request =
@@ -2426,15 +2427,15 @@ namespace
 				QFETCH(int, transition);
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-owner-XXXXXX")));
 				QVERIFY(root.isValid());
-				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/keep.wav")).isEmpty());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/keep.wav")).isEmpty());
 				const QString replacement =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/cue.wav"));
 				QVERIFY(!replacement.isEmpty());
 				SoundEngine engine;
 				engine.initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				engine.configureSoundDirectory(root.path());
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				QCOMPARE(session->playFile(1, QStringLiteral("keep.wav"), true, -100.0, 0.0, 73), eOK);
 				QVERIFY(session->confirmLuaAudioOwnership(1, 73));
@@ -2504,13 +2505,13 @@ namespace
 			{
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-prepare-XXXXXX")));
 				QVERIFY(root.isValid());
-				QVERIFY(
-				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav")).isEmpty());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/cue.wav"))
+				             .isEmpty());
 				SoundEngine engine;
 				engine.initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				engine.configureSoundDirectory(root.path());
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				const quint64 intercepted = session->prepareFile(QStringLiteral("cue.wav"));
 				QTRY_COMPARE(SoundEngineTestAccess::pendingFileCount(engine, session), 1);
@@ -2534,12 +2535,12 @@ namespace
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-pending-context-XXXXXX")));
 				QVERIFY(root.isValid());
 				const QString first = soundFixture(
-				    root.path(), QStringLiteral("sounds/Erion/z/worlds/pluginsB/alerts/cue.wav"));
+				    root.path(), QStringLiteral("sounds/TestWorld/z/worlds/pluginsB/alerts/cue.wav"));
 				const QString second =
 				    soundFixture(root.path(), QStringLiteral("sounds/Other/relocated/cue.wav"));
 				QVERIFY(!first.isEmpty() && !second.isEmpty());
-				QVERIFY(
-				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/a/alerts/cue.wav")).isEmpty());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/a/alerts/cue.wav"))
+				             .isEmpty());
 				SoundEngine engine;
 				engine.initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
@@ -2547,7 +2548,7 @@ namespace
 				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("worlds/plugins")));
 				QVERIFY(QDir(root.path()).mkpath(QStringLiteral("worlds/pluginsB")));
 				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
-				const auto       session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto       session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				PendingSoundCall call(session,
 				                      [&]
 				                      {
@@ -2576,11 +2577,11 @@ namespace
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-plugin-alias-XXXXXX")));
 				QVERIFY(root.isValid());
 				const QString pluginWorld =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/AddOn/prompt.wav"));
-				const QString ordinaryWorld =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/worlds/plugins/AddOn/prompt.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/AddOn/prompt.wav"));
+				const QString ordinaryWorld = soundFixture(
+				    root.path(), QStringLiteral("sounds/TestWorld/worlds/plugins/AddOn/prompt.wav"));
 				const QString unaffected =
-				    soundFixture(root.path(), QStringLiteral("sounds/Erion/unrelated.wav"));
+				    soundFixture(root.path(), QStringLiteral("sounds/TestWorld/unrelated.wav"));
 				QVERIFY(!pluginWorld.isEmpty() && !ordinaryWorld.isEmpty() && !unaffected.isEmpty());
 				QVERIFY(
 				    !soundFixture(root.path(), QStringLiteral("worlds/plugins/AddOn/prompt.wav")).isEmpty());
@@ -2590,7 +2591,7 @@ namespace
 				engine.configureSoundDirectory(root.path());
 				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
 				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				const QString request = QStringLiteral("worlds/plugins/AddOn/prompt.wav");
 				QCOMPARE(session->playFile(1, request, true, -100.0, 0.0), eOK);
@@ -2613,13 +2614,13 @@ namespace
 			{
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-native-root-XXXXXX")));
 				QVERIFY(root.isValid());
-				QVERIFY(
-				    !soundFixture(root.path(), QStringLiteral("sounds/Erion/relocated/cue.wav")).isEmpty());
+				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/TestWorld/relocated/cue.wav"))
+				             .isEmpty());
 				SoundEngine engine;
 				engine.initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				engine.configureSoundDirectory(root.path());
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				for (const auto protocol : {QMudNativeSoundProtocol::Msp, QMudNativeSoundProtocol::Mxp})
 				{
@@ -2685,11 +2686,11 @@ namespace
 					return path;
 				};
 				const QString shared         = fixture(QStringLiteral("sounds/shared/voice.wav"));
-				const QString preferred      = fixture(QStringLiteral("sounds/Erion/shared/voice.wav"));
+				const QString preferred      = fixture(QStringLiteral("sounds/TestWorld/shared/voice.wav"));
 				const QString other          = fixture(QStringLiteral("sounds/Other/shared/voice.wav"));
 				const QString plugin         = fixture(QStringLiteral("worlds/plugins/AddOn/prompt.wav"));
-				const QString pluginOverride = fixture(QStringLiteral("sounds/Erion/AddOn/prompt.wav"));
-				const QString relocated      = fixture(QStringLiteral("sounds/Erion/relocated/cue.wav"));
+				const QString pluginOverride = fixture(QStringLiteral("sounds/TestWorld/AddOn/prompt.wav"));
+				const QString relocated      = fixture(QStringLiteral("sounds/TestWorld/relocated/cue.wav"));
 				QVERIFY(!shared.isEmpty() && !preferred.isEmpty() && !other.isEmpty() && !plugin.isEmpty() &&
 				        !pluginOverride.isEmpty() && !relocated.isEmpty());
 				QVERIFY(!fixture(QStringLiteral("sounds/legacy/cue.wav")).isEmpty());
@@ -2698,7 +2699,7 @@ namespace
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				engine.configureSoundDirectory(root.path());
 				engine.configurePluginDirectory(QDir(root.path()).filePath(QStringLiteral("worlds/plugins")));
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				QVERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
 				quint64 generation = 100;
@@ -2851,7 +2852,8 @@ namespace
 			{
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-native-gain-XXXXXX")));
 				QVERIFY(root.isValid());
-				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/cue.wav")).isEmpty());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("sounds/TestWorld/moved/cue.wav")).isEmpty());
 				SoundEngine engine;
 				engine.initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
@@ -2862,7 +2864,7 @@ namespace
 					for (const QMudNativeSoundMedia media :
 					     {QMudNativeSoundMedia::Sound, QMudNativeSoundMedia::Music})
 					{
-						const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+						const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 						QVERIFY(session);
 						auto request        = nativeSoundRequest(QStringLiteral("legacy/cue.wav"), media);
 						request.protocol    = protocol;
@@ -3081,7 +3083,7 @@ namespace
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-fallback-XXXXXX")));
 				QVERIFY(root.isValid());
 				const QString sourceDirectory =
-				    QDir(root.path()).filePath(QStringLiteral("sounds/Erion/notifications"));
+				    QDir(root.path()).filePath(QStringLiteral("sounds/TestWorld/notifications"));
 				const QString collisionDirectory =
 				    QDir(root.path()).filePath(QStringLiteral("sounds/Other/combat"));
 				QVERIFY(QDir().mkpath(sourceDirectory));
@@ -3094,7 +3096,7 @@ namespace
 				engine.initializePlayback();
 				engine.configureSoundDirectory(root.path());
 				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
-				const auto session = engine.registerSession({}, QStringLiteral("./sounds/Erion/"));
+				const auto session = engine.registerSession({}, QStringLiteral("./sounds/TestWorld/"));
 				QVERIFY(session);
 				const QString request = QStringLiteral(R"(worlds\sounds\notifications\crash.wav)");
 				int           buffer  = 0;
@@ -3145,7 +3147,8 @@ namespace
 				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, 1), source);
 				QCOMPARE(session->stop(1), eOK);
 				const QString preferredDirectory =
-				    QDir(root.path()).filePath(QStringLiteral("sounds/Erion/worlds/sounds/notifications"));
+				    QDir(root.path())
+				        .filePath(QStringLiteral("sounds/TestWorld/worlds/sounds/notifications"));
 				QVERIFY(QDir().mkpath(preferredDirectory));
 				QVERIFY(QFile::copy(testSoundFileName(),
 				                    QDir(preferredDirectory).filePath(QStringLiteral("crash.wav"))));
@@ -3797,12 +3800,13 @@ namespace
 				QTemporaryDir root(
 				    QDir::current().filePath(QStringLiteral("sound-memory-replacement-XXXXXX")));
 				QVERIFY(root.isValid());
-				QVERIFY(!soundFixture(root.path(), QStringLiteral("sounds/Erion/moved/next.wav")).isEmpty());
+				QVERIFY(
+				    !soundFixture(root.path(), QStringLiteral("sounds/TestWorld/moved/next.wav")).isEmpty());
 				SoundEngine engine;
 				engine.initializePlayback();
 				SoundEngineTestAccess::setCatalogPaused(engine, true);
 				engine.configureSoundDirectory(root.path());
-				const auto session = engine.registerSession({}, QStringLiteral("sounds/Erion"));
+				const auto session = engine.registerSession({}, QStringLiteral("sounds/TestWorld"));
 				QVERIFY(session);
 				MemoryPreparationBlocker preparation(engine);
 				QVERIFY(preparation.waitUntilEntered());

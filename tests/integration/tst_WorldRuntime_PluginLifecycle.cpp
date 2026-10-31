@@ -943,7 +943,7 @@ end
 		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
 		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 		trigger.children.insert(QStringLiteral("send"),
-		                        QStringLiteral("Note(\"[695, 770]\")\nNote(\"0 0 +196\")"));
+		                        QStringLiteral("Note(\"[111, 222]\")\nNote(\"0 0 +123\")"));
 		return trigger;
 	}
 
@@ -1194,7 +1194,7 @@ end
 	{
 		QTRY_COMPARE_WITH_TIMEOUT(lines.size(), qsizetype{2}, 1000);
 		QCOMPARE(lines.at(0).text, QStringLiteral("start-"));
-		QCOMPARE(lines.at(1).text, QStringLiteral("newbie"));
+		QCOMPARE(lines.at(1).text, QStringLiteral("sample"));
 		QVERIFY(!lines.at(0).spans.isEmpty());
 		QVERIFY(!lines.at(1).spans.isEmpty());
 		QCOMPARE(lines.at(0).spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
@@ -2383,12 +2383,12 @@ end
 			                 });
 
 			runtime.receiveRawData(
-			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
+			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityResolvesCurrentPartialLineWithExistingBuffer()
@@ -2411,12 +2411,12 @@ end
 			                 });
 
 			runtime.receiveRawData(
-			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
+			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityIgnoresInsertedOutputWhileBodyStaysPartial()
@@ -2436,12 +2436,12 @@ end
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-"));
 			runtime.addLine(QStringLiteral("inserted-output"), WorldRuntime::LineOutput);
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityTreatsCommittedPartialAsStaleCurrentLine()
@@ -2461,12 +2461,12 @@ end
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1zprefix <send href=\"help &text;\">start-"));
 			QVERIFY(WorldRuntimeTestAccess::commitPendingIncomingPartialLineStorage(runtime));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("newbie"));
+			QCOMPARE(line, QStringLiteral("sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityReplacementIsNotRecursive()
@@ -2509,12 +2509,12 @@ end
 			                 });
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<!ELEMENT help '<send href=\"help &text;\">'>"));
-			runtime.receiveRawData(QByteArrayLiteral("<help>start-newbie</help>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("<help>start-sample</help>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityResolvesAcrossCompletedLines()
@@ -2525,10 +2525,10 @@ end
 			QVERIFY(harness.showAndWait());
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<send href=\"help &text;\">start-\n"));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
 			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
-			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nnewbie"));
+			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nsample"));
 		}
 
 		static void mxpSendTextEntityIgnoresCallbackLinesInsertedBeforeActionStart()
@@ -2545,18 +2545,18 @@ end
 			QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(actionStartLineNumber, 1, 0, false,
 			                                                   QStringLiteral("callback"),
 			                                                   WorldRuntime::LineNote, {}, true));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
 			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
 			QTRY_COMPARE_WITH_TIMEOUT(lines.size(), qsizetype{3}, 1000);
 			QCOMPARE(lines.at(0).text, QStringLiteral("callback"));
 			QCOMPARE(lines.at(1).text, QStringLiteral("start-"));
-			QCOMPARE(lines.at(2).text, QStringLiteral("newbie"));
+			QCOMPARE(lines.at(2).text, QStringLiteral("sample"));
 			QVERIFY(lines.at(0).spans.isEmpty());
 			QVERIFY(!lines.at(1).spans.isEmpty());
 			QVERIFY(!lines.at(2).spans.isEmpty());
-			QCOMPARE(lines.at(1).spans.first().action, QStringLiteral("help start-\nnewbie"));
-			QCOMPARE(lines.at(2).spans.first().action, QStringLiteral("help start-\nnewbie"));
+			QCOMPARE(lines.at(1).spans.first().action, QStringLiteral("help start-\nsample"));
+			QCOMPARE(lines.at(2).spans.first().action, QStringLiteral("help start-\nsample"));
 		}
 
 		static void mxpCustomElementTextEntityResolvesAcrossCompletedLines()
@@ -2568,10 +2568,10 @@ end
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<!ELEMENT help '<send href=\"help &text;\">'>"));
 			runtime.receiveRawData(QByteArrayLiteral("<help>start-\n"));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</help>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</help>\n"));
 
 			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
-			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nnewbie"));
+			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nsample"));
 		}
 
 		static void mxpSendTextEntityResolutionUsesCompleteBodyText()
@@ -2690,14 +2690,14 @@ end
 
 			runtime.receiveRawData(bytes({IAC, SB, 91, IAC, SE}));
 
-			QByteArray payload = QByteArrayLiteral("There are 10 characters on.\r\n\r\n");
+			QByteArray payload = QByteArrayLiteral("Sample output before prompt.\r\n\r\n");
 			payload.append(
-			    QByteArrayLiteral("\x1B[3z\x1B[0;32m\x1B[1;33m<Ex>N</Ex><Ex>Sw</Ex>\x1B[0;32m 2:30pm "
-			                      "\x1B[1;31m32/32hp \x1B[1;34m100/100m \x1B[0;35m300mv "
-			                      "\x1B[0;32m2000xp\x1B[0;32m&gt; \x1B[0;37m"));
+			    QByteArrayLiteral("\x1B[3z\x1B[0;32m\x1B[1;33m<Ex>A</Ex><Ex>Bc</Ex>\x1B[0;32m 1:00pm "
+			                      "\x1B[1;31m10/10aa \x1B[1;34m200/200b \x1B[0;35m300cc "
+			                      "\x1B[0;32m4000dd\x1B[0;32m&gt; \x1B[0;37m"));
 			runtime.receiveRawData(payload);
 
-			const QString expectedPrompt = QStringLiteral("NSw 2:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			const QString expectedPrompt = QStringLiteral("ABc 1:00pm 10/10aa 200/200b 300cc 4000dd> ");
 			QTRY_VERIFY(!partialLines.isEmpty());
 			QCOMPARE(partialLines.constLast(), expectedPrompt);
 			QCOMPARE(partialSpans.size(), partialLines.size());
@@ -3169,7 +3169,7 @@ end
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
 			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie\3/send\4"), 0, 0, 319, 79,
+			    QStringLiteral("\3send href=\"help &text;\"\4start-sample\3/send\4"), 0, 0, 319, 79,
 			    0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
@@ -3180,7 +3180,7 @@ end
 			QCOMPARE(actionSpy.count(), 1);
 			const QList<QVariant> action = actionSpy.takeFirst();
 			QCOMPARE(action.at(0).toInt(), static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(action.at(1).toString(), QStringLiteral("help start-newbie"));
+			QCOMPARE(action.at(1).toString(), QStringLiteral("help start-sample"));
 		}
 
 		static void miniWindowUnclosedTextEntityActionIsNotHotspot()
@@ -3192,7 +3192,7 @@ end
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
 			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie"), 0, 0, 319, 79, 0x00FFFFFF,
+			    QStringLiteral("\3send href=\"help &text;\"\4start-sample"), 0, 0, 319, 79, 0x00FFFFFF,
 			    QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
@@ -4576,15 +4576,15 @@ end
 			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 
-			const QString prompt = QStringLiteral("[SAFE]<2083hp 2220sp 1990st> ");
+			const QString prompt = QStringLiteral("[TEST]<1000aa 2000bb 3000cc> ");
 			WorldRuntimeTestAccess::triggers(runtime).push_back(makePromptNoteTrigger(prompt));
 			runtime.markTriggersChanged();
 
 			RuntimeCommandHarness harness(runtime);
 			QVERIFY(harness.showAndWait());
 
-			harness.processor.onIncomingStyledLineReceived(QStringLiteral("(Mount: 2614st)"), {});
-			QTRY_VERIFY_WITH_TIMEOUT(harness.view.outputLines().contains(QStringLiteral("(Mount: 2614st)")),
+			harness.processor.onIncomingStyledLineReceived(QStringLiteral("(Value: 1000aa)"), {});
+			QTRY_VERIFY_WITH_TIMEOUT(harness.view.outputLines().contains(QStringLiteral("(Value: 1000aa)")),
 			                         5000);
 
 			harness.processor.onIncomingStyledLinePartialReceived(prompt, {});
@@ -4597,8 +4597,8 @@ end
 				if (lines.size() < 4)
 					return false;
 				const QStringList tailLines = lines.sliced(lines.size() - 4);
-				return tailLines == QStringList{QStringLiteral("(Mount: 2614st)"), prompt,
-				                                QStringLiteral("[695, 770]"), QStringLiteral("0 0 +196")} &&
+				return tailLines == QStringList{QStringLiteral("(Value: 1000aa)"), prompt,
+				                                QStringLiteral("[111, 222]"), QStringLiteral("0 0 +123")} &&
 				       std::ranges::none_of(tailLines, [](const QString &line) { return line.isEmpty(); });
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(tailLinesMatch(), 5000);

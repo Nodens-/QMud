@@ -51,7 +51,7 @@ namespace
 			{
 				QVERIFY(hasUnresolvedMxpTextEntityReference(QStringLiteral("help &text;")));
 				QVERIFY(hasUnresolvedMxpTextEntityReference(QStringLiteral("help &amp;text;")));
-				QVERIFY(!hasUnresolvedMxpTextEntityReference(QStringLiteral("help start-newbie")));
+				QVERIFY(!hasUnresolvedMxpTextEntityReference(QStringLiteral("help start-sample")));
 			}
 
 			void parsePluginHyperlinkCallAcceptsMushclientPayload()

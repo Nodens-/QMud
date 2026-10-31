@@ -349,15 +349,15 @@ namespace
 
 			static void triggerMatchTargetPreservesTrailingWhitespaceForRegexp()
 			{
-				const QString line = QStringLiteral("<274hp 930sp 448st> ");
+				const QString line = QStringLiteral("<100aa 200bb 300cc> ");
 				QCOMPARE(QMudCommandText::normalizeTriggerMatchLine(line, true), line);
 			}
 
 			static void triggerMatchTargetTrimsTrailingWhitespaceForWildcard()
 			{
-				const QString line = QStringLiteral("<274hp 930sp 448st> \t");
+				const QString line = QStringLiteral("<100aa 200bb 300cc> \t");
 				QCOMPARE(QMudCommandText::normalizeTriggerMatchLine(line, false),
-				         QStringLiteral("<274hp 930sp 448st>"));
+				         QStringLiteral("<100aa 200bb 300cc>"));
 			}
 
 			static void triggerMultilineTargetPreservesTrailingWhitespaceForRegexp()

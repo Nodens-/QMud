@@ -4934,7 +4934,7 @@ end
 			g_accessibleTextInsertRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
 
-			const QString prompt = QStringLiteral("N Sw 12:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			const QString prompt = QStringLiteral("A Bc 01:00pm 10/10aa 200/200b 300cc 4000dd> ");
 			view.updatePartialOutputText(prompt);
 
 			QTRY_COMPARE(view.outputLines().constLast(), prompt);
@@ -5015,7 +5015,7 @@ end
 			g_accessibleTextInsertRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
 
-			const QString prompt = QStringLiteral("N Sw 12:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			const QString prompt = QStringLiteral("A Bc 01:00pm 10/10aa 200/200b 300cc 4000dd> ");
 			runtimeForTest()->receiveRawData(prompt.toUtf8());
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 1);
 			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, prompt);
@@ -8546,11 +8546,11 @@ end
 				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-plugin-room-%1").arg(cycle),
 				                                            true);
 				view.updatePartialOutputText(QStringLiteral("<split-plugin-prompt-%1> ").arg(cycle));
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), true);
 				view.updatePartialOutputText(QStringLiteral("<split-plugin-prompt-%1> ").arg(cycle));
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("<split-plugin-prompt-%1> look").arg(cycle), true);
@@ -8592,11 +8592,11 @@ end
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("select-plugin-room-%1").arg(cycle), true);
 				view.updatePartialOutputText(QStringLiteral("<select-plugin-prompt-%1> ").arg(cycle));
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), true);
 				view.updatePartialOutputText(QStringLiteral("<select-plugin-prompt-%1> ").arg(cycle));
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("<select-plugin-prompt-%1> look").arg(cycle), true);
@@ -8668,11 +8668,11 @@ end
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("split-select-plugin-room-%1").arg(cycle), true);
 				view.updatePartialOutputText(QStringLiteral("<split-select-plugin-prompt-%1> ").arg(cycle));
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), true);
 				view.updatePartialOutputText(QStringLiteral("<split-select-plugin-prompt-%1> ").arg(cycle));
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("<split-select-plugin-prompt-%1> look").arg(cycle), true);
@@ -9834,25 +9834,25 @@ end
 			QVERIFY(nativeCanvas);
 
 			QVector<WorldRuntime::LineEntry> lines{
-			    makeRuntimeLine(QStringLiteral("A Trail of Two Tails"), WorldRuntime::LineOutput, true, 100),
-			    makeRuntimeLine(QStringLiteral("W"), WorldRuntime::LineNote, false, 101),
+			    makeRuntimeLine(QStringLiteral("Sample output title"), WorldRuntime::LineOutput, true, 100),
+			    makeRuntimeLine(QStringLiteral("A"), WorldRuntime::LineNote, false, 101),
 			    makeRuntimeLine(QStringLiteral(" <---("), WorldRuntime::LineNote, false, 102),
-			    makeRuntimeLine(QStringLiteral("M"), WorldRuntime::LineNote, false, 103),
+			    makeRuntimeLine(QStringLiteral("B"), WorldRuntime::LineNote, false, 103),
 			    makeRuntimeLine(QStringLiteral(")---> "), WorldRuntime::LineNote, false, 104),
-			    makeRuntimeLine(QStringLiteral("E"), WorldRuntime::LineNote, false, 105),
+			    makeRuntimeLine(QStringLiteral("C"), WorldRuntime::LineNote, false, 105),
 			    makeRuntimeLine(QString(), WorldRuntime::LineNote, true, 106),
-			    makeRuntimeLine(QStringLiteral("<2060hp 1694sp 1595st>"), WorldRuntime::LineOutput, true,
+			    makeRuntimeLine(QStringLiteral("<1000aa 2000bb 3000cc>"), WorldRuntime::LineOutput, true,
 			                    107)};
 			runtimeForTest()->replaceOutputLines(lines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
 			QTRY_COMPARE(view.outputLines().size(), 3);
-			QCOMPARE(view.outputLines().at(0), QStringLiteral("A Trail of Two Tails"));
-			QCOMPARE(view.outputLines().at(1), QStringLiteral("W <---(M)---> E"));
-			QCOMPARE(view.outputLines().at(2), QStringLiteral("<2060hp 1694sp 1595st>"));
+			QCOMPARE(view.outputLines().at(0), QStringLiteral("Sample output title"));
+			QCOMPARE(view.outputLines().at(1), QStringLiteral("A <---(B)---> C"));
+			QCOMPARE(view.outputLines().at(2), QStringLiteral("<1000aa 2000bb 3000cc>"));
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
-			             QStringLiteral("<2060hp 1694sp 1595st>"));
+			             QStringLiteral("<1000aa 2000bb 3000cc>"));
 			resetTestState();
 		}
 
@@ -9869,24 +9869,24 @@ end
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			runtimeOutputForTest(view).appendOutputText(QStringLiteral("A Trail of Two Tails"), true);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Sample output title"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), false);
 			runtimeOutputForTest(view).appendNoteText(QString(), true);
-			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<2060hp 1694sp 1595st>"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<1000aa 2000bb 3000cc>"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
 			QTRY_COMPARE(view.outputLines().size(), 3);
-			QCOMPARE(view.outputLines().at(0), QStringLiteral("A Trail of Two Tails"));
-			QCOMPARE(view.outputLines().at(1), QStringLiteral("W <---(M)---> E"));
-			QCOMPARE(view.outputLines().at(2), QStringLiteral("<2060hp 1694sp 1595st>"));
+			QCOMPARE(view.outputLines().at(0), QStringLiteral("Sample output title"));
+			QCOMPARE(view.outputLines().at(1), QStringLiteral("A <---(B)---> C"));
+			QCOMPARE(view.outputLines().at(2), QStringLiteral("<1000aa 2000bb 3000cc>"));
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
-			             QStringLiteral("<2060hp 1694sp 1595st>"));
+			             QStringLiteral("<1000aa 2000bb 3000cc>"));
 			resetTestState();
 		}
 
@@ -9904,35 +9904,35 @@ end
 			QVERIFY(nativeCanvas);
 
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room description"), true);
-			view.updatePartialOutputText(QStringLiteral("<2060hp 1694sp> "));
+			view.updatePartialOutputText(QStringLiteral("<1000aa 2000bb> "));
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
-			QVERIFY(view.outputLines().contains(QStringLiteral("<2060hp 1694sp> ")));
+			QVERIFY(view.outputLines().contains(QStringLiteral("<1000aa 2000bb> ")));
 
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"), true);
-			view.updatePartialOutputText(QStringLiteral("<2060hp 1694sp> "));
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("[fixture: alpha / beta text]"), true);
+			view.updatePartialOutputText(QStringLiteral("<1000aa 2000bb> "));
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
 			QStringList lines = view.outputLines();
 			QVERIFY(lines.contains(QStringLiteral("room description")));
-			QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
-			QCOMPARE(lines.constLast(), QStringLiteral("<2060hp 1694sp> "));
+			QVERIFY(lines.contains(QStringLiteral("[fixture: alpha / beta text]")));
+			QCOMPARE(lines.constLast(), QStringLiteral("<1000aa 2000bb> "));
 
 			view.clearPartialOutput();
-			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<2060hp 1694sp> look"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<1000aa 2000bb> look"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
 			lines = view.outputLines();
-			QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
-			QCOMPARE(lines.constLast(), QStringLiteral("<2060hp 1694sp> look"));
+			QVERIFY(lines.contains(QStringLiteral("[fixture: alpha / beta text]")));
+			QCOMPARE(lines.constLast(), QStringLiteral("<1000aa 2000bb> look"));
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
-			             QStringLiteral("<2060hp 1694sp> look"));
+			             QStringLiteral("<1000aa 2000bb> look"));
 			resetTestState();
 		}
 
@@ -9949,7 +9949,7 @@ end
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			const QString prompt = QStringLiteral("[Library][SAFE]<2084hp 1806sp 1695st> ");
+			const QString prompt = QStringLiteral("[Fixture][TEST]<1000aa 2000bb 3000cc> ");
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room description"), true);
 			view.updatePartialOutputText(prompt);
 			QCoreApplication::processEvents();
@@ -9959,9 +9959,9 @@ end
 
 			view.clearPartialOutput();
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral("["), false);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("435"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("123"), false);
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral(", "), false);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("1226"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("4567"), false);
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral("]"), true);
 			runtimeOutputForTest(view).appendOutputText(prompt, true);
 			QCoreApplication::processEvents();
@@ -9969,11 +9969,11 @@ end
 			QCoreApplication::processEvents();
 
 			const QStringList lines = view.outputLines();
-			QVERIFY(lines.contains(QStringLiteral("[435, 1226]")));
+			QVERIFY(lines.contains(QStringLiteral("[123, 4567]")));
 			QCOMPARE(lines.constLast(), prompt);
-			QVERIFY(!lines.contains(QStringLiteral("[435, 1226]<2084hp 1806sp 1695st> ")));
+			QVERIFY(!lines.contains(QStringLiteral("[123, 4567]<1000aa 2000bb 3000cc> ")));
 			QVERIFY(std::ranges::none_of(lines, [](const QString &line)
-			                             { return line == QStringLiteral("<2084hp 1806sp 1695st> "); }));
+			                             { return line == QStringLiteral("<1000aa 2000bb 3000cc> "); }));
 			resetTestState();
 		}
 
@@ -9992,9 +9992,9 @@ end
 
 			QVector<WorldRuntime::LineEntry> lines{
 			    makeRuntimeLine(QStringLiteral("room description"), WorldRuntime::LineOutput, true, 100),
-			    makeRuntimeLine(QStringLiteral("[gmcp: no-npcs / city street]"), WorldRuntime::LineNote, true,
+			    makeRuntimeLine(QStringLiteral("[fixture: alpha / beta text]"), WorldRuntime::LineNote, true,
 			                    300),
-			    makeRuntimeLine(QStringLiteral("<2060hp 1694sp 1595st>"), WorldRuntime::LineOutput, true,
+			    makeRuntimeLine(QStringLiteral("<1000aa 2000bb 3000cc>"), WorldRuntime::LineOutput, true,
 			                    200)};
 			runtimeForTest()->replaceOutputLines(lines);
 			nativeCanvas->repaint();
@@ -10002,8 +10002,8 @@ end
 
 			QTRY_COMPARE(view.outputLines().size(), 3);
 			QCOMPARE(view.outputLines().at(0), QStringLiteral("room description"));
-			QCOMPARE(view.outputLines().at(1), QStringLiteral("[gmcp: no-npcs / city street]"));
-			QCOMPARE(view.outputLines().at(2), QStringLiteral("<2060hp 1694sp 1595st>"));
+			QCOMPARE(view.outputLines().at(1), QStringLiteral("[fixture: alpha / beta text]"));
+			QCOMPARE(view.outputLines().at(2), QStringLiteral("<1000aa 2000bb 3000cc>"));
 			resetTestState();
 		}
 
@@ -12812,12 +12812,12 @@ end
 			QTRY_COMPARE(runtime->lines().size(), qsizetype{2});
 			QCOMPARE(view.outputLines(), QStringList({QStringLiteral("start-"), QStringLiteral("middle-")}));
 
-			runtime->receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime->receiveRawData(QByteArrayLiteral("sample</send>\n"));
 			QTRY_COMPARE(runtime->lines().size(), qsizetype{3});
 			QCOMPARE(view.outputLines(), QStringList({QStringLiteral("start-"), QStringLiteral("middle-"),
-			                                          QStringLiteral("newbie")}));
+			                                          QStringLiteral("sample")}));
 
-			const QString expectedAction = QStringLiteral("help start-\nmiddle-\nnewbie");
+			const QString expectedAction = QStringLiteral("help start-\nmiddle-\nsample");
 			for (int renderIndex = 0; renderIndex < 2; ++renderIndex)
 			{
 				const auto &spans = view.m_nativeRenderModel->m_nativeRenderLineCache.at(renderIndex).spans;
@@ -12890,11 +12890,11 @@ end
 			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("cap-room"), true);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 			runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), true);
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<cap-prompt>"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -12904,7 +12904,7 @@ end
 			QCOMPARE(runtimeForTest()->lines().size(), 10);
 			QVERIFY(!lines.contains(QStringLiteral("cap-primer-0")));
 			QVERIFY(lines.contains(QStringLiteral("cap-room")));
-			QVERIFY(lines.contains(QStringLiteral("W <---(M)---> E")));
+			QVERIFY(lines.contains(QStringLiteral("A <---(B)---> C")));
 			QCOMPARE(lines.constLast(), QStringLiteral("<cap-prompt>"));
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
 			             QStringLiteral("<cap-prompt>"));
@@ -12939,11 +12939,11 @@ end
 			for (int cycle = 0; cycle < 5; ++cycle)
 			{
 				runtimeOutputForTest(view).appendOutputText(QStringLiteral("cycle-room-%1").arg(cycle), true);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), true);
 				runtimeOutputForTest(view).appendOutputText(QStringLiteral("<cycle-prompt-%1>").arg(cycle),
 				                                            true);
 				QCoreApplication::processEvents();
@@ -12952,7 +12952,7 @@ end
 
 				const QStringList lines = view.outputLines();
 				QCOMPARE(runtimeForTest()->lines().size(), 24);
-				QVERIFY(lines.contains(QStringLiteral("W <---(M)---> E")));
+				QVERIFY(lines.contains(QStringLiteral("A <---(B)---> C")));
 				QCOMPARE(lines.constLast(), QStringLiteral("<cycle-prompt-%1>").arg(cycle));
 				QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(),
 				             rebuildsBefore);
@@ -12992,13 +12992,13 @@ end
 			{
 				runtimeOutputForTest(view).appendOutputText(QStringLiteral("guard-room-%1").arg(cycle), true);
 				view.updatePartialOutputText(QStringLiteral("<guard-prompt-%1> ").arg(cycle));
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"),
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("[fixture: alpha / beta text]"),
 				                                          true);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("A"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("B"), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("C"), true);
 				view.updatePartialOutputText(QStringLiteral("<guard-prompt-%1> ").arg(cycle));
 				view.clearPartialOutput();
 				runtimeOutputForTest(view).appendOutputText(
@@ -13009,8 +13009,8 @@ end
 
 				const QStringList lines = view.outputLines();
 				QCOMPARE(runtimeForTest()->lines().size(), 80);
-				QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
-				QVERIFY(lines.contains(QStringLiteral("W <---(M)---> E")));
+				QVERIFY(lines.contains(QStringLiteral("[fixture: alpha / beta text]")));
+				QVERIFY(lines.contains(QStringLiteral("A <---(B)---> C")));
 				QCOMPARE(lines.constLast(), QStringLiteral("<guard-prompt-%1> look").arg(cycle));
 				QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(),
 				             rebuildsBefore);
@@ -13052,7 +13052,7 @@ end
 				runtimeOutputForTest(view).appendOutputText(QStringLiteral("partial-room-%1").arg(cycle),
 				                                            true);
 				view.updatePartialOutputText(QStringLiteral("<partial-prompt-%1> ").arg(cycle));
-				runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"),
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("[fixture: alpha / beta text]"),
 				                                          true);
 				view.updatePartialOutputText(QStringLiteral("<partial-prompt-%1> ").arg(cycle));
 				QCoreApplication::processEvents();
@@ -13067,7 +13067,7 @@ end
 
 				const QStringList lines = view.outputLines();
 				QCOMPARE(runtimeForTest()->lines().size(), 14);
-				QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
+				QVERIFY(lines.contains(QStringLiteral("[fixture: alpha / beta text]")));
 				QCOMPARE(lines.constLast(), QStringLiteral("<partial-prompt-%1> look").arg(cycle));
 				QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
 				             QStringLiteral("<partial-prompt-%1> look").arg(cycle));
@@ -13110,7 +13110,7 @@ end
 			QVERIFY(promptIndex >= 0);
 
 			WorldRuntime::LineEntry compassLine;
-			compassLine.text                                 = QStringLiteral("W <---(M)---> E");
+			compassLine.text                                 = QStringLiteral("A <---(B)---> C");
 			compassLine.flags                                = WorldRuntime::LineNote;
 			compassLine.hardReturn                           = true;
 			compassLine.time                                 = QDateTime::currentDateTime();
@@ -13122,7 +13122,7 @@ end
 			QVERIFY(!nativeCanvas->grab().isNull());
 			QVERIFY(nativeCanvas->property("qmud_native_plain_tail_lines")
 			            .toStringList()
-			            .contains(QStringLiteral("W <---(M)---> E")));
+			            .contains(QStringLiteral("A <---(B)---> C")));
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
 			QCOMPARE(nativeCanvas->property("qmud_native_plain_tail_lines").toStringList().constLast(),
@@ -13910,8 +13910,8 @@ end
 			setTestWorldAttribute(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
 
 			WorldRuntime *const runtime = runtimeForTest();
-			runtime->addLine(QStringLiteral("Nodette!"), WorldRuntime::LineOutput);
-			runtime->addLine(QStringLiteral("Nodens:"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("PlayerTwo!"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("PlayerOne:"), WorldRuntime::LineOutput);
 			const QString symbols = QStringLiteral("!@#$%^&*()_+-=[]{};:\"',./<>?`~\\|");
 			QCOMPARE(symbols.size(), 32);
 			for (int index = 0; index < symbols.size(); ++index)
@@ -13934,23 +13934,23 @@ end
 			for (const QChar prefix : symbols)
 			{
 				const QString prefixText(prefix);
-				view.setInputText(prefixText + QStringLiteral("node"), true);
+				view.setInputText(prefixText + QStringLiteral("play"), true);
 				QTextCursor cursor = input->textCursor();
 				cursor.movePosition(QTextCursor::End);
 				input->setTextCursor(cursor);
 
 				QTest::keyClick(input, Qt::Key_Tab);
-				QCOMPARE(view.inputText(), prefixText + QStringLiteral("Nodens"));
+				QCOMPARE(view.inputText(), prefixText + QStringLiteral("PlayerOne"));
 			}
 
-			view.setInputText(QStringLiteral("@node"), true);
+			view.setInputText(QStringLiteral("@play"), true);
 			QTextCursor cursor = input->textCursor();
 			cursor.movePosition(QTextCursor::End);
 			input->setTextCursor(cursor);
 			QTest::keyClick(input, Qt::Key_Tab);
-			QCOMPARE(view.inputText(), QStringLiteral("@Nodens"));
+			QCOMPARE(view.inputText(), QStringLiteral("@PlayerOne"));
 			QTest::keyClick(input, Qt::Key_Tab);
-			QCOMPARE(view.inputText(), QStringLiteral("@Nodette"));
+			QCOMPARE(view.inputText(), QStringLiteral("@PlayerTwo"));
 
 			for (int index = 0; index < symbols.size(); ++index)
 			{
@@ -13967,23 +13967,23 @@ end
 
 			runtime->setWorldAttribute(QStringLiteral("tab_completion_excludes_symbol_prefix"),
 			                           QStringLiteral("0"));
-			view.setInputText(QStringLiteral("@node"), true);
+			view.setInputText(QStringLiteral("@play"), true);
 			cursor = input->textCursor();
 			cursor.movePosition(QTextCursor::End);
 			input->setTextCursor(cursor);
 			QTest::keyClick(input, Qt::Key_Tab);
-			QCOMPARE(view.inputText(), QStringLiteral("@node"));
+			QCOMPARE(view.inputText(), QStringLiteral("@play"));
 
 			runtime->setWorldAttribute(QStringLiteral("tab_completion_excludes_symbol_prefix"),
 			                           QStringLiteral("1"));
 			runtime->setWorldAttribute(QStringLiteral("tab_completion_excludes_symbol_suffix"),
 			                           QStringLiteral("0"));
-			view.setInputText(QStringLiteral("@node"), true);
+			view.setInputText(QStringLiteral("@play"), true);
 			cursor = input->textCursor();
 			cursor.movePosition(QTextCursor::End);
 			input->setTextCursor(cursor);
 			QTest::keyClick(input, Qt::Key_Tab);
-			QCOMPARE(view.inputText(), QStringLiteral("@Nodens:"));
+			QCOMPARE(view.inputText(), QStringLiteral("@PlayerOne:"));
 
 			resetTestState();
 		}
@@ -14566,9 +14566,9 @@ end
 
 			WorldView view;
 			setTestRuntimeObserver(view, runtimeForTest());
-			runtimeOutputForTest(view).appendOutputText(QStringLiteral("If you're new to CthulhuMUD"), true);
-			runtimeOutputForTest(view).appendOutputText(
-			    QStringLiteral("Read through the entire Newbie School"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("This is new sample output"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Read the New sample instructions"),
+			                                            true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -14596,9 +14596,9 @@ end
 
 			WorldView view;
 			setTestRuntimeObserver(view, runtimeForTest());
-			runtimeOutputForTest(view).appendOutputText(QStringLiteral("new to CthulhuMUD"), true);
-			runtimeOutputForTest(view).appendOutputText(
-			    QStringLiteral("Read through the entire Newbie School"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("new sample output"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Read the New sample instructions"),
+			                                            true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -16209,7 +16209,7 @@ end
 			                 &WorldView::updatePartialOutputText);
 			view.applyRuntimeSettings();
 
-			const QString prompt = QStringLiteral("<2060hp 1694sp> ");
+			const QString prompt = QStringLiteral("<1000aa 2000bb> ");
 			runtime->receiveRawData(prompt.toUtf8());
 			QTRY_COMPARE(view.outputLines().constLast(), prompt);
 

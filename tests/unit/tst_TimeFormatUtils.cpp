@@ -70,10 +70,10 @@ namespace
 
 				QCOMPARE(workingDirExpansion, QStringLiteral("work'dir%value"));
 
-				context.worldName = QStringLiteral("Lara's mud");
+				context.worldName = QStringLiteral("Test's world");
 				const QString literalName =
 				    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%N"), context, false, nullptr);
-				QCOMPARE(literalName, QStringLiteral("Lara's mud"));
+				QCOMPARE(literalName, QStringLiteral("Test's world"));
 			}
 
 			void formatWorldTimeFixHtmlUsesProvidedCallback()
