@@ -127,6 +127,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #ifdef Q_OS_WIN
 #include <winnls.h>
 #ifndef VER_PLATFORM_WIN32_NT
@@ -891,6 +892,101 @@ namespace
 			}
 	};
 
+	/** @brief Owning variable edit retained independently of callback-local observation caches. */
+	struct DeferredVariableMutation
+	{
+			QMudVariableMapUtils::Name name;
+			QString                    value;
+			bool                       remove{false};
+	};
+
+	/** @brief Contiguous variable edits sharing one guarded owner and one executable journal entry. */
+	struct DeferredVariableMutationRun
+	{
+			QPointer<WorldRuntime>                                                    runtime;
+			QString                                                                   pluginId;
+			LuaCallbackPluginsSnapshotState::RuntimeIdentity                          identity;
+			std::variant<DeferredVariableMutation, QVector<DeferredVariableMutation>> records;
+
+			/**
+			 * @brief Checks whether another accepted edit belongs to this exact captured owner.
+			 * @param target Runtime receiving the edit.
+			 * @param ownerId Canonical plugin identifier, or empty for world variables.
+			 * @param ownerIdentity Captured plugin location, runtime and engine generations.
+			 * @return Whether the edit can share this run's owner descriptor.
+			 */
+			[[nodiscard]] bool
+			matchesOwner(const WorldRuntime *target, const QString &ownerId,
+			             const LuaCallbackPluginsSnapshotState::RuntimeIdentity &ownerIdentity) const
+			{
+				return runtime.data() == target && pluginId == ownerId && identity == ownerIdentity;
+			}
+
+			/**
+			 * @brief Replaces the last assignment when no intervening variable observer can see it.
+			 * @param mutation Next accepted edit, moved only when it replaces the last assignment.
+			 * @return Whether the edit replaced a same-key assignment without adding a record.
+			 */
+			bool replaceLastSet(DeferredVariableMutation &mutation)
+			{
+				if (mutation.remove)
+					return false;
+				auto *last = std::get_if<DeferredVariableMutation>(&records);
+				if (!last)
+					last = &std::get<QVector<DeferredVariableMutation>>(records).last();
+				if (last->remove || last->name.key() != mutation.name.key())
+					return false;
+				*last = std::move(mutation);
+				return true;
+			}
+
+			/**
+			 * @brief Appends an edit, allocating record storage only when the inline singleton grows.
+			 * @param mutation Owning accepted variable edit.
+			 */
+			void append(DeferredVariableMutation mutation)
+			{
+				if (auto *single = std::get_if<DeferredVariableMutation>(&records))
+				{
+					QVector<DeferredVariableMutation> edits;
+					edits.reserve(2);
+					edits.push_back(std::move(*single));
+					edits.push_back(std::move(mutation));
+					records = std::move(edits);
+				}
+				else
+					std::get<QVector<DeferredVariableMutation>>(records).push_back(std::move(mutation));
+			}
+
+			/**
+			 * @brief Applies an edit through the existing runtime guards and snapshot patch paths.
+			 * @param mutation Accepted edit in journal order.
+			 */
+			void apply(const DeferredVariableMutation &mutation) const
+			{
+				if (!runtime)
+					return;
+				if (!pluginId.isEmpty())
+					LuaCallbackRuntimeMutationAccess::mutatePluginVariable(
+					    *runtime, pluginId, identity, mutation.name, mutation.value, mutation.remove);
+				else if (mutation.remove)
+					static_cast<void>(runtime->deleteVariable(mutation.name));
+				else
+					runtime->setVariable(mutation.name, mutation.value);
+			}
+
+			/** @brief Replays the frozen run on the owning runtime thread without yielding or dispatching Lua. */
+			void operator()() const
+			{
+				if (const auto *single = std::get_if<DeferredVariableMutation>(&records))
+					apply(*single);
+				else
+					for (const DeferredVariableMutation &mutation :
+					     std::get<QVector<DeferredVariableMutation>>(records))
+						apply(mutation);
+			}
+	};
+
 	struct LuaCallbackExecutionContext
 	{
 			bool                                 originatedFromCallback{false};
@@ -1143,6 +1239,9 @@ namespace
 			std::shared_ptr<CallbackOutputStreamState>          callbackOutputStreamState;
 			QPointer<WorldRuntime>                              deferredRuntimeTarget;
 			QVector<std::function<void()>>                      deferredRuntimeMutations;
+			// Index only while the journal is callback-private; observers/publication retire it. Captured
+			// miniwindow surfaces may separate this run from the tail without observing variable replay.
+			qsizetype                                           deferredVariableMutationRunIndex{-1};
 			PendingNotepadAppendBatch                           pendingNotepadAppend;
 			std::shared_ptr<LuaCallbackMutationDependencyState> mutationDependencies;
 			bool                                                hasPendingDeferredRuntimeMutations{false};
@@ -1234,6 +1333,7 @@ namespace
 
 	void clearDeferredMutationPendingState(LuaCallbackExecutionContext &context)
 	{
+		context.deferredVariableMutationRunIndex = -1;
 		if (!context.hasPendingDeferredRuntimeMutations)
 			return;
 		context.hasPendingDeferredRuntimeMutations = false;
@@ -1294,7 +1394,8 @@ namespace
 		auto it = g_luaCallbackExecutionContexts.find(engine);
 		if (it == g_luaCallbackExecutionContexts.end() || it->isEmpty())
 			return context;
-		context = std::move(it->last());
+		context                                  = std::move(it->last());
+		context.deferredVariableMutationRunIndex = -1;
 		it->removeLast();
 		if (it->isEmpty())
 			g_luaCallbackExecutionContexts.erase(it);
@@ -11263,6 +11364,10 @@ namespace
 			    });
 			context.pendingMiniWindowFlushCheckpoints.push_back(std::move(checkpoint));
 		}
+		// The state commit above consumes captured values and queues later hover checks. Post-commit
+		// callables are arbitrary executable effects and may observe variables or dispatch Lua.
+		if (!context.deferredMiniWindowPostCommitMutations.isEmpty())
+			context.deferredVariableMutationRunIndex = -1;
 		mutations += std::move(context.deferredMiniWindowPostCommitMutations);
 		context.deferredMiniWindowPostCommitMutations.clear();
 	}
@@ -11328,6 +11433,8 @@ namespace
 			*mutationsApplied = false;
 		if (!context.hasPendingDeferredRuntimeMutations)
 			return true;
+		// Published, executed, restored-on-failure and discarded journals are never amended afterward.
+		context.deferredVariableMutationRunIndex     = -1;
 		const bool    requiresCausalOrdering         = context.pendingMutationBatchRequiresCausalOrdering;
 		const bool    windowAddHotspotReentryBlocked = context.windowAddHotspotReentryBlocked;
 
@@ -11474,6 +11581,68 @@ namespace
 		       flushDeferredRuntimeMutationsFromContext(
 		           engine, *context, runtime, DeferredRuntimeMutationFlushPolicy::AllowSynchronousBridge,
 		           DeferredRuntimeMutationContextDisposition::Continues, mutationsApplied);
+	}
+
+	/**
+	 * @brief Records a typed variable edit while retaining existing target-switch and publication semantics.
+	 * @param engine Engine owning the active callback.
+	 * @param runtime Runtime receiving the edit.
+	 * @param pluginId Canonical plugin identifier, or empty for world variables.
+	 * @param identity Captured plugin location, runtime and engine generations.
+	 * @param name Normalized name retaining the caller's original spelling.
+	 * @param value Assigned content, or empty for deletion.
+	 * @param remove Whether to delete the variable.
+	 * @return Whether the edit was accepted for runtime execution.
+	 */
+	bool enqueueCallbackVariableMutation(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+	                                     const QString                                          &pluginId,
+	                                     const LuaCallbackPluginsSnapshotState::RuntimeIdentity &identity,
+	                                     QMudVariableMapUtils::Name name, QString value, const bool remove)
+	{
+		if (!runtime)
+			return false;
+		auto *context = activeCallbackContext(engine);
+		if (!context || context->flushingDeferredRuntimeMutations)
+			return enqueueRuntimeThreadDeferredMutationNoResult(
+			    engine, runtime,
+			    DeferredVariableMutationRun{
+			        runtime, pluginId, identity,
+			        DeferredVariableMutation{std::move(name), std::move(value), remove}
+            });
+		if (context->deferredRuntimeTarget && context->deferredRuntimeTarget.data() != runtime)
+		{
+			if (!flushDeferredRuntimeMutations(engine, runtime))
+				return false;
+			invalidateCallbackRuntimeSnapshots(engine);
+			context = activeCallbackContext(engine);
+		}
+
+		context->deferredRuntimeTarget = runtime;
+		sealPendingNotepadAppend(*context);
+		appendPendingMiniWindowCommitMutations(*context, context->deferredRuntimeMutations);
+		const qsizetype              index = context->deferredVariableMutationRunIndex;
+		DeferredVariableMutationRun *run =
+		    index >= 0 && index < context->deferredRuntimeMutations.size()
+		        ? context->deferredRuntimeMutations[index].target<DeferredVariableMutationRun>()
+		        : nullptr;
+		DeferredVariableMutation mutation{std::move(name), std::move(value), remove};
+		const bool               matchingOwner = run && run->matchesOwner(runtime, pluginId, identity);
+		if (matchingOwner && run->replaceLastSet(mutation))
+		{
+			// Every Lua call still updates its local overlay. Only this private executable record is
+			// replaced, retaining the final spelling and an explicit write even when its value is equal.
+		}
+		else if (matchingOwner && index == context->deferredRuntimeMutations.size() - 1)
+			run->append(std::move(mutation));
+		else
+		{
+			context->deferredRuntimeMutations.push_back(
+			    DeferredVariableMutationRun{runtime, pluginId, identity, std::move(mutation)});
+			context->deferredVariableMutationRunIndex = context->deferredRuntimeMutations.size() - 1;
+		}
+		markPendingSemanticMutation(*context);
+		updateDeferredMutationPendingState(*context);
+		return true;
 	}
 
 	enum class CallbackMiniWindowCommitClass : quint8
@@ -13425,6 +13594,8 @@ void LuaCallbackEngine::appendDeferredRuntimeMutationBatch(
 	bindOrAssertExecutionThread("LuaCallbackEngine::appendDeferredRuntimeMutationBatch");
 	if (!runtime || mutations.isEmpty())
 		return;
+	if (auto *context = activeCallbackContext(this))
+		context->deferredVariableMutationRunIndex = -1;
 	LuaDeferredRuntimeMutationBatch batch;
 	batch.runtime                        = runtime;
 	batch.mutations                      = std::move(mutations);
@@ -13446,9 +13617,10 @@ bool LuaCallbackEngine::appendDeferredRuntimeMutationBatchToActiveCallback(
 	{
 		if (!engine)
 			continue;
-		const auto contextIt = g_luaCallbackExecutionContexts.constFind(engine);
-		if (contextIt == g_luaCallbackExecutionContexts.constEnd() || contextIt->isEmpty())
+		const auto contextIt = g_luaCallbackExecutionContexts.find(engine);
+		if (contextIt == g_luaCallbackExecutionContexts.end() || contextIt->isEmpty())
 			continue;
+		contextIt->last().deferredVariableMutationRunIndex = -1;
 		batch.windowAddHotspotReentryBlocked =
 		    batch.windowAddHotspotReentryBlocked || contextIt->constLast().windowAddHotspotReentryBlocked;
 
@@ -13464,6 +13636,8 @@ bool LuaCallbackEngine::appendDeferredRuntimeMutationBatchToActiveCallback(
 QVector<LuaDeferredRuntimeMutationBatch> LuaCallbackEngine::takeDeferredRuntimeMutationBatches()
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::takeDeferredRuntimeMutationBatches");
+	if (auto *context = activeCallbackContext(this))
+		context->deferredVariableMutationRunIndex = -1;
 	QVector<LuaDeferredRuntimeMutationBatch> batches;
 	batches.swap(m_deferredRuntimeMutationBatches);
 	return batches;
@@ -13473,7 +13647,11 @@ void LuaCallbackEngine::appendDeferredRuntimeMutationBatches(QVector<LuaDeferred
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::appendDeferredRuntimeMutationBatches");
 	if (!batches.isEmpty())
+	{
+		if (auto *context = activeCallbackContext(this))
+			context->deferredVariableMutationRunIndex = -1;
 		m_deferredRuntimeMutationBatches += std::move(batches);
+	}
 }
 
 QSharedPointer<const LuaCallbackSnapshot>
@@ -14577,8 +14755,9 @@ namespace
 	{
 		if (!context.pendingNotepadAppend.isValid())
 			return;
-		PendingNotepadAppendBatch batch = std::move(context.pendingNotepadAppend);
-		context.pendingNotepadAppend    = {};
+		context.deferredVariableMutationRunIndex = -1;
+		PendingNotepadAppendBatch batch          = std::move(context.pendingNotepadAppend);
+		context.pendingNotepadAppend             = {};
 		context.deferredRuntimeMutations.push_back(
 		    [runtimeGuard = batch.runtime, title = std::move(batch.title),
 		     contents = std::move(batch.contents), results = std::move(batch.results)]
@@ -18241,20 +18420,8 @@ static int luaDeleteVariable(lua_State *L)
 				lua_pushnumber(L, eVariableNotFound);
 				return 1;
 			}
-			enqueueRuntimeThreadDeferredMutationNoResult(
-			    engine, runtime,
-			    [variableName = variableName, pluginId = pluginId, pluginScoped,
-			     originatingPluginIdentity](WorldRuntime &targetRuntime)
-			    {
-				    if (pluginScoped)
-				    {
-					    LuaCallbackRuntimeMutationAccess::mutatePluginVariable(targetRuntime, pluginId,
-					                                                           originatingPluginIdentity,
-					                                                           variableName, QString(), true);
-				    }
-				    else
-					    static_cast<void>(targetRuntime.deleteVariable(variableName));
-			    });
+			enqueueCallbackVariableMutation(engine, runtime, pluginId, originatingPluginIdentity,
+			                                variableName, QString(), true);
 			updateCallbackVariableSnapshotValue(engine, pluginId, variableName, QString(), true);
 			lua_pushnumber(L, eOK);
 			return 1;
@@ -18562,6 +18729,8 @@ static int runOnRuntimeThreadDeferredMutation(const LuaCallbackEngine *engine, W
 	};
 
 	auto *context = activeCallbackContext(engine);
+	if (context)
+		context->deferredVariableMutationRunIndex = -1;
 	if (!context || context->flushingDeferredRuntimeMutations)
 	{
 		return runOnRuntimeThread(
@@ -18642,6 +18811,9 @@ static bool enqueueRuntimeThreadDeferredMutationNoResult(const LuaCallbackEngine
 		else
 			fnCopy();
 	};
+	auto *context = activeCallbackContext(engine);
+	if (context)
+		context->deferredVariableMutationRunIndex = -1;
 	if (!requiresCausalOrdering)
 	{
 		if (QThread::currentThread() == runtime->thread())
@@ -18659,7 +18831,6 @@ static bool enqueueRuntimeThreadDeferredMutationNoResult(const LuaCallbackEngine
 		    Qt::QueuedConnection);
 	}
 
-	auto *context = activeCallbackContext(engine);
 	if (!context || context->flushingDeferredRuntimeMutations)
 	{
 		if (QThread::currentThread() == runtime->thread())
@@ -43710,19 +43881,8 @@ static int luaSetVariable(lua_State *L)
 		const auto originatingPluginIdentity = pluginScoped
 		                                           ? originatingPluginRuntimeIdentity(*context)
 		                                           : LuaCallbackPluginsSnapshotState::RuntimeIdentity{};
-		enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime,
-		    [pluginScoped, pluginId = pluginId, originatingPluginIdentity, variableName = variableName,
-		     value = value](WorldRuntime &targetRuntime)
-		    {
-			    if (pluginScoped)
-			    {
-				    LuaCallbackRuntimeMutationAccess::mutatePluginVariable(
-				        targetRuntime, pluginId, originatingPluginIdentity, variableName, value, false);
-			    }
-			    else
-				    targetRuntime.setVariable(variableName, value);
-		    });
+		enqueueCallbackVariableMutation(engine, runtime, pluginId, originatingPluginIdentity, variableName,
+		                                value, false);
 		// Enqueueing may flush another runtime's journal and replace the callback's working views.
 		updateCallbackVariableSnapshotValue(engine, pluginId, variableName, value, false);
 		lua_pushnumber(L, eOK);

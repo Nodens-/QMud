@@ -501,6 +501,20 @@ class tst_LuaCallbackEngine final : public QObject
 		void callbackVariableReadsPreserveValuesAcrossMutations();
 		/** @brief Verifies ordered writes survive equality against a stale callback snapshot. */
 		void unchangedPluginWriteStillAppliesToNewerRuntimeState();
+		/** @brief Supplies complete and sparse world/plugin variable journal cases. */
+		void typedVariableJournalPreservesEdits_data();
+		/** @brief Verifies packed edits retain overlays, deletion order, spelling and shared delivery ownership. */
+		void typedVariableJournalPreservesEdits();
+		/** @brief Supplies world/plugin drawing cases for inline and promoted variable records. */
+		void variableJournalCoalescesAcrossCapturedDrawing_data();
+		/** @brief Verifies same-key folding preserves text captured before a later assignment. */
+		void variableJournalCoalescesAcrossCapturedDrawing();
+		/** @brief Supplies cancellation, owner destruction and recovery delivery paths. */
+		void typedVariableJournalRetainsPlaybackOwnership_data();
+		/** @brief Verifies frozen typed records obey cancellation and exactly-once recovery ownership. */
+		void typedVariableJournalRetainsPlaybackOwnership();
+		/** @brief Checks an ordered create/delete retains the world variable dirty flag after coalescing. */
+		void variableJournalPreservesDeletionDirtyState();
 		/** @brief Verifies full and sparse variable overlays survive nested calls and deletion. */
 		void nestedPluginVariablesUseCanonicalFullAndSparseOverlays();
 		/** @brief Verifies state-save callbacks and files observe writes at their ordered journal position. */
@@ -8581,6 +8595,290 @@ end
 	QVERIFY(teardownWorkerEngine(*executor, engine));
 }
 
+void tst_LuaCallbackEngine::typedVariableJournalPreservesEdits_data()
+{
+	QTest::addColumn<bool>("pluginScoped");
+	QTest::addColumn<bool>("complete");
+	QTest::newRow("world-complete") << false << true;
+	QTest::newRow("world-sparse") << false << false;
+	QTest::newRow("plugin-complete") << true << true;
+	QTest::newRow("plugin-sparse") << true << false;
+}
+
+void tst_LuaCallbackEngine::typedVariableJournalPreservesEdits()
+{
+	QFETCH(bool, pluginScoped);
+	QFETCH(bool, complete);
+	WorldRuntime  runtime;
+	const QString id     = pluginScoped ? QStringLiteral("abcdefabcdefabcdefabcdef") : QString();
+	auto          engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (pluginScoped)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.enabled = true;
+		plugin.lua     = engine;
+		WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+		WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	}
+	const ILuaExecutor *executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function packed_variables(mode)
+  for i = 1, 256 do
+    local name = "variable_" .. i
+    assert(SetVariable(name, tostring(i)) == 0)
+    assert(GetVariable(name) == tostring(i))
+  end
+  assert(SetVariable(" VARIABLE_2 ", "final") == 0)
+  assert(GetVariable("variable_2") == "final")
+  if mode == "complete" then
+    assert(DeleteVariable("variable_1") == 0)
+    assert(GetVariable("variable_1") == nil)
+    assert(SetVariable("Variable_1", "recreated") == 0)
+    assert(GetVariableList().variable_1 == "recreated")
+  end
+  return "ok"
+end
+)lua"),
+	                               &runtime, id, id, QDir::currentPath()));
+	auto snapshot =
+	    QSharedPointer<LuaCallbackSnapshot>::create(*captureVariableDispatchSnapshotForTest(runtime));
+	if (!complete)
+	{
+		if (pluginScoped)
+			snapshot->pluginVariablesSnapshotById.remove(id);
+		else
+		{
+			snapshot->hasWorldVariablesSnapshot = false;
+			snapshot->worldVariablesSnapshot.clear();
+		}
+	}
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("packed_variables");
+	request.stringArg           = complete ? QStringLiteral("complete") : QStringLiteral("sparse");
+	request.callbackSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(*executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
+	// Hundreds of accepted writes share one executable entry, including ordered delete/recreate.
+	QCOMPARE(result.deferredRuntimeMutationBatches.constFirst().mutations.size(), qsizetype{1});
+	QVERIFY(pluginScoped ? runtime.pluginForId(id)->variables.values().isEmpty()
+	                     : runtime.variables().isEmpty());
+	const auto retained = result.deferredRuntimeMutationBatches;
+	const auto delivery = result.deferredRuntimeMutationDelivery;
+	QMudLuaDeferredRuntimeMutation::apply(result);
+	const auto &values = pluginScoped ? runtime.pluginForId(id)->variables.values() : runtime.variables();
+	QCOMPARE(values.size(), qsizetype{256});
+	QCOMPARE(values.value(QStringLiteral("variable_1")).content,
+	         complete ? QStringLiteral("recreated") : QStringLiteral("1"));
+	QCOMPARE(values.value(QStringLiteral("variable_2")).content, QStringLiteral("final"));
+	QCOMPARE(values.value(QStringLiteral("variable_2")).label, QStringLiteral(" VARIABLE_2 "));
+	QCOMPARE(values.value(QStringLiteral("variable_256")).content, QStringLiteral("256"));
+	QCOMPARE(runtime.variablesChanged(), !pluginScoped);
+	QVERIFY(!retained.isEmpty());
+	QVERIFY(delivery);
+	bool deliveredAgain = false;
+	QVERIFY(!delivery->consumeForDelivery([&](const QVector<LuaDeferredRuntimeMutationBatch> &)
+	                                      { deliveredAgain = true; }));
+	QVERIFY(!deliveredAgain);
+	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
+void tst_LuaCallbackEngine::variableJournalCoalescesAcrossCapturedDrawing_data()
+{
+	QTest::addColumn<bool>("pluginScoped");
+	QTest::addColumn<bool>("promoted");
+	QTest::newRow("world-inline") << false << false;
+	QTest::newRow("world-promoted") << false << true;
+	QTest::newRow("plugin-inline") << true << false;
+	QTest::newRow("plugin-promoted") << true << true;
+}
+
+void tst_LuaCallbackEngine::variableJournalCoalescesAcrossCapturedDrawing()
+{
+	QFETCH(bool, pluginScoped);
+	QFETCH(bool, promoted);
+	WorldRuntime  runtime;
+	const QString id     = pluginScoped ? QStringLiteral("abcdefabcdefabcdefabcdef") : QString();
+	auto          engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (pluginScoped)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.enabled = true;
+		plugin.lua     = engine;
+		WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+		WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	}
+	for (const QString &name : {QStringLiteral("captured"), QStringLiteral("expected")})
+	{
+		QCOMPARE(runtime.windowCreate(name, 0, 0, 100, 40, 0, 0, Qt::black, QString()), eOK);
+		QCOMPARE(runtime.windowFont(name, QStringLiteral("font"), QStringLiteral("Sans Serif"), 12, false,
+		                            false, false, false, 0, 0),
+		         eOK);
+	}
+	const auto *executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function draw_variables(mode)
+  if mode == "promoted" then
+    assert(SetVariable("prefix", "retained") == 0)
+  end
+  assert(SetVariable("phase", "before A") == 0)
+  assert(GetVariable("phase") == "before A")
+  assert(SetVariable("Phase", "A") == 0)
+  assert(WindowText("captured", "font", GetVariable("phase"), 0, 0, 100, 40, 16777215) > 0)
+  assert(SetVariable("phase", "before B") == 0)
+  assert(WindowText("expected", "font", "A", 0, 0, 100, 40, 16777215) > 0)
+  assert(SetVariable(" PHASE ", "B") == 0)
+  assert(GetVariable("phase") == "B")
+  return "ok"
+end
+)lua"),
+	                               &runtime, id, id, QDir::currentPath()));
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("draw_variables");
+	request.stringArg           = promoted ? QStringLiteral("promoted") : QStringLiteral("inline");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(*executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
+	QCOMPARE(result.deferredRuntimeMutationBatches.constFirst().mutations.size(), qsizetype{3});
+	bool inspected = false;
+	// Inspect the retained variable entry before the captured surfaces play back. A separate later
+	// variable entry would expose A here, proving that cross-drawing folding had failed to happen.
+	result.deferredRuntimeMutationBatches.first().mutations.insert(
+	    1,
+	    [&]
+	    {
+		    const auto &values =
+		        pluginScoped ? runtime.pluginForId(id)->variables.values() : runtime.variables();
+		    QCOMPARE(values.value(QStringLiteral("phase")).content, QStringLiteral("B"));
+		    QCOMPARE(values.value(QStringLiteral("phase")).label, QStringLiteral(" PHASE "));
+		    if (promoted)
+			    QCOMPARE(values.value(QStringLiteral("prefix")).content, QStringLiteral("retained"));
+		    inspected = true;
+	    });
+	const auto retained = result.deferredRuntimeMutationBatches;
+	QMudLuaDeferredRuntimeMutation::apply(result);
+	QVERIFY(inspected);
+	QCOMPARE(runtime.miniWindow(QStringLiteral("captured"))->backingSurface(),
+	         runtime.miniWindow(QStringLiteral("expected"))->backingSurface());
+	QVERIFY(!retained.isEmpty());
+	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
+void tst_LuaCallbackEngine::typedVariableJournalRetainsPlaybackOwnership_data()
+{
+	QTest::addColumn<QString>("path");
+	QTest::newRow("cancel-before-playback") << QStringLiteral("cancel");
+	QTest::newRow("cancel-suspended-playback") << QStringLiteral("suspend");
+	QTest::newRow("shutdown-recovery") << QStringLiteral("shutdown");
+	QTest::newRow("destroyed-runtime") << QStringLiteral("destroy");
+}
+
+void tst_LuaCallbackEngine::typedVariableJournalRetainsPlaybackOwnership()
+{
+	QFETCH(QString, path);
+	auto runtime  = std::make_unique<WorldRuntime>();
+	auto executor = std::make_unique<LuaExecutorWorker>(recoveredMutationConsumerForTest());
+	auto engine   = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function prepare_variables()
+  assert(SetVariable("prefix", "retained") == 0)
+  assert(SetVariable("phase", "A") == 0)
+  assert(SetVariable("Phase", "B") == 0)
+end
+)lua"),
+	                               runtime.get(), QString(), QString(), QDir::currentPath()));
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("prepare_variables");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(*runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(*executor, request, result));
+	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
+	const auto delivery = result.deferredRuntimeMutationDelivery;
+	QVERIFY(delivery);
+	if (path == QStringLiteral("cancel"))
+	{
+		result.connectionCancellationState = std::make_shared<LuaCallbackConnectionCancellationState>(1);
+		result.connectionCancellationState->cancel();
+	}
+	std::function<void(bool)> release;
+	if (path == QStringLiteral("suspend"))
+		result.deferredRuntimeMutationBatches.first().mutations.prepend(
+		    [&] { release = runtime->retainLuaDeferredRuntimeMutationPlayback(); });
+	const auto retained = result.deferredRuntimeMutationBatches;
+	if (path == QStringLiteral("shutdown"))
+	{
+		executor.reset();
+		QCOMPARE(runtime->variableSnapshot().value(QStringLiteral("phase")).content, QStringLiteral("B"));
+		// The late normal completion loses ownership to recovery and must not replay over newer state.
+		runtime->setVariable(QStringLiteral("phase"), QStringLiteral("after recovery"));
+		QMudLuaDeferredRuntimeMutation::apply(result);
+		QCOMPARE(runtime->variableSnapshot().value(QStringLiteral("phase")).content,
+		         QStringLiteral("after recovery"));
+	}
+	else
+	{
+		if (path == QStringLiteral("destroy"))
+			runtime.reset();
+		QMudLuaDeferredRuntimeMutation::apply(result);
+		if (path == QStringLiteral("suspend"))
+		{
+			QVERIFY(release);
+			QVERIFY(runtime->variables().isEmpty());
+			release(true);
+		}
+		if (runtime)
+			QVERIFY(runtime->variables().isEmpty());
+		QVERIFY(teardownWorkerEngine(*executor, engine));
+	}
+	QVERIFY(!retained.isEmpty());
+	bool repeated = false;
+	QVERIFY(!delivery->consumeForDelivery([&](const QVector<LuaDeferredRuntimeMutationBatch> &)
+	                                      { repeated = true; }));
+	QVERIFY(!repeated);
+}
+
+void tst_LuaCallbackEngine::variableJournalPreservesDeletionDirtyState()
+{
+	WorldRuntime runtime;
+	auto         engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const auto  *executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	QVERIFY(initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+function delete_transient_variable()
+  assert(SetVariable("temporary", "A") == 0)
+  assert(SetVariable("temporary", "B") == 0)
+  assert(DeleteVariable("temporary") == 0)
+  assert(GetVariable("temporary") == nil)
+end
+)lua"),
+	                               &runtime, QString(), QString(), QDir::currentPath()));
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("delete_transient_variable");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(*executor, request, result));
+	QVERIFY(!runtime.variablesChanged());
+	QMudLuaDeferredRuntimeMutation::apply(result);
+	QVERIFY(runtime.variables().isEmpty());
+	QVERIFY(runtime.variablesChanged());
+	QVERIFY(teardownWorkerEngine(*executor, engine));
+}
+
 void tst_LuaCallbackEngine::callbackVariableReadsPreserveValuesAcrossMutations()
 {
 	for (const bool pluginScoped : {false, true})
@@ -8824,10 +9122,12 @@ function exercise(_)
   assert(type(GetVariableList()) == "table")
   assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 0)
   assert(select("#", GetPluginVariableList("abcdefabcdefabcdefabcdea")) == 0)
+  assert(SetVariable("phase", "discarded before save") == 0)
   assert(SetVariable("Phase", "A") == 0)
   assert(GetVariableList().phase == "A")
   assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 1)
   assert(SaveState() == 0)
+  assert(SetVariable("phase", "discarded after save") == 0)
   assert(SetVariable("PHASE", "B") == 0)
   assert(GetVariableList().phase == "B")
   assert(GetPluginInfo("abcdefabcdefabcdefabcdef", 12) == 1)
