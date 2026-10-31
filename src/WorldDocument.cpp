@@ -7,6 +7,8 @@
  */
 
 #include "WorldDocument.h"
+#include "PluginStatePersistence.h"
+#include "helpers/VariableMapUtils.h"
 
 #include "NativePluginRegistry.h"
 #include "Version.h"
@@ -19,6 +21,7 @@
 #include <QHash>
 #include <QXmlStreamReader>
 #include <algorithm>
+#include <type_traits>
 
 static bool makeVirtualNativePlugin(const QString &rawName, WorldDocument::Plugin &plugin)
 {
@@ -364,6 +367,14 @@ static QString withLine(const QXmlStreamReader &reader, const QString &message)
 	return message;
 }
 
+/**
+ * @brief Adds an XML item using its domain's input-name and duplicate policies.
+ * @tparam Item XML rule or variable record type.
+ * @param items Destination records.
+ * @param indexByName Lookup of names already seen in this XML input.
+ * @param item Parsed input record retaining its original attributes.
+ * @param duplicatePolicy Whether a later named record replaces an earlier one.
+ */
 template <typename Item>
 static void appendNamedItem(QList<Item> &items, QHash<QString, qsizetype> &indexByName, Item item,
                             const WorldDocument::NamedDuplicatePolicy duplicatePolicy)
@@ -371,7 +382,13 @@ static void appendNamedItem(QList<Item> &items, QHash<QString, qsizetype> &index
 	const QString name = item.attributes.value(QStringLiteral("name")).trimmed();
 	if (!name.isEmpty() && duplicatePolicy == WorldDocument::NamedDuplicatePolicy::KeepLast)
 	{
-		const QString key = name.toCaseFolded();
+		const QString key = [&name]
+		{
+			if constexpr (std::is_same_v<Item, WorldDocument::Variable>)
+				return QMudVariableMapUtils::Name(name).key();
+			else
+				return name.toCaseFolded();
+		}();
 		if (const auto existing = indexByName.constFind(key); existing != indexByName.cend())
 		{
 			items[existing.value()] = std::move(item);
@@ -680,8 +697,19 @@ bool WorldDocument::loadFromXmlWithPolicy(const QString &xmlText, const PluginPo
 							variable.attributes.insert(attr.name().toString(), attr.value().toString());
 						}
 						variable.content = reader.readElementText(QXmlStreamReader::IncludeChildElements);
-						appendNamedItem(m_variables, variableIndexByName, std::move(variable),
-						                duplicatePolicy);
+						const QMudVariableMapUtils::Name variableName(
+						    variable.attributes.value(QStringLiteral("name")));
+						if (!variableName.key().isEmpty())
+						{
+							const auto found = variableIndexByName.constFind(variableName.key());
+							if (found == variableIndexByName.cend())
+							{
+								variableIndexByName.insert(variableName.key(), m_variables.size());
+								m_variables.push_back(std::move(variable));
+							}
+							else
+								m_variables[*found] = std::move(variable);
+						}
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("variables"))
 						break;
@@ -1219,7 +1247,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 
 		const QString pluginFlag = include.attributes.value(QStringLiteral("plugin")).toLower();
 		const bool    isPlugin   = (pluginFlag == QStringLiteral("y") || pluginFlag == QStringLiteral("1") ||
-                               pluginFlag == QStringLiteral("true"));
+		                            pluginFlag == QStringLiteral("true"));
 		if (isPlugin != wantPlugins)
 			continue;
 		if (isPlugin)
@@ -1328,7 +1356,8 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 				if (!base.endsWith('/') && !base.endsWith('\\'))
 					base += '/';
 				const QString stateFile = base + worldId + "-" + pluginId + "-state.xml";
-				QFileInfo     info(stateFile);
+				PluginStatePersistence::instance().flush(QFileInfo(stateFile).absoluteFilePath());
+				QFileInfo info(stateFile);
 				if (info.exists())
 				{
 					if (info.size() == 0)
@@ -1351,7 +1380,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 							return false;
 						}
 						if (!child.m_plugins.isEmpty())
-							mergePluginVariablesFrom(child.m_plugins.front(), stateDoc.variables(), true);
+							mergePluginVariablesFrom(child.m_plugins.front(), stateDoc.variables());
 					}
 				}
 			}
@@ -1530,15 +1559,15 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 
 	const QString explicitRelativeLower      = explicitRelativeWithoutCurrentDir.toLower();
 	const bool    explicitStartsPortableRoot = explicitRelativeLower == QStringLiteral("worlds") ||
-	                                        explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
-	                                        explicitRelativeLower == QStringLiteral("logs") ||
-	                                        explicitRelativeLower.startsWith(QStringLiteral("logs/"));
+	                                           explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
+	                                           explicitRelativeLower == QStringLiteral("logs") ||
+	                                           explicitRelativeLower.startsWith(QStringLiteral("logs/"));
 
 	const QString normalizedLower    = nativeName.toLower();
 	const bool    startsPortableRoot = normalizedLower == QStringLiteral("worlds") ||
-	                                normalizedLower.startsWith(QStringLiteral("worlds/")) ||
-	                                normalizedLower == QStringLiteral("logs") ||
-	                                normalizedLower.startsWith(QStringLiteral("logs/"));
+	                                   normalizedLower.startsWith(QStringLiteral("worlds/")) ||
+	                                   normalizedLower == QStringLiteral("logs") ||
+	                                   normalizedLower.startsWith(QStringLiteral("logs/"));
 
 	if (isExplicitRelative)
 	{
@@ -1667,19 +1696,21 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 
 	auto mergeVariables = [&](auto &dest, const auto &src)
 	{
-		QMap<QString, int> indexByName;
+		QHash<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+			const QString name =
+			    QMudVariableMapUtils::Name(dest[i].attributes.value(QStringLiteral("name"))).key();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
 
 		for (const auto &item : src)
 		{
-			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toCaseFolded();
-			if (key.isEmpty() || !indexByName.contains(key))
+			const QString rawName  = item.attributes.value(QStringLiteral("name")).trimmed();
+			const QString key      = QMudVariableMapUtils::Name(rawName).key();
+			const auto    existing = indexByName.constFind(key);
+			if (key.isEmpty() || existing == indexByName.cend())
 			{
 				dest.push_back(item);
 				if (!key.isEmpty())
@@ -1692,9 +1723,9 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 				warn(QStringLiteral("%1: duplicate variable ignored").arg(rawName));
 				continue;
 			}
-			if ((flags & IncludeMergeWarn) != 0 && dest[indexByName.value(key)].content != item.content)
+			if ((flags & IncludeMergeWarn) != 0 && dest[*existing].content != item.content)
 				warn(QStringLiteral("%1: overwriting existing variable contents").arg(rawName));
-			dest[indexByName.value(key)] = item;
+			dest[*existing] = item;
 		}
 		return true;
 	};
@@ -1718,66 +1749,27 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 	return true;
 }
 
-void WorldDocument::mergeVariablesFrom(const WorldDocument &other, bool overwrite)
+void WorldDocument::mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars)
 {
-	if (!overwrite)
-	{
-		m_variables.append(other.m_variables);
-		return;
-	}
-
-	QMap<QString, qsizetype> indexByName;
-	for (qsizetype i = 0; i < m_variables.size(); ++i)
-	{
-		const QString name = m_variables[i].attributes.value(QStringLiteral("name"));
-		if (!name.isEmpty())
-			indexByName.insert(name, i);
-	}
-
-	for (const auto &v : other.m_variables)
-	{
-		const QString name = v.attributes.value(QStringLiteral("name"));
-		if (!name.isEmpty() && indexByName.contains(name))
-			m_variables[indexByName.value(name)] = v;
-		else
-		{
-			m_variables.append(v);
-			if (!name.isEmpty())
-				indexByName.insert(name, m_variables.size() - 1);
-		}
-	}
-}
-
-void WorldDocument::mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars, bool overwrite)
-{
-	if (!overwrite)
-	{
-		plugin.variables.append(vars);
-		return;
-	}
-
-	QMap<QString, qsizetype> indexByName;
+	QHash<QString, qsizetype> indexByName;
+	indexByName.reserve(plugin.variables.size() + vars.size());
 	for (qsizetype i = 0; i < plugin.variables.size(); ++i)
 	{
-		const QString name = plugin.variables[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
-		if (!name.isEmpty())
-			indexByName.insert(name, i);
+		const QMudVariableMapUtils::Name name(
+		    plugin.variables.at(i).attributes.value(QStringLiteral("name")));
+		if (!name.key().isEmpty())
+			indexByName.insert(name.key(), i);
 	}
-
-	for (const auto &v : vars)
+	for (const auto &variable : vars)
 	{
-		const QString name = v.attributes.value(QStringLiteral("name")).trimmed();
-		const QString key  = name.toLower();
-		if (!key.isEmpty() && indexByName.contains(key))
-		{
-			plugin.variables[indexByName.value(key)] = v;
-		}
+		const QMudVariableMapUtils::Name name(variable.attributes.value(QStringLiteral("name")));
+		if (name.key().isEmpty())
+			continue;
+		auto [it, inserted] = indexByName.tryEmplace(name.key(), plugin.variables.size());
+		if (inserted)
+			plugin.variables.push_back(variable);
 		else
-		{
-			plugin.variables.append(v);
-			if (!key.isEmpty())
-				indexByName.insert(key, plugin.variables.size() - 1);
-		}
+			plugin.variables[*it] = variable;
 	}
 }
 

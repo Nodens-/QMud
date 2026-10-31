@@ -181,7 +181,7 @@ struct WorldPreferencesDialog::WorkingLists
 		struct Variable
 		{
 				WorldRuntime::Variable value;
-				QString                runtimeName;
+				QString                runtimeKey;
 				bool                   presentInRuntime{false};
 				bool                   nameEdited{false};
 				bool                   valueEdited{false};
@@ -667,11 +667,6 @@ static QStringList macroDescriptionList()
 static QString boolAttributeValue(const bool enabled)
 {
 	return enabled ? QStringLiteral("1") : QStringLiteral("0");
-}
-
-static QString normalizeObjectName(const QString &value)
-{
-	return value.trimmed().toLower();
 }
 
 static int worldMaxOutputLines(const QMap<QString, QString> &attrs)
@@ -1877,8 +1872,7 @@ void WorldPreferencesDialog::initializeWorkingList(const Page page) const
 	{
 		for (const WorldRuntime::Variable &variable : m_runtime->variables())
 		{
-			m_workingLists->variables.push_back(
-			    {variable, variable.attributes.value(QStringLiteral("name")), true, false, false});
+			m_workingLists->variables.push_back({variable, variable.key, true, false, false});
 		}
 		m_workingLists->variablesInitialized = true;
 	}
@@ -2722,7 +2716,7 @@ bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidatio
 		return false;
 	}
 
-	auto duplicateLines = [](const auto &items, auto itemValue) -> QStringList
+	auto duplicateLines = [](const auto &items, auto nameKey) -> QStringList
 	{
 		struct NameCount
 		{
@@ -2732,10 +2726,10 @@ bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidatio
 		QMap<QString, NameCount> counts;
 		for (const auto &item : items)
 		{
-			const QString name = itemValue(item).attributes.value(QStringLiteral("name")).trimmed();
+			const QString name = item.attributes.value(QStringLiteral("name")).trimmed();
 			if (name.isEmpty())
 				continue;
-			NameCount &entry = counts[name.toCaseFolded()];
+			NameCount &entry = counts[nameKey(name)];
 			if (entry.displayName.isEmpty())
 				entry.displayName = name;
 			++entry.count;
@@ -2757,16 +2751,17 @@ bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidatio
 	};
 	if (includeTriggers)
 		appendSection(QStringLiteral("Triggers"),
-		              duplicateLines(triggers, [](const auto &item) -> const auto & { return item; }));
+		              duplicateLines(triggers, [](const QString &name) { return name.toCaseFolded(); }));
 	if (includeAliases)
 		appendSection(QStringLiteral("Aliases"),
-		              duplicateLines(aliases, [](const auto &item) -> const auto & { return item; }));
+		              duplicateLines(aliases, [](const QString &name) { return name.toCaseFolded(); }));
 	if (includeTimers)
 		appendSection(QStringLiteral("Timers"),
-		              duplicateLines(timers, [](const auto &item) -> const auto & { return item; }));
+		              duplicateLines(timers, [](const QString &name) { return name.toCaseFolded(); }));
 	if (includeVariables)
 		appendSection(QStringLiteral("Variables"),
-		              duplicateLines(variables, [](const auto &item) -> const auto & { return item; }));
+		              duplicateLines(variables, [](const QString &name)
+		                             { return QMudVariableMapUtils::Name(name).key(); }));
 	if (sections.isEmpty())
 		return true;
 
@@ -2790,15 +2785,14 @@ QList<WorldPreferencesDialog::ResolvedVariable> WorldPreferencesDialog::effectiv
 		return variables;
 	}
 
-	const QList<WorldRuntime::Variable> current = m_runtime->variables();
+	const QList<WorldRuntime::Variable> current = m_runtime->variables().values();
 	QList<ResolvedVariable>             resolved;
 	QSet<QString>                       emittedRuntimeNames;
 	QHash<QString, qsizetype>           currentIndexByName;
 	resolved.reserve(m_workingLists->variables.size() + current.size());
 	for (qsizetype index = 0; index < current.size(); ++index)
 	{
-		const QString key =
-		    current.at(index).attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+		const QString key = current.at(index).key;
 		currentIndexByName.insert(key, index);
 	}
 	for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
@@ -2806,15 +2800,14 @@ QList<WorldPreferencesDialog::ResolvedVariable> WorldPreferencesDialog::effectiv
 		ResolvedVariable value{working.value.attributes, working.value.content};
 		if (working.presentInRuntime)
 		{
-			const QString runtimeKey   = working.runtimeName.trimmed().toCaseFolded();
+			const QString runtimeKey   = working.runtimeKey;
 			const auto    currentIndex = currentIndexByName.constFind(runtimeKey);
 			if (currentIndex == currentIndexByName.cend())
 				continue;
 			const WorldRuntime::Variable &currentValue = current.at(currentIndex.value());
 			value                                      = {currentValue.attributes, currentValue.content};
 			if (working.nameEdited)
-				value.attributes.insert(QStringLiteral("name"),
-				                        working.value.attributes.value(QStringLiteral("name")));
+				value.attributes.insert(QStringLiteral("name"), working.value.label);
 			if (working.valueEdited)
 				value.content = working.value.content;
 			emittedRuntimeNames.insert(runtimeKey);
@@ -2823,7 +2816,7 @@ QList<WorldPreferencesDialog::ResolvedVariable> WorldPreferencesDialog::effectiv
 	}
 	for (const WorldRuntime::Variable &candidate : current)
 	{
-		const QString key = candidate.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+		const QString key = candidate.key;
 		if (!m_workingLists->deletedVariableNames.contains(key) && !emittedRuntimeNames.contains(key))
 			resolved.push_back({candidate.attributes, candidate.content});
 	}
@@ -5557,13 +5550,13 @@ bool WorldPreferencesDialog::loadVariablesFromFile(const QString &fileName)
 	for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
 	{
 		if (working.presentInRuntime)
-			m_workingLists->deletedVariableNames.insert(working.runtimeName.trimmed().toCaseFolded());
+			m_workingLists->deletedVariableNames.insert(working.runtimeKey);
 	}
 	for (const auto &v : doc.variables())
 	{
-		WorldRuntime::Variable rv;
-		rv.attributes = v.attributes;
-		rv.content    = v.content;
+		WorldRuntime::Variable rv(
+		    v.attributes, v.content,
+		    QMudVariableMapUtils::Name(v.attributes.value(QStringLiteral("name"))).key());
 		vars.push_back({rv, {}, false, false, false});
 	}
 	m_workingLists->variables       = std::move(vars);
@@ -10618,7 +10611,7 @@ void WorldPreferencesDialog::buildUi()
 				                     QStringLiteral("Variable name cannot be blank."));
 				continue;
 			}
-			if (currentDisallowedNames().contains(candidateName.toCaseFolded()))
+			if (currentDisallowedNames().contains(QMudVariableMapUtils::Name(candidateName).key()))
 			{
 				QMessageBox::warning(&dialog, QStringLiteral("Variables"),
 				                     QStringLiteral("That variable name is already in use."));
@@ -10631,37 +10624,37 @@ void WorldPreferencesDialog::buildUi()
 		}
 	};
 	if (m_addVariableButton)
-		connect(
-		    m_addVariableButton, &QPushButton::clicked, this,
-		    [this, editVariableDialogNow]
-		    {
-			    if (!m_runtime)
-				    return;
-			    QString name;
-			    QString value;
-			    auto    currentNamesInUse = [this]
-			    {
-				    QSet<QString> names;
-				    for (const WorldRuntime::Variable &var : m_runtime->variables())
-					    names.insert(var.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded());
-				    for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
-					    names.insert(
-					        working.value.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded());
-				    return names;
-			    };
-			    if (!editVariableDialogNow(name, value, true, currentNamesInUse))
-				    return;
-			    WorldRuntime::Variable newVar;
-			    newVar.attributes.insert(QStringLiteral("name"), name);
-			    newVar.content                        = value;
-			    QList<WorldRuntime::Variable> updated = m_runtime->variables();
-			    updated.push_back(newVar);
-			    m_runtime->setVariables(updated);
-			    m_workingLists->variables.push_back({newVar, name, true, false, false});
-			    populateVariables();
-			    selectRowByIndex(m_variablesTable, saturatingToInt(m_workingLists->variables.size()) - 1);
-			    updateVariableControls();
-		    });
+		connect(m_addVariableButton, &QPushButton::clicked, this,
+		        [this, editVariableDialogNow]
+		        {
+			        if (!m_runtime)
+				        return;
+			        QString name;
+			        QString value;
+			        auto    currentNamesInUse = [this]
+			        {
+				        QSet<QString> names;
+				        for (const WorldRuntime::Variable &var : m_runtime->variables())
+					        names.insert(var.key);
+				        for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+					        names.insert(working.value.key);
+				        return names;
+			        };
+			        if (!editVariableDialogNow(name, value, true, currentNamesInUse))
+				        return;
+			        WorldRuntime::Variable newVar(
+			            {
+			                {QStringLiteral("name"), name}
+                    },
+			            value, QMudVariableMapUtils::Name(name).key());
+			        QList<WorldRuntime::Variable> updated = m_runtime->variables().values();
+			        updated.push_back(newVar);
+			        m_runtime->setVariables(updated);
+			        m_workingLists->variables.push_back({newVar, newVar.key, true, false, false});
+			        populateVariables();
+			        selectRowByIndex(m_variablesTable, saturatingToInt(m_workingLists->variables.size()) - 1);
+			        updateVariableControls();
+		        });
 	if (m_editVariableButton)
 		connect(m_editVariableButton, &QPushButton::clicked, this,
 		        [this, editVariableDialogNow]
@@ -10674,10 +10667,10 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 			        if (index >= m_workingLists->variables.size())
 				        return;
-			        WorkingLists::Variable &working = m_workingLists->variables[index];
-			        const QString           oldName = working.value.attributes.value(QStringLiteral("name"));
-			        QString                 name    = oldName;
-			        QString                 value   = working.value.content;
+			        WorkingLists::Variable &working           = m_workingLists->variables[index];
+			        const QString           oldName           = working.value.label;
+			        QString                 name              = oldName;
+			        QString                 value             = working.value.content;
 			        auto                    currentNamesInUse = [this, index]
 			        {
 				        QSet<QString>                 names;
@@ -10686,19 +10679,14 @@ void WorldPreferencesDialog::buildUi()
 				        {
 					        if (i == index)
 						        continue;
-					        names.insert(m_workingLists->variables.at(i)
-					                         .value.attributes.value(QStringLiteral("name"))
-					                         .trimmed()
-					                         .toCaseFolded());
+					        names.insert(m_workingLists->variables.at(i).value.key);
 				        }
 				        for (const WorldRuntime::Variable &runtimeVariable : m_runtime->variables())
 				        {
-					        const QString runtimeName =
-					            runtimeVariable.attributes.value(QStringLiteral("name")).trimmed();
-					        if (selected.presentInRuntime &&
-					            runtimeName.compare(selected.runtimeName, Qt::CaseInsensitive) == 0)
+					        const QString &runtimeKey = runtimeVariable.key;
+					        if (selected.presentInRuntime && runtimeKey == selected.runtimeKey)
 						        continue;
-					        names.insert(runtimeName.toCaseFolded());
+					        names.insert(runtimeKey);
 				        }
 				        return names;
 			        };
@@ -10707,16 +10695,16 @@ void WorldPreferencesDialog::buildUi()
 
 			        WorldRuntime::Variable committed = working.value;
 			        committed.attributes.insert(QStringLiteral("name"), name);
+			        committed.label                                = name;
+			        committed.key                                  = QMudVariableMapUtils::Name(name).key();
 			        committed.content                              = value;
-			        QList<WorldRuntime::Variable> runtimeVariables = m_runtime->variables();
+			        QList<WorldRuntime::Variable> runtimeVariables = m_runtime->variables().values();
 			        int                           runtimeIndex     = -1;
 			        if (working.presentInRuntime)
 			        {
 				        for (int i = 0; i < runtimeVariables.size(); ++i)
 				        {
-					        if (runtimeVariables.at(i)
-					                .attributes.value(QStringLiteral("name"))
-					                .compare(working.runtimeName, Qt::CaseInsensitive) == 0)
+					        if (runtimeVariables.at(i).key == working.runtimeKey)
 					        {
 						        runtimeIndex = i;
 						        break;
@@ -10728,7 +10716,7 @@ void WorldPreferencesDialog::buildUi()
 			        else
 				        runtimeVariables.push_back(committed);
 			        m_runtime->setVariables(runtimeVariables);
-			        working = {committed, name, true, false, false};
+			        working = {committed, committed.key, true, false, false};
 			        populateVariables();
 			        selectRowByIndex(m_variablesTable, index);
 			        updateVariableControls();
@@ -10749,8 +10737,7 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 			        const WorkingLists::Variable &working = m_workingLists->variables.at(index);
 			        if (working.presentInRuntime)
-				        m_workingLists->deletedVariableNames.insert(
-				            working.runtimeName.trimmed().toCaseFolded());
+				        m_workingLists->deletedVariableNames.insert(working.runtimeKey);
 			        m_workingLists->variables.removeAt(index);
 			        m_workingLists->variablesStaged = true;
 			        populateVariables();
@@ -10770,7 +10757,9 @@ void WorldPreferencesDialog::buildUi()
 			        WorkingLists::Variable &working = m_workingLists->variables[index];
 			        if (item->column() == 0)
 			        {
-				        working.value.attributes.insert(QStringLiteral("name"), item->text().trimmed());
+				        working.value.label = item->text().trimmed();
+				        working.value.attributes.insert(QStringLiteral("name"), working.value.label);
+				        working.value.key  = QMudVariableMapUtils::Name(item->text()).key();
 				        working.nameEdited = true;
 			        }
 			        else if (item->column() == 1)
@@ -10911,9 +10900,9 @@ void WorldPreferencesDialog::buildUi()
 			        }
 			        for (const auto &v : doc.variables())
 			        {
-				        WorldRuntime::Variable rv;
-				        rv.attributes = v.attributes;
-				        rv.content    = v.content;
+				        WorldRuntime::Variable rv(
+				            v.attributes, v.content,
+				            QMudVariableMapUtils::Name(v.attributes.value(QStringLiteral("name"))).key());
 				        m_workingLists->variables.push_back({rv, {}, false, false, false});
 			        }
 			        if (!doc.variables().isEmpty())
@@ -12866,8 +12855,9 @@ void WorldPreferencesDialog::populateVariables()
 	QSet<QString> pluginOwnedVariables;
 	for (const auto &plugin : m_runtime->plugins())
 	{
-		for (auto it = plugin.variables.constBegin(); it != plugin.variables.constEnd(); ++it)
-			pluginOwnedVariables.insert(normalizeObjectName(it.key()) + QLatin1Char('\x1d') + it.value());
+		for (auto it = plugin.variables.values().constBegin(); it != plugin.variables.values().constEnd();
+		     ++it)
+			pluginOwnedVariables.insert(it.key() + QLatin1Char('\x1d') + it->content);
 	}
 	const QMap<QString, QString> &multi = m_runtime->worldMultilineAttributes();
 	if (!m_variableFilterLoaded)
@@ -12882,11 +12872,22 @@ void WorldPreferencesDialog::populateVariables()
 	const bool      useLuaFilter = filterEnabled && filter.isValid();
 #endif
 	const QSignalBlocker tableBlocker(m_variablesTable);
+	QVector<int>         visibleOrder;
+	visibleOrder.reserve(m_workingLists->variables.size());
 	for (int i = 0; i < m_workingLists->variables.size(); ++i)
+		visibleOrder.push_back(i);
+	std::ranges::sort(visibleOrder,
+	                  [this](int a, int b)
+	                  {
+		                  return QString::compare(m_workingLists->variables.at(a).value.label,
+		                                          m_workingLists->variables.at(b).value.label,
+		                                          Qt::CaseInsensitive) < 0;
+	                  });
+	for (const int i : visibleOrder)
 	{
-		const WorldRuntime::Variable &var     = m_workingLists->variables.at(i).value;
-		const QString                 varName = var.attributes.value(QStringLiteral("name"));
-		const QString variableKey = normalizeObjectName(varName) + QLatin1Char('\x1d') + var.content;
+		const WorldRuntime::Variable &var         = m_workingLists->variables.at(i).value;
+		const QString                 varName     = var.label;
+		const QString                 variableKey = var.key + QLatin1Char('\x1d') + var.content;
 		if (pluginOwnedVariables.contains(variableKey))
 			continue;
 		bool include = true;
@@ -12895,7 +12896,7 @@ void WorldPreferencesDialog::populateVariables()
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 			if (useLuaFilter)
 			{
-				const QString name     = var.attributes.value(QStringLiteral("name"));
+				const QString name     = var.label;
 				auto          pushInfo = [&var](lua_State *L)
 				{
 					lua_newtable(L);

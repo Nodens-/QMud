@@ -62,6 +62,16 @@ namespace
 		runtime.setSoundBackendForTest(std::move(backend));
 	}
 
+	/**
+	 * @brief Installs an accepting transport for MSP negotiation and playback integration input.
+	 * @param runtime Runtime representing the connected test session.
+	 */
+	void installMspTransport(WorldRuntime &runtime)
+	{
+		WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+		WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	}
+
 	/** @brief QTest fixture covering native MSP runtime behavior. */
 	class tst_WorldRuntime_Msp : public QObject
 	{
@@ -73,6 +83,7 @@ namespace
 			void nativeMspUsesProtocolAndDirectSoundBoundaries()
 			{
 				WorldRuntime runtime;
+				installMspTransport(runtime);
 				runtime.setSoundAvailable(true);
 				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
@@ -140,6 +151,7 @@ namespace
 				AppController controller;
 				AppControllerTestAccess::reportSoundInitialization(controller, false);
 				WorldRuntime unavailableRuntime;
+				installMspTransport(unavailableRuntime);
 				AppControllerTestAccess::initializeRuntime(controller, &unavailableRuntime);
 				WorldRuntimeTestAccess::processRawDataPayload(unavailableRuntime,
 				                                              QByteArray::fromHex("fffb5a"));
@@ -147,6 +159,7 @@ namespace
 
 				AppControllerTestAccess::reportSoundInitialization(controller, true);
 				WorldRuntime availableRuntime;
+				installMspTransport(availableRuntime);
 				AppControllerTestAccess::initializeRuntime(controller, &availableRuntime);
 				WorldRuntimeTestAccess::processRawDataPayload(availableRuntime,
 				                                              QByteArray::fromHex("fffb5a"));
@@ -175,6 +188,7 @@ namespace
 			void nativeMspConsumesEmbeddedAndMultipleCommands()
 			{
 				WorldRuntime runtime;
+				installMspTransport(runtime);
 				runtime.setSoundAvailable(true);
 				runtime.setWorldAttribute(QStringLiteral("enable_embedded_msp"), QStringLiteral("y"));
 				SoundBackendState soundState;
@@ -219,6 +233,7 @@ namespace
 			void disabledMspPlaybackConsumesCommandsWithoutStartingSounds()
 			{
 				WorldRuntime runtime;
+				installMspTransport(runtime);
 				runtime.setSoundAvailable(true);
 				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
@@ -256,6 +271,7 @@ namespace
 			void unknownMspParametersAreIgnoredForPlayback()
 			{
 				WorldRuntime runtime;
+				installMspTransport(runtime);
 				runtime.setSoundAvailable(true);
 				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
@@ -272,6 +288,7 @@ namespace
 			void nativeMspNegotiationAppliesInStreamOrder()
 			{
 				WorldRuntime runtime;
+				installMspTransport(runtime);
 				runtime.setSoundAvailable(true);
 				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);
@@ -306,6 +323,7 @@ namespace
 			void musicContinuationParametersReachSoundWorker()
 			{
 				WorldRuntime runtime;
+				installMspTransport(runtime);
 				runtime.setSoundAvailable(true);
 				SoundBackendState soundState;
 				installSoundBackend(runtime, soundState);

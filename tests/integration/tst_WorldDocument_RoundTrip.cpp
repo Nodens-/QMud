@@ -111,8 +111,9 @@ namespace
 				QMudTest::applyDeterministicTestEnvironment();
 			}
 
+			/** @brief Verifies representative world sections survive serialization and reload. */
 			// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-			void representativeSectionsCanRoundTrip()
+			void representativeSectionsCanRoundTrip() const
 			{
 				const QString sourcePath =
 				    fixturePath(QStringLiteral("tests/data/worlds/world_sections.xml"));
@@ -259,7 +260,15 @@ namespace
 				compareNamedEntries(stabilized.aliases(), loaded.aliases());
 				compareNamedEntries(stabilized.timers(), loaded.timers());
 				compareNamedEntries(stabilized.macros(), loaded.macros());
-				compareContentEntries(stabilized.variables(), loaded.variables());
+				auto variablesByName = [](const auto &variables)
+				{
+					QHash<QString, QPair<QMap<QString, QString>, QString>> result;
+					for (const auto &variable : variables)
+						result.insert(variable.attributes.value(QStringLiteral("name")),
+						              {variable.attributes, variable.content});
+					return result;
+				};
+				QCOMPARE(variablesByName(stabilized.variables()), variablesByName(loaded.variables()));
 				compareGroupedEntries(stabilized.colours(), loaded.colours());
 				compareContentEntries(stabilized.keypadEntries(), loaded.keypadEntries());
 				compareGroupedEntries(stabilized.printingStyles(), loaded.printingStyles());

@@ -1028,6 +1028,44 @@ bool QMudLuaSupport::decodePpiArguments(const QString &serializedArguments, cons
 	return decodePpiArguments(parserState.get(), serializedArguments, argumentCount, arguments, errorText);
 }
 
+void QMudLuaSupport::pushCallPluginValue(lua_State *L, const QVariant &value)
+{
+	if (!value.isValid() || value.isNull())
+	{
+		lua_pushnil(L);
+		return;
+	}
+	switch (value.typeId())
+	{
+	case QMetaType::Bool:
+		lua_pushboolean(L, value.toBool());
+		break;
+	case QMetaType::Char:
+	case QMetaType::SChar:
+	case QMetaType::Short:
+	case QMetaType::Int:
+	case QMetaType::Long:
+	case QMetaType::LongLong:
+	case QMetaType::UChar:
+	case QMetaType::UShort:
+	case QMetaType::UInt:
+	case QMetaType::ULong:
+	case QMetaType::ULongLong:
+		lua_pushinteger(L, static_cast<lua_Integer>(value.toLongLong()));
+		break;
+	case QMetaType::Float:
+	case QMetaType::Double:
+		lua_pushnumber(L, value.toDouble());
+		break;
+	default:
+	{
+		const QByteArray bytes = value.toString().toUtf8();
+		lua_pushlstring(L, bytes.constData(), static_cast<size_t>(bytes.size()));
+		break;
+	}
+	}
+}
+
 QString QMudLuaSupport::serializePpiReturnValues(const QVector<QVariant> &values)
 {
 	auto stringLiteral = [](const QString &value)

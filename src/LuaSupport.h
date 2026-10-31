@@ -176,6 +176,12 @@ namespace QMudLuaSupport
 	bool       decodePpiArguments(const QString &serializedArguments, qsizetype argumentCount,
 	                              QVector<QVariant> &arguments, QString &errorText);
 	/**
+	 * @brief Pushes a primitive CallPlugin value, preserving nil, numeric types, and UTF-8 string bytes.
+	 * @param L Destination Lua state with space for one value.
+	 * @param value Primitive value to push; invalid or null variants represent nil.
+	 */
+	void       pushCallPluginValue(lua_State *L, const QVariant &value);
+	/**
 	 * @brief Serializes primitive native return values for `ppi.lua`.
 	 * @param values Ordered native return values.
 	 * @return Lua table constructor accepted by `serialize.save_simple` consumers.

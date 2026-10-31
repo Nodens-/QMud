@@ -1906,6 +1906,75 @@ namespace
 				QCOMPARE(lua_gettop(state.get()), 0);
 			}
 
+			/** @brief Supplies positional and named SQLite binding entry points for string preservation. */
+			void sqliteBindingsPreserveNumericStrings_data()
+			{
+				QTest::addColumn<QString>("bindingScript");
+				QTest::newRow("bind-index") << QStringLiteral("assert(stmt:bind(1, value) == sqlite3.OK)\n"
+				                                              "assert(stmt:bind(2, value) == sqlite3.OK)");
+				QTest::newRow("bind-name")
+				    << QStringLiteral("assert(stmt:bind(':text_value', value) == sqlite3.OK)\n"
+				                      "assert(stmt:bind(':raw_value', value) == sqlite3.OK)");
+				QTest::newRow("bind-values")
+				    << QStringLiteral("assert(stmt:bind_values(value, value) == sqlite3.OK)");
+				QTest::newRow("bind-names")
+				    << QStringLiteral("assert(stmt:bind_names({text_value = value, raw_value = value}) == "
+				                      "sqlite3.OK)");
+			}
+
+			/** @brief Verifies bound numeric strings retain their exact text and actual numbers remain numeric. */
+			void sqliteBindingsPreserveNumericStrings()
+			{
+				QFETCH(QString, bindingScript);
+				LuaStateOwner state = makeCompatLuaState();
+				QVERIFY(state);
+
+				QString sqliteError;
+				QVERIFY2(openSqliteModule(state.get(), sqliteError), qPrintable(sqliteError));
+
+				const QByteArray script = QStringLiteral(R"lua(
+local db = assert(sqlite3.open_memory())
+assert(db:exec('CREATE TABLE bound_values(text_value TEXT, raw_value)') == sqlite3.OK)
+local values = {'0', '1', '1.0', '001', '1e3', '-02.50', ' 1 ',
+                '9007199254740993', 'plain text', 0, 1, -2, 1.25}
+for _, value in ipairs(values) do
+  local stmt = assert(db:prepare(
+    'INSERT INTO bound_values VALUES (:text_value, :raw_value)'))
+  %1
+  assert(stmt:step() == sqlite3.DONE)
+  assert(stmt:finalize() == sqlite3.OK)
+
+  local stored
+  for row in db:nrows([[
+    SELECT text_value, raw_value, typeof(raw_value) AS raw_type
+    FROM bound_values WHERE rowid = last_insert_rowid()
+  ]]) do
+    stored = row
+  end
+  assert(stored, 'Bound row was not stored')
+  if type(value) == 'string' then
+    assert(stored.text_value == value, 'TEXT column changed string: ' .. value)
+    assert(stored.raw_type == 'text', 'Binding converted string to number: ' .. value)
+    assert(type(stored.raw_value) == 'string' and stored.raw_value == value,
+           'String did not round-trip unchanged: ' .. value)
+  else
+    assert(stored.raw_type == 'real' or stored.raw_type == 'integer',
+           'Binding converted an actual number to text')
+    assert(type(stored.raw_value) == 'number' and stored.raw_value == value,
+           'Actual number did not round-trip unchanged')
+    assert(tonumber(stored.text_value) == value, 'TEXT column changed numeric value')
+  end
+end
+assert(db:close() == sqlite3.OK)
+return 'ok'
+)lua")
+				                              .arg(bindingScript)
+				                              .toUtf8();
+				const auto       result = evaluateLuaToString(state.get(), script);
+				QVERIFY2(result.ok, qPrintable(result.error));
+				QCOMPARE(result.value, QStringLiteral("ok"));
+			}
+
 			/**
 			 * @brief Verifies SQLite-compatible trigger boundaries for completeness and both execute overloads.
 			 */

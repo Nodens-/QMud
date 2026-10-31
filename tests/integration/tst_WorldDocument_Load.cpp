@@ -180,11 +180,27 @@ namespace
 				QCOMPARE(preservedDoc.triggers().size(), 4);
 				QCOMPARE(preservedDoc.aliases().size(), 2);
 				QCOMPARE(preservedDoc.timers().size(), 2);
-				QCOMPARE(preservedDoc.variables().size(), 2);
+				QCOMPARE(preservedDoc.variables().size(), 1);
+				QCOMPARE(preservedDoc.variables().front().content, QStringLiteral("new value"));
 				QCOMPARE(preservedDoc.triggers().at(0).attributes.value(QStringLiteral("match")),
 				         QStringLiteral("old"));
 				QCOMPARE(preservedDoc.triggers().at(2).attributes.value(QStringLiteral("match")),
 				         QStringLiteral("new"));
+			}
+
+			/** @brief XML corruption collapses to one final named variable even when rule duplicates are preserved. */
+			void variableInputIsCanonicalAndUnique()
+			{
+				WorldDocument document;
+				QVERIFY(document.loadFromXml(QStringLiteral(R"xml(<qmud><variables>
+<variable name=" MiXeD ">old</variable><variable>unnamed</variable>
+<variable name="   ">blank</variable><variable name="mixed">last</variable>
+</variables></qmud>)xml"),
+				                             WorldDocument::NamedDuplicatePolicy::Preserve));
+				QCOMPARE(document.variables().size(), 1);
+				QCOMPARE(document.variables().front().content, QStringLiteral("last"));
+				QCOMPARE(document.variables().front().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("mixed"));
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};

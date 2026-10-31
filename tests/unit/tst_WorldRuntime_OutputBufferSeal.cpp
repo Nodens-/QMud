@@ -221,10 +221,14 @@ namespace
 				runtime.endIncomingLineLuaContext();
 				QCOMPARE(runtime.incomingLineLuaContextAbsoluteNumber(), qint64{0});
 				QCOMPARE(runtime.lines().size(), 3);
-				QCOMPARE(runtime.luaContextLinesInBufferCount(), 2);
+				QCOMPARE(runtime.luaContextLinesInBufferCount(), 3);
 				WorldRuntime::LineEntry logicalSecondLine;
 				QVERIFY(runtime.luaContextLineEntry(2, logicalSecondLine));
 				QCOMPARE(logicalSecondLine.text, QStringLiteral("following"));
+				WorldRuntime::LineEntry currentLine;
+				QVERIFY(runtime.luaContextLineEntry(3, currentLine));
+				QVERIFY(currentLine.text.isEmpty());
+				QVERIFY(!currentLine.hardReturn);
 				QVERIFY(!runtime.luaContextLineEntryByAbsoluteNumber(hiddenLineNumber, logicalSecondLine));
 				runtime.beginIncomingLineLuaContext(QStringLiteral("next pending"), WorldRuntime::LineOutput,
 				                                    {});

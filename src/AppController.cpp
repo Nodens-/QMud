@@ -26,6 +26,7 @@
 #include "MainWindowHostResolver.h"
 #include "MushclientImportUtils.h"
 #include "NameGeneration.h"
+#include "PluginStatePersistence.h"
 #include "ReloadUtils.h"
 #include "SoundEngine.h"
 #include "SqliteCompat.h"
@@ -2412,6 +2413,7 @@ AppController::AppController(const bool disableAutoConnectForExecution, QObject 
 
 AppController::~AppController()
 {
+	PluginStatePersistence::instance().flush();
 	if (QCoreApplication *application = QCoreApplication::instance())
 		application->removeEventFilter(this);
 #ifdef QMUD_ENABLE_LUA_I18N
@@ -2893,6 +2895,7 @@ bool AppController::saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage
 		}
 	}
 
+	PluginStatePersistence::instance().flush();
 	return true;
 }
 
@@ -2995,7 +2998,7 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 		        qApp,
 		        [completionFn, runtimeGuard, persistOutputBuffer, ok, error]
 		        {
-			        if (persistOutputBuffer && runtimeGuard)
+			        if (persistOutputBuffer && runtimeGuard && !runtimeGuard->runtimeDestructionStarted())
 				        runtimeGuard->setSessionStateOutputBufferSealed(false);
 			        if (completionFn && *completionFn)
 				        (*completionFn)(ok, error);
@@ -6470,6 +6473,13 @@ void AppController::handleUpdateQmudNow()
 					            .arg(restartLogCloseError));
 					    return false;
 				    }
+				    QString pluginStateError;
+				    if (!saveOpenWorldPluginStatesBeforeRestart(&pluginStateError))
+				    {
+					    QMessageBox::warning(resolveUiOwner(), QStringLiteral("QMud Update"),
+					                         pluginStateError);
+					    return false;
+				    }
 				    QString restartSessionStateError;
 				    if (!saveOpenWorldSessionStatesBeforeRestart(&restartSessionStateError))
 				    {
@@ -6481,6 +6491,7 @@ void AppController::handleUpdateQmudNow()
 					            .arg(restartSessionStateError));
 					    return false;
 				    }
+				    PluginStatePersistence::instance().flush();
 				    return true;
 			    };
 
@@ -12333,14 +12344,15 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		{
 			if (state.selectedVariables.isEmpty())
 				return;
-			QList<WorldRuntime::Variable>        vars;
-			const QList<WorldRuntime::Variable> &all = runtime->variables();
-			for (int i = 0; i < all.size(); ++i)
+			QList<WorldRuntime::Variable> vars;
+			const auto                   &all = runtime->variables();
+			for (const QString &key : state.selectedVariables)
 			{
-				if (!state.selectedVariables.contains(i))
-					continue;
-				vars.push_back(all.at(i));
+				const auto it = all.constFind(key);
+				if (it != all.cend())
+					vars.push_back(*it);
 			}
+
 			if (vars.isEmpty())
 				return;
 			out << nl << "<!--  Variables  -->" << nl << nl;
@@ -12348,17 +12360,11 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
-			std::ranges::stable_sort(vars,
-			                         [](const WorldRuntime::Variable &a, const WorldRuntime::Variable &b)
-			                         {
-				                         return a.attributes.value(QStringLiteral("name")) <
-				                                b.attributes.value(QStringLiteral("name"));
-			                         });
-			for (const auto &[attributes, content] : vars)
+			for (const auto &variable : vars)
 			{
-				const QString name = attributes.value(QStringLiteral("name"));
+				const QString name = variable.attributes.value(QStringLiteral("name"));
 				out << "  <variable name=\"" << fixHtmlString(name) << "\">"
-				    << fixHtmlMultilineString(content) << "</variable>" << nl;
+				    << fixHtmlMultilineString(variable.content) << "</variable>" << nl;
 			}
 			out << "</variables>" << nl;
 		};
@@ -12452,14 +12458,9 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			}
 			if (!state.selectedVariables.isEmpty())
 			{
-				QList<WorldRuntime::Variable> filtered;
-				const auto                   &all = runtime->variables();
-				for (auto i = 0; i < all.size(); ++i)
-				{
-					if (state.selectedVariables.contains(i))
-						continue;
-					filtered.push_back(all.at(i));
-				}
+				auto filtered = runtime->variables();
+				for (const QString &key : state.selectedVariables)
+					filtered.remove(key);
 				runtime->setVariables(filtered);
 			}
 		}
@@ -14715,6 +14716,7 @@ bool AppController::prepareForApplicationRestart(const QString &title, const boo
 		    QStringLiteral("Failed to persist world session state before restart.\n%1").arg(error));
 		return false;
 	}
+	PluginStatePersistence::instance().flush();
 	return true;
 }
 
@@ -15253,6 +15255,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 		argv.push_back(arg.data());
 	argv.push_back(nullptr);
 
+	PluginStatePersistence::instance().flush();
 	execv(executablePathBytes.constData(), argv.data());
 
 	const int savedErrno = errno;
@@ -15325,7 +15328,7 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 	QList<WorldRuntime::Alias>         mergedAliases;
 	QList<WorldRuntime::Timer>         mergedTimers;
 	QList<WorldRuntime::Macro>         mergedMacros;
-	QList<WorldRuntime::Variable>      mergedVariables;
+	QMudVariableMapUtils::VariableMap  mergedVariables;
 	QList<WorldRuntime::Colour>        mergedColours;
 	QList<WorldRuntime::Keypad>        mergedKeypad;
 	QList<WorldRuntime::PrintingStyle> mergedPrinting;

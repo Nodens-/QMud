@@ -10,6 +10,9 @@
 
 #include <QtTest/QTest>
 
+#include <utility>
+
+using QMudAccessibleTextUtils::LineOffsetIndex;
 using QMudAccessibleTextUtils::LineOffsetMap;
 using QMudAccessibleTextUtils::TextBoundaryKind;
 using QMudAccessibleTextUtils::TextBoundaryQuery;
@@ -27,6 +30,112 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			void incrementalIndexTracksHeadTrimTailAppendAndMutation()
+			{
+				LineOffsetIndex index;
+				index.reset({5, 4, 5});
+				QCOMPARE(index.lineCount(), 3);
+				QCOMPARE(index.characterCount(), 16);
+				QCOMPARE(index.offsetForPosition({2, 2}), 13);
+
+				QVERIFY(index.replace(0, 1, {}));
+				QVERIFY(index.replace(0, 1, {7}));
+				QVERIFY(index.replace(2, 0, {4}));
+				QCOMPARE(index.lineCount(), 3);
+				QCOMPARE(index.characterCount(), 18);
+				QCOMPARE(index.offsetForPosition({1, 0}), 8);
+				QCOMPARE(index.offsetForPosition({2, 0}), 14);
+
+				const TextPosition position = index.positionForOffset(16);
+				QCOMPARE(position.line, 2);
+				QCOMPARE(position.column, 2);
+
+				QVERIFY(index.replace(1, 1, {2, 3, 4}));
+				QCOMPARE(index.lineCount(), 5);
+				QCOMPARE(index.characterCount(), 24);
+				QCOMPARE(index.offsetForPosition({4, 0}), 20);
+			}
+
+			void incrementalIndexHandlesMultiBlockHeadRemoval()
+			{
+				LineOffsetIndex index;
+				QVector<int>    lengths(1100, 3);
+				index.reset(lengths);
+				QCOMPARE(index.lineCount(), 1100);
+				QCOMPARE(index.characterCount(), 4399);
+				QCOMPARE(index.offsetForPosition({512, 0}), 2048);
+				const TextPosition blockBoundary = index.positionForOffset(2048);
+				QCOMPARE(blockBoundary.line, 512);
+				QCOMPARE(blockBoundary.column, 0);
+
+				QVERIFY(index.replace(0, 700, {}));
+				QCOMPARE(index.lineCount(), 400);
+				QCOMPARE(index.characterCount(), 1599);
+				QCOMPARE(index.offsetForPosition({399, 3}), 1599);
+			}
+
+			void incrementalIndexExtractsTextAcrossMultipleBlocks()
+			{
+				QVector<QString> lines;
+				QVector<int>     lengths;
+				QString          expected;
+				constexpr int    lineCount = 1537;
+				lines.reserve(lineCount);
+				lengths.reserve(lineCount);
+				for (int line = 0; line < lineCount; ++line)
+				{
+					QString text = QStringLiteral("line-%1").arg(line);
+					if (!expected.isEmpty())
+						expected += QLatin1Char('\n');
+					expected += text;
+					lengths.push_back(static_cast<int>(text.size()));
+					lines.push_back(std::move(text));
+				}
+
+				LineOffsetIndex index;
+				index.reset(lengths);
+				auto lineText = [&lines](const int line) -> const QString & { return lines.at(line); };
+				QCOMPARE(index.text(0, index.characterCount(), lineText), expected);
+
+				const int start = index.offsetForPosition({511, 2});
+				const int end   = index.offsetForPosition({513, 3});
+				QCOMPARE(index.text(start, end, lineText), lines.at(511).mid(2) + QLatin1Char('\n') +
+				                                               lines.at(512) + QLatin1Char('\n') +
+				                                               lines.at(513).left(3));
+			}
+
+			void wordBoundariesTraverseMultipleBlocksOfBlankLines()
+			{
+				QVector<QString> lines(1026);
+				lines[0]    = QStringLiteral("alpha");
+				lines[1025] = QStringLiteral("omega");
+				const LineOffsetMap                               map(std::move(lines));
+
+				const QMudAccessibleTextUtils::TextBoundaryResult after =
+				    map.boundaryText(0, TextBoundaryKind::Word, TextBoundaryQuery::After);
+				QCOMPARE(after.text, QStringLiteral("omega"));
+				QCOMPARE(after.startOffset, map.offsetForPosition({1025, 0}));
+				QCOMPARE(after.endOffset, map.characterCount());
+
+				const QMudAccessibleTextUtils::TextBoundaryResult before = map.boundaryText(
+				    map.offsetForPosition({1025, 0}), TextBoundaryKind::Word, TextBoundaryQuery::Before);
+				QCOMPARE(before.text, QStringLiteral("alpha"));
+				QCOMPARE(before.startOffset, 0);
+				QCOMPARE(before.endOffset, 5);
+
+				const QMudAccessibleTextUtils::TextBoundaryResult afterSentence =
+				    map.boundaryText(0, TextBoundaryKind::Sentence, TextBoundaryQuery::After);
+				QCOMPARE(afterSentence.text, QStringLiteral("omega"));
+				QCOMPARE(afterSentence.startOffset, map.offsetForPosition({1025, 0}));
+				QCOMPARE(afterSentence.endOffset, map.characterCount());
+
+				const QMudAccessibleTextUtils::TextBoundaryResult beforeSentence = map.boundaryText(
+				    map.offsetForPosition({1025, 0}), TextBoundaryKind::Sentence, TextBoundaryQuery::Before);
+				QCOMPARE(beforeSentence.text, QStringLiteral("alpha"));
+				QCOMPARE(beforeSentence.startOffset, 0);
+				QCOMPARE(beforeSentence.endOffset, 5);
+			}
+
 			void emptyOutputHasNoAccessibleText()
 			{
 				const LineOffsetMap map;

@@ -890,8 +890,8 @@ class AppController : public QObject
 		[[nodiscard]] bool saveOpenWorldSessionStatesBeforeRestart(QString *errorMessage = nullptr) const;
 		/**
 		 * @brief Saves plugin state snapshots for open worlds before reload/restart.
-		 * @param errorMessage Optional output error text when a plugin-state save fails.
-		 * @return `true` when all plugin-state saves completed successfully.
+		 * @param errorMessage Optional output error text when plugin-state capture fails.
+		 * @return `true` when captures were accepted and published writes have drained.
 		 */
 		[[nodiscard]] bool saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage = nullptr) const;
 		/**

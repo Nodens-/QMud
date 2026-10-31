@@ -25,31 +25,31 @@ class WorldRuntime;
  */
 struct PluginWizardState
 {
-		QString   name;
-		QString   author;
-		QString   purpose;
-		QString   version;
-		QString   id;
-		QString   dateWritten;
-		double    requiresVersion{0.0};
-		bool      removeItems{true};
+		QString       name;
+		QString       author;
+		QString       purpose;
+		QString       version;
+		QString       id;
+		QString       dateWritten;
+		double        requiresVersion{0.0};
+		bool          removeItems{true};
 
-		QString   description;
-		bool      generateHelp{true};
-		QString   helpAlias;
+		QString       description;
+		bool          generateHelp{true};
+		QString       helpAlias;
 
-		QSet<int> selectedTriggers;
-		QSet<int> selectedAliases;
-		QSet<int> selectedTimers;
-		QSet<int> selectedVariables;
+		QSet<int>     selectedTriggers;
+		QSet<int>     selectedAliases;
+		QSet<int>     selectedTimers;
+		QSet<QString> selectedVariables;
 
-		bool      saveState{false};
+		bool          saveState{false};
 
-		QString   language;
-		bool      standardConstants{false};
-		QString   script;
+		QString       language;
+		bool          standardConstants{false};
+		QString       script;
 
-		QString   comments;
+		QString       comments;
 };
 
 /**
@@ -71,7 +71,7 @@ class PluginWizardDialog : public QWizard
 		 */
 		[[nodiscard]] const PluginWizardState &state() const;
 
-	protected:
+	public slots:
 		/**
 		 * @brief Validates current page values and commits final state.
 		 */
@@ -178,9 +178,9 @@ class PluginWizardDialog : public QWizard
 		/**
 		 * @brief Fills variable table from ordered indices and selection set.
 		 * @param order Row order by source index.
-		 * @param selected Selected row index set.
+		 * @param selected Selected canonical variable names.
 		 */
-		void              fillVariableTable(const QVector<int> &order, const QSet<int> &selected) const;
+		void              fillVariableTable(const QVector<int> &order, const QSet<QString> &selected) const;
 
 		WorldRuntime     *m_runtime{nullptr};
 		PluginWizardState m_state;

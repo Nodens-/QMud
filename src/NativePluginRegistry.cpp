@@ -12,6 +12,7 @@
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 #include "LuaSupport.h"
 #endif
+#include "SoundEngine.h"
 #include "TtsEngine.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
@@ -31,7 +32,10 @@
 #include <QTextStream>
 #include <QTimer>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -168,6 +172,8 @@ namespace
 	const QList<LuaAudioPpiEndpoint> &luaAudioPpiEndpoints()
 	{
 		static const QList<LuaAudioPpiEndpoint> endpoints{
+		    {QStringLiteral("PPI_init_PPI_"),            QStringLiteral("init"),            0},
+		    {QStringLiteral("PPI_unload_PPI_"),          QStringLiteral("unload"),          0},
 		    {QStringLiteral("PPI_setPitch_PPI_"),        QStringLiteral("setPitch"),        2},
 		    {QStringLiteral("PPI_slidePitch_PPI_"),      QStringLiteral("slidePitch"),      3},
 		    {QStringLiteral("PPI_isPlaying_PPI_"),       QStringLiteral("isPlaying"),       1},
@@ -813,35 +819,6 @@ namespace
 		return arguments.isEmpty() ? QString() : arguments.constFirst().toString();
 	}
 
-	double argumentNumber(const QVector<QVariant> &arguments, const qsizetype index, const double fallback)
-	{
-		if (index >= arguments.size() || !arguments.at(index).isValid())
-			return fallback;
-		bool         ok    = false;
-		const double value = arguments.at(index).toDouble(&ok);
-		return ok ? value : fallback;
-	}
-
-	bool secondArgumentBoolOrFalse(const QVector<QVariant> &arguments)
-	{
-		constexpr qsizetype kIndex = 1;
-		if (kIndex >= arguments.size() || !arguments.at(kIndex).isValid())
-			return false;
-		const QVariant &value = arguments.at(kIndex);
-		if (value.typeId() == QMetaType::Bool)
-			return value.toBool();
-		bool         ok     = false;
-		const double number = value.toDouble(&ok);
-		if (ok)
-			return number != 0.0;
-		const QString text = value.toString().trimmed().toLower();
-		if (text == QStringLiteral("true") || text == QStringLiteral("yes") || text == QStringLiteral("y"))
-			return true;
-		if (text == QStringLiteral("false") || text == QStringLiteral("no") || text == QStringLiteral("n"))
-			return false;
-		return false;
-	}
-
 	double luaAudioVolumeToQmudVolume(const double volume)
 	{
 		return qBound(0.0, volume, 100.0) - 100.0;
@@ -898,9 +875,11 @@ namespace
 	void ensureLuaAudioOperationGeneration(LuaAudioNativeState &state, const int buffer,
 	                                       const quint64 generation)
 	{
-		auto guardIt = state.operationGuards.find(buffer);
+		const auto pending = state.buffers.value(buffer).pendingCancel;
+		auto       guardIt = state.operationGuards.find(buffer);
 		if (guardIt != state.operationGuards.end() && guardIt->generation == generation &&
-		    guardIt->cancelled && !guardIt->cancelled->load(std::memory_order_acquire))
+		    guardIt->cancelled && (!pending || guardIt->cancelled == pending) &&
+		    !guardIt->cancelled->load(std::memory_order_acquire))
 		{
 			return;
 		}
@@ -908,7 +887,9 @@ namespace
 			guardIt->cancelled->store(true, std::memory_order_release);
 		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard guard;
 		guard.generation = generation;
-		guard.cancelled  = std::make_shared<std::atomic_bool>(false);
+		guard.cancelled  = pending;
+		if (!guard.cancelled)
+			guard.cancelled = std::make_shared<std::atomic_bool>(false);
 		state.operationGuards.insert(buffer, std::move(guard));
 	}
 
@@ -933,8 +914,6 @@ namespace
 	 */
 	void eraseLuaAudioBufferState(LuaAudioNativeState &state, const int buffer)
 	{
-		if (const auto bufferIt = state.buffers.constFind(buffer); bufferIt != state.buffers.constEnd())
-			cancelLuaAudioPendingWork(bufferIt.value());
 		cancelLuaAudioOperationGeneration(state, buffer);
 		state.ownedBuffers.remove(buffer);
 		state.buffers.remove(buffer);
@@ -947,21 +926,37 @@ namespace
 		}
 	}
 
+	/**
+	 * @brief Captures initial arguments and ownership metadata independently of live worker controls.
+	 * @param loop Whether playback loops.
+	 * @param volume Captured initial volume.
+	 * @param pan Captured initial balance.
+	 * @param pitch Captured initial frequency offset.
+	 * @param pendingCancel Optional delayed-play cancellation identity.
+	 * @return Initial LuaAudio ownership record.
+	 */
 	QMudNativePluginRegistry::LuaAudioRuntimeBufferState
-	luaAudioBufferStateFromMaster(const WorldRuntime *runtime, const bool loop, const double volume,
-	                              const double pan, std::shared_ptr<std::atomic_bool> pendingCancel = {})
+	luaAudioInitialBufferState(const bool loop, const double volume, const double pan, const double pitch,
+	                           std::shared_ptr<std::atomic_bool> pendingCancel = {})
 	{
 		QMudNativePluginRegistry::LuaAudioRuntimeBufferState state;
 		state.loop              = loop;
 		state.volume            = qBound(0.0, volume, 100.0);
 		state.pan               = pan;
-		state.pitch             = QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime).pitch;
+		state.pitch             = pitch;
 		state.pendingCancel     = std::move(pendingCancel);
 		state.playbackSubmitted = !state.pendingCancel;
 		return state;
 	}
 
-	void stopLuaAudioNativeBuffer(const WorldRuntime *runtime, const int buffer)
+	/**
+	 * @brief Stops the currently owned generation and optionally captures its exact worker result.
+	 * @param runtime Owning runtime.
+	 * @param buffer One-based channel.
+	 * @param postState Optional immutable post-command state destination.
+	 */
+	void stopLuaAudioNativeBuffer(const WorldRuntime *runtime, const int buffer,
+	                              std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr)
 	{
 		QMudNativePluginRegistry::LuaAudioRuntimeBufferState state;
 		if (!runtime || buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers ||
@@ -970,7 +965,7 @@ namespace
 			return;
 		}
 		auto *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-		static_cast<void>(mutableRuntime->stopSoundForNativeAudio(buffer, state.generation));
+		static_cast<void>(mutableRuntime->stopSoundForNativeAudio(buffer, state.generation, postState));
 		static_cast<void>(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
 		    runtime, buffer, state.generation));
 	}
@@ -1022,118 +1017,25 @@ namespace
 			it->second.loopBuffersByName.clear();
 	}
 
-	void scheduleLuaAudioNativeStop(const WorldRuntime *runtime, const int buffer, const int delayMs)
-	{
-		if (!runtime)
-			return;
-		if (buffer == 0)
-		{
-			for (const int ownedBuffer : QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(runtime))
-				scheduleLuaAudioNativeStop(runtime, ownedBuffer, delayMs);
-			return;
-		}
-		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
-		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
-		                                                                          operationGuard))
-			return;
-		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
-		QTimer::singleShot(
-		    delayMs, const_cast<WorldRuntime *>(runtime),
-		    [runtimeGuard, operationGuard, buffer]
-		    {
-			    if (!runtimeGuard)
-				    return;
-			    QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			    if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
-			            runtimeGuard, buffer, operationGuard, bufferState))
-				    return;
-			    static_cast<void>(runtimeGuard->stopSoundForNativeAudio(buffer, bufferState.generation));
-			    static_cast<void>(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
-			        runtimeGuard, buffer, bufferState.generation));
-		    });
-	}
-
-	void scheduleLuaAudioNativeSetVolume(const WorldRuntime *runtime, const int buffer, const double volume,
-	                                     const int delayMs)
-	{
-		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
-		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
-		                                                                          operationGuard))
-			return;
-		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
-		QTimer::singleShot(
-		    delayMs, const_cast<WorldRuntime *>(runtime),
-		    [runtimeGuard, operationGuard, buffer, volume]
-		    {
-			    if (!runtimeGuard)
-				    return;
-			    QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			    if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
-			            runtimeGuard, buffer, operationGuard, bufferState))
-				    return;
-			    bufferState.volume = qBound(0.0, volume, 100.0);
-			    if (QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(runtimeGuard, buffer,
-			                                                                          bufferState))
-			    {
-				    static_cast<void>(runtimeGuard->updateSoundForNativeAudio(
-				        buffer, bufferState.loop, luaAudioVolumeToQmudVolume(bufferState.volume),
-				        bufferState.pan, bufferState.generation));
-			    }
-		    });
-	}
-
-	void scheduleLuaAudioNativeSetPan(const WorldRuntime *runtime, const int buffer, const double pan,
-	                                  const int delayMs)
-	{
-		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
-		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
-		                                                                          operationGuard))
-			return;
-		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
-		QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
-		                   [runtimeGuard, operationGuard, buffer, pan]
-		                   {
-			                   if (!runtimeGuard)
-				                   return;
-			                   QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			                   if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
-			                           runtimeGuard, buffer, operationGuard, bufferState))
-				                   return;
-			                   bufferState.pan = pan;
-			                   static_cast<void>(
-			                       QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
-			                           runtimeGuard, buffer, bufferState));
-		                   });
-	}
-
-	void scheduleLuaAudioNativeSetPitch(const WorldRuntime *runtime, const int buffer, const double pitch,
-	                                    const int delayMs)
-	{
-		QMudNativePluginRegistry::LuaAudioRuntimeOperationGuard operationGuard;
-		if (!QMudNativePluginRegistry::luaAudioCaptureRuntimeBufferOperationGuard(runtime, buffer,
-		                                                                          operationGuard))
-			return;
-		QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
-		QTimer::singleShot(delayMs, const_cast<WorldRuntime *>(runtime),
-		                   [runtimeGuard, operationGuard, buffer, pitch]
-		                   {
-			                   if (!runtimeGuard)
-				                   return;
-			                   QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			                   if (!QMudNativePluginRegistry::luaAudioResolveRuntimeBufferOperation(
-			                           runtimeGuard, buffer, operationGuard, bufferState))
-				                   return;
-			                   bufferState.pitch = pitch;
-			                   static_cast<void>(
-			                       QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
-			                           runtimeGuard, buffer, bufferState));
-		                   });
-	}
-
+	/**
+	 * @brief Starts or reserves a generation-scoped LuaAudio playback with captured defaults.
+	 * @param runtime Owning sound runtime.
+	 * @param fileName Unresolved compatibility path.
+	 * @param loop Whether playback loops indefinitely.
+	 * @param volume Initial LuaAudio volume.
+	 * @param pan Initial balance.
+	 * @param delayMs Deliberate playback delay in milliseconds.
+	 * @param ownerKey Opaque calling-engine identity used only for teardown.
+	 * @param pitch Captured initial frequency offset in units of 100 Hz.
+	 * @param postState Optional immutable post-command state destination.
+	 * @return Internal one-based channel, or zero when the request fails.
+	 */
 	int playLuaAudioNativeBuffer(const WorldRuntime *runtime, const QString &fileName, const bool loop,
-	                             const double volume, const double pan, const int delayMs)
+	                             const double volume, const double pan, const int delayMs,
+	                             const void *ownerKey = nullptr, const double pitch = 0.0,
+	                             std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr)
 	{
-		if (fileName.isEmpty())
+		if (fileName.isEmpty() || !qIsFinite(volume) || !qIsFinite(pan) || !qIsFinite(pitch))
 			return 0;
 		const quint64 generation = QMudNativePluginRegistry::luaAudioNextRuntimeBufferGeneration(runtime);
 		if (generation == 0)
@@ -1141,12 +1043,15 @@ namespace
 		if (delayMs > 0)
 		{
 			auto     *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-			const int buffer         = mutableRuntime->reserveSoundBufferForNativeAudio(fileName, generation);
+			const int buffer = mutableRuntime->reserveSoundBufferForNativeAudio(fileName, generation, volume,
+			                                                                    pan, pitch, postState);
 			if (buffer < 1)
 				return 0;
-			auto cancelToken       = std::make_shared<std::atomic_bool>(false);
-			auto bufferState       = luaAudioBufferStateFromMaster(runtime, loop, volume, pan, cancelToken);
-			bufferState.generation = generation;
+			auto cancelToken         = std::make_shared<std::atomic_bool>(false);
+			auto bufferState         = luaAudioInitialBufferState(loop, volume, pan, pitch, cancelToken);
+			bufferState.generation   = generation;
+			bufferState.ownerKey     = ownerKey;
+			bufferState.soundSession = runtime->soundSessionForNativeAudio();
 			QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
 			mutableRuntime->confirmSoundBufferForNativeAudio(buffer, generation);
 			QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
@@ -1172,20 +1077,33 @@ namespace
 		}
 		auto     *mutableRuntime = const_cast<WorldRuntime *>(runtime);
 		int       buffer         = 0;
-		const int status         = mutableRuntime->playSoundForNativeAudio(
-		    0, fileName, loop, luaAudioVolumeToQmudVolume(volume), pan, generation, false, &buffer);
+		const int status =
+		    mutableRuntime->playSoundForNativeAudio(0, fileName, loop, luaAudioVolumeToQmudVolume(volume),
+		                                            pan, generation, false, &buffer, pitch, postState);
 		if (status != eOK)
 			return 0;
-		auto bufferState       = luaAudioBufferStateFromMaster(runtime, loop, volume, pan);
-		bufferState.generation = generation;
+		auto bufferState         = luaAudioInitialBufferState(loop, volume, pan, pitch);
+		bufferState.generation   = generation;
+		bufferState.ownerKey     = ownerKey;
+		bufferState.soundSession = runtime->soundSessionForNativeAudio();
 		QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
 		mutableRuntime->confirmSoundBufferForNativeAudio(buffer, generation);
 		return buffer;
 	}
 
-	void setLuaAudioMasterVolumeAndCommandVolume(const WorldRuntime *runtime, const double volume)
+	/**
+	 * @brief Applies a finite volume to active voices and both LuaAudio volume defaults.
+	 * @param runtime Owning runtime, or null to ignore the update.
+	 * @param volume Requested percentage; non-finite values leave all state unchanged.
+	 * @param postState Optional immutable post-command state destination.
+	 */
+	void setLuaAudioMasterVolumeAndCommandVolume(
+	    const WorldRuntime *runtime, const double volume,
+	    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr)
 	{
-		QMudNativePluginRegistry::luaAudioSetRuntimeMasterVolume(runtime, volume);
+		if (!runtime || !qIsFinite(volume))
+			return;
+		QMudNativePluginRegistry::luaAudioSetRuntimeMasterVolume(runtime, volume, postState);
 		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).commandVolume = qBound(0.0, volume, 100.0);
 	}
@@ -1252,228 +1170,331 @@ namespace
 		static_cast<void>(runtime->savePluginState(QMudNativePluginRegistry::luaAudioPluginId(), true));
 	}
 
+	/**
+	 * @brief Validates and executes every LuaAudio entry through one operation path.
+	 * @param runtime Owning runtime or null during validation.
+	 * @param routine Original DLL function or XML wrapper name.
+	 * @param arguments Primitive arguments retaining nil positions.
+	 * @param executionMode Whether to perform side effects.
+	 * @param context Dispatch-local reads and write visibility.
+	 * @return XML wrapper results or a routine error.
+	 */
 	QMudNativePluginRegistry::NativeCallResult
 	callLuaAudioRoutine(WorldRuntime *runtime, const QString &routine, const QVector<QVariant> &arguments,
-	                    const QMudNativePluginRegistry::NativeCallExecutionMode executionMode)
+	                    const QMudNativePluginRegistry::NativeCallExecutionMode executionMode,
+	                    const QMudNativePluginRegistry::LuaAudioCallContext    &context = {})
 	{
-		QMudNativePluginRegistry::NativeCallResult result;
-		result.errorCode   = eOK;
-		const QString name = normalizedRoutine(routine);
-		const bool    executeSideEffects =
-		    executionMode == QMudNativePluginRegistry::NativeCallExecutionMode::ExecuteSideEffects;
+		using namespace QMudNativePluginRegistry;
+		NativeCallResult result;
+		result.errorCode = eOK;
+		QString name     = normalizedRoutine(routine);
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-		if (const QString targetRoutine = luaAudioPpiTargetRoutineName(routine); !targetRoutine.isEmpty())
+		if (const QString target = luaAudioPpiTargetRoutineName(routine); !target.isEmpty())
 		{
-			QVector<QVariant> decodedArguments;
-			QString           decodeError;
-			const qsizetype   argumentCount = luaAudioPpiArgumentCountValue(routine);
+			QVector<QVariant> decoded;
+			QString           error;
 			if (arguments.isEmpty() ||
-			    !QMudLuaSupport::decodePpiArguments(firstArgumentString(arguments), argumentCount,
-			                                        decodedArguments, decodeError))
+			    !QMudLuaSupport::decodePpiArguments(firstArgumentString(arguments),
+			                                        luaAudioPpiArgumentCountValue(routine), decoded, error))
 			{
 				result.errorCode = eErrorCallingPluginRoutine;
 				result.errorText =
-				    decodeError.isEmpty() ? QStringLiteral("Missing serialized PPI arguments") : decodeError;
+				    error.isEmpty() ? QStringLiteral("Missing serialized PPI arguments") : error;
 				return result;
 			}
-			result = callLuaAudioRoutine(runtime, targetRoutine, decodedArguments, executionMode);
-			if (result.errorCode != eOK)
-				return result;
-			if (executeSideEffects)
+			result = callLuaAudioRoutine(runtime, target, decoded, executionMode, context);
+			if (result.errorCode == eOK && executionMode == NativeCallExecutionMode::ExecuteSideEffects)
 			{
 				if (!runtime)
 				{
 					result.errorCode = eErrorCallingPluginRoutine;
 					result.errorText = QStringLiteral("LuaAudio PPI runtime is unavailable");
-					result.returnValues.clear();
-					return result;
 				}
-				runtime->setPluginVariableValue(
-				    QMudNativePluginRegistry::luaAudioPluginId(),
-				    QMudNativePluginRegistry::luaAudioPpiReturnVariableName(),
-				    QMudLuaSupport::serializePpiReturnValues(result.returnValues));
+				else
+					runtime->setPluginVariableValue(
+					    luaAudioPluginId(), luaAudioPpiReturnVariableName(),
+					    QMudLuaSupport::serializePpiReturnValues(result.returnValues));
 			}
 			result.returnValues.clear();
 			return result;
 		}
 #endif
+		if (name == QStringLiteral("volume"))
+			name = QStringLiteral("setvol");
+		if (name == QStringLiteral("pan"))
+			name = QStringLiteral("setpan");
+		if (name == QStringLiteral("pitch"))
+			name = QStringLiteral("setpitch");
+		const bool execute = executionMode == NativeCallExecutionMode::ExecuteSideEffects && runtime;
+		auto       number  = [&](const qsizetype index, const std::optional<double> fallback = {})
+		{
+			bool   ok    = false;
+			double value = 0.0;
+			if (index >= arguments.size() || !arguments.at(index).isValid() || arguments.at(index).isNull())
+			{
+				ok    = fallback.has_value();
+				value = fallback.value_or(0.0);
+			}
+			else if (arguments.at(index).typeId() != QMetaType::Bool)
+				value = arguments.at(index).toDouble(&ok);
+			if (!ok || !qIsFinite(value))
+			{
+				result.errorCode = eErrorCallingPluginRoutine;
+				result.errorText = QStringLiteral("Bad argument #%1 to LuaAudio '%2' (number expected)")
+				                       .arg(index + 1)
+				                       .arg(routine);
+				return 0.0;
+			}
+			return std::trunc(value);
+		};
+		auto bufferArgument = [&](const qsizetype index, const std::optional<double> fallback = {})
+		{
+			const double value = number(index, fallback);
+			return value >= 0 && value <= WorldRuntime::kMaxSoundBuffers ? static_cast<int>(value) : -1;
+		};
+		auto milliseconds = [&](const qsizetype index, const std::optional<double> fallback = {})
+		{
+			const double value = number(index, fallback);
+			if (value < 0 || value > std::numeric_limits<int>::max())
+			{
+				result.errorCode = eErrorCallingPluginRoutine;
+				result.errorText =
+				    QStringLiteral("LuaAudio duration is outside the supported millisecond range");
+				return std::chrono::milliseconds{0};
+			}
+			return std::chrono::milliseconds{static_cast<int>(value)};
+		};
+		auto status = [&](const int buffer)
+		{
+			return context.status ? context.status(buffer) : runtime ? runtime->soundStatus(buffer) : -3;
+		};
+		auto volume = [&](const int buffer, const LuaAudioRuntimeBufferState &)
+		{
+			return context.volume ? context.volume(buffer)
+			       : runtime      ? runtime->soundVolumeForNativeAudio(buffer)
+			                      : 0.0;
+		};
+		auto changed = [&](const int buffer, const std::shared_ptr<const SoundEngineSession::Snapshot> &state)
+		{
+			if (context.changed && state)
+				context.changed(buffer, state);
+		};
+		auto changedVolumes =
+		    [&](const QList<int> &buffers, const std::shared_ptr<const SoundEngineSession::Snapshot> &state)
+		{
+			for (const int buffer : buffers)
+				changed(buffer, state);
+		};
+		if (name == QStringLiteral("freq"))
+		{
+			const double value = number(0);
+			if (result.errorCode == eOK && execute)
+				luaAudioSetRuntimeMasterPitch(runtime, value);
+			return result;
+		}
 		if (name == QStringLiteral("plugin_update_url"))
 		{
 			result.returnValues.push_back(QStringLiteral("qmud:native/LuaAudio"));
 			return result;
 		}
-		if (name == QStringLiteral("isplaying"))
+		if (name == QStringLiteral("isplaying") || name == QStringLiteral("getvolume"))
 		{
-			const int buffer = static_cast<int>(argumentNumber(arguments, 0, 0.0));
-			QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			result.returnValues.push_back(
-			    runtime && buffer > 0 &&
-			    QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState) &&
-			    runtime->soundStatus(buffer) > 0);
-			return result;
-		}
-		if (name == QStringLiteral("getvolume"))
-		{
-			const int buffer = static_cast<int>(argumentNumber(arguments, 0, 0.0));
-			QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-			if (runtime && buffer > 0 &&
-			    QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
-				result.returnValues.push_back(bufferState.volume);
-			else if (runtime)
-				result.returnValues.push_back(
-				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime).volume);
-			else
-				result.returnValues.push_back(100.0);
-			return result;
-		}
-		if (name == QStringLiteral("stop") || name == QStringLiteral("fadeout"))
-		{
-			if (executeSideEffects && runtime)
+			const int buffer = bufferArgument(
+			    0, name == QStringLiteral("getvolume") ? std::optional<double>(0) : std::nullopt);
+			LuaAudioRuntimeBufferState state;
+			const bool owned = runtime && buffer > 0 && luaAudioRuntimeBufferState(runtime, buffer, state);
+			if (result.errorCode != eOK)
+				return result;
+			if (name == QStringLiteral("isplaying"))
 			{
-				const int buffer = static_cast<int>(argumentNumber(arguments, 0, 0.0));
-				const int delay  = qMax(0, qRound(argumentNumber(arguments, 1, 0.0) * 1000.0));
-				if (delay > 0)
-					scheduleLuaAudioNativeStop(runtime, buffer, delay);
-				else if (buffer == 0)
-					stopLuaAudioNativeBuffers(runtime);
-				else
-					stopLuaAudioNativeBuffer(runtime, buffer);
+				const int current = owned ? status(buffer) : -3;
+				result.returnValues.push_back(current == 1 || current == 2 ? 1 : 0);
 			}
+			else
+				result.returnValues.push_back(buffer == 0 ? luaAudioRuntimeMasterState(runtime).volume
+				                              : owned     ? volume(buffer, state)
+				                                          : 0.0);
 			return result;
 		}
 		if (name == QStringLiteral("play") || name == QStringLiteral("playlooped") ||
 		    name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped"))
 		{
-			if (!executeSideEffects || !runtime)
+			QString file;
+			if (arguments.isEmpty() || arguments.front().isNull() ||
+			    (arguments.front().typeId() != QMetaType::QString &&
+			     !arguments.front().canConvert<double>()) ||
+			    arguments.front().typeId() == QMetaType::Bool)
 			{
-				result.returnValues.push_back(0);
+				result.errorCode = eErrorCallingPluginRoutine;
+				result.errorText = QStringLiteral("Bad argument #1 to LuaAudio play (string expected)");
 				return result;
 			}
-			const QString fileName = firstArgumentString(arguments);
-			if (fileName.isEmpty())
-			{
-				result.returnValues.push_back(0);
+			file                 = arguments.front().toString();
+			const auto   master  = luaAudioRuntimeMasterState(runtime);
+			const bool   delayed = name.startsWith(QStringLiteral("playdelay"));
+			const bool   loop    = name == QStringLiteral("playlooped") ||
+			                       name == QStringLiteral("playdelaylooped") ||
+			                       (name == QStringLiteral("play") && number(1) != 0.0);
+			const auto   delay   = delayed ? milliseconds(1, name == QStringLiteral("playdelaylooped")
+			                                                     ? std::optional<double>(250)
+			                                                     : std::nullopt)
+			                               : std::chrono::milliseconds{0};
+			const double pan     = name == QStringLiteral("playlooped") ? master.pan : number(2, master.pan);
+			const double gain =
+			    name == QStringLiteral("playlooped") ? master.volume : number(3, master.volume);
+			if (result.errorCode != eOK)
 				return result;
-			}
-			const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
-			    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
-			const bool isDelayed =
-			    name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped");
-			const bool   loop   = name == QStringLiteral("playlooped") ||
-			                      name == QStringLiteral("playdelaylooped") ||
-			                      (!isDelayed && secondArgumentBoolOrFalse(arguments));
-			const int    delay  = isDelayed ? qMax(0, qRound(argumentNumber(arguments, 1, 0.0) * 1000.0)) : 0;
-			const double pan    = argumentNumber(arguments, 2, master.pan);
-			const double volume = argumentNumber(arguments, 3, master.volume);
-			result.returnValues.push_back(
-			    playLuaAudioNativeBuffer(runtime, fileName, loop, volume, pan, delay));
+			std::shared_ptr<const SoundEngineSession::Snapshot> postState;
+			const int buffer = execute ? playLuaAudioNativeBuffer(runtime, file, loop, gain, pan,
+			                                                      static_cast<int>(delay.count()),
+			                                                      context.ownerKey, master.pitch, &postState)
+			                           : 0;
+			if (buffer > 0)
+				changed(buffer, postState);
+			result.returnValues.push_back(delayed ? QVariant{} : QVariant{buffer});
 			return result;
 		}
-		if (name == QStringLiteral("setpitch") || name == QStringLiteral("slidepitch"))
+		if (name == QStringLiteral("free") || name == QStringLiteral("unload") ||
+		    name == QStringLiteral("init"))
 		{
-			if (executeSideEffects && runtime)
+			if (execute)
 			{
-				const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
-				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
-				const double pitch  = argumentNumber(arguments, 0, master.pitch);
-				const int    buffer = static_cast<int>(argumentNumber(arguments, 1, 0.0));
-				const int    delay  = name == QStringLiteral("slidepitch")
-				                          ? qMax(0, qRound(argumentNumber(arguments, 2, 0.0) * 1000.0))
-				                          : 0;
-				QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-				if (buffer > 0 &&
-				    QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
+				if (name != QStringLiteral("init"))
 				{
-					if (delay > 0)
-						scheduleLuaAudioNativeSetPitch(runtime, buffer, pitch, delay);
-					else
+					const auto owned = luaAudioRuntimeOwnedBuffers(runtime);
+					std::shared_ptr<const SoundEngineSession::Snapshot> stoppedState;
+					static_cast<void>(runtime->setLuaAudioInitialized(false, &stoppedState));
+					for (const int buffer : owned)
 					{
-						bufferState.pitch = pitch;
-						static_cast<void>(QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
-						    runtime, buffer, bufferState));
+						std::shared_ptr<const SoundEngineSession::Snapshot> postState;
+						stopLuaAudioNativeBuffer(runtime, buffer, &postState);
+						changed(buffer, postState ? postState : stoppedState);
 					}
 				}
-				else if (buffer <= 0)
-					QMudNativePluginRegistry::luaAudioSetRuntimeMasterPitch(runtime, pitch);
-			}
-			return result;
-		}
-		if (name == QStringLiteral("setpan") || name == QStringLiteral("slidepan"))
-		{
-			if (executeSideEffects && runtime)
-			{
-				const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
-				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
-				const double pan    = argumentNumber(arguments, 0, master.pan);
-				const int    buffer = static_cast<int>(argumentNumber(arguments, 1, 0.0));
-				const int    delay  = name == QStringLiteral("slidepan")
-				                          ? qMax(0, qRound(argumentNumber(arguments, 2, 0.0) * 1000.0))
-				                          : 0;
-				QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-				if (buffer > 0 &&
-				    QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
+				else
 				{
-					if (delay > 0)
-						scheduleLuaAudioNativeSetPan(runtime, buffer, pan, delay);
+					static_cast<void>(runtime->setLuaAudioInitialized(true));
+					std::optional<QString> stored;
+					if (context.storedVolume)
+						stored = context.storedVolume();
 					else
 					{
-						bufferState.pan = pan;
-						static_cast<void>(QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(
-						    runtime, buffer, bufferState));
+						QString value;
+						if (runtime->findPluginVariable(luaAudioPluginId(), QStringLiteral("vol"), value))
+							stored = value;
 					}
-				}
-				else if (buffer <= 0)
-					QMudNativePluginRegistry::luaAudioSetRuntimeMasterPan(runtime, pan);
-			}
-			return result;
-		}
-		if (name == QStringLiteral("setvol") || name == QStringLiteral("slidevol"))
-		{
-			if (executeSideEffects && runtime)
-			{
-				const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
-				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
-				const double volume = argumentNumber(arguments, 0, master.volume);
-				const int    buffer = static_cast<int>(argumentNumber(arguments, 1, 0.0));
-				const int    delay  = name == QStringLiteral("slidevol")
-				                          ? qMax(0, qRound(argumentNumber(arguments, 2, 0.0) * 1000.0))
-				                          : 0;
-				QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
-				if (buffer > 0 &&
-				    QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
-				{
-					if (delay > 0)
-						scheduleLuaAudioNativeSetVolume(runtime, buffer, volume, delay);
-					else
+					bool         ok       = true;
+					const double restored = stored ? stored->toDouble(&ok) : 100.0;
+					if (!ok || !qIsFinite(restored))
 					{
-						bufferState.volume = qBound(0.0, volume, 100.0);
-						if (QMudNativePluginRegistry::luaAudioUpdateRuntimeBufferIfGeneration(runtime, buffer,
-						                                                                      bufferState))
+						result.errorCode = eErrorCallingPluginRoutine;
+						result.errorText = QStringLiteral("LuaAudio's stored volume is not a number");
+						return result;
+					}
+					const auto owned = luaAudioRuntimeOwnedBuffers(runtime);
+					std::shared_ptr<const SoundEngineSession::Snapshot> postState;
+					luaAudioRestorePersistentVolume(runtime, std::trunc(restored), &postState);
+					changedVolumes(owned, postState);
+					if (!stored)
+					{
+						if (context.storeVolume)
 						{
-							auto *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-							static_cast<void>(mutableRuntime->updateSoundForNativeAudio(
-							    buffer, bufferState.loop, luaAudioVolumeToQmudVolume(bufferState.volume),
-							    bufferState.pan, bufferState.generation));
+							if (!context.storeVolume(QStringLiteral("100")))
+							{
+								result.errorCode = eErrorCallingPluginRoutine;
+								result.errorText = QStringLiteral("Unable to save LuaAudio's initial volume");
+							}
+						}
+						else
+						{
+							runtime->setPluginVariableValue(luaAudioPluginId(), QStringLiteral("vol"),
+							                                QStringLiteral("100"));
+							static_cast<void>(runtime->savePluginState(luaAudioPluginId(), true));
 						}
 					}
 				}
-				else if (buffer <= 0)
+			}
+			return result;
+		}
+		const bool stop   = name == QStringLiteral("stop");
+		const bool fade   = name == QStringLiteral("fadeout");
+		const bool slide  = name == QStringLiteral("slidevol") || name == QStringLiteral("slidepan") ||
+		                    name == QStringLiteral("slidepitch");
+		const bool setter = name == QStringLiteral("setvol") || name == QStringLiteral("setpan") ||
+		                    name == QStringLiteral("setpitch");
+		if (stop || fade || slide || setter)
+		{
+			const auto   attribute = name.endsWith(QStringLiteral("pan"))     ? QMudSoundAttribute::Pan
+			                         : name.endsWith(QStringLiteral("pitch")) ? QMudSoundAttribute::Pitch
+			                                                                  : QMudSoundAttribute::Volume;
+			const double value     = stop || fade ? 0.0 : number(0);
+			const int    buffer    = bufferArgument(
+			    stop || fade ? 0 : 1,
+			    setter && attribute != QMudSoundAttribute::Pitch ? std::optional<double>(0) : std::nullopt);
+			const auto duration =
+			    fade || slide ? milliseconds(fade ? 1 : 2, 1000) : std::chrono::milliseconds{0};
+			if (result.errorCode != eOK || !execute || buffer < 0)
+				return result;
+			if (buffer == 0 && setter)
+			{
+				if (attribute == QMudSoundAttribute::Pitch)
+					return result;
+				if (attribute == QMudSoundAttribute::Volume)
 				{
-					QMudNativePluginRegistry::luaAudioSetRuntimeMasterVolume(runtime, volume);
+					const auto owned = luaAudioRuntimeOwnedBuffers(runtime);
+					std::shared_ptr<const SoundEngineSession::Snapshot> postState;
+					luaAudioSetRuntimeMasterVolume(runtime, value, &postState);
+					changedVolumes(owned, postState);
 				}
+				else if (attribute == QMudSoundAttribute::Pan)
+					luaAudioSetRuntimeMasterPan(runtime, value);
+				return result;
+			}
+			if (buffer == 0 && !stop)
+				return result;
+			const QList<int> buffers =
+			    buffer == 0 ? luaAudioRuntimeOwnedBuffers(runtime) : QList<int>{buffer};
+			for (const int owned : buffers)
+			{
+				LuaAudioRuntimeBufferState state;
+				if (!luaAudioRuntimeBufferState(runtime, owned, state))
+					continue;
+				if (stop)
+				{
+					std::shared_ptr<const SoundEngineSession::Snapshot> postState;
+					stopLuaAudioNativeBuffer(runtime, owned, &postState);
+					changed(owned, postState);
+					continue;
+				}
+				const double target =
+				    attribute == QMudSoundAttribute::Volume ? qBound(0.0, value, 100.0) : value;
+				std::shared_ptr<const SoundEngineSession::Snapshot> postState;
+				if (runtime->setSoundAttributeForNativeAudio(
+				        owned, state.generation, attribute, target, duration, fade,
+				        name == QStringLiteral("slidepitch") ? QMudSoundAttributeTarget::Relative
+				                                             : QMudSoundAttributeTarget::Absolute,
+				        &postState) != eOK)
+					continue;
+				changed(owned, postState);
 			}
 			return result;
 		}
 		result.errorCode = eNoSuchRoutine;
-		result.errorText =
-		    QStringLiteral("No function '%1' in native shim '%2' (%3)")
-		        .arg(routine, QStringLiteral("LuaAudio"), QMudNativePluginRegistry::luaAudioPluginId());
+		result.errorText = QStringLiteral("No function '%1' in native shim 'LuaAudio' (%2)")
+		                       .arg(routine, luaAudioPluginId());
 		return result;
 	}
+
 } // namespace
 
 namespace QMudNativePluginRegistry
 {
+	NativeCallResult callLuaAudio(WorldRuntime *runtime, const QString &routine,
+	                              const QVector<QVariant> &arguments, const LuaAudioCallContext &context,
+	                              const NativeCallExecutionMode executionMode)
+	{
+		return callLuaAudioRoutine(runtime, routine, arguments, executionMode, context);
+	}
 	QString nativeShimMarkerText()
 	{
 		return QString::fromLatin1(kNativeShimMarker);
@@ -1579,24 +1600,32 @@ namespace QMudNativePluginRegistry
 		return it == luaAudioNativeStates().end() ? LuaAudioRuntimeMasterState{} : it->second.master;
 	}
 
-	void luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, const double volume)
+	void luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, const double volume,
+	                                    std::shared_ptr<const SoundEngineSession::Snapshot> *postState)
 	{
-		if (!runtime)
+		if (!runtime || !qIsFinite(volume))
 			return;
-		QMutexLocker locker(&luaAudioStateMutex());
-		luaAudioNativeStateFor(runtime).master.volume = qBound(0.0, volume, 100.0);
+		const double bounded = qBound(0.0, volume, 100.0);
+		{
+			QMutexLocker locker(&luaAudioStateMutex());
+			luaAudioNativeStateFor(runtime).master.volume = bounded;
+		}
+		static_cast<void>(
+		    runtime->setSoundAttributeForNativeAudio(0, 0, QMudSoundAttribute::Volume, bounded, {}, false,
+		                                             QMudSoundAttributeTarget::Absolute, postState));
 	}
 
-	void luaAudioRestorePersistentVolume(const WorldRuntime *runtime, const double volume)
+	void luaAudioRestorePersistentVolume(const WorldRuntime *runtime, const double volume,
+	                                     std::shared_ptr<const SoundEngineSession::Snapshot> *postState)
 	{
 		if (!runtime)
 			return;
-		setLuaAudioMasterVolumeAndCommandVolume(runtime, volume);
+		setLuaAudioMasterVolumeAndCommandVolume(runtime, volume, postState);
 	}
 
 	void luaAudioSetRuntimeMasterPan(const WorldRuntime *runtime, const double pan)
 	{
-		if (!runtime)
+		if (!runtime || !qIsFinite(pan))
 			return;
 		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).master.pan = pan;
@@ -1604,7 +1633,7 @@ namespace QMudNativePluginRegistry
 
 	void luaAudioSetRuntimeMasterPitch(const WorldRuntime *runtime, const double pitch)
 	{
-		if (!runtime)
+		if (!runtime || !qIsFinite(pitch))
 			return;
 		QMutexLocker locker(&luaAudioStateMutex());
 		luaAudioNativeStateFor(runtime).master.pitch = pitch;
@@ -1832,11 +1861,32 @@ namespace QMudNativePluginRegistry
 
 	void luaAudioStopRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey)
 	{
-		if (!runtime || !ownerKey)
+		if (!ownerKey)
 			return;
 		const QList<int> buffers = luaAudioRuntimeOwnedBuffers(runtime, ownerKey);
 		for (const int buffer : buffers)
 			stopLuaAudioNativeBuffer(runtime, buffer);
+		/** @brief Generation-scoped owner cleanup that never retains or dereferences another runtime. */
+		struct OwnedSessionChannel
+		{
+				std::shared_ptr<SoundEngineSession> session;
+				int                                 buffer;
+				quint64                             generation;
+		};
+		QList<OwnedSessionChannel> others;
+		{
+			QMutexLocker locker(&luaAudioStateMutex());
+			for (const auto &[runtimeKey, state] : luaAudioNativeStates())
+			{
+				Q_UNUSED(runtimeKey);
+				for (auto it = state.buffers.cbegin(); it != state.buffers.cend(); ++it)
+					if (it->ownerKey == ownerKey)
+						if (auto session = it->soundSession.lock())
+							others.push_back({std::move(session), it.key(), it->generation});
+			}
+		}
+		for (const auto &voice : others)
+			static_cast<void>(voice.session->stopLuaAudioChannel(voice.buffer, voice.generation));
 	}
 
 	void luaAudioResetRuntime(const WorldRuntime *runtime)
@@ -2038,12 +2088,7 @@ namespace QMudNativePluginRegistry
 		const QString  name = normalizedRoutine(routine);
 		if (id == luaAudioPluginId())
 		{
-			return name == QStringLiteral("stop") || name == QStringLiteral("fadeout") ||
-			       name == QStringLiteral("play") || name == QStringLiteral("playlooped") ||
-			       name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped") ||
-			       name == QStringLiteral("setpitch") || name == QStringLiteral("slidepitch") ||
-			       name == QStringLiteral("setpan") || name == QStringLiteral("slidepan") ||
-			       name == QStringLiteral("setvol") || name == QStringLiteral("slidevol");
+			return name == QStringLiteral("init") || !luaAudioPpiTargetRoutineName(routine).isEmpty();
 		}
 		if (id != mushReaderPluginId())
 			return false;
@@ -2167,6 +2212,11 @@ namespace QMudNativePluginRegistry
 			outputLine(*runtime, luaAudioSoundsEnabled(runtime) ? QStringLiteral("1") : QStringLiteral("0"));
 			return true;
 		}
+		if (lower == QStringLiteral("sound_close"))
+		{
+			static_cast<void>(callLuaAudio(runtime, QStringLiteral("free"), {}));
+			return true;
+		}
 		return false;
 	}
 
@@ -2188,32 +2238,26 @@ namespace QMudNativePluginRegistry
 			const QString key   = trimmed.left(separator).trimmed().toLower();
 			const QString value = trimmed.mid(separator + 1).trimmed();
 			bool          ok    = false;
-			if (key == QStringLiteral("pan"))
+			if (key == QStringLiteral("pan") || key == QStringLiteral("volume") ||
+			    key == QStringLiteral("freq"))
 			{
-				const double pan = value.toDouble(&ok);
-				if (ok)
-					luaAudioSetRuntimeMasterPan(runtime, pan);
-				return true;
-			}
-			if (key == QStringLiteral("volume"))
-			{
-				const double volume = value.toDouble(&ok);
-				if (ok)
-					setLuaAudioMasterVolumeAndCommandVolume(runtime, volume);
-				return true;
-			}
-			if (key == QStringLiteral("freq"))
-			{
-				const double pitch = value.toDouble(&ok);
-				if (ok)
-					luaAudioSetRuntimeMasterPitch(runtime, pitch);
+				const double numericValue = value.toDouble(&ok);
+				if (ok && qIsFinite(numericValue))
+				{
+					if (key == QStringLiteral("pan"))
+						luaAudioSetRuntimeMasterPan(runtime, numericValue);
+					else if (key == QStringLiteral("volume"))
+						setLuaAudioMasterVolumeAndCommandVolume(runtime, numericValue);
+					else
+						luaAudioSetRuntimeMasterPitch(runtime, numericValue);
+				}
 				return true;
 			}
 			if (key == QStringLiteral("loop"))
 			{
 				const LuaAudioRuntimeMasterState master = luaAudioRuntimeMasterState(runtime);
-				const int                        buffer =
-				    playLuaAudioNativeBuffer(runtime, value, true, master.volume, master.pan, 0);
+				const int buffer = playLuaAudioNativeBuffer(runtime, value, true, master.volume, master.pan,
+				                                            0, nullptr, master.pitch);
 				if (buffer != 0)
 					markLuaAudioLoopBuffer(runtime, value, buffer);
 				return true;
@@ -2235,10 +2279,13 @@ namespace QMudNativePluginRegistry
 				}
 				return true;
 			}
+			return true;
 		}
 
 		const LuaAudioRuntimeMasterState master = luaAudioRuntimeMasterState(runtime);
-		return playLuaAudioNativeBuffer(runtime, trimmed, false, master.volume, master.pan, 0) != 0;
+		static_cast<void>(playLuaAudioNativeBuffer(runtime, trimmed, false, master.volume, master.pan, 0,
+		                                           nullptr, master.pitch));
+		return true;
 	}
 
 	void handleMushReaderScreenDraw(const WorldRuntime *runtime, const int type, const int /*log*/,

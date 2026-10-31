@@ -146,7 +146,7 @@ namespace
 				                           QStringLiteral("sha256:%1").arg(sampleSha256())));
 				const QString changelog =
 				    QStringLiteral("## What's changed\n\n### Bug Fixes\n\n* Fix release notes rendering by "
-				                   "@Nodens- ([#131](https://github.com/Nodens-/QMud/pull/131))\n");
+				                   "@test-author ([#123](https://example.invalid/test/project/pull/123))\n");
 				const QByteArray payload =
 				    makeLatestReleasePayload(QStringLiteral("v10.07"), assets, changelog);
 

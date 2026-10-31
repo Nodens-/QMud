@@ -9,6 +9,7 @@
 #ifndef QMUD_NATIVEPLUGINREGISTRY_H
 #define QMUD_NATIVEPLUGINREGISTRY_H
 
+#include "SoundEngine.h"
 #include "WorldOptions.h"
 
 #include <QDateTime>
@@ -22,8 +23,10 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 
 class WorldRuntime;
+class SoundEngineSession;
 
 namespace QMudNativePluginRegistry
 {
@@ -84,7 +87,7 @@ namespace QMudNativePluginRegistry
 	};
 
 	/**
-	 * @brief Runtime-level LuaAudio playback settings shared by direct `audio.*` and native CallPlugin paths.
+	 * @brief LuaAudio ownership and captured initial arguments; live controls belong to the sound worker.
 	 */
 	struct LuaAudioRuntimeBufferState
 	{
@@ -94,6 +97,7 @@ namespace QMudNativePluginRegistry
 			bool                              loop{false};
 			bool                              playbackSubmitted{false};
 			const void                       *ownerKey{nullptr};
+			std::weak_ptr<SoundEngineSession> soundSession;
 			std::shared_ptr<std::atomic_bool> pendingCancel;
 			quint64                           generation{0};
 	};
@@ -116,6 +120,32 @@ namespace QMudNativePluginRegistry
 			double pan{0.0};
 			double pitch{0.0};
 	};
+
+	/** @brief Dispatch-local adapters around the single LuaAudio operation implementation. */
+	struct LuaAudioCallContext
+	{
+			const void                *ownerKey{nullptr};
+			std::function<int(int)>    status;
+			std::function<double(int)> volume;
+			std::function<void(int, const std::shared_ptr<const SoundEngineSession::Snapshot> &)> changed;
+			std::function<std::optional<QString>()> storedVolume;
+			std::function<bool(const QString &)>    storeVolume;
+	};
+	/**
+	 * @brief Executes one original LuaAudio operation with common validation and playback behavior.
+	 * @param runtime Owning world runtime.
+	 * @param routine Original audio function or XML wrapper name.
+	 * @param arguments Primitive Lua arguments with invalid variants representing nil.
+	 * @param context Optional callback-local read and mutation adapters.
+	 * @param executionMode Whether to execute side effects or validate only.
+	 * @return Native result preserving XML wrapper result counts and types.
+	 * @note Delayed wrappers return one nil; the raw audio adapter discards it for the DLL's zero-result contract.
+	 * @note Init persistence uses the runtime thread unless the caller supplies snapshot and mutation adapters.
+	 */
+	[[nodiscard]] NativeCallResult
+	callLuaAudio(WorldRuntime *runtime, const QString &routine, const QVector<QVariant> &arguments,
+	             const LuaAudioCallContext &context       = {},
+	             NativeCallExecutionMode    executionMode = NativeCallExecutionMode::ExecuteSideEffects);
 
 	/**
 	 * @brief Returns the exact UI marker used for native shim shadow rows.
@@ -213,27 +243,33 @@ namespace QMudNativePluginRegistry
 	 */
 	[[nodiscard]] LuaAudioRuntimeMasterState luaAudioRuntimeMasterState(const WorldRuntime *runtime);
 	/**
-	 * @brief Updates LuaAudio master volume for a runtime.
+	 * @brief Updates LuaAudio's default volume and the volume of active non-muted voices.
 	 * @param runtime Owning runtime.
-	 * @param volume Legacy LuaAudio volume value.
+	 * @param volume Finite legacy LuaAudio volume value; non-finite inputs are ignored.
+	 * @param postState Optional immutable post-command state destination.
 	 */
-	void                  luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, double volume);
+	void
+	luaAudioSetRuntimeMasterVolume(const WorldRuntime *runtime, double volume,
+	                               std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr);
 	/**
 	 * @brief Restores LuaAudio's persisted command and master volume.
 	 * @param runtime Owning runtime.
-	 * @param volume Persisted legacy LuaAudio volume value.
+	 * @param volume Finite persisted legacy LuaAudio volume value; non-finite inputs are ignored.
+	 * @param postState Optional immutable post-command state destination.
 	 */
-	void                  luaAudioRestorePersistentVolume(const WorldRuntime *runtime, double volume);
+	void
+	luaAudioRestorePersistentVolume(const WorldRuntime *runtime, double volume,
+	                                std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr);
 	/**
 	 * @brief Updates LuaAudio master pan for a runtime.
 	 * @param runtime Owning runtime.
-	 * @param pan Legacy LuaAudio pan value.
+	 * @param pan Finite legacy LuaAudio pan value; non-finite inputs are ignored.
 	 */
 	void                  luaAudioSetRuntimeMasterPan(const WorldRuntime *runtime, double pan);
 	/**
 	 * @brief Updates LuaAudio master pitch for a runtime.
 	 * @param runtime Owning runtime.
-	 * @param pitch Legacy LuaAudio pitch value.
+	 * @param pitch Finite legacy LuaAudio pitch value; non-finite inputs are ignored.
 	 */
 	void                  luaAudioSetRuntimeMasterPitch(const WorldRuntime *runtime, double pitch);
 	/**
@@ -342,8 +378,8 @@ namespace QMudNativePluginRegistry
 	 */
 	void              luaAudioStopRuntime(const WorldRuntime *runtime);
 	/**
-	 * @brief Stops and releases all runtime LuaAudio buffers owned by a specific caller token.
-	 * @param runtime Owning runtime.
+	 * @brief Stops one Lua engine's voices in its associated runtime and other live sound sessions.
+	 * @param runtime Associated runtime, whose test backend may also own voices.
 	 * @param ownerKey Owner token to stop and release.
 	 */
 	void              luaAudioStopRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey);

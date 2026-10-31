@@ -14,6 +14,7 @@
 #include "MainFrame.h"
 #include "ReloadUtils.h"
 #include "SingleInstanceIpc.h"
+#include "SoundEngine.h"
 #include "WorldView.h"
 #include <QApplication>
 #include <QCoreApplication>
@@ -145,8 +146,17 @@ namespace
 #endif
 } // namespace
 
+bool SoundEngine::isOutputMuted() noexcept
+{
+	return false;
+}
+
 int main(int argc, char *argv[])
 {
+	// QMud uses audio only; an explicit empty device list prevents FFmpeg video hardware probing.
+	qputenv("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", QByteArrayLiteral(","));
+	qputenv("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", QByteArrayLiteral(","));
+
 #ifdef Q_OS_WIN
 	configureWindowsDllSearchPath();
 	if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))

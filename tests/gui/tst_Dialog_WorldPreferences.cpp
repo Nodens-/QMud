@@ -3124,6 +3124,116 @@ namespace
 				QCOMPARE(dialog.result(), 0);
 			}
 
+			/** @brief Added, renamed and pasted variables retain their visible spelling. */
+			void variableEditorAndPasteRetainOriginalNames()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Variables"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageVariables);
+				QTableWidget *variables = nullptr;
+				for (auto *table : dialog.findChildren<QTableWidget *>())
+					if (table->horizontalHeaderItem(0) && table->horizontalHeaderItem(1) &&
+					    table->horizontalHeaderItem(0)->text() == QStringLiteral("Name") &&
+					    table->horizontalHeaderItem(1)->text() == QStringLiteral("Value"))
+						variables = table;
+				QVERIFY(variables);
+				auto button = [variables](const QString &text) -> QPushButton *
+				{
+					for (auto *candidate : variables->parentWidget()->findChildren<QPushButton *>())
+						if (candidate->text() == text)
+							return candidate;
+					return nullptr;
+				};
+				auto *add   = button(QStringLiteral("&Add..."));
+				auto *edit  = button(QStringLiteral("&Edit..."));
+				auto *paste = button(QStringLiteral("&Paste"));
+				QVERIFY(add);
+				QVERIFY(edit);
+				QVERIFY(paste);
+				auto enterName = [&dialog](const QString &name)
+				{
+					return QMetaObject::invokeMethod(
+					    &dialog,
+					    [name]
+					    {
+						    auto *editor = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+						    QVERIFY(editor);
+						    auto *nameEdit = editor->findChild<QLineEdit *>();
+						    QVERIFY(nameEdit);
+						    nameEdit->setText(name);
+						    editor->accept();
+					    },
+					    Qt::QueuedConnection);
+				};
+				QVERIFY(enterName(QStringLiteral("AddedName")));
+				add->click();
+				QCOMPARE(variables->rowCount(), 1);
+				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("AddedName"));
+				QVERIFY(enterName(QStringLiteral("RenamedName")));
+				edit->click();
+				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("RenamedName"));
+				auto *clipboard = QGuiApplication::clipboard();
+				QVERIFY(clipboard);
+				clipboard->setText(
+				    QStringLiteral("<variables><variable name=\"PastedName\">value</variable></variables>"));
+				paste->click();
+				QCOMPARE(variables->rowCount(), 2);
+				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("PastedName"));
+				QCOMPARE(variables->item(1, 0)->text(), QStringLiteral("RenamedName"));
+				dialog.accept();
+				QCOMPARE(runtime.variables().value(QStringLiteral("renamedname")).label,
+				         QStringLiteral("RenamedName"));
+				QCOMPARE(runtime.variables().value(QStringLiteral("pastedname")).content,
+				         QStringLiteral("value"));
+			}
+
+			/** @brief Sorted variable rows retain their identity and merge concurrent runtime edits. */
+			void sortedVariableRowsEditByIdentityAndPreserveLiveChanges()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Variables"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setVariable(QStringLiteral("Zulu"), QStringLiteral("Z"));
+				runtime.setVariable(QStringLiteral("Alpha"), QStringLiteral("A"));
+				runtime.setVariable(QStringLiteral("Middle"), QStringLiteral("M"));
+				const auto             issued = runtime.variables();
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageVariables);
+				QTableWidget *variables = nullptr;
+				for (auto *table : dialog.findChildren<QTableWidget *>())
+					if (table->horizontalHeaderItem(0) &&
+					    table->horizontalHeaderItem(0)->text() == QStringLiteral("Name") &&
+					    table->horizontalHeaderItem(1) &&
+					    table->horizontalHeaderItem(1)->text() == QStringLiteral("Value"))
+						variables = table;
+				QVERIFY(variables);
+				QCOMPARE(variables->rowCount(), 3);
+				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("Alpha"));
+				QCOMPARE(variables->item(1, 0)->text(), QStringLiteral("Middle"));
+				QCOMPARE(variables->item(2, 0)->text(), QStringLiteral("Zulu"));
+				variables->item(0, 0)->setText(QStringLiteral("Omega"));
+				variables->item(0, 1)->setText(QStringLiteral("edited"));
+				runtime.setVariable(QStringLiteral("Zulu"), QStringLiteral("live"));
+				runtime.setVariable(QStringLiteral("Beta"), QStringLiteral("new"));
+				dialog.accept();
+				QCOMPARE(runtime.variableCount(), 4);
+				const auto result = runtime.variableSnapshot();
+				QVERIFY(!result.contains(QStringLiteral("alpha")));
+				QCOMPARE(result.value(QStringLiteral("omega")).content, QStringLiteral("edited"));
+				QCOMPARE(result.value(QStringLiteral("omega")).label, QStringLiteral("Omega"));
+				QCOMPARE(result.value(QStringLiteral("middle")).content, QStringLiteral("M"));
+				QCOMPARE(result.value(QStringLiteral("zulu")).content, QStringLiteral("live"));
+				QCOMPARE(result.value(QStringLiteral("beta")).content, QStringLiteral("new"));
+				QCOMPARE(issued.value(QStringLiteral("alpha")).content, QStringLiteral("A"));
+				QCOMPARE(issued.value(QStringLiteral("zulu")).content, QStringLiteral("Z"));
+			}
+
 			void inlineVariableEditIsStagedUntilMainDialogAcceptance()
 			{
 				auto configureRuntime = [](WorldRuntime &runtime)
@@ -3157,9 +3267,9 @@ namespace
 					QTableWidget *table = findVariablesTable(dialog);
 					QVERIFY(table);
 					table->item(0, 1)->setText(QStringLiteral("20"));
-					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
+					QCOMPARE(runtime.variables().constBegin().value().content, QStringLiteral("10"));
 					dialog.reject();
-					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
+					QCOMPARE(runtime.variables().constBegin().value().content, QStringLiteral("10"));
 				}
 
 				{
@@ -3170,9 +3280,9 @@ namespace
 					QTableWidget *table = findVariablesTable(dialog);
 					QVERIFY(table);
 					table->item(0, 1)->setText(QStringLiteral("20"));
-					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
+					QCOMPARE(runtime.variables().constBegin().value().content, QStringLiteral("10"));
 					dialog.accept();
-					QCOMPARE(runtime.variables().front().content, QStringLiteral("20"));
+					QCOMPARE(runtime.variables().constBegin().value().content, QStringLiteral("20"));
 				}
 			}
 

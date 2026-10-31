@@ -13,6 +13,7 @@
 #include "MainFrame.h"
 #include "MiniWindow.h"
 #include "NativePluginRegistry.h"
+#include "PluginStatePersistenceTestAccess.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
 #include "WorldCommandProcessorUtils.h"
@@ -33,6 +34,7 @@
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QScopedPointer>
+#include <QSemaphore>
 #include <QTcpServer>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTcpSocket>
@@ -42,6 +44,7 @@
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 #include <algorithm>
+#include <atomic>
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 extern "C"
@@ -164,6 +167,7 @@ namespace
 	 */
 	bool readTextFile(const QString &path, QString &text)
 	{
+		PluginStatePersistence::instance().flush(QFileInfo(path).absoluteFilePath());
 		QFile file(path);
 		if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
 			return false;
@@ -334,6 +338,8 @@ end
 
 function OnPluginTelnetSubnegotiation(msg_type, data)
   qcb_append_order("telnet")
+  local count = GetLinesInBufferCount()
+  SetVariable("telnet_current_line", GetLineInfo(count, 1) or "")
   Note("telnet-note-b73")
   Send("qcmd-telnet-b73")
 end
@@ -549,12 +555,12 @@ end
 function OnPluginConnect()
   local count = GetLinesInBufferCount()
   SetVariable("observed_count", string.format("%.0f", count))
-  SetVariable("observed_last_line", GetLineInfo(count, 1) or "<nil>")
+  SetVariable("observed_last_line", GetLineInfo(count - 1, 1) or "<nil>")
 end
 function OnPluginDisconnect()
   local count = GetLinesInBufferCount()
   SetVariable("observed_unsuspended_count", string.format("%.0f", count))
-  SetVariable("observed_unsuspended_last_line", GetLineInfo(count, 1) or "<nil>")
+  SetVariable("observed_unsuspended_last_line", GetLineInfo(count - 1, 1) or "<nil>")
 end
 ]]></script>
   </plugin>
@@ -802,6 +808,8 @@ end
     <script><![CDATA[
 function OnPluginMXPsetEntity(payload)
   SetVariable("mxp_entity_payload", payload)
+  local count = GetLinesInBufferCount()
+  SetVariable("mxp_entity_current_line", GetLineInfo(count, 1) or "")
 end
 
 function OnPluginLineReceived(payload)
@@ -935,7 +943,7 @@ end
 		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
 		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 		trigger.children.insert(QStringLiteral("send"),
-		                        QStringLiteral("Note(\"[695, 770]\")\nNote(\"0 0 +196\")"));
+		                        QStringLiteral("Note(\"[111, 222]\")\nNote(\"0 0 +123\")"));
 		return trigger;
 	}
 
@@ -1186,7 +1194,7 @@ end
 	{
 		QTRY_COMPARE_WITH_TIMEOUT(lines.size(), qsizetype{2}, 1000);
 		QCOMPARE(lines.at(0).text, QStringLiteral("start-"));
-		QCOMPARE(lines.at(1).text, QStringLiteral("newbie"));
+		QCOMPARE(lines.at(1).text, QStringLiteral("sample"));
 		QVERIFY(!lines.at(0).spans.isEmpty());
 		QVERIFY(!lines.at(1).spans.isEmpty());
 		QCOMPARE(lines.at(0).spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
@@ -1200,7 +1208,7 @@ end
 	 * @param runtime Runtime to configure.
 	 * @param tempDir Temporary root directory.
 	 */
-	void configureFocusCallbackRuntime(WorldRuntime &runtime, const QTemporaryDir &tempDir)
+	void configureFocusCallbackRuntime(WorldRuntime &runtime, const PluginStateTestDirectory &tempDir)
 	{
 		runtime.setStartupDirectory(tempDir.path());
 		runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
@@ -1769,7 +1777,7 @@ SetVariable("dynamic_import_status", ok and string.format("%.0f", imported) or t
 
 		static void pluginIdsAreCanonicalizedAtXmlAndApiBoundaries()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString uppercaseId = QStringLiteral("ABCDEFABCDEFABCDEFABCDEF");
 			const QString lowercaseId = uppercaseId.toLower();
@@ -1886,6 +1894,8 @@ end
 		static void reloadMccpCleanEndRecordsSuccess()
 		{
 			WorldRuntime runtime;
+			WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+			WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 			activateMccp2(runtime);
 			QVERIFY(runtime.isCompressing());
 
@@ -1900,6 +1910,8 @@ end
 		static void reloadMccpNoResponseRemainsPendingUntilPreparationClears()
 		{
 			WorldRuntime runtime;
+			WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+			WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 			activateMccp2(runtime);
 			QVERIFY(runtime.isCompressing());
 
@@ -2371,12 +2383,12 @@ end
 			                 });
 
 			runtime.receiveRawData(
-			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
+			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityResolvesCurrentPartialLineWithExistingBuffer()
@@ -2399,12 +2411,12 @@ end
 			                 });
 
 			runtime.receiveRawData(
-			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
+			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityIgnoresInsertedOutputWhileBodyStaysPartial()
@@ -2424,12 +2436,12 @@ end
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-"));
 			runtime.addLine(QStringLiteral("inserted-output"), WorldRuntime::LineOutput);
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityTreatsCommittedPartialAsStaleCurrentLine()
@@ -2449,12 +2461,12 @@ end
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1zprefix <send href=\"help &text;\">start-"));
 			QVERIFY(WorldRuntimeTestAccess::commitPendingIncomingPartialLineStorage(runtime));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
-			QCOMPARE(line, QStringLiteral("newbie"));
+			QCOMPARE(line, QStringLiteral("sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityReplacementIsNotRecursive()
@@ -2497,12 +2509,12 @@ end
 			                 });
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<!ELEMENT help '<send href=\"help &text;\">'>"));
-			runtime.receiveRawData(QByteArrayLiteral("<help>start-newbie</help>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("<help>start-sample</help>\n"));
 
-			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QCOMPARE(line, QStringLiteral("start-sample"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-sample"));
 		}
 
 		static void mxpSendTextEntityResolvesAcrossCompletedLines()
@@ -2513,10 +2525,10 @@ end
 			QVERIFY(harness.showAndWait());
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<send href=\"help &text;\">start-\n"));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
 			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
-			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nnewbie"));
+			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nsample"));
 		}
 
 		static void mxpSendTextEntityIgnoresCallbackLinesInsertedBeforeActionStart()
@@ -2533,18 +2545,18 @@ end
 			QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(actionStartLineNumber, 1, 0, false,
 			                                                   QStringLiteral("callback"),
 			                                                   WorldRuntime::LineNote, {}, true));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</send>\n"));
 
 			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
 			QTRY_COMPARE_WITH_TIMEOUT(lines.size(), qsizetype{3}, 1000);
 			QCOMPARE(lines.at(0).text, QStringLiteral("callback"));
 			QCOMPARE(lines.at(1).text, QStringLiteral("start-"));
-			QCOMPARE(lines.at(2).text, QStringLiteral("newbie"));
+			QCOMPARE(lines.at(2).text, QStringLiteral("sample"));
 			QVERIFY(lines.at(0).spans.isEmpty());
 			QVERIFY(!lines.at(1).spans.isEmpty());
 			QVERIFY(!lines.at(2).spans.isEmpty());
-			QCOMPARE(lines.at(1).spans.first().action, QStringLiteral("help start-\nnewbie"));
-			QCOMPARE(lines.at(2).spans.first().action, QStringLiteral("help start-\nnewbie"));
+			QCOMPARE(lines.at(1).spans.first().action, QStringLiteral("help start-\nsample"));
+			QCOMPARE(lines.at(2).spans.first().action, QStringLiteral("help start-\nsample"));
 		}
 
 		static void mxpCustomElementTextEntityResolvesAcrossCompletedLines()
@@ -2556,10 +2568,10 @@ end
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<!ELEMENT help '<send href=\"help &text;\">'>"));
 			runtime.receiveRawData(QByteArrayLiteral("<help>start-\n"));
-			runtime.receiveRawData(QByteArrayLiteral("newbie</help>\n"));
+			runtime.receiveRawData(QByteArrayLiteral("sample</help>\n"));
 
 			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
-			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nnewbie"));
+			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nsample"));
 		}
 
 		static void mxpSendTextEntityResolutionUsesCompleteBodyText()
@@ -2678,14 +2690,14 @@ end
 
 			runtime.receiveRawData(bytes({IAC, SB, 91, IAC, SE}));
 
-			QByteArray payload = QByteArrayLiteral("There are 10 characters on.\r\n\r\n");
+			QByteArray payload = QByteArrayLiteral("Sample output before prompt.\r\n\r\n");
 			payload.append(
-			    QByteArrayLiteral("\x1B[3z\x1B[0;32m\x1B[1;33m<Ex>N</Ex><Ex>Sw</Ex>\x1B[0;32m 2:30pm "
-			                      "\x1B[1;31m32/32hp \x1B[1;34m100/100m \x1B[0;35m300mv "
-			                      "\x1B[0;32m2000xp\x1B[0;32m&gt; \x1B[0;37m"));
+			    QByteArrayLiteral("\x1B[3z\x1B[0;32m\x1B[1;33m<Ex>A</Ex><Ex>Bc</Ex>\x1B[0;32m 1:00pm "
+			                      "\x1B[1;31m10/10aa \x1B[1;34m200/200b \x1B[0;35m300cc "
+			                      "\x1B[0;32m4000dd\x1B[0;32m&gt; \x1B[0;37m"));
 			runtime.receiveRawData(payload);
 
-			const QString expectedPrompt = QStringLiteral("NSw 2:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			const QString expectedPrompt = QStringLiteral("ABc 1:00pm 10/10aa 200/200b 300cc 4000dd> ");
 			QTRY_VERIFY(!partialLines.isEmpty());
 			QCOMPARE(partialLines.constLast(), expectedPrompt);
 			QCOMPARE(partialSpans.size(), partialLines.size());
@@ -2774,7 +2786,7 @@ end
 
 		static void mushReaderPluginTriggerSpeaksOnlyCompletedPresentedLines()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -2836,7 +2848,7 @@ end
 
 		static void mushReaderEnabledUserEchoCommitsPartialLineBeforeEcho()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -2917,7 +2929,7 @@ end
 
 		static void legacyEncodingMxpSetEntityCallbackPayloadUsesInternalUtf8()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -2953,7 +2965,7 @@ end
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_payload")),
 			    QStringLiteral("partial"));
 
-			QByteArray payload = QByteArrayLiteral("\x1B[1z<!ENTITY server '");
+			QByteArray payload = QByteArrayLiteral("-before-entity\x1B[1z<!ENTITY server '");
 			payload.append(QByteArray::fromHex("D6D0CEC4"));
 			payload.append("'>");
 			runtime.receiveRawData(payload);
@@ -2961,14 +2973,20 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("mxp_entity_payload")),
 			    QStringLiteral("server=中文"), 5000);
+			QCOMPARE(pluginVariable(runtime, kMxpEntityCallbackPluginId,
+			                        QStringLiteral("mxp_entity_current_line")),
+			         QStringLiteral("partial-before-entity"));
 			QCOMPARE(
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_count")),
-			    QStringLiteral("1"));
+			    QStringLiteral("2"));
+			QCOMPARE(
+			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_payload")),
+			    QStringLiteral("partial-before-entity"));
 		}
 
 		static void mxpParserContinuesAfterEarlierLineCallbackSuspends()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3151,7 +3169,7 @@ end
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
 			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie\3/send\4"), 0, 0, 319, 79,
+			    QStringLiteral("\3send href=\"help &text;\"\4start-sample\3/send\4"), 0, 0, 319, 79,
 			    0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
@@ -3162,7 +3180,7 @@ end
 			QCOMPARE(actionSpy.count(), 1);
 			const QList<QVariant> action = actionSpy.takeFirst();
 			QCOMPARE(action.at(0).toInt(), static_cast<int>(WorldRuntime::ActionSend));
-			QCOMPARE(action.at(1).toString(), QStringLiteral("help start-newbie"));
+			QCOMPARE(action.at(1).toString(), QStringLiteral("help start-sample"));
 		}
 
 		static void miniWindowUnclosedTextEntityActionIsNotHotspot()
@@ -3174,7 +3192,7 @@ end
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
 			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie"), 0, 0, 319, 79, 0x00FFFFFF,
+			    QStringLiteral("\3send href=\"help &text;\"\4start-sample"), 0, 0, 319, 79, 0x00FFFFFF,
 			    QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
@@ -3184,7 +3202,7 @@ end
 
 		static void hiddenConnectDisconnectMessagesDoNotSuppressPluginLifecycleCallbacks()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3220,7 +3238,7 @@ end
 
 		static void hiddenConnectDisconnectMessagesDoNotSuppressLifecycleActions()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3285,7 +3303,7 @@ end
 
 		static void focusCallbacksFollowMushclientWorldThenPluginOrder()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3356,7 +3374,7 @@ end
 
 		static void focusCallbacksPreserveRapidOppositeTransitions()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3488,7 +3506,7 @@ end
 
 		static void suspendedRecipientRefreshesSnapshotForFollowingPlugin()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3530,7 +3548,7 @@ end
 
 		static void deferredMutationRefreshesSnapshotBeforeFollowingPlugin()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3573,7 +3591,7 @@ end
 
 		static void suspendedLifecycleMutationPrunesDisabledRemainingRecipient()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -3616,7 +3634,7 @@ end
 
 		static void lifecycleMutationPrunesUnloadedRemainingRecipient()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -3653,7 +3671,7 @@ end
 
 		static void continuedDispatchPreservesRecipientStopPolicies()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -3775,7 +3793,6 @@ end
 			callbackRequest.callbackSnapshotArg =
 			    runtime.captureLuaCallbackSnapshotForRequest(callbackRequest);
 			bool                   completionCalled                        = false;
-			bool                   presentationCommitCalled                = false;
 			bool                   presentationCommittedBeforeCancellation = false;
 			bool                   finalCompletionCalledBeforeCancellation = false;
 			bool                   suspensionObserved                      = false;
@@ -3788,7 +3805,9 @@ end
 			    {
 				    if (runtime.m_suspendedPluginCallbackDispatches.size() != 1)
 					    return false;
-				    presentationCommittedBeforeCancellation = presentationCommitCalled;
+				    presentationCommittedBeforeCancellation =
+				        std::ranges::any_of(runtime.lines(), [](const WorldRuntime::LineEntry &line)
+				                            { return line.text == QStringLiteral("cancellation output"); });
 				    finalCompletionCalledBeforeCancellation = completionCalled;
 				    const auto suspendedIt = runtime.m_suspendedPluginCallbackDispatches.constBegin();
 				    runtimeResumeId        = suspendedIt.key();
@@ -3809,7 +3828,7 @@ end
 				    completionCalled = true;
 				    completionResult = result;
 			    },
-			    false, false, false, [&presentationCommitCalled] { presentationCommitCalled = true; }));
+			    false, false, false));
 
 			QTRY_VERIFY_WITH_TIMEOUT(modalDeliveryObserver.observed(), 5000);
 			QVERIFY(suspensionObserved);
@@ -4519,7 +4538,7 @@ end
 
 		static void executeTimerMultilineActionRunsEachCommandWithoutBlankLines()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -4557,15 +4576,15 @@ end
 			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 
-			const QString prompt = QStringLiteral("[SAFE]<2083hp 2220sp 1990st> ");
+			const QString prompt = QStringLiteral("[TEST]<1000aa 2000bb 3000cc> ");
 			WorldRuntimeTestAccess::triggers(runtime).push_back(makePromptNoteTrigger(prompt));
 			runtime.markTriggersChanged();
 
 			RuntimeCommandHarness harness(runtime);
 			QVERIFY(harness.showAndWait());
 
-			harness.processor.onIncomingStyledLineReceived(QStringLiteral("(Mount: 2614st)"), {});
-			QTRY_VERIFY_WITH_TIMEOUT(harness.view.outputLines().contains(QStringLiteral("(Mount: 2614st)")),
+			harness.processor.onIncomingStyledLineReceived(QStringLiteral("(Value: 1000aa)"), {});
+			QTRY_VERIFY_WITH_TIMEOUT(harness.view.outputLines().contains(QStringLiteral("(Value: 1000aa)")),
 			                         5000);
 
 			harness.processor.onIncomingStyledLinePartialReceived(prompt, {});
@@ -4578,8 +4597,8 @@ end
 				if (lines.size() < 4)
 					return false;
 				const QStringList tailLines = lines.sliced(lines.size() - 4);
-				return tailLines == QStringList{QStringLiteral("(Mount: 2614st)"), prompt,
-				                                QStringLiteral("[695, 770]"), QStringLiteral("0 0 +196")} &&
+				return tailLines == QStringList{QStringLiteral("(Value: 1000aa)"), prompt,
+				                                QStringLiteral("[111, 222]"), QStringLiteral("0 0 +123")} &&
 				       std::ranges::none_of(tailLines, [](const QString &line) { return line.isEmpty(); });
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(tailLinesMatch(), 5000);
@@ -4673,7 +4692,7 @@ end
 
 		static void packetDebugDisconnectWaitsForRemainingCausalOutboundTransmissions()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -4740,7 +4759,7 @@ end
 
 		static void packetDebugSendRemainsBehindAlreadyStagedCausalTransmissions()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -4804,7 +4823,7 @@ end
 
 		static void causalOutboundTransmissionPreservesOriginatingActionSourceForPacketDebug()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -5001,7 +5020,7 @@ Note("post-ansi-output")
 			QCOMPARE(lines.sliced(lines.size() - expected.size()), expected);
 			QVERIFY(!lines.contains(QStringLiteral("ansi-ordered-origin")));
 			QCOMPARE(worldVariable(runtime, QStringLiteral("ansi_callback_lines")),
-			         QStringLiteral("3|prior-trigger-output|ansi-replacement-output"));
+			         QStringLiteral("4|ansi-replacement-output|following-partial"));
 		}
 
 		static void keepEvaluatingTriggerOutputRetainsActionOrderWhenMatchedLineIsOmitted_data()
@@ -5345,7 +5364,7 @@ ColourNote("red", "black", "single-note-two")
 
 		static void directLuaTriggerCallPluginSendDoesNotInheritDirectActionPriorityQueueBand()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5402,7 +5421,7 @@ ColourNote("red", "black", "single-note-two")
 
 		static void telnetSubnegotiationCallbacksPreserveStreamOrderAfterCompletedTriggerLine()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5455,8 +5474,8 @@ ColourNote("red", "black", "single-note-two")
 
 		static void iacGaCallbackResumesAfterCompletedTriggerLine()
 		{
-			QTemporaryDir tempDir(QDir(QCoreApplication::applicationDirPath())
-			                          .filePath(QStringLiteral("iac-ga-continuation-XXXXXX")));
+			PluginStateTestDirectory tempDir(QDir(QCoreApplication::applicationDirPath())
+			                                     .filePath(QStringLiteral("iac-ga-continuation-XXXXXX")));
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5512,7 +5531,7 @@ ColourNote("red", "black", "single-note-two")
 
 		static void telnetOnlyCallbackOutputPreservesVisiblePartialLine()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5546,18 +5565,25 @@ ColourNote("red", "black", "single-note-two")
 			runtime.receiveRawData(QByteArrayLiteral("visible-partial"));
 			QCOMPARE(harness.view.outputLines().constLast(), QStringLiteral("visible-partial"));
 
-			runtime.receiveRawData(bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE}));
+			QByteArray callbackPayload = QByteArrayLiteral("-continued");
+			callbackPayload += bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE});
+			runtime.receiveRawData(callbackPayload);
 			QStringList afterCallback;
 			auto        callbackOutputPresented = [&]
 			{
 				afterCallback = harness.view.outputLines();
 				return afterCallback.size() >= 2 &&
 				       afterCallback.sliced(afterCallback.size() - 2) ==
-				           QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")};
+				           QStringList{QStringLiteral("telnet-note-b73"),
+				                       QStringLiteral("visible-partial-continued")};
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(callbackOutputPresented(), 5000);
 			QCOMPARE(afterCallback.sliced(afterCallback.size() - 2),
-			         (QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")}));
+			         (QStringList{QStringLiteral("telnet-note-b73"),
+			                      QStringLiteral("visible-partial-continued")}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("telnet_current_line")),
+			    QStringLiteral("visible-partial-continued"), 5000);
 
 			runtime.receiveRawData(QByteArrayLiteral("\r\n"));
 			QStringList afterCompletion;
@@ -5566,11 +5592,13 @@ ColourNote("red", "black", "single-note-two")
 				afterCompletion = harness.view.outputLines();
 				return afterCompletion.size() >= 2 &&
 				       afterCompletion.sliced(afterCompletion.size() - 2) ==
-				           QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")};
+				           QStringList{QStringLiteral("telnet-note-b73"),
+				                       QStringLiteral("visible-partial-continued")};
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(completedLinePresented(), 5000);
 			QCOMPARE(afterCompletion.sliced(afterCompletion.size() - 2),
-			         (QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")}));
+			         (QStringList{QStringLiteral("telnet-note-b73"),
+			                      QStringLiteral("visible-partial-continued")}));
 		}
 
 		static void delayedTelnetBroadcastOutputRetainsEventPosition()
@@ -5645,7 +5673,7 @@ end
 
 		static void telnetSubnegotiationCallbacksUsePacketTransformedStreamOrder()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5689,7 +5717,7 @@ end
 
 		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterFilteredBytes()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5735,7 +5763,7 @@ end
 
 		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterRemovedPuebloMarker()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -5782,7 +5810,7 @@ end
 
 		static void pluginEnableRevalidatesTargetAfterCallbackPluginRemoval()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -5850,7 +5878,7 @@ end
 
 		static void pluginUnloadRevalidatesTargetAfterCloseCallbackPluginRemoval()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -5894,9 +5922,197 @@ end
 			QVERIFY(runtime.isPluginInstalled(sentinelId));
 		}
 
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+		/** @brief Exercises unload through both ordinary C++ and Lua mutation continuation paths. */
+		static void pluginUnloadLeavesOtherWorldsThrottled_data()
+		{
+			QTest::addColumn<bool>("continuable");
+			QTest::newRow("ordinary") << false;
+			QTest::newRow("lua-continuation") << true;
+		}
+
+		/** @brief Final unload handoff does not wait for disk or expedite another world's pending state. */
+		static void pluginUnloadLeavesOtherWorldsThrottled()
+		{
+			QFETCH(bool, continuable);
+			PluginStateTestDirectory directory;
+			QVERIFY(directory.isValid());
+			const QString targetId = QStringLiteral("1234567890abcdef12345678");
+			const QString driverId = QStringLiteral("234567890abcdef123456789");
+			const QString otherId  = QStringLiteral("34567890abcdef1234567890");
+			const QString targetPath =
+			    QDir(directory.path())
+			        .filePath(QStringLiteral("target-") + targetId + QStringLiteral("-state.xml"));
+			const QString otherPath =
+			    QDir(directory.path())
+			        .filePath(QStringLiteral("other-") + otherId + QStringLiteral("-state.xml"));
+			auto &service       = PluginStatePersistence::instance();
+			auto  originalClock = PluginStatePersistenceTestAccess::replaceClock(
+			    service, [] { return PluginStatePersistence::TimePoint{}; });
+			const auto restoreClock = qScopeGuard(
+			    [&]
+			    {
+				    static_cast<void>(PluginStatePersistenceTestAccess::replaceClock(service, originalClock));
+			    });
+			QSemaphore                     started, unloadFinished;
+			std::atomic_bool               gateArmed{false}, observedUnloadCompletion{false};
+			PluginStatePersistence::Writer original;
+			original = PluginStatePersistenceTestAccess::replaceWriter(
+			    service,
+			    [&](const PluginStatePersistence::Snapshot &snapshot, QString &error)
+			    {
+				    if (snapshot.targetFilePath == targetPath && gateArmed.exchange(false))
+				    {
+					    started.release();
+					    observedUnloadCompletion = unloadFinished.tryAcquire(1, 5000);
+				    }
+				    return original(snapshot, error);
+			    });
+			const auto restoreWriter = qScopeGuard(
+			    [&]
+			    { static_cast<void>(PluginStatePersistenceTestAccess::replaceWriter(service, original)); });
+			const auto   unblock = qScopeGuard([&] { unloadFinished.release(); });
+			WorldRuntime other;
+			other.setStartupDirectory(QDir::currentPath());
+			other.setStateFilesDirectory(directory.path());
+			other.setWorldAttribute(QStringLiteral("id"), QStringLiteral("other"));
+			WorldRuntime::Plugin otherPlugin;
+			otherPlugin.attributes.insert(QStringLiteral("id"), otherId);
+			otherPlugin.enabled = true;
+			WorldRuntimeTestAccess::plugins(other).push_back(otherPlugin);
+			WorldRuntimeTestAccess::commitPluginStructure(other);
+			other.setPluginVariableValue(otherId, QStringLiteral("value"), QStringLiteral("initial"));
+			QCOMPARE(other.savePluginState(otherId, true), eOK);
+			service.flush(otherPath);
+			const auto otherForcedBefore =
+			    PluginStatePersistenceTestAccess::forcedRevision(service, otherPath);
+			WorldRuntime target;
+			target.setStartupDirectory(QDir::currentPath());
+			target.setStateFilesDirectory(directory.path());
+			target.setWorldAttribute(QStringLiteral("id"), QStringLiteral("target"));
+			const QString targetFile = QDir(directory.path()).filePath(QStringLiteral("target.xml"));
+			QVERIFY(writeTextFile(targetFile, QStringLiteral(R"xml(<qmud>
+<plugin id="%1" name="UnloadTarget" language="lua" enabled="y" save_state="y">
+<script><![CDATA[
+function OnPluginClose() SetVariable("closed", "yes") end
+function OnPluginSaveState() SetVariable("saved_closed", GetVariable("closed") or "no") end
+]]></script></plugin></qmud>)xml")
+			                                      .arg(targetId)));
+			const QString driverFile = QDir(directory.path()).filePath(QStringLiteral("driver.xml"));
+			QVERIFY(writeTextFile(driverFile, QStringLiteral(R"xml(<qmud>
+<plugin id="%1" name="UnloadDriver" language="lua" enabled="y" save_state="n">
+<script><![CDATA[
+function unload_target(_)
+  assert(UnloadPlugin("%2") == 0)
+  SetVariable("returned", "yes")
+  return "done"
+end
+]]></script></plugin></qmud>)xml")
+			                                      .arg(driverId, targetId)));
+			QString error;
+			QVERIFY2(target.loadPluginFile(targetFile, &error), qPrintable(error));
+			QVERIFY2(target.loadPluginFile(driverFile, &error), qPrintable(error));
+			QCOMPARE(target.savePluginState(targetId, true), eOK);
+			service.flush(targetPath);
+			other.setPluginVariableValue(otherId, QStringLiteral("value"), QStringLiteral("pending"));
+			QCOMPARE(other.savePluginState(otherId, true), eOK);
+			gateArmed = true;
+			if (continuable)
+			{
+				LuaBatchDispatchRequest request;
+				request.kind         = LuaBatchDispatchKind::StringInOut;
+				request.functionName = QStringLiteral("unload_target");
+				request.engines      = {target.pluginForId(driverId)->lua};
+				const auto result =
+				    WorldRuntimeTestAccess::queuePluginCallbackDispatchResult(target, request);
+				QCOMPARE(result.stringResult, QStringLiteral("done"));
+				QCOMPARE(target.pluginVariableValue(driverId, QStringLiteral("returned")),
+				         QStringLiteral("yes"));
+			}
+			else
+				QVERIFY2(target.unloadPlugin(targetId, &error), qPrintable(error));
+			unloadFinished.release();
+			QVERIFY(!target.isPluginInstalled(targetId));
+			QVERIFY(started.tryAcquire(1, 5000));
+			service.flush(targetPath);
+			QVERIFY(observedUnloadCompletion.load());
+			QCOMPARE(PluginStatePersistenceTestAccess::forcedRevision(service, otherPath), otherForcedBefore);
+			QCOMPARE(PluginStatePersistenceTestAccess::pendingValue(service, otherPath),
+			         QStringLiteral("pending"));
+			QString saved;
+			QVERIFY(readTextFile(targetPath, saved));
+			QCOMPARE(savedStateVariable(saved, QStringLiteral("saved_closed")), QStringLiteral("yes"));
+		}
+#endif
+
+		/** @brief A first queued save is drained before the loader tests for file existence. */
+		static void pluginLoadDrainsPendingFirstSaveBeforeCheckingExistence()
+		{
+			PluginStateTestDirectory directory;
+			QVERIFY(directory.isValid());
+			const QString pluginId   = QStringLiteral("0123456789abcdef01234567");
+			const QString pluginPath = QDir(directory.path()).filePath(QStringLiteral("test.xml"));
+			const QString statePath =
+			    QDir(directory.path())
+			        .filePath(QStringLiteral("world-") + pluginId + QStringLiteral("-state.xml"));
+			QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"xml(<qmud>
+<plugin id="%1" name="PendingFirstSave" language="lua" enabled="y" save_state="n">
+<variables><variable name="Value">embedded</variable></variables>
+</plugin></qmud>)xml")
+			                                      .arg(pluginId)));
+			auto                          &service = PluginStatePersistence::instance();
+			QSemaphore                     started, release;
+			bool                           first = true;
+			PluginStatePersistence::Writer original;
+			original = PluginStatePersistenceTestAccess::replaceWriter(
+			    service,
+			    [&](const PluginStatePersistence::Snapshot &snapshot, QString &error)
+			    {
+				    if (snapshot.targetFilePath == statePath && first)
+				    {
+					    first = false;
+					    started.release();
+					    release.acquire();
+				    }
+				    return original(snapshot, error);
+			    });
+			const auto restoreWriter = qScopeGuard(
+			    [&]
+			    { static_cast<void>(PluginStatePersistenceTestAccess::replaceWriter(service, original)); });
+			const auto   unblock = qScopeGuard([&] { release.release(); });
+			WorldRuntime producer;
+			producer.setStartupDirectory(QDir::currentPath());
+			producer.setStateFilesDirectory(directory.path());
+			producer.setWorldAttribute(QStringLiteral("id"), QStringLiteral("world"));
+			QString error;
+			QVERIFY2(producer.loadPluginFile(pluginPath, &error), qPrintable(error));
+			producer.setPluginVariableValue(pluginId, QStringLiteral("Value"), QStringLiteral("saved"));
+			QCOMPARE(producer.savePluginState(pluginId, true), eOK);
+			QVERIFY(started.tryAcquire(1, 5000));
+			QVERIFY(!QFileInfo::exists(statePath));
+			producer.setPluginVariableValue(pluginId, QStringLiteral("Value"), QStringLiteral("unsaved"));
+			WorldRuntime reader;
+			reader.setStartupDirectory(QDir::currentPath());
+			reader.setStateFilesDirectory(directory.path());
+			reader.setWorldAttribute(QStringLiteral("id"), QStringLiteral("world"));
+			bool        observedDrain = false;
+			std::thread releaser(
+			    [&]
+			    {
+				    observedDrain = PluginStatePersistenceTestAccess::waitForced(service, statePath);
+				    release.release();
+			    });
+			auto joinReleaser = qScopeGuard([&] { releaser.join(); });
+			QVERIFY2(reader.loadPluginFile(pluginPath, &error), qPrintable(error));
+			releaser.join();
+			joinReleaser.dismiss();
+			QVERIFY(observedDrain);
+			QCOMPARE(reader.pluginVariableValue(pluginId, QStringLiteral("value")), QStringLiteral("saved"));
+		}
+
 		static void pluginSaveStateRevalidatesTargetAfterCallbackPluginRemoval()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			const QString stateDir   = QDir(tempDir.path()).filePath(QStringLiteral("state"));
@@ -5963,7 +6179,7 @@ end
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		static void callPluginLuaKeepsTargetMetadataAcrossCallbackPluginRemoval()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -6022,7 +6238,7 @@ end
 
 		static void teardownRevalidatesPluginsAfterCloseCallbackPluginRemoval()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			const QString stateDir   = QDir(tempDir.path()).filePath(QStringLiteral("state"));
@@ -6099,7 +6315,7 @@ end
 
 		static void teardownPluginCloseRunsBeforeSaveStateWithQueuedAsyncCallback()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString originalCurrentPath = QDir::currentPath();
@@ -6182,7 +6398,7 @@ end
 
 		static void nativeShimPluginSourceSurvivesWorldSaveReload()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString worldsDir  = QDir(tempDir.path()).filePath(QStringLiteral("worlds"));
@@ -6304,7 +6520,8 @@ end
 		 */
 		static void nativeLuaAudioVariablesUsePluginStateLifecycle()
 		{
-			QTemporaryDir tempDir(QDir::current().filePath(QStringLiteral("native_audio_state_XXXXXX")));
+			PluginStateTestDirectory tempDir(
+			    QDir::current().filePath(QStringLiteral("native_audio_state_XXXXXX")));
 			QVERIFY(tempDir.isValid());
 
 			const QString stateDir = QDir(tempDir.path()).filePath(QStringLiteral("state"));
@@ -6361,6 +6578,7 @@ end
 
 			const QString stateFile =
 			    QDir(stateDir).filePath(worldId + QLatin1Char('-') + audioId + QStringLiteral("-state.xml"));
+			PluginStatePersistence::instance().flush(stateFile);
 			QVERIFY(QFileInfo::exists(stateFile));
 
 			WorldRuntime restored;
@@ -6386,7 +6604,7 @@ end
 
 		static void pluginReorderPersistsEffectiveSequenceWithoutChangingDeclaredMetadata()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString worldsDir  = QDir(tempDir.path()).filePath(QStringLiteral("worlds"));
@@ -6547,7 +6765,7 @@ end
 
 		static void localPluginEnabledOverridesRoundTripInBothDirections()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString worldsDir  = QDir(tempDir.path()).filePath(QStringLiteral("worlds"));
@@ -6649,7 +6867,7 @@ end
 
 		static void equalSequencePluginReorderPersistsByIncludeOrder()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString worldsDir  = QDir(tempDir.path()).filePath(QStringLiteral("worlds"));
@@ -6776,7 +6994,7 @@ end
 
 		static void persistentPluginMembershipDirtinessIsCentralized()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -6814,7 +7032,7 @@ end
 
 		static void luaPluginMembershipApisUseCentralizedDirtiness()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -7013,7 +7231,7 @@ end
 
 		static void globalPluginEnabledOverridesDirtyAndRoundTrip()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			const QString stateDir   = QDir(tempDir.path()).filePath(QStringLiteral("state"));
@@ -7204,7 +7422,7 @@ end
 
 		static void reloadPreservesRequestedDisabledStateWhileInstallIsPending()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -7261,7 +7479,7 @@ end
 
 		static void installCompletionDoesNotConsumeSameIdReplacementInstall()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -7382,7 +7600,7 @@ end
 
 		static void disableCompletionDoesNotConsumeSameIdReplacementInstall()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -7445,7 +7663,7 @@ end
 
 		static void globalPluginInstallRejectionPersistsDisabledState()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
 			QVERIFY(QDir().mkpath(pluginsDir));
@@ -7496,7 +7714,7 @@ end
 
 		static void mushReaderPluginInfoEnabledIgnoresQtAccessibilitySpeechToggle()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString worldsDir  = QDir(tempDir.path()).filePath(QStringLiteral("worlds"));
@@ -7670,7 +7888,7 @@ end
 
 		static void deferredWorldConnectHandlersRunOnceAfterPluginInstallCompletes()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -7742,7 +7960,7 @@ end
 
 		static void pluginInstallDrawNotificationUsesPresentedViewport()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
@@ -7863,7 +8081,7 @@ end
 
 		static void pluginInstallWithoutPresentationDoesNotSynthesizeDrawViewport()
 		{
-			QTemporaryDir tempDir;
+			PluginStateTestDirectory tempDir;
 			QVERIFY(tempDir.isValid());
 
 			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));

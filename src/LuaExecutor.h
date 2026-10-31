@@ -9,11 +9,13 @@
 
 #ifndef QMUD_LUAEXECUTOR_H
 #define QMUD_LUAEXECUTOR_H
+#include "helpers/VariableMapUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include "AnsiSgrParseUtils.h"
 #include "Flags.h"
 #include "MiniWindow.h"
+#include "SoundEngine.h"
 #include "TelnetProcessor.h"
 
 #include <QByteArray>
@@ -62,6 +64,208 @@ struct MiniWindow;
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 struct lua_State;
 #endif
+
+/**
+ * @brief Shared runtime identities for lines created by one deferred Lua callback output sequence.
+ *
+ * Identity numbers are allocated by the Lua worker. Ordered output playback publishes and resolves committed line
+ * numbers on the runtime thread, so the runtime-owned table itself needs no cross-thread synchronization.
+ */
+class LuaCallbackDeferredLineIdentityState final
+{
+	public:
+		/**
+		 * @brief Allocates one nonzero deferred line identity.
+		 * @return Process-local identity within this callback output sequence.
+		 */
+		[[nodiscard]] quint64 allocateIdentity() noexcept
+		{
+			return m_nextIdentity.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		/**
+		 * @brief Publishes the runtime line committed for one deferred identity.
+		 * @param identity Deferred identity allocated by @ref allocateIdentity.
+		 * @param absoluteLineNumber Committed `LineEntry::lineNumber` value.
+		 */
+		void publish(const quint64 identity, const qint64 absoluteLineNumber)
+		{
+			if (identity == 0 || absoluteLineNumber <= 0 ||
+			    identity > static_cast<quint64>(std::numeric_limits<qsizetype>::max()))
+			{
+				return;
+			}
+			const auto index = static_cast<qsizetype>(identity - 1);
+			if (m_absoluteLineNumbers.size() <= index)
+				m_absoluteLineNumbers.resize(index + 1);
+			m_absoluteLineNumbers[index] = absoluteLineNumber;
+		}
+
+		/**
+		 * @brief Resolves one deferred identity during ordered runtime playback.
+		 * @param identity Deferred identity allocated by @ref allocateIdentity.
+		 * @return Committed absolute line number, or zero before a successful output commit.
+		 */
+		[[nodiscard]] qint64 resolve(const quint64 identity) const
+		{
+			if (identity == 0 || identity > static_cast<quint64>(m_absoluteLineNumbers.size()))
+				return 0;
+			return m_absoluteLineNumbers.at(static_cast<qsizetype>(identity - 1));
+		}
+
+		/**
+		 * @brief Records that canonical output playback produced a different physical layout than the callback overlay.
+		 * @param exactIdentitiesRemainReliable Whether every published deferred identity still names the callback-visible
+		 * line represented by that identity.
+		 */
+		void markLayoutDiverged(const bool exactIdentitiesRemainReliable) noexcept
+		{
+			if (!exactIdentitiesRemainReliable)
+			{
+				m_layoutState.store(LayoutState::DivergedWithUnreliableIdentities, std::memory_order_release);
+				return;
+			}
+
+			LayoutState expected = LayoutState::Exact;
+			static_cast<void>(
+			    m_layoutState.compare_exchange_strong(expected, LayoutState::DivergedWithReliableIdentities,
+			                                          std::memory_order_release, std::memory_order_relaxed));
+		}
+
+		/**
+		 * @brief Tests whether canonical output playback diverged from the callback overlay's line layout.
+		 * @return `true` after any output in this callback sequence produced a different physical layout.
+		 */
+		[[nodiscard]] bool layoutDiverged() const noexcept
+		{
+			return m_layoutState.load(std::memory_order_acquire) != LayoutState::Exact;
+		}
+
+		/**
+		 * @brief Tests whether published deferred identities still identify their callback-visible lines exactly.
+		 * @return `true` until incomplete or multi-line playback makes an identity ambiguous.
+		 */
+		[[nodiscard]] bool exactIdentitiesRemainReliable() const noexcept
+		{
+			return m_layoutState.load(std::memory_order_acquire) !=
+			       LayoutState::DivergedWithUnreliableIdentities;
+		}
+
+	private:
+		enum class LayoutState : quint8
+		{
+			Exact,
+			DivergedWithReliableIdentities,
+			DivergedWithUnreliableIdentities
+		};
+
+		std::atomic<quint64>     m_nextIdentity{1};
+		std::atomic<LayoutState> m_layoutState{LayoutState::Exact};
+		QVector<qint64>          m_absoluteLineNumbers;
+};
+
+/**
+ * @brief Reference to one line in a shared deferred callback output identity sequence.
+ */
+struct LuaCallbackDeferredLineIdentity final
+{
+		std::shared_ptr<LuaCallbackDeferredLineIdentityState>
+		                   state;       ///< Shared callback output identity state.
+		quint64            identity{0}; ///< Identity within @ref state.
+
+		/**
+		 * @brief Tests whether this reference can be published and resolved.
+		 * @return `true` when both the shared state and nonzero identity are present.
+		 */
+		[[nodiscard]] bool isValid() const noexcept
+		{
+			return state && identity > 0;
+		}
+};
+
+/**
+ * @brief Sparse callback-visible index of deferred output-line identities.
+ *
+ * Raw hash keys include a monotonically increasing origin. Advancing that origin after output-buffer head eviction
+ * shifts every retained identity in constant time without rebuilding the hash.
+ */
+class LuaCallbackDeferredLineIdentityIndex final
+{
+	public:
+		/**
+		 * @brief Returns the deferred identity at one callback-visible buffer position.
+		 * @param bufferIndex One-based callback-visible buffer position.
+		 * @return Deferred identity at the requested position, or an empty identity when none is tracked.
+		 */
+		[[nodiscard]] LuaCallbackDeferredLineIdentity value(const int bufferIndex) const
+		{
+			return bufferIndex > 0 ? m_identities.value(m_origin + bufferIndex)
+			                       : LuaCallbackDeferredLineIdentity{};
+		}
+
+		/**
+		 * @brief Stores a deferred identity at one callback-visible buffer position.
+		 * @param bufferIndex One-based callback-visible buffer position.
+		 * @param identity Deferred identity to store.
+		 */
+		void insert(const int bufferIndex, const LuaCallbackDeferredLineIdentity &identity)
+		{
+			if (bufferIndex > 0)
+				m_identities.insert(m_origin + bufferIndex, identity);
+		}
+
+		/**
+		 * @brief Removes identities in an inclusive callback-visible position range.
+		 * @param firstBufferIndex First one-based position to remove.
+		 * @param lastBufferIndex Last one-based position to remove.
+		 */
+		void removeRange(const int firstBufferIndex, const int lastBufferIndex)
+		{
+			if (firstBufferIndex <= 0 || lastBufferIndex < firstBufferIndex || m_identities.isEmpty())
+				return;
+
+			const qint64 firstKey  = m_origin + firstBufferIndex;
+			const qint64 lastKey   = m_origin + lastBufferIndex;
+			const qint64 rangeSize = static_cast<qint64>(lastBufferIndex) - firstBufferIndex + 1;
+			if (rangeSize < m_identities.size())
+			{
+				for (qint64 key = firstKey; key <= lastKey; ++key)
+					m_identities.remove(key);
+				return;
+			}
+
+			for (auto it = m_identities.begin(); it != m_identities.end();)
+			{
+				if (it.key() >= firstKey && it.key() <= lastKey)
+					it = m_identities.erase(it);
+				else
+					++it;
+			}
+		}
+
+		/**
+		 * @brief Removes callback-visible head positions and shifts every retained identity left logically.
+		 * @param count Number of leading positions removed by output-buffer trimming.
+		 */
+		void removeHead(const int count)
+		{
+			if (count <= 0)
+				return;
+			removeRange(1, count);
+			m_origin += count;
+		}
+
+		/** @brief Removes all deferred identities and resets the callback-visible position origin. */
+		void clear()
+		{
+			m_identities.clear();
+			m_origin = 0;
+		}
+
+	private:
+		QHash<qint64, LuaCallbackDeferredLineIdentity> m_identities;
+		qint64                                         m_origin{0};
+};
 
 /**
  * @brief Shared cancellation generation for callbacks derived from one world connection.
@@ -383,6 +587,9 @@ struct LuaCallbackAttributeContentSnapshot
 		QString                content;
 		bool                   operator==(const LuaCallbackAttributeContentSnapshot &) const = default;
 };
+
+/** @brief World variable snapshot retaining its canonical key and original XML attributes. */
+using LuaCallbackVariableSnapshot = QMudVariableMapUtils::Record;
 
 /**
  * @brief Trigger payload used by callback-scope rule-list snapshots.
@@ -740,19 +947,19 @@ template <typename Value> class LuaCallbackPersistentSlotMap
 		};
 
 		/**
-		 * @brief Finds one immutable value.
+		 * @brief Finds one immutable value while borrowing the root-owned directory nodes.
 		 * @param key Stable slot key.
-		 * @return Stored value, or an empty pointer when absent.
+		 * @return Owning stored-value pointer, or an empty pointer when absent.
 		 */
 		[[nodiscard]] QSharedPointer<const Value> value(const quint32 key) const
 		{
-			QSharedPointer<const Node> node = m_root;
+			const Node *node = m_root.data();
 			for (int level = kLevels - 1; level > 0; --level)
 			{
 				if (!node)
 					return {};
 				const int branch = static_cast<int>((key >> (level * 4)) & 0x0fU);
-				node             = node->children[branch];
+				node             = node->children[branch].data();
 			}
 			return node ? node->values[static_cast<int>(key & 0x0fU)] : QSharedPointer<const Value>{};
 		}
@@ -1589,6 +1796,16 @@ template <typename Value> class LuaCallbackPersistentStringMap
 			return result;
 		}
 
+		/**
+		 * @brief Checks immutable storage identity without comparing entries.
+		 * @param other Map whose storage is compared.
+		 * @return Whether both maps share the same root and entry count.
+		 */
+		[[nodiscard]] bool sharesStorageWith(const LuaCallbackPersistentStringMap &other) const noexcept
+		{
+			return m_root == other.m_root && m_size == other.m_size;
+		}
+
 		bool operator==(const LuaCallbackPersistentStringMap &other) const
 		{
 			if (m_root == other.m_root)
@@ -1808,12 +2025,21 @@ struct LuaCallbackLineEntrySnapshot
  */
 struct LuaCallbackLineBufferSnapshot
 {
-		quint64                                  lineBufferGeneration{0};
-		int                                      lineBufferCount{0};
-		int                                      firstCapturedLineBufferIndex{0};
-		int                                      lastCapturedLineBufferIndex{0};
-		QHash<int, LuaCallbackLineEntrySnapshot> lineEntriesByBufferIndex;
-		QStringList                              recentLinesSnapshot;
+		/** Generation of the materialized output-buffer presentation. */
+		quint64                                     lineBufferGeneration{0};
+		/** Generation of the independently refreshed non-stored current line. */
+		quint64                                     currentLineGeneration{0};
+		int                                         lineBufferCount{0};
+		/** Number of Lua-visible entries backed by output storage or the active incoming line. */
+		int                                         materializedLineBufferCount{-1};
+		/** Runtime-captured metadata and active style for constructing a non-stored current line. */
+		std::optional<LuaCallbackLineEntrySnapshot> currentLineTemplate;
+		/** Non-stored MUSHclient-compatible current line, when one follows the materialized lines. */
+		std::optional<LuaCallbackLineEntrySnapshot> currentLine;
+		int                                         firstCapturedLineBufferIndex{0};
+		int                                         lastCapturedLineBufferIndex{0};
+		QHash<int, LuaCallbackLineEntrySnapshot>    lineEntriesByBufferIndex;
+		QStringList                                 recentLinesSnapshot;
 };
 
 /**
@@ -2051,66 +2277,66 @@ enum class LuaCallbackOrderingDomain : quint8
  * completion requirements are deliberately represented separately by the runtime dispatch API.
  */
 #define QMUD_LUA_CALLBACK_EVENT_REGISTRY(X)                                                                  \
-	X(None, "", Deferrable)                                                                                  \
-	X(TriggerRoutine, "", InputCritical)                                                                     \
-	X(TriggerScript, "", InputCritical)                                                                      \
-	X(AliasRoutine, "", InputCritical)                                                                       \
-	X(AliasScript, "", InputCritical)                                                                        \
-	X(TimerRoutine, "", Deferrable)                                                                          \
-	X(TimerScript, "", Deferrable)                                                                           \
-	X(Hotspot, "", InputCritical)                                                                            \
-	X(AsyncResult, "OnPluginAsyncResult", Deferrable)                                                        \
-	X(Broadcast, "OnPluginBroadcast", Deferrable)                                                            \
-	X(ChatAccept, "OnPluginChatAccept", Deferrable)                                                          \
-	X(ChatDisplay, "OnPluginChatDisplay", Deferrable)                                                        \
-	X(ChatMessage, "OnPluginChatMessage", Deferrable)                                                        \
-	X(ChatMessageOut, "OnPluginChatMessageOut", Deferrable)                                                  \
-	X(ChatNewUser, "OnPluginChatNewUser", Deferrable)                                                        \
-	X(ChatUserDisconnect, "OnPluginChatUserDisconnect", Deferrable)                                          \
-	X(Close, "OnPluginClose", InputCritical)                                                                 \
-	X(Command, "OnPluginCommand", InputCritical)                                                             \
-	X(CommandChanged, "OnPluginCommandChanged", Deferrable)                                                  \
-	X(CommandEntered, "OnPluginCommandEntered", InputCritical)                                               \
-	X(Connect, "OnPluginConnect", Deferrable)                                                                \
-	X(Disable, "OnPluginDisable", Deferrable)                                                                \
-	X(Disconnect, "OnPluginDisconnect", Deferrable)                                                          \
-	X(DrawOutputWindow, "OnPluginDrawOutputWindow", Deferrable)                                              \
-	X(Enable, "OnPluginEnable", Deferrable)                                                                  \
-	X(GetFocus, "OnPluginGetFocus", Deferrable)                                                              \
-	X(IacGa, "OnPluginIacGa", TelnetNotification)                                                            \
-	X(Install, "OnPluginInstall", Deferrable)                                                                \
-	X(LineReceived, "OnPluginLineReceived", InputCritical)                                                   \
-	X(ListChanged, "OnPluginListChanged", Deferrable)                                                        \
-	X(LoseFocus, "OnPluginLoseFocus", Deferrable)                                                            \
-	X(MouseMoved, "OnPluginMouseMoved", Deferrable)                                                          \
-	X(MxpCloseTag, "OnPluginMXPcloseTag", InputCritical)                                                     \
-	X(MxpError, "OnPluginMXPerror", Deferrable)                                                              \
-	X(MxpOpenTag, "OnPluginMXPopenTag", InputCritical)                                                       \
-	X(MxpSetEntity, "OnPluginMXPsetEntity", InputCritical)                                                   \
-	X(MxpSetVariable, "OnPluginMXPsetVariable", InputCritical)                                               \
-	X(MxpStart, "OnPluginMXPstart", Deferrable)                                                              \
-	X(MxpStop, "OnPluginMXPstop", Deferrable)                                                                \
-	X(PacketReceived, "OnPluginPacketReceived", InputCritical)                                               \
-	X(PartialLine, "OnPluginPartialLine", Deferrable)                                                        \
-	X(PlaySound, "OnPluginPlaySound", Deferrable)                                                            \
-	X(SaveState, "OnPluginSaveState", InputCritical)                                                         \
-	X(ScreenDraw, "OnPluginScreendraw", Deferrable)                                                          \
-	X(SelectionChanged, "OnPluginSelectionChanged", Deferrable)                                              \
-	X(Send, "OnPluginSend", InputCritical)                                                                   \
-	X(Sent, "OnPluginSent", InputCritical)                                                                   \
-	X(TabComplete, "OnPluginTabComplete", InputCritical)                                                     \
-	X(TelnetOption, "OnPluginTelnetOption", TelnetNotification)                                              \
-	X(TelnetRequest, "OnPluginTelnetRequest", InputCritical)                                                 \
-	X(TelnetSubnegotiation, "OnPluginTelnetSubnegotiation", TelnetNotification)                              \
-	X(Tick, "OnPluginTick", Deferrable)                                                                      \
-	X(Trace, "OnPluginTrace", Deferrable)                                                                    \
-	X(PacketDebug, "OnPluginPacketDebug", Deferrable)                                                        \
-	X(WorldOutputResized, "OnPluginWorldOutputResized", Deferrable)                                          \
-	X(WorldSave, "OnPluginWorldSave", Deferrable)
+	X(None, "", Deferrable, false)                                                                           \
+	X(TriggerRoutine, "", InputCritical, false)                                                              \
+	X(TriggerScript, "", InputCritical, false)                                                               \
+	X(AliasRoutine, "", InputCritical, false)                                                                \
+	X(AliasScript, "", InputCritical, false)                                                                 \
+	X(TimerRoutine, "", Deferrable, false)                                                                   \
+	X(TimerScript, "", Deferrable, false)                                                                    \
+	X(Hotspot, "", InputCritical, false)                                                                     \
+	X(AsyncResult, "OnPluginAsyncResult", Deferrable, false)                                                 \
+	X(Broadcast, "OnPluginBroadcast", Deferrable, false)                                                     \
+	X(ChatAccept, "OnPluginChatAccept", Deferrable, false)                                                   \
+	X(ChatDisplay, "OnPluginChatDisplay", Deferrable, false)                                                 \
+	X(ChatMessage, "OnPluginChatMessage", Deferrable, false)                                                 \
+	X(ChatMessageOut, "OnPluginChatMessageOut", Deferrable, false)                                           \
+	X(ChatNewUser, "OnPluginChatNewUser", Deferrable, false)                                                 \
+	X(ChatUserDisconnect, "OnPluginChatUserDisconnect", Deferrable, false)                                   \
+	X(Close, "OnPluginClose", InputCritical, false)                                                          \
+	X(Command, "OnPluginCommand", InputCritical, false)                                                      \
+	X(CommandChanged, "OnPluginCommandChanged", Deferrable, false)                                           \
+	X(CommandEntered, "OnPluginCommandEntered", InputCritical, false)                                        \
+	X(Connect, "OnPluginConnect", Deferrable, false)                                                         \
+	X(Disable, "OnPluginDisable", Deferrable, false)                                                         \
+	X(Disconnect, "OnPluginDisconnect", Deferrable, false)                                                   \
+	X(DrawOutputWindow, "OnPluginDrawOutputWindow", Deferrable, false)                                       \
+	X(Enable, "OnPluginEnable", Deferrable, false)                                                           \
+	X(GetFocus, "OnPluginGetFocus", Deferrable, false)                                                       \
+	X(IacGa, "OnPluginIacGa", TelnetNotification, true)                                                      \
+	X(Install, "OnPluginInstall", Deferrable, false)                                                         \
+	X(LineReceived, "OnPluginLineReceived", InputCritical, false)                                            \
+	X(ListChanged, "OnPluginListChanged", Deferrable, false)                                                 \
+	X(LoseFocus, "OnPluginLoseFocus", Deferrable, false)                                                     \
+	X(MouseMoved, "OnPluginMouseMoved", Deferrable, false)                                                   \
+	X(MxpCloseTag, "OnPluginMXPcloseTag", InputCritical, true)                                               \
+	X(MxpError, "OnPluginMXPerror", Deferrable, true)                                                        \
+	X(MxpOpenTag, "OnPluginMXPopenTag", InputCritical, true)                                                 \
+	X(MxpSetEntity, "OnPluginMXPsetEntity", InputCritical, true)                                             \
+	X(MxpSetVariable, "OnPluginMXPsetVariable", InputCritical, true)                                         \
+	X(MxpStart, "OnPluginMXPstart", Deferrable, true)                                                        \
+	X(MxpStop, "OnPluginMXPstop", Deferrable, true)                                                          \
+	X(PacketReceived, "OnPluginPacketReceived", InputCritical, true)                                         \
+	X(PartialLine, "OnPluginPartialLine", Deferrable, false)                                                 \
+	X(PlaySound, "OnPluginPlaySound", Deferrable, false)                                                     \
+	X(SaveState, "OnPluginSaveState", InputCritical, false)                                                  \
+	X(ScreenDraw, "OnPluginScreendraw", Deferrable, false)                                                   \
+	X(SelectionChanged, "OnPluginSelectionChanged", Deferrable, false)                                       \
+	X(Send, "OnPluginSend", InputCritical, false)                                                            \
+	X(Sent, "OnPluginSent", InputCritical, false)                                                            \
+	X(TabComplete, "OnPluginTabComplete", InputCritical, false)                                              \
+	X(TelnetOption, "OnPluginTelnetOption", TelnetNotification, true)                                        \
+	X(TelnetRequest, "OnPluginTelnetRequest", InputCritical, true)                                           \
+	X(TelnetSubnegotiation, "OnPluginTelnetSubnegotiation", TelnetNotification, true)                        \
+	X(Tick, "OnPluginTick", Deferrable, false)                                                               \
+	X(Trace, "OnPluginTrace", Deferrable, false)                                                             \
+	X(PacketDebug, "OnPluginPacketDebug", Deferrable, false)                                                 \
+	X(WorldOutputResized, "OnPluginWorldOutputResized", Deferrable, false)                                   \
+	X(WorldSave, "OnPluginWorldSave", Deferrable, false)
 
 enum class LuaCallbackEvent : quint8
 {
-#define QMUD_DECLARE_LUA_CALLBACK_EVENT(name, functionName, orderingDomain) name,
+#define QMUD_DECLARE_LUA_CALLBACK_EVENT(name, functionName, orderingDomain, incomingProtocol) name,
 	QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_DECLARE_LUA_CALLBACK_EVENT)
 #undef QMUD_DECLARE_LUA_CALLBACK_EVENT
 	    Count
@@ -2120,18 +2346,36 @@ inline constexpr std::size_t kLuaCallbackEventCount = static_cast<std::size_t>(L
 
 inline constexpr std::array<LuaCallbackOrderingDomain, kLuaCallbackEventCount>
     kLuaCallbackEventOrderingDomains = {
-#define QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN(name, functionName, orderingDomain)                   \
+#define QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN(name, functionName, orderingDomain, incomingProtocol) \
 	LuaCallbackOrderingDomain::orderingDomain,
         QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN)
 #undef QMUD_APPEND_LUA_CALLBACK_EVENT_ORDERING_DOMAIN
 };
 
 inline const std::array<QString, kLuaCallbackEventCount> kLuaCallbackEventFunctionNames = {
-#define QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME(name, functionName, orderingDomain)                     \
+#define QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME(name, functionName, orderingDomain, incomingProtocol)   \
 	QStringLiteral(functionName),
     QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME)
 #undef QMUD_APPEND_LUA_CALLBACK_EVENT_FUNCTION_NAME
 };
+
+/** @brief Registry-defined incoming protocol callback roles. */
+inline constexpr std::array<bool, kLuaCallbackEventCount> kLuaCallbackEventIncomingProtocol = {
+#define QMUD_APPEND_INCOMING_PROTOCOL(name, functionName, orderingDomain, incomingProtocol) incomingProtocol,
+    QMUD_LUA_CALLBACK_EVENT_REGISTRY(QMUD_APPEND_INCOMING_PROTOCOL)
+#undef QMUD_APPEND_INCOMING_PROTOCOL
+};
+
+/**
+ * @brief Identifies callbacks that process an admitted incoming protocol event.
+ * @param event Authoritative callback identity.
+ * @return Whether the event is an incoming protocol handler.
+ */
+[[nodiscard]] constexpr bool luaCallbackEventIsIncomingProtocol(const LuaCallbackEvent event) noexcept
+{
+	const auto index = static_cast<std::size_t>(event);
+	return index < kLuaCallbackEventIncomingProtocol.size() && kLuaCallbackEventIncomingProtocol[index];
+}
 
 [[nodiscard]] constexpr LuaCallbackOrderingDomain
 luaCallbackEventOrderingDomain(const LuaCallbackEvent event) noexcept
@@ -2426,17 +2670,15 @@ luaCallbackStableSnapshotDomainBit(const LuaCallbackStableSnapshotDomain domain)
 
 struct LuaCallbackWorldVariablesSnapshotState
 {
-		bool                                       hasWorldVariablesSnapshot{false};
-		QMap<QString, QString>                     worldVariablesSnapshot;
-		bool                                       hasVariableEntriesSnapshot{false};
-		QList<LuaCallbackAttributeContentSnapshot> variableEntriesSnapshot;
+		bool                              hasWorldVariablesSnapshot{false};
+		QMudVariableMapUtils::VariableMap worldVariablesSnapshot;
 		bool operator==(const LuaCallbackWorldVariablesSnapshotState &) const = default;
 };
 
 struct LuaCallbackPluginVariablesSnapshotState
 {
-		QHash<QString, QMap<QString, QString>> pluginVariablesSnapshotById;
-		QSet<QString>                          unavailablePluginVariableSnapshotIds;
+		QHash<QString, QMudVariableMapUtils::VariableMap> pluginVariablesSnapshotById;
+		QSet<QString>                                     unavailablePluginVariableSnapshotIds;
 		bool operator==(const LuaCallbackPluginVariablesSnapshotState &) const = default;
 };
 
@@ -2920,9 +3162,63 @@ struct LuaCallbackUdpPresentationSnapshot
  */
 struct LuaCallbackSoundPresentationSnapshot
 {
-		quint64         sessionId{0};
-		quint64         revision{0};
-		QHash<int, int> statusByBuffer;
+		quint64                                                sessionId{0};
+		quint64                                                revision{0};
+		QHash<int, int>                                        statusByBuffer;
+		QHash<int, double>                                     volumeByBuffer;
+		std::array<quint64, SoundEngineSession::kChannelCount> revisionByBuffer{};
+
+		/**
+		 * @brief Projects exactly the channels affected by one completed sound command.
+		 * @param state Immutable worker state at command completion.
+		 * @param buffer One-based affected channel, or zero for every channel.
+		 * @return Session-scoped sound changes carrying each affected channel's observation revision.
+		 */
+		[[nodiscard]] static LuaCallbackSoundPresentationSnapshot
+		fromSoundSnapshot(const SoundEngineSession::Snapshot &state, const int buffer)
+		{
+			LuaCallbackSoundPresentationSnapshot result;
+			result.sessionId = state.sessionId;
+			result.revision  = state.revision;
+			if (buffer < 0 || buffer > SoundEngineSession::kChannelCount)
+				return result;
+			const int first = buffer == 0 ? 1 : buffer;
+			const int last  = buffer == 0 ? SoundEngineSession::kChannelCount : buffer;
+			for (int channel = first; channel <= last; ++channel)
+			{
+				const auto index = static_cast<std::size_t>(channel - 1);
+				result.statusByBuffer.insert(channel, state.status[index]);
+				result.volumeByBuffer.insert(channel, state.volume[index]);
+				result.revisionByBuffer[index] = state.revision;
+			}
+			return result;
+		}
+
+		/**
+		 * @brief Merges preceding sound changes without replacing newer observations or another session.
+		 * @param changes Completed changes, containing only the affected channels.
+		 */
+		void merge(const LuaCallbackSoundPresentationSnapshot &changes)
+		{
+			if (changes.statusByBuffer.isEmpty())
+				return;
+			if (statusByBuffer.isEmpty())
+				sessionId = changes.sessionId;
+			if (sessionId != changes.sessionId)
+				return;
+			for (auto it = changes.statusByBuffer.cbegin(); it != changes.statusByBuffer.cend(); ++it)
+			{
+				if (it.key() < 1 || it.key() > SoundEngineSession::kChannelCount)
+					continue;
+				const auto index = static_cast<std::size_t>(it.key() - 1);
+				if (changes.revisionByBuffer[index] < revisionByBuffer[index])
+					continue;
+				statusByBuffer.insert(it.key(), it.value());
+				volumeByBuffer.insert(it.key(), changes.volumeByBuffer.value(it.key()));
+				revisionByBuffer[index] = changes.revisionByBuffer[index];
+			}
+			revision = qMax(revision, changes.revision);
+		}
 };
 
 /**
@@ -3287,53 +3583,65 @@ struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
 		/** MUSHclient WindowAddHotspot recursion guard inherited by this callback dispatch. */
 		bool                                                            windowAddHotspotReentryBlocked{false};
 		QString                                                         geometryConstrainedMiniWindowName;
-		int                                                 geometryConstraintDisplayClientHeight{0};
-		int                                                 geometryConstraintDisplayClientWidth{0};
-		double                                              absoluteMiniWindowScaleXOver{1.0};
-		double                                              absoluteMiniWindowScaleYOver{1.0};
-		double                                              absoluteMiniWindowScaleXUnder{1.0};
-		double                                              absoluteMiniWindowScaleYUnder{1.0};
-		bool                                                hasRuntimeCountersSnapshot{false};
-		LuaCallbackRuntimeCountersSnapshotState             runtimeCountersSnapshotState;
+		int                                                   geometryConstraintDisplayClientHeight{0};
+		int                                                   geometryConstraintDisplayClientWidth{0};
+		double                                                absoluteMiniWindowScaleXOver{1.0};
+		double                                                absoluteMiniWindowScaleYOver{1.0};
+		double                                                absoluteMiniWindowScaleXUnder{1.0};
+		double                                                absoluteMiniWindowScaleYUnder{1.0};
+		bool                                                  hasRuntimeCountersSnapshot{false};
+		LuaCallbackRuntimeCountersSnapshotState               runtimeCountersSnapshotState;
 		// Dispatch-sampled external/asynchronous domains.
-		bool                                                hasChatSnapshot{false};
-		QList<long>                                         chatConnectionIdsSnapshot;
-		QHash<long, QHash<int, QVariant>>                   chatInfoValuesById;
-		QHash<long, QHash<QString, QVariant>>               chatOptionValuesById;
-		QHash<QString, long>                                chatIdsByLookupKey;
+		bool                                                  hasChatSnapshot{false};
+		QList<long>                                           chatConnectionIdsSnapshot;
+		QHash<long, QHash<int, QVariant>>                     chatInfoValuesById;
+		QHash<long, QHash<QString, QVariant>>                 chatOptionValuesById;
+		QHash<QString, long>                                  chatIdsByLookupKey;
 		// Dispatch-sampled cross-runtime and backend state.
-		bool                                                hasUdpPortSnapshot{false};
-		QList<int>                                          udpPortsSnapshot;
-		QHash<int, QString>                                 udpListenerPluginIdsByPort;
-		bool                                                hasUsedUdpPortsSnapshot{false};
-		QSet<int>                                           usedUdpPortsSnapshot;
-		QHash<int, int>                                     usedUdpPortReferenceCountsSnapshot;
-		QHash<int, int>                                     soundStatusByBuffer;
+		bool                                                  hasUdpPortSnapshot{false};
+		QList<int>                                            udpPortsSnapshot;
+		QHash<int, QString>                                   udpListenerPluginIdsByPort;
+		bool                                                  hasUsedUdpPortsSnapshot{false};
+		QSet<int>                                             usedUdpPortsSnapshot;
+		QHash<int, int>                                       usedUdpPortReferenceCountsSnapshot;
+		LuaCallbackSoundPresentationSnapshot                  soundState;
 		// Request-local callback line context and overlays.
-		bool                                                hasLineBufferSnapshot{false};
-		int                                                 lineBufferCount{0};
-		QSharedPointer<const LuaCallbackLineBufferSnapshot> lineBufferSnapshot;
-		QHash<int, LuaCallbackLineEntrySnapshot>            lineEntriesByBufferIndex;
-		bool                                                hasCallbackOutputAnchor{false};
-		int                                                 callbackOutputAnchorBufferIndex{0};
-		qint64                                              callbackOutputAnchorAbsoluteNumber{0};
-		bool                                                callbackOutputAnchorIsActiveIncoming{false};
-		bool                                                callbackOutputAnchorIsHidden{false};
+		bool                                                  hasLineBufferSnapshot{false};
+		int                                                   lineBufferCount{0};
+		int                                                   materializedLineBufferCount{-1};
+		std::optional<LuaCallbackLineEntrySnapshot>           currentLineTemplate;
+		std::optional<LuaCallbackLineEntrySnapshot>           currentLine;
+		QSharedPointer<const LuaCallbackLineBufferSnapshot>   lineBufferSnapshot;
+		QHash<int, LuaCallbackLineEntrySnapshot>              lineEntriesByBufferIndex;
+		/** Whether @ref deferredLineIdentityIndex is an authoritative context snapshot. */
+		bool                                                  hasDeferredLineIdentitySnapshot{false};
+		/** Deferred identities for callback-created lines indexed by callback-visible presentation position. */
+		LuaCallbackDeferredLineIdentityIndex                  deferredLineIdentityIndex;
+		/** Shared output-layout state used by deferred line identities in this callback sequence. */
+		std::shared_ptr<LuaCallbackDeferredLineIdentityState> deferredLineIdentityState;
+		bool                                                  hasCallbackOutputAnchor{false};
+		int                                                   callbackOutputAnchorBufferIndex{0};
+		qint64                                                callbackOutputAnchorAbsoluteNumber{0};
+		bool                                                  callbackOutputAnchorIsActiveIncoming{false};
+		bool                                                  callbackOutputAnchorIsHidden{false};
 		// Deferred output playback and promoted runtime cursors share this state across immutable
 		// snapshots. Queued and suspended callbacks therefore retain position and presentation without a scan.
-		std::shared_ptr<LuaCallbackOutputAnchorState>       callbackOutputAnchorState;
-		bool                                                triggerMatchedLineSnapshotResolved{false};
-		bool                                                hasTriggerMatchedLineSnapshot{false};
-		int                                                 triggerMatchedLineBufferIndex{0};
-		qint64                                              triggerMatchedLineAbsoluteNumber{0};
-		LuaCallbackLineEntrySnapshot                        triggerMatchedLineSnapshot;
-		bool                                                hasLineBufferDeltaSnapshot{false};
-		bool                                                hasLineBufferCountDelta{false};
-		int                                                 lineBufferDeltaCount{0};
-		QHash<int, LuaCallbackLineEntrySnapshot>            lineEntryDeltasByBufferIndex;
-		QSet<int>                                           missingLineEntryDeltasByBufferIndex;
-		bool                                                linePresentationRequiresRefresh{false};
-		bool                                                outputScrollPositionRequiresRefresh{false};
+		std::shared_ptr<LuaCallbackOutputAnchorState>         callbackOutputAnchorState;
+		bool                                                  triggerMatchedLineSnapshotResolved{false};
+		bool                                                  hasTriggerMatchedLineSnapshot{false};
+		int                                                   triggerMatchedLineBufferIndex{0};
+		qint64                                                triggerMatchedLineAbsoluteNumber{0};
+		LuaCallbackLineEntrySnapshot                          triggerMatchedLineSnapshot;
+		bool                                                  hasLineBufferDeltaSnapshot{false};
+		bool                                                  hasLineBufferCountDelta{false};
+		int                                                   lineBufferDeltaCount{0};
+		int                                                   materializedLineBufferDeltaCount{-1};
+		bool                                                  currentLineDeltaPresent{false};
+		std::optional<LuaCallbackLineEntrySnapshot>           currentLineDelta;
+		QHash<int, LuaCallbackLineEntrySnapshot>              lineEntryDeltasByBufferIndex;
+		QSet<int>                                             missingLineEntryDeltasByBufferIndex;
+		bool                                                  linePresentationRequiresRefresh{false};
+		bool                                                  outputScrollPositionRequiresRefresh{false};
 		bool                                             miniWindowGeometryConstraintRequiresRefresh{false};
 		bool                                             recentLinesSnapshotInvalidated{false};
 		bool                                             hasRecentLinesSnapshot{false};

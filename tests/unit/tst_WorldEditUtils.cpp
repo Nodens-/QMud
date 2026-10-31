@@ -15,6 +15,8 @@
 #include <QPlainTextEdit>
 #include <QtTest/QTest>
 
+#include <memory>
+
 namespace
 {
 	/**
@@ -24,7 +26,21 @@ namespace
 	{
 			Q_OBJECT
 
+			std::unique_ptr<AppController> m_app;
+
 		private slots:
+			/** @brief Creates the one application controller shared by all helper cases. */
+			void initTestCase()
+			{
+				m_app = std::make_unique<AppController>();
+			}
+
+			/** @brief Releases the shared application controller before the Qt application is destroyed. */
+			void cleanupTestCase()
+			{
+				m_app.reset();
+			}
+
 			static void populatesCompleteSendTargetList()
 			{
 				WorldEditUtils::populateSendToCombo(nullptr);
@@ -86,7 +102,6 @@ namespace
 				QFETCH(QString, filler);
 				QFETCH(QString, expected);
 
-				AppController app;
 				QCOMPARE(WorldEditUtils::evaluateSpeedwalk(input, filler), expected);
 			}
 
@@ -132,7 +147,6 @@ namespace
 				QFETCH(QString, input);
 				QFETCH(QString, expected);
 
-				AppController app;
 				QCOMPARE(WorldEditUtils::evaluateSpeedwalk(input, QStringLiteral("wait")), expected);
 			}
 
@@ -159,7 +173,6 @@ namespace
 				QFETCH(QString, input);
 				QFETCH(QString, expected);
 
-				AppController app;
 				QCOMPARE(WorldEditUtils::reverseSpeedwalk(input), expected);
 			}
 
@@ -199,7 +212,6 @@ namespace
 				QFETCH(QString, input);
 				QFETCH(QString, expected);
 
-				AppController app;
 				QCOMPARE(WorldEditUtils::reverseSpeedwalk(input), expected);
 			}
 
@@ -219,33 +231,32 @@ namespace
 				                                               QRegularExpression::CaseInsensitiveOption));
 			}
 
-			static void appliesEditorPreferences()
+			void appliesEditorPreferences() const
 			{
-				AppController  app;
 				QLineEdit      lineEdit;
 				QPlainTextEdit plainTextEdit;
 
 				WorldEditUtils::applyEditorPreferences(static_cast<QLineEdit *>(nullptr));
 				WorldEditUtils::applyEditorPreferences(static_cast<QPlainTextEdit *>(nullptr));
 
-				app.setGlobalOptionInt(QStringLiteral("FixedFontForEditing"), 0);
+				m_app->setGlobalOptionInt(QStringLiteral("FixedFontForEditing"), 0);
 				const QFont originalLineFont = lineEdit.font();
 				WorldEditUtils::applyEditorPreferences(&lineEdit);
 				QCOMPARE(lineEdit.font(), originalLineFont);
 
-				app.setGlobalOptionString(QStringLiteral("FixedPitchFont"),
-				                          QStringLiteral("DejaVu Sans Mono"));
-				app.setGlobalOptionInt(QStringLiteral("FixedPitchFontSize"), 17);
-				app.setGlobalOptionInt(QStringLiteral("FixedFontForEditing"), 1);
+				m_app->setGlobalOptionString(QStringLiteral("FixedPitchFont"),
+				                             QStringLiteral("DejaVu Sans Mono"));
+				m_app->setGlobalOptionInt(QStringLiteral("FixedPitchFontSize"), 17);
+				m_app->setGlobalOptionInt(QStringLiteral("FixedFontForEditing"), 1);
 				WorldEditUtils::applyEditorPreferences(&lineEdit);
 				QCOMPARE(lineEdit.font().pointSize(), 17);
 
-				app.setGlobalOptionInt(QStringLiteral("TabInsertsTabInMultiLineDialogs"), 0);
+				m_app->setGlobalOptionInt(QStringLiteral("TabInsertsTabInMultiLineDialogs"), 0);
 				WorldEditUtils::applyEditorPreferences(&plainTextEdit);
 				QVERIFY(plainTextEdit.tabChangesFocus());
 				QCOMPARE(plainTextEdit.font().pointSize(), 17);
 
-				app.setGlobalOptionInt(QStringLiteral("TabInsertsTabInMultiLineDialogs"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("TabInsertsTabInMultiLineDialogs"), 1);
 				WorldEditUtils::applyEditorPreferences(&plainTextEdit);
 				QVERIFY(!plainTextEdit.tabChangesFocus());
 			}

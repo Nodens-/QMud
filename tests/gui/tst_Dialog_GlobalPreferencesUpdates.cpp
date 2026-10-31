@@ -495,7 +495,7 @@ namespace
 
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 
 				QList<QSize> initialPageHints;
 				QList<QSize> initialComboHints;
@@ -1026,10 +1026,11 @@ namespace
 			 */
 			void updateChangelogMarkdownRendersPullRequestLink() const
 			{
-				const QString pullRequestUrl = QStringLiteral("https://github.com/Nodens-/QMud/pull/131");
+				const QString pullRequestUrl =
+				    QStringLiteral("https://example.invalid/test/project/pull/123");
 				const QString changelog =
 				    QStringLiteral("## What's changed\n\n### Bug Fixes\n\n* Fix release notes rendering by "
-				                   "@Nodens- ([#131](%1))\n")
+				                   "@test-author ([#123](%1))\n")
 				        .arg(pullRequestUrl);
 
 				QWidget updateUiOwner;

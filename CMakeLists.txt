@@ -335,6 +335,7 @@ set(QMUD_SOURCES
         helpers/WorldCommandProcessorUtils.cpp
         helpers/SoundFileRoutingUtils.cpp
         SoundEngine.cpp
+        SoundPcmStream.cpp
         MspProtocol.cpp
         helpers/ShortcutPreferenceUtils.cpp
         helpers/LuaExecutionUtils.cpp
@@ -359,6 +360,7 @@ set(QMUD_SOURCES
         NativePluginRegistry.cpp
         SqliteCompat.cpp
         WorldRuntime.cpp
+        PluginStatePersistence.cpp
         WorldCommandProcessor.cpp
         SpeedwalkParser.cpp
         helpers/TimerSchedulingUtils.cpp
@@ -440,6 +442,7 @@ set(QMUD_HEADERS
         helpers/WorldCommandProcessorUtils.h
         helpers/SoundFileRoutingUtils.h
         SoundEngine.h
+        SoundPcmStream.h
         helpers/ShortcutPreferenceUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
@@ -457,6 +460,8 @@ set(QMUD_HEADERS
         ActivityWindow.h
         dialogs/ImportXmlDialog.h
         WorldDocument.h
+        PluginStatePersistence.h
+        helpers/XmlEscapeUtils.h
         XmlImportResult.h
         NativePluginRegistry.h
         WorldRuntime.h
