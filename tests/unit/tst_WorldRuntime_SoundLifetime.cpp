@@ -815,9 +815,19 @@ namespace
 				QVERIFY(SoundEngineTestAccess::fileRequestIsCached(engine, session, secondRequest));
 			}
 
-			/** @brief Verifies removing one directory subtree retains catalog state for sibling directories. */
+			/** @brief Exercises deleted-subtree lookup with ordinary watcher events and forced reconciliation. */
+			void nativeSoundCatalogRemovesOnlyDeletedSubtree_data()
+			{
+				QTest::addColumn<bool>("reconcileDuringLookup");
+				QTest::newRow("watcher-events") << false;
+				QTest::newRow("pending-reconciliation") << true;
+			}
+
+			/** @brief Verifies subtree removal retains sibling sounds and rejects deleted files after lookup completes. */
 			void nativeSoundCatalogRemovesOnlyDeletedSubtree()
 			{
+				QFETCH(bool, reconcileDuringLookup);
+
 				QTemporaryDir root(QDir::current().filePath(QStringLiteral("sound-subtree-removal-XXXXXX")));
 				QVERIFY(root.isValid());
 				const QString removedDirectory =
@@ -853,11 +863,37 @@ namespace
 				QCOMPARE(SoundEngineTestAccess::activeFileIdentity(engine, session, selectedBuffer),
 				         retainedFile);
 				QCOMPARE(session->stop(selectedBuffer), eOK);
-				QVERIFY(session->submitNativeSound(
-				    nativeSoundRequest(QStringLiteral("removed/child/removed.wav"))));
-				QVERIFY(!SoundEngineTestAccess::nativePlaybackState(
-				             engine, session, QMudNativeSoundProtocol::Msp, QMudNativeSoundMedia::Sound)
-				             .current);
+
+				[[maybe_unused]] auto resumeCatalog =
+				    qScopeGuard([&engine] { SoundEngineTestAccess::setCatalogPaused(engine, false); });
+				if (reconcileDuringLookup)
+				{
+					SoundEngineTestAccess::setCatalogPaused(engine, true);
+					SoundEngineTestAccess::reconcileCatalogDirectory(engine, retainedDirectory);
+					QVERIFY(!SoundEngineTestAccess::fileCatalogState(engine).ready);
+				}
+
+				auto request = nativeSoundRequest(QStringLiteral("removed/child/removed.wav"));
+				// A wrongly selected sound must not finish naturally and satisfy the rejection check.
+				request.repeatCount = -1;
+				QVERIFY(session->submitNativeSound(request));
+				if (reconcileDuringLookup)
+				{
+					const auto pending = SoundEngineTestAccess::nativePlaybackState(
+					    engine, session, request.protocol, request.media);
+					QVERIFY(pending.current);
+					QVERIFY(pending.buffer > 0);
+					QVERIFY(
+					    SoundEngineTestAccess::activeFileIdentity(engine, session, pending.buffer).isEmpty());
+					SoundEngineTestAccess::setCatalogPaused(engine, false);
+				}
+
+				// Readiness can change after any observation when another watcher event arrives.
+				QTRY_VERIFY(!SoundEngineTestAccess::nativePlaybackState(engine, session, request.protocol,
+				                                                        request.media)
+				                 .current);
+				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				QCOMPARE(SoundEngineTestAccess::fileCatalogState(engine).fileCount, 1);
 			}
 
 			/** @brief Verifies startup restores the last complete catalog before background reconciliation. */
