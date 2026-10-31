@@ -346,11 +346,18 @@ namespace
 		return static_cast<LuaSqliteStmt *>(luaL_checkudata(L, 1, "qmud.sqlite3.stmt"));
 	}
 
+	/**
+	 * @brief Binds a positional value without converting numeric Lua strings to numbers.
+	 * @param stmt Prepared statement receiving the value.
+	 * @param index Zero-based SQL parameter index.
+	 * @param L Calling Lua state.
+	 * @param valueIndex Lua stack index containing the value.
+	 */
 	void bindValue(LuaSqliteStmt *stmt, const int index, lua_State *L, const int valueIndex)
 	{
 		if (lua_isnil(L, valueIndex))
 			stmt->query.bindValue(index, QVariant());
-		else if (lua_isnumber(L, valueIndex))
+		else if (lua_type(L, valueIndex) == LUA_TNUMBER)
 			stmt->query.bindValue(index, lua_tonumber(L, valueIndex));
 		else if (lua_isboolean(L, valueIndex))
 			stmt->query.bindValue(index, lua_toboolean(L, valueIndex) != 0);
@@ -358,11 +365,17 @@ namespace
 			stmt->query.bindValue(index, QString::fromUtf8(lua_tostring(L, valueIndex)));
 	}
 
+	/**
+	 * @brief Binds the top Lua stack value to a named parameter while retaining its string or number type.
+	 * @param stmt Prepared statement receiving the value.
+	 * @param name SQL parameter name including its prefix.
+	 * @param L Calling Lua state with the value at the top of its stack.
+	 */
 	void bindValueNamed(LuaSqliteStmt *stmt, const QString &name, lua_State *L)
 	{
 		if (lua_isnil(L, -1))
 			stmt->query.bindValue(name, QVariant());
-		else if (lua_isnumber(L, -1))
+		else if (lua_type(L, -1) == LUA_TNUMBER)
 			stmt->query.bindValue(name, lua_tonumber(L, -1));
 		else if (lua_isboolean(L, -1))
 			stmt->query.bindValue(name, lua_toboolean(L, -1) != 0);
@@ -814,6 +827,11 @@ namespace
 		return luaReturnCount(L, topBefore);
 	}
 
+	/**
+	 * @brief Binds a Lua value to an indexed or named SQL parameter without coercing numeric strings.
+	 * @param L Calling Lua state containing the statement, parameter identifier, and value.
+	 * @return Number of Lua results containing the SQLite status code.
+	 */
 	int stmtBind(lua_State *L)
 	{
 		const int      topBefore = lua_gettop(L);
@@ -852,7 +870,7 @@ namespace
 			        : QStringLiteral(":") + raw;
 			if (lua_isnil(L, 3))
 				stmt->query.bindValue(name, QVariant());
-			else if (lua_isnumber(L, 3))
+			else if (lua_type(L, 3) == LUA_TNUMBER)
 				stmt->query.bindValue(name, lua_tonumber(L, 3));
 			else if (lua_isboolean(L, 3))
 				stmt->query.bindValue(name, lua_toboolean(L, 3) != 0);
