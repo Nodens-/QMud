@@ -2765,6 +2765,15 @@ class WorldView : public QWidget
 		 */
 		void                  cancelPendingHyperlinkActivation();
 		/**
+		 * @brief Starts or stops selection auto-scroll depending on where the drag pointer is.
+		 * @param globalPos Pointer position in global coordinates.
+		 */
+		void                  updateNativeOutputSelectionAutoScroll(const QPoint &globalPos);
+		/**
+		 * @brief Scrolls the output and extends the selection while a drag is held above or below it.
+		 */
+		void                  nativeOutputSelectionAutoScrollTick();
+		/**
 		 * @brief Hit-tests a point in an output viewport against native output lines.
 		 * @param view Source output view.
 		 * @param viewPos Viewport-local point.
@@ -3765,6 +3774,7 @@ class WorldView : public QWidget
 		bool                                    m_anchorHoverActive{false};
 		QString                                 m_hoveredHyperlinkHref;
 		QTimer                                 *m_hyperlinkActivationTimer{nullptr};
+		QTimer                                 *m_selectionAutoScrollTimer{nullptr};
 		QString                                 m_pendingHyperlinkActivationHref;
 		mutable NativeOutputSelectionState      m_nativeOutputSelection;
 		NativeOutputWordSelectionCandidate      m_nativeOutputWordSelectionCandidate;
