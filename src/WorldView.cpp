@@ -1830,6 +1830,10 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_hyperlinkActivationTimer->setTimerType(Qt::PreciseTimer);
 	connect(m_hyperlinkActivationTimer, &QTimer::timeout, this,
 	        &WorldView::dispatchPendingHyperlinkActivation);
+	m_selectionAutoScrollTimer = new QTimer(this);
+	m_selectionAutoScrollTimer->setInterval(50);
+	connect(m_selectionAutoScrollTimer, &QTimer::timeout, this,
+	        &WorldView::nativeOutputSelectionAutoScrollTick);
 	m_timeFadeCancelled = QDateTime::currentDateTimeUtc();
 	auto *outputLayout  = new QHBoxLayout(m_outputContainer);
 	outputLayout->setContentsMargins(0, 0, 0, 0);
@@ -11474,6 +11478,7 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		    m_nativeOutputSelection.sourceView ? m_nativeOutputSelection.sourceView : sourceView;
 		if (!selectionSource)
 			return false;
+		updateNativeOutputSelectionAutoScroll(mouseEvent->globalPosition().toPoint());
 		NativeOutputPosition position;
 		bool                 textHit = false;
 		if (!nativeOutputDragHitTestGlobal(mouseEvent->globalPosition().toPoint(), position, nullptr, nullptr,
@@ -12856,6 +12861,74 @@ void WorldView::scrollOutputLineDown()
 	else
 		syncOutputScrollbackReviewState();
 	requestNativeOutputRepaint();
+}
+
+void WorldView::updateNativeOutputSelectionAutoScroll(const QPoint &globalPos)
+{
+	if (!m_selectionAutoScrollTimer)
+		return;
+	const WrapTextBrowser *source = m_nativeOutputSelection.sourceView;
+	if (!m_nativeOutputSelection.dragging || !m_output || !m_output->viewport() || (source && source != m_output))
+	{
+		m_selectionAutoScrollTimer->stop();
+		return;
+	}
+	const QRect viewportRect(m_output->viewport()->mapToGlobal(QPoint(0, 0)), m_output->viewport()->size());
+	if (globalPos.y() < viewportRect.top() || globalPos.y() > viewportRect.bottom())
+	{
+		if (!m_selectionAutoScrollTimer->isActive())
+			m_selectionAutoScrollTimer->start();
+	}
+	else
+		m_selectionAutoScrollTimer->stop();
+}
+
+void WorldView::nativeOutputSelectionAutoScrollTick()
+{
+	if (!m_nativeOutputSelection.dragging || !m_output || !m_output->viewport() ||
+	    (QGuiApplication::mouseButtons() & Qt::LeftButton) == Qt::NoButton)
+	{
+		m_selectionAutoScrollTimer->stop();
+		return;
+	}
+
+	const QPoint globalPos = QCursor::pos();
+	const QRect  viewportRect(m_output->viewport()->mapToGlobal(QPoint(0, 0)), m_output->viewport()->size());
+	int          distance = 0;
+	if (globalPos.y() < viewportRect.top())
+		distance = globalPos.y() - viewportRect.top();
+	else if (globalPos.y() > viewportRect.bottom())
+		distance = globalPos.y() - viewportRect.bottom();
+	if (distance == 0)
+	{
+		m_selectionAutoScrollTimer->stop();
+		return;
+	}
+
+	// The further past the edge, the faster it scrolls (1-10 lines per tick).
+	const int lines = qBound(1, 1 + (qAbs(distance) / 20), 10);
+	for (int i = 0; i < lines; ++i)
+	{
+		if (distance < 0)
+			scrollOutputLineUp();
+		else
+			scrollOutputLineDown();
+	}
+
+	applyPendingNativeSelectionRenderDelta(nativeOutputRenderLines());
+	if (!m_nativeOutputSelection.dragging)
+	{
+		m_selectionAutoScrollTimer->stop();
+		return;
+	}
+
+	NativeOutputPosition position;
+	bool                 textHit = false;
+	if (!nativeOutputDragHitTestGlobal(globalPos, position, nullptr, nullptr, &textHit))
+		return;
+	const WrapTextBrowser *source =
+	    m_nativeOutputSelection.sourceView ? m_nativeOutputSelection.sourceView : m_output;
+	setNativeOutputSelection(source, m_nativeOutputSelection.anchor, position, true);
 }
 
 void WorldView::addHyperlinkToHistory(const QString &text)
