@@ -19852,6 +19852,37 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		bool      handled   = false;
 		if (event->modifiers() == Qt::NoModifier)
 		{
+			// In a multi-line command, Up/Down first move between lines, then to the
+			// start (Up) or end (Down) of the input, and only then step through
+			// history. While stepping through recalled entries, keep stepping.
+			const bool browsingHistory = m_view->m_historyIndex >= 0 || m_view->m_partialIndex >= 0;
+			if (m_view->m_arrowsChangeHistory && !browsingHistory)
+			{
+				QTextCursor probe(document());
+				const bool  multiLine = probe.movePosition(QTextCursor::Down);
+				if (multiLine)
+				{
+					QTextCursor cursor = textCursor();
+					cursor.clearSelection();
+					const auto lineMove  = direction < 0 ? QTextCursor::Up : QTextCursor::Down;
+					const auto edgeMove  = direction < 0 ? QTextCursor::Start : QTextCursor::End;
+					QTextCursor moved    = cursor;
+					bool        consumed = moved.movePosition(lineMove);
+					if (!consumed)
+					{
+						moved    = cursor;
+						moved.movePosition(edgeMove);
+						consumed = moved.position() != cursor.position();
+					}
+					if (consumed)
+					{
+						setTextCursor(moved);
+						ensureCursorVisible();
+						m_view->requestInputViewportSync();
+						return;
+					}
+				}
+			}
 			if (m_view->m_arrowsChangeHistory)
 			{
 				if (m_view->m_arrowRecallsPartial &&
