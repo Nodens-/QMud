@@ -1,5 +1,5 @@
 # QMud Lua API inventory export
-# Exported (UTC): 2026-09-08T08:23:10Z
+# Exported (UTC): 2026-11-11T02:06:48Z
 
 ANSI
 Accelerator
@@ -440,4 +440,14 @@ WorldAddress
 WorldName
 WorldPort
 WriteLog
+gmcpGet
+gmcpGetMessages
+gmcpGetRaw
+gmcpGetString
+gmcpIsEnabled
+gmcpRegisterModule
+gmcpSend
+gmcpToTable
+gmcpType
+gmcpUnregisterModule
 print

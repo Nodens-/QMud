@@ -976,6 +976,7 @@ class WorldPreferencesDialog : public QDialog
 		QComboBox                           *m_connectMethod{nullptr};
 		QSpinBox                            *m_connectDelay{nullptr};
 		QCheckBox   *m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops{nullptr};
+		QCheckBox   *m_nativeGmcp{nullptr};
 		QCheckBox   *m_onlyNegotiateTelnetOptionsOnce{nullptr};
 		QLabel      *m_connectLineCount{nullptr};
 

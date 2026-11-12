@@ -161,19 +161,18 @@ static bool bringOwnedWindowToFrontByTitle(const QString &title)
 	const QString target = title.trimmed();
 	if (target.isEmpty())
 		return false;
-	for (const auto windows = QApplication::topLevelWidgets(); QWidget *window : windows)
-	{
-		if (!window)
-			continue;
-		if (window->windowTitle().trimmed().compare(target, Qt::CaseInsensitive) != 0)
-			continue;
-		if (!window->isVisible())
-			window->show();
-		window->raise();
-		window->activateWindow();
-		return true;
-	}
-	return false;
+	return std::ranges::any_of(
+	    QApplication::topLevelWidgets(),
+	    [&target](QWidget *window)
+	    {
+		    if (!window || window->windowTitle().trimmed().compare(target, Qt::CaseInsensitive) != 0)
+			    return false;
+		    if (!window->isVisible())
+			    window->show();
+		    window->raise();
+		    window->activateWindow();
+		    return true;
+	    });
 }
 
 struct WorldPreferencesDialog::WorkingLists
@@ -1296,11 +1295,7 @@ static void doFindAdvanced(WorldPreferencesDialog *dialog, QTableWidget *table,
 	const int rowCount = table->rowCount();
 	if (rowCount <= 0 || findText.isEmpty())
 		return;
-	int startRow = 0;
-	if (continueFromCurrent)
-		startRow = findIndex + (forwards ? 1 : -1);
-	else
-		startRow = forwards ? 0 : rowCount - 1;
+	int startRow = continueFromCurrent ? findIndex + (forwards ? 1 : -1) : (forwards ? 0 : rowCount - 1);
 	if (startRow < 0)
 		startRow = rowCount - 1;
 	if (startRow >= rowCount)
@@ -2538,9 +2533,10 @@ std::optional<WorldPreferencesDialog::Page> WorldPreferencesDialog::pageForWorld
 		add(PageInfo, {"id"});
 		add(PageAutoSay, {"enable_auto_say", "re_evaluate_auto_say", "autosay_exclude_non_alpha",
 		                  "autosay_exclude_macros", "auto_say_string", "auto_say_override_prefix"});
-		add(PageConnecting, {"player", "password", "connect_text", "connect_method", "connect_delay",
-		                     "automatically_protect_against_telnet_option_renegotiation_loops",
-		                     "only_negotiate_telnet_options_once"});
+		add(PageConnecting,
+		    {"native_gmcp", "player", "password", "connect_text", "connect_method", "connect_delay",
+		     "automatically_protect_against_telnet_option_renegotiation_loops",
+		     "only_negotiate_telnet_options_once"});
 		add(PageMxp,
 		    {"use_mxp", "mxp_debug_level", "detect_pueblo", "hyperlink_colour", "use_custom_link_colour",
 		     "mud_can_change_link_colour", "underline_hyperlinks", "mud_can_remove_underline",
@@ -3539,6 +3535,9 @@ WorldPreferencesDialog::OptionValues WorldPreferencesDialog::collectWorldOptionV
 		    m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked() ? QStringLiteral("1")
 		                                                                             : QStringLiteral("0"));
 	}
+	if (m_nativeGmcp)
+		values.attributes.insert(QStringLiteral("native_gmcp"),
+		                         m_nativeGmcp->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
 	if (m_onlyNegotiateTelnetOptionsOnce)
 		values.attributes.insert(QStringLiteral("only_negotiate_telnet_options_once"),
 		                         m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
@@ -4550,8 +4549,8 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 	const QString content = m_notes->toPlainText();
 	if (content.isEmpty() || findText.isEmpty())
 		return;
-	const Qt::CaseSensitivity cs         = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-	int                       startIndex = 0;
+	const Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
+	int                       startIndex;
 	if (forwards)
 	{
 		startIndex = (again && m_notesFindIndex >= 0) ? (m_notesFindIndex + 1) : 0;
@@ -4990,7 +4989,7 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 		return haystack.contains(findText, matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive);
 	};
 
-	int startRow = 0;
+	int startRow;
 	if (continueFromCurrent && m_macroFindRow >= 0 && m_macroFindRow < rowCount)
 		startRow = forwards ? (m_macroFindRow + 1) : (m_macroFindRow - 1);
 	else if (!continueFromCurrent && m_macrosTable->currentRow() >= 0)
@@ -9201,6 +9200,11 @@ void WorldPreferencesDialog::buildUi()
 	m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops = new QCheckBox(
 	    QStringLiteral("Automatically protect against Telnet option renegotiation loops"), connectingPage);
 	connectingLayout->addWidget(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops);
+	m_nativeGmcp = new QCheckBox(QStringLiteral("Native GMCP"), connectingPage);
+	m_nativeGmcp->setObjectName(QStringLiteral("nativeGmcpCheckBox"));
+	m_nativeGmcp->setToolTip(QStringLiteral(
+	    "Handle GMCP natively, bypassing legacy protocol callbacks. Changes apply on the next connection."));
+	connectingLayout->addWidget(m_nativeGmcp);
 	m_onlyNegotiateTelnetOptionsOnce =
 	    new QCheckBox(QStringLiteral("Only negotiate telnet options once"), connectingPage);
 	auto *onlyNegotiateLayout = new QHBoxLayout;
@@ -13037,6 +13041,8 @@ void WorldPreferencesDialog::populateConnecting() const
 		m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->setChecked(qmudIsEnabledFlag(
 		    attrs.value(QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"))));
 	}
+	if (m_nativeGmcp)
+		m_nativeGmcp->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("native_gmcp"))));
 	if (m_onlyNegotiateTelnetOptionsOnce)
 	{
 		m_onlyNegotiateTelnetOptionsOnce->setChecked(

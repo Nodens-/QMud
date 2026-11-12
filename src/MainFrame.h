@@ -800,6 +800,10 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void onLuaCallbackPresentationWorldAttributeChanged(const QString &key) const;
 		/**
+		 * @brief Updates browser access from the active world's selected connection mode.
+		 */
+		void refreshGmcpBrowserAction() const;
+		/**
 		 * @brief Internal UI construction and routing helpers.
 		 * @return `true` when world preferences shortcut was handled.
 		 */

@@ -12,6 +12,7 @@
 
 #include "AnsiSgrParseUtils.h"
 #include "AtomicSharedPtrCompat.h"
+#include "GmcpProtocol.h"
 #include "IndexedRingBuffer.h"
 #include "LuaCallbackContinuation.h"
 #include "LuaExecutor.h"
@@ -21,6 +22,7 @@
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
 #include "WorldOptions.h"
+#include "WorldSocketService.h"
 #include "XmlImportResult.h"
 #include "helpers/VariableMapUtils.h"
 
@@ -60,11 +62,11 @@
 #include <utility>
 
 class WorldDocument;
-class WorldSocketService;
 class SoundEngine;
 class SoundEngineSession;
 struct QMudNativeSoundRequest;
 class QFileSystemWatcher;
+class QTimer;
 class LuaCallbackEngine;
 class LuaCallbackRuntimeMutationAccess;
 class ILuaExecutor;
@@ -277,6 +279,101 @@ class WorldRuntime : public QObject
 		QMudLuaDeferredRuntimeMutation::applyLocallyOrQueue(QVector<LuaDeferredRuntimeMutationBatch> batches);
 
 	public:
+		/**
+		 * @brief Returns the live native GMCP endpoint.
+		 * @return Shared publication endpoint.
+		 */
+		std::shared_ptr<QMudGmcp::Publication> gmcpPublication() const;
+		/**
+		 * @brief Returns the configured native-mode preference.
+		 * @return Whether the next connection uses native GMCP.
+		 */
+		bool                                   nativeGmcpConfigured() const;
+		/**
+		 * @brief Returns availability from the selected connection's native state.
+		 * @return Whether native handling is selected for a live or restored connection.
+		 */
+		bool                                   nativeGmcpAvailable() const;
+
+		/**
+		 * @brief Returns native GMCP history.
+		 * @return Records in receive/write order, with hourly eviction protecting the latest five.
+		 */
+		const QMudGmcp::History               &gmcpHistory() const;
+		/**
+		 * @brief Sends a validated native message through existing causal output.
+		 * @param raw Unframed message.
+		 * @param generation Session identity.
+		 * @return Whether queued or sent.
+		 */
+		bool                                   sendGmcp(const QByteArray &raw, quint64 generation);
+		/**
+		 * @brief Sets world-wide merge policy.
+		 * @param name Message name.
+		 * @param mode Application mode.
+		 * @param force Override server policy.
+		 * @return Whether accepted.
+		 */
+		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force = false) const;
+		/**
+		 * @brief Sets an owner's module registration, ignoring the native-owned merge capability.
+		 * @param owner Script/plugin identity.
+		 * @param module Module name.
+		 * @param version Positive version, or zero to remove.
+		 * @param engineInstance Immutable owning engine identity.
+		 */
+		void registerGmcpModule(const QString &owner, const QString &module, int version,
+		                        quint64 engineInstance = 0);
+		/**
+		 * @brief Releases stale module owners and advertises enabled owners' support while retaining disabled
+		 * owners' registrations.
+		 */
+		void refreshGmcpModules();
+		/**
+		 * @brief Releases registrations after their Lua state is reset or detached.
+		 * @param engineInstance Immutable engine identity.
+		 */
+		void releaseGmcpModules(quint64 engineInstance);
+		/**
+		 * @brief Serializes GMCP session data after frozen input has drained.
+		 * @return Saved GMCP state, or empty when the connection cannot be reused.
+		 */
+		QByteArray           saveNativeGmcpState() const;
+		/**
+		 * @brief Publishes preserved native or legacy state before startup Lua runs.
+		 * @param state Saved GMCP state, empty for legacy ownership.
+		 * @return Whether the state was prepared successfully.
+		 */
+		bool                 prepareNativeGmcpRestore(const QByteArray &state);
+		/**
+		 * @brief Freezes reception and begins draining already received work for reload.
+		 */
+		void                 freezeForReload();
+		/**
+		 * @brief Checks reload preparation state.
+		 * @return Whether new periodic work is paused for reload.
+		 */
+		bool                 reloadPreparing() const;
+		/**
+		 * @brief Checks complete input and causal callback delivery.
+		 * @return Whether frozen work has completed.
+		 */
+		bool                 reloadDrained() const;
+		/**
+		 * @brief Checks execution frames that must unwind before reload preparation.
+		 * @return Whether runtime execution is currently on the caller stack.
+		 */
+		bool                 reloadExecutionActive() const;
+		/**
+		 * @brief Flushes frozen transport output.
+		 * @return Whether no writes remain buffered.
+		 */
+		bool                 flushForReload() const;
+		/**
+		 * @brief Resumes reception after an unsuccessful reload attempt.
+		 */
+		void                 resumeTransportAfterReload();
+
 		static constexpr int kAcceleratorFirstCommand = 12000;
 		static constexpr int kAcceleratorCount        = 1000;
 		static constexpr int kSameColour              = 65535;
@@ -1648,8 +1745,8 @@ class WorldRuntime : public QObject
 		 */
 		XmlImportResult
 		     importPluginXml(const QString &xml, const QString &pluginId,
-		                     const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
-		                     unsigned long                                           mask);
+			                 const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
+			                 unsigned long                                           mask);
 		/**
 		 * @brief Unloads installed plugin.
 		 * @param pluginId Plugin id to unload.
@@ -2271,7 +2368,7 @@ class WorldRuntime : public QObject
 		 * @param hardReturn Hard-return state.
 		 * @param outputStreamId Callback output stream that owns the anchored insertion cursor.
 		 * @param anchorState Shared presentation state maintained with the insertion cursor.
-		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after the write.
+		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after write.
 		 * @param outputIdentity Stable source and result identities for deferred callback output.
 		 * @return `true` when runtime line state changed.
 		 */
@@ -2290,7 +2387,7 @@ class WorldRuntime : public QObject
 		 * @param flags Line flags captured for the callback output.
 		 * @param outputStreamId Callback output stream that owns the anchored insertion cursor.
 		 * @param anchorState Shared presentation state maintained with the insertion cursor.
-		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after the write.
+		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after write.
 		 * @param outputIdentity Stable source and result identities for deferred callback output.
 		 * @return `true` when the anchored output was written.
 		 */
@@ -2573,8 +2670,8 @@ class WorldRuntime : public QObject
 		 * @param top Top coordinate.
 		 * @param right Right coordinate.
 		 * @param bottom Bottom coordinate.
-		 * @param startColour Gradient start colour.
-		 * @param endColour Gradient end colour.
+		 * @param startColour Gradient start color.
+		 * @param endColour Gradient end color.
 		 * @param mode Gradient mode code.
 		 * @return API status code.
 		 */
@@ -2706,7 +2803,7 @@ class WorldRuntime : public QObject
 		 * @param mouseUp Mouse-up callback assigned to generated link hotspots.
 		 * @param hotspotPrefix Prefix used for generated hotspot ids.
 		 * @param pluginId Owning plugin id.
-		 * @param renderContext World colours, options, custom elements, and entities.
+		 * @param renderContext World colors, options, custom elements, and entities.
 		 * @param metricsOut Optional render metrics output.
 		 * @param addedHotspotIdsOut Optional ids of link hotspots created by this render.
 		 * @param removedHotspotIdsOut Optional ids of generated hotspots removed by this render.
@@ -3262,15 +3359,16 @@ class WorldRuntime : public QObject
 		 * @brief Network I/O, command dispatch, and session counters.
 		 */
 		/**
-		 * @brief Feeds raw socket bytes into telnet/output processing.
+		 * @brief Accounts for socket reads and queues their remaining text for processing.
 		 * @param data Raw socket payload bytes.
+		 * @param metadata Read accounting and compression statistics captured with this input batch.
 		 */
-		void               receiveRawData(const QByteArray &data);
+		void receiveRawData(const QByteArray &data, const WorldSocketInputMetadata &metadata = {});
 		/**
 		 * @brief Queues input generated by the explicit simulation API.
 		 * @param data Simulated incoming bytes.
 		 */
-		void               simulateInput(const QByteArray &data);
+		void simulateInput(const QByteArray &data);
 		/**
 		 * @brief Queues resumption of a Lua callback suspended by a modal string-result API.
 		 * @param pluginId Plugin id that owns the suspended callback, or empty for the world script.
@@ -3406,10 +3504,12 @@ class WorldRuntime : public QObject
 		 * @brief Sends raw bytes after any Telnet protocol output already pending at the physical write boundary.
 		 * @param payload Bytes to send.
 		 * @param commandTransaction Optional command transaction resolved by the physical write.
+		 * @param gmcpSession Optional native GMCP session identity validated at the physical write.
 		 * @return Payload bytes accepted by the socket, excluding protocol output, or a non-positive value on failure.
 		 */
 		qint64 sendToWorld(const QByteArray                                 &payload,
-		                   const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
+		                   const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {},
+		                   quint64                                           gmcpSession        = 0);
 		/**
 		 * @brief Sends an exact raw packet through the guarded causal callback transport.
 		 * @param payload Raw packet bytes, including any embedded NUL bytes.
@@ -4051,7 +4151,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Ends the interactive script-reload lifetime after primary-world close is accepted.
 		 *
-		 * Reloads that have not started are cancelled in constant time. A reload already executing on its worker
+		 * Reloads that have not started are canceled in constant time. A reload already executing on its worker
 		 * finishes normally so its engine state and runtime mutation journal remain consistent.
 		 */
 		void                                 beginWorldSessionClose();
@@ -4961,13 +5061,13 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool             notesInRgb() const;
 		/**
-		 * @brief Returns note text colour index.
-		 * @return Note text colour index.
+		 * @brief Returns note text color index.
+		 * @return Note text color index.
 		 */
 		[[nodiscard]] int              noteTextColour() const;
 		/**
-		 * @brief Sets note text colour index.
-		 * @param value Note text colour index.
+		 * @brief Sets note text color index.
+		 * @param value Note text color index.
 		 */
 		void                           setNoteTextColour(int value);
 		/**
@@ -5049,7 +5149,7 @@ class WorldRuntime : public QObject
 		void                           fireWorldSaveHandlers();
 		/**
 		 * @brief Fires world-save callbacks without blocking callback completion delivery.
-		 * @param completion Completion receiving whether callback delivery was cancelled.
+		 * @param completion Completion receiving whether callback delivery was canceled.
 		 */
 		void                           fireWorldSaveHandlersContinuable(std::function<void(bool)> completion);
 		/**
@@ -5343,7 +5443,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginCommandContinuable(const QString                        &text,
-		                                  LuaCallbackResultContinuationFactory &continuationFactory);
+			                              LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin command-changed callback chain.
 		 */
@@ -5362,7 +5462,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginSendContinuable(const QString                        &text,
-		                               LuaCallbackResultContinuationFactory &continuationFactory);
+			                           LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin command-entered transform callback.
 		 * @param text Command text, possibly modified in place.
@@ -5376,7 +5476,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginCommandEnteredContinuable(const QString                        &text,
-		                                         LuaCallbackResultContinuationFactory &continuationFactory);
+			                                     LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin tab-complete transform callback.
 		 * @param text Completion text, possibly modified in place.
@@ -5390,7 +5490,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginLineReceivedContinuable(const QString                        &text,
-		                                       LuaCallbackResultContinuationFactory &continuationFactory);
+			                                   LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin play-sound callback chain.
 		 * @param sound Sound identifier or path.
@@ -5432,7 +5532,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginSentContinuable(const LuaBatchDispatchRequest        &request,
-		                               LuaCallbackResultContinuationFactory &continuationFactory);
+			                           LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin partial-line callback.
 		 * @param text Partial line text.
@@ -5571,7 +5671,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Writes HTML-escaped text with the supplied output style spans to the active log.
 		 * @param text Text covered sequentially by @p spans.
-		 * @param spans Output style spans to serialize as HTML colours and underlining.
+		 * @param spans Output style spans to serialize as HTML colors and underlining.
 		 * @return API status code.
 		 */
 		int                   writeStyledHtmlLogText(const QString &text, const QVector<StyleSpan> &spans);
@@ -5654,6 +5754,40 @@ class WorldRuntime : public QObject
 		[[nodiscard]] QString mainTitleOverride() const;
 
 	signals:
+		/**
+		 * @brief Announces an imminent append to native GMCP history.
+		 */
+		void gmcpHistoryAboutToAppend();
+		/**
+		 * @brief Reports a completed append to native GMCP history.
+		 */
+		void gmcpHistoryAppended();
+		/**
+		 * @brief Announces removal from native GMCP history.
+		 * @param first First oldest-first record index.
+		 * @param last Last oldest-first record index.
+		 */
+		void gmcpHistoryAboutToRemove(int first, int last);
+		/**
+		 * @brief Reports a completed removal from native GMCP history.
+		 */
+		void gmcpHistoryRemoved();
+		/**
+		 * @brief Reports a GMCP history or publication change.
+		 */
+		void gmcpChanged();
+		/**
+		 * @brief Reports a received package and its exact immutable publication version.
+		 * @param record Published version observed with the message.
+		 * @param message Received native message.
+		 */
+		void gmcpPackageReceived(const QMudGmcp::Record                         &record,
+		                         const std::shared_ptr<const QMudGmcp::Message> &message);
+		/**
+		 * @brief Reports a change to the selected native-handler mode or its preconnection availability.
+		 */
+		void nativeGmcpAvailabilityChanged();
+
 		/**
 		 * @brief Emitted when registered accelerator keys change.
 		 */
@@ -5860,6 +5994,32 @@ class WorldRuntime : public QObject
 		bool event(QEvent *event) override;
 
 	private:
+		/**
+		 * @brief Publishes an exact incoming packet diagnostic.
+		 * @param caption Direction label.
+		 * @param packet Original bytes.
+		 * @param number Packet number.
+		 * @param operationId Optional ingress cancellation identity.
+		 * @return Whether processing remains valid.
+		 */
+		bool publishIncomingPacketDebug(const QString &caption, const QByteArray &packet, qint64 number,
+		                                quint64 operationId);
+		/**
+		 * @brief Accounts for automatic transport output independently of the active command or input.
+		 * @param write Accepted protocol bytes and their write timestamp.
+		 */
+		void recordOutgoingProtocolWrite(const WorldSocketProtocolWrite &write);
+		/**
+		 * @brief Accounts for accepted writes and queues existing packet diagnostics.
+		 * @param payload Accepted packet.
+		 * @param written Accepted byte count.
+		 * @param commandTransaction Optional command transaction.
+		 * @param timestamp Transport acceptance time, or invalid to use the current time.
+		 */
+		void recordOutgoingWorldPacket(const QByteArray &payload, qint64 written,
+		                               const QSharedPointer<OutboundCommandTransaction> &commandTransaction,
+		                               const QDateTime                                  &timestamp = {});
+
 		enum class RuntimeLocationKind : quint8;
 		struct RuntimeLocationSlot;
 		struct CausalOutboundScopeHandle
@@ -6226,8 +6386,13 @@ class WorldRuntime : public QObject
 		runtimeCountersSnapshotWithResolvedNoteColours(bool includeStrings, long noteColourFore,
 		                                               long noteColourBack,
 		                                               bool includeExternalStrings = true) const;
-		[[nodiscard]] QDateTime cachedScriptFileModTime() const;
-		void                    refreshScriptFileWatcher(bool notifyChange, bool forceChange = false);
+		/**
+		 * @brief Finds transport-decoded input statistics belonging to the current ingress execution.
+		 * @return Batch metadata, or null outside native network input processing.
+		 */
+		[[nodiscard]] const WorldSocketInputMetadata *activeTransportInputMetadata() const;
+		[[nodiscard]] QDateTime                       cachedScriptFileModTime() const;
+		void refreshScriptFileWatcher(bool notifyChange, bool forceChange = false);
 		// Internal plugin-callback, chat, save-snapshot, and log-rotation helpers.
 		/**
 		 * @brief Runs plugin callbacks until one returns false.
@@ -6471,7 +6636,7 @@ class WorldRuntime : public QObject
 		 */
 		void               drainPendingRawIngressPayloads();
 		/**
-		 * @brief Queues raw-ingress draining after a cancelled operation's caller context has unwound.
+		 * @brief Queues raw-ingress draining after a canceled operation's caller context has unwound.
 		 */
 		void               schedulePendingRawIngressPayloadDrain();
 		void               beginRawIngressExecution(quint64 operationId);
@@ -6479,7 +6644,14 @@ class WorldRuntime : public QObject
 		[[nodiscard]] bool rawIngressCancellationRequested(quint64 operationId) const;
 		void               finalizeRawIngressCancellation(quint64 operationId);
 		void               registerRawIngressContinuationTicket(quint64 operationId, quint64 ticket);
-		void               enqueueRawIngress(const QByteArray &data, RawIngressSource source);
+		/**
+		 * @brief Queues incoming bytes together with their transport statistics.
+		 * @param data Incoming bytes.
+		 * @param source Input origin.
+		 * @param metadata Statistics captured for these bytes.
+		 */
+		void               enqueueRawIngress(const QByteArray &data, RawIngressSource source,
+		                                     const WorldSocketInputMetadata &metadata = {});
 		/**
 		 * @brief Starts one raw-ingress operation, suspending it when packet transformation is asynchronous.
 		 * @param payload Raw ingress payload and retained mutation completion.
@@ -6533,9 +6705,9 @@ class WorldRuntime : public QObject
 		    const LuaBatchDispatchRequest &request) const noexcept;
 		static void discardPluginCallbackMutations(LuaBatchDispatchResult &result);
 		/**
-		 * @brief Discards a cancelled callback result and cancels any suspended Lua coroutine it owns.
+		 * @brief Discards a canceled callback result and cancels any suspended Lua coroutine it owns.
 		 * @param command Dispatch command that produced the result.
-		 * @param result Cancelled result to sanitize.
+		 * @param result Canceled result to sanitize.
 		 */
 		void        discardCancelledPluginCallbackResult(const PluginCallbackDispatchCommand &command,
 		                                                 LuaBatchDispatchResult              &result) const;
@@ -6718,7 +6890,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] LuaBatchDispatchRequest
 		                          currentPluginCallbackDispatchRequest(PluginCallbackDispatchCommand &command,
-		                                                               int                            firstRecipientIndex = 0);
+								                                       int                            firstRecipientIndex = 0);
 		/**
 		 * @brief Checks whether plugin should receive async result callback for API name.
 		 * @param plugin Plugin state entry.
@@ -6997,7 +7169,7 @@ class WorldRuntime : public QObject
 			return (domainMask &
 			        luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::Plugins)) != 0U
 			           ? domainMask | luaCallbackPluginIndexedStableSnapshotDomainsMask()
-			           : domainMask;
+					   : domainMask;
 		}
 		/**
 		 * @brief Invalidates the cached stable callback-dispatch snapshot.
@@ -7315,7 +7487,7 @@ class WorldRuntime : public QObject
 					return storedIndex +
 					       (deferredHiddenPhysicalIndex >= 0 && storedIndex >= deferredHiddenPhysicalIndex
 					            ? 1
-					            : 0);
+								: 0);
 				}
 				/**
 				 * @brief Maps stored logical indexing to a one-based Lua buffer index.
@@ -7332,7 +7504,7 @@ class WorldRuntime : public QObject
 					return physicalIndex + 1 -
 					       (deferredHiddenPhysicalIndex >= 0 && physicalIndex > deferredHiddenPhysicalIndex
 					            ? 1
-					            : 0);
+								: 0);
 				}
 		};
 		/**
@@ -7386,7 +7558,7 @@ class WorldRuntime : public QObject
 		 * @return Stored line pointer, or `nullptr` for an invalid index or an unbuffered pending line.
 		 */
 		[[nodiscard]] const LineEntry      *
-        luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
+		luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
 		                                            const LuaContextBufferPresentation &presentation) const;
 		/**
 		 * @brief Resolves a callback matched line from its maintained or captured position.
@@ -7415,7 +7587,7 @@ class WorldRuntime : public QObject
 		void              notifyOutputViewLineChanged(int runtimeLineIndex = -1);
 		/**
 		 * @brief Notifies or defers presentation of newly appended runtime tail lines.
-		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by the append.
+		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by append.
 		 */
 		void              notifyOutputViewLineAppended(int removedHeadCount = 0);
 		/**
@@ -7595,7 +7767,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Dispatches a callback and invokes a completion when asynchronous work finishes.
 		 * @param request Structured callback command payload.
-		 * @param completion Completion receiving whether dispatch was cancelled.
+		 * @param completion Completion receiving whether dispatch was canceled.
 		 * @return `true` when dispatch completed inline.
 		 */
 		bool               dispatchPluginCallbackContinuable(const LuaBatchDispatchRequest &request,
@@ -7610,7 +7782,7 @@ class WorldRuntime : public QObject
 		 * @param worldCallbackAttribute World option containing the callback function name.
 		 * @param worldCallbackKind Dispatch signature used by the world callback.
 		 * @param worldCallbackEvent Event identity associated with the world callback.
-		 * @param completion Completion receiving whether callback delivery was cancelled.
+		 * @param completion Completion receiving whether callback delivery was canceled.
 		 */
 		void               dispatchWorldNoArgCallbackContinuable(const QString                   &worldCallbackAttribute,
 		                                                         LuaBatchDispatchKind             worldCallbackKind,
@@ -7635,7 +7807,7 @@ class WorldRuntime : public QObject
 		 * @param worldCallbackKind Dispatch signature used by the world callback.
 		 * @param worldCallbackEvent Event identity associated with the world callback.
 		 * @param pluginCallbackEvent Plugin event dispatched after the world callback.
-		 * @param completion Completion receiving whether callback delivery was cancelled.
+		 * @param completion Completion receiving whether callback delivery was canceled.
 		 */
 		void dispatchWorldAndPluginNoArgCallbacksContinuable(const QString            &worldCallbackAttribute,
 		                                                     LuaBatchDispatchKind      worldCallbackKind,
@@ -7660,7 +7832,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Cancels one suspended runtime operation by its continuation ticket.
 		 * @param ticket Runtime continuation ticket.
-		 * @return `true` when a pending continuation was cancelled.
+		 * @return `true` when a pending continuation was canceled.
 		 */
 		bool cancelPluginCallbackResultContinuation(quint64 ticket);
 		/**
@@ -7794,12 +7966,12 @@ class WorldRuntime : public QObject
 		int         completeSoundPluginDecision(const PendingSoundOperation &operation, bool handled) const;
 		/**
 		 * @brief Cancels one pending plugin sound decision on the runtime thread.
-		 * @param operation Sound operation whose prepared playback and completion are cancelled.
+		 * @param operation Sound operation whose prepared playback and completion are canceled.
 		 */
 		void        cancelSoundPluginDecision(const PendingSoundOperation &operation) const;
 		/**
-		 * @brief Completes callbacks retained by a cancelled sound operation.
-		 * @param operation Cancelled sound operation.
+		 * @brief Completes callbacks retained by a canceled sound operation.
+		 * @param operation Canceled sound operation.
 		 */
 		static void finishCancelledSoundOperation(const PendingSoundOperation &operation);
 		struct PendingChatNoteOperation
@@ -7819,8 +7991,8 @@ class WorldRuntime : public QObject
 		void               completeChatNoteDispatch(const PendingChatNoteOperation &operation, bool accepted);
 		void               cancelChatNoteDispatch(const PendingChatNoteOperation &operation);
 		/**
-		 * @brief Completes retained mutation state for a cancelled chat note.
-		 * @param operation Cancelled chat-note operation.
+		 * @brief Completes retained mutation state for a canceled chat note.
+		 * @param operation Canceled chat-note operation.
 		 */
 		void               finishCancelledChatNoteOperation(const PendingChatNoteOperation &operation) const;
 		void               drainPendingChatNoteOperations();
@@ -7881,9 +8053,9 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool
 		     buildActiveStateNoArgCallbackCommand(const QVector<QSharedPointer<LuaCallbackEngine>> &engines,
-		                                          const QString &functionName, LuaCallbackEvent callbackEvent,
-		                                          bool                           revalidateObservedRecipients,
-		                                          PluginCallbackDispatchCommand &command);
+			                                      const QString &functionName, LuaCallbackEvent callbackEvent,
+			                                      bool                           revalidateObservedRecipients,
+			                                      PluginCallbackDispatchCommand &command);
 		/**
 		 * @brief Drains queued plugin callback commands.
 		 * @param completionCommandId Optional command-id barrier; `0` drains all currently queued commands.
@@ -8129,7 +8301,7 @@ class WorldRuntime : public QObject
 		 * @return Matching active slot, or `nullptr` for a stale handle.
 		 */
 		[[nodiscard]] const CausalOutboundScopeSlot      *
-        causalOutboundScopeSlot(const CausalOutboundScopeHandle &scope) const;
+		causalOutboundScopeSlot(const CausalOutboundScopeHandle &scope) const;
 		void runWithCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group,
 		                                const std::function<void()>               &work);
 		[[nodiscard]] QSharedPointer<CausalOutboundGroup> currentCausalOutboundGroup() const;
@@ -8153,19 +8325,23 @@ class WorldRuntime : public QObject
 		 * @param payload Encoded and telnet-escaped command bytes, consumed only when staged.
 		 * @param triggerPriority Place bytes in the trigger-priority band when `true`.
 		 * @param commandTransaction Optional command commit whose outcome follows the staged bytes.
-		 * @return Whether the payload was staged, should be sent immediately, or belongs to a cancelled connection.
+		 * @param gmcpSession Optional native GMCP session identity validated at the physical write.
+		 * @return Whether the payload was staged, should be sent immediately, or belongs to a canceled connection.
 		 */
 		[[nodiscard]] CausalOutboundStageResult stageCausalOutboundTransmission(
 		    QByteArray &payload, bool triggerPriority,
-		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
+		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {},
+		    quint64                                           gmcpSession        = 0);
 		/**
 		 * @brief Writes one packet and applies the shared transport accounting and notification lifecycle.
 		 * @param payload Packet bytes, with protocol prerequisites already satisfied.
 		 * @param commandTransaction Optional command transaction resolved by this physical write.
+		 * @param gmcpSession Optional native GMCP session identity validated at the physical write.
 		 * @return Bytes accepted by the socket, or a non-positive value on failure.
 		 */
 		qint64 writeWorldPacket(const QByteArray                                 &payload,
-		                        const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
+		                        const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {},
+		                        quint64                                           gmcpSession        = 0);
 		/**
 		 * @brief Writes pending Telnet protocol bytes without re-entering the application output boundary.
 		 * @return `true` when pending protocol output is satisfied without losing the connection; `false` on
@@ -8549,7 +8725,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
-		                            QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
+			                        QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
 		/**
 		 * @brief Captures and queues state belonging to the original save callback owner.
 		 * @param resolvedPluginId Canonical plugin identifier.
@@ -8716,7 +8892,7 @@ class WorldRuntime : public QObject
 		};
 
 		/**
-		 * @brief Marks the lazily resolved output-colour cache stale.
+		 * @brief Marks the lazily resolved output-color cache stale.
 		 */
 		void                                           invalidateResolvedOutputColourCache() const;
 		[[nodiscard]] const ResolvedOutputColourCache &resolvedOutputColourCache() const;
@@ -9200,8 +9376,8 @@ class WorldRuntime : public QObject
 			private:
 				std::shared_ptr<PluginCallbackLaneQueueHandle>
 				            insert(PluginCallbackLaneQueueStorage::const_iterator position,
-				                   PluginCallbackLaneCommand command, bool blocksInputCriticalInsertion,
-				                   bool prependNonBlockingIndex);
+							       PluginCallbackLaneCommand command, bool blocksInputCriticalInsertion,
+							       bool prependNonBlockingIndex);
 				void        unlinkNonBlocking(PluginCallbackLaneQueueNode &node);
 				/**
 				 * @brief Detaches a queue node's externally held removal handle.
@@ -9222,6 +9398,7 @@ class WorldRuntime : public QObject
 				quint64                                                 operationId{0};
 				quint64                                                 connectionEpoch{0};
 				QByteArray                                              data;
+				WorldSocketInputMetadata                                metadata;
 				RawIngressSource                                        source{RawIngressSource::Network};
 				std::function<void(bool)>                               mutationCompletion;
 				std::shared_ptr<LuaCallbackConnectionCancellationState> connectionCancellationState;
@@ -9230,6 +9407,7 @@ class WorldRuntime : public QObject
 		{
 				QSharedPointer<IncomingPresentationWork>                presentationWork;
 				quint64                                                 id{0};
+				WorldSocketInputMetadata                                metadata;
 				quint64                                                 connectionEpoch{0};
 				quint64                                                 continuationTicket{0};
 				RawIngressSource                                        source{RawIngressSource::Network};
@@ -9505,6 +9683,19 @@ class WorldRuntime : public QObject
 		 * destroying callback engines or any runtime cache/state; declaration order is not sufficient.
 		 */
 		std::unique_ptr<ILuaExecutor>           m_luaExecutor;
+		std::shared_ptr<QMudGmcp::Publication>  m_gmcpPublication;
+		QByteArray                              m_pendingNativeGmcpRestore;
+		bool                                    m_nativeGmcpRestorePrepared{false};
+		bool                                    m_reloadPreparing{false};
+		QMudGmcp::History                       m_gmcpHistory;
+		QTimer                                 *m_gmcpHistoryTimer{nullptr};
+		/**
+		 * @brief Evicts history older than one hour, protecting the latest five records.
+		 * @param now Timestamp of this periodic check.
+		 */
+		void                                    evictGmcpHistory(const QDateTime &now);
+		QMap<QString, QMap<QString, int>>       m_gmcpModules;
+		QMap<QString, quint64>                  m_gmcpModuleOwners;
 		QString                                 m_luaScriptText;
 		WorldCommandProcessor                  *m_commandProcessor{nullptr};
 		bool                                    m_initialStartPausedStateApplied{false};

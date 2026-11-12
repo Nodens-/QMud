@@ -367,6 +367,7 @@ set(QMUD_SOURCES
         helpers/AnsiSgrParseUtils.cpp
         WorldView.cpp
         WorldSocket.cpp
+        GmcpProtocol.cpp
         TelnetProcessor.cpp
         WorldOptions.cpp
         WorldOptionDefaults.cpp
@@ -393,6 +394,7 @@ set(QMUD_SOURCES
         dialogs/PluginsDialog.cpp
         dialogs/PluginWizardDialog.cpp
         dialogs/GeneratedNameDialog.cpp
+        dialogs/GmcpBrowserDialog.cpp
         dialogs/ColourPickerDialog.cpp
         dialogs/ConfirmPreambleDialog.cpp
         dialogs/HighlightPhraseDialog.cpp
@@ -476,6 +478,7 @@ set(QMUD_HEADERS
         CommandIds.h
         WorldSocketService.h
         WorldSocket.h
+        GmcpProtocol.h
         TelnetProcessor.h
         WorldOptions.h
         WorldOptionDefaults.h
@@ -495,6 +498,7 @@ set(QMUD_HEADERS
         dialogs/PluginsDialog.h
         dialogs/PluginWizardDialog.h
         dialogs/GeneratedNameDialog.h
+        dialogs/GmcpBrowserDialog.h
         dialogs/ColourPickerDialog.h
         dialogs/ConfirmPreambleDialog.h
         dialogs/HighlightPhraseDialog.h

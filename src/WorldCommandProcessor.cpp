@@ -71,7 +71,7 @@ constexpr int kStyleBlink = 0x0004;
 /**
  * @brief Narrow internal access used by automation execution and one-shot removal.
  *
- * Collection references remain private in WorldRuntime; every mutation performed through this accessor is paired
+ * Collection references, remain private in WorldRuntime; every mutation performed through this accessor is paired
  * with the processor's definition/runtime-state publication guards.
  */
 class WorldCommandProcessorMutationAccess final
@@ -1369,7 +1369,7 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 				}
 				WorldRuntime::Plugin *plugin =
 				    scope.pluginId.isEmpty() ? nullptr
-				                             : WorldCommandProcessorMutationAccess::pluginForLocation(
+					                         : WorldCommandProcessorMutationAccess::pluginForLocation(
 				                                   *runtime, scope.pluginRuntimeLocationHandle,
 				                                   scope.pluginRuntimeInstanceId, scope.pluginIndexHint);
 				QList<WorldRuntime::Alias> &aliases =
@@ -1446,9 +1446,9 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 				    if (!self->processor)
 					    return;
 				    self->processor->sendTo(decoded.sendToValue, sendText, decoded.omitFromOutput,
-				                            decoded.omitFromLog, decoded.variableName, decoded.scriptLabel,
-				                            pluginId, nullptr, false, false, 0, 0,
-				                            LuaCallbackEvent::AliasScript);
+					                        decoded.omitFromLog, decoded.variableName, decoded.scriptLabel,
+					                        pluginId, nullptr, false, false, 0, 0,
+					                        LuaCallbackEvent::AliasScript);
 			    },
 			    [self](const bool completed) { self->resumeOrderedAction(completed); });
 		}
@@ -1555,7 +1555,7 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 				omitFromLog = decoded.omitFromLog;
 				processor->emitTrace(decoded.label.isEmpty()
 				                         ? QStringLiteral("Matched alias \"%1\"").arg(decoded.matchText)
-				                         : QStringLiteral("Matched alias %1").arg(decoded.label));
+										 : QStringLiteral("Matched alias %1").arg(decoded.label));
 				bool          ok       = false;
 				const QString sendText = processor->fixSendText(
 				    WorldCommandProcessor::fixupEscapeSequences(decoded.sendText), decoded.sendToValue,
@@ -2001,9 +2001,12 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 				finishCurrentTimer();
 			else
 			{
+#if !defined(QT_NO_DEBUG) || defined(QT_FORCE_ASSERTS)
 				Q_ASSERT_X(false, "TimerEvaluationSequence::orderedActionFinished",
 				           "timer action completed without a pending action");
+#else
 				return;
+#endif
 			}
 			if (disposition == AdvanceDisposition::WaitingForRoutine)
 				return;
@@ -2048,9 +2051,9 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 			    {
 				    if (self->processor)
 					    self->processor->sendTo(sendToValue, sendText, omitFromOutput, omitFromLog,
-					                            variableName, QStringLiteral("Timer: %1").arg(label),
-					                            self->current.pluginId, nullptr, false, false, 0, 0,
-					                            LuaCallbackEvent::TimerScript);
+						                        variableName, QStringLiteral("Timer: %1").arg(label),
+						                        self->current.pluginId, nullptr, false, false, 0, 0,
+						                        LuaCallbackEvent::TimerScript);
 			    },
 			    [self](const bool completed) { self->orderedActionFinished(completed); });
 			if (runtime)
@@ -2124,15 +2127,15 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 				        engine, scriptName, LuaCallbackEvent::TimerRoutine, {label}, {}, {}, nullptr,
 				        WorldRuntime::eTimerFired, false, 0, 0,
 				        [self, operation, context, worldScript,
-				         scriptName](const LuaBatchDispatchResult &result)
+						 scriptName](const LuaBatchDispatchResult &result)
 				        {
 					        const auto complete = [self, operation, worldScript, scriptName, result]
 					        {
 						        if (worldScript && result.hasFunctionValid && !result.hasFunction &&
-						            self->processor)
+								    self->processor)
 						        {
 							        self->processor->warnMissingWorldScriptFunction(QStringLiteral("Timer"),
-							                                                        scriptName);
+									                                                scriptName);
 						        }
 						        if (operation)
 							        operation->release(true);
@@ -2227,7 +2230,7 @@ QString WorldCommandProcessor::fixHtmlString(const QString &source)
 	QString   strOldString = source;
 	QString   strNewString;
 
-	qsizetype i = -1;
+	qsizetype i;
 	while ((i = strOldString.indexOf(QRegularExpression(QStringLiteral("[<>&\\\"]")))) != -1)
 	{
 		strNewString += strOldString.left(i);
@@ -2920,7 +2923,7 @@ int WorldCommandProcessor::executeUserMacroSendNow(const QString &text, const bo
 			                                   if (!completed || !processor)
 				                                   return;
 			                                   if (history && !historyState->omitFromHistory &&
-			                                       !historyState->sendFailed && processor->m_view)
+											       !historyState->sendFailed && processor->m_view)
 			                                   {
 				                                   processor->m_view->addToHistoryForced(text);
 			                                   }
@@ -2976,8 +2979,8 @@ int WorldCommandProcessor::executeCommandWithTriggerPriority(const QString &text
 	    [this, &result, text, processor]
 	    {
 		    result = executeCommandWithCompletion(text,
-		                                          [processor](const bool completed)
-		                                          {
+			                                      [processor](const bool completed)
+			                                      {
 			                                          if (processor)
 				                                          processor->finishTriggerPriorityCommand(completed);
 		                                          });
@@ -3112,7 +3115,7 @@ void WorldCommandProcessor::sendToFromAccelerator(int sendTo, const QString &tex
 		const quint64 pluginRuntimeInstanceId     = plugin ? plugin->runtimeInstanceId : 0;
 		enqueueOrRunInputCriticalAction(
 		    [processor = QPointer<WorldCommandProcessor>(this), sendTo, text, description, pluginId,
-		     pluginRuntimeLocationHandle, pluginRuntimeInstanceId](CommandCompletion completion)
+			 pluginRuntimeLocationHandle, pluginRuntimeInstanceId](CommandCompletion completion)
 		    {
 			    if (!processor)
 			    {
@@ -3122,16 +3125,16 @@ void WorldCommandProcessor::sendToFromAccelerator(int sendTo, const QString &tex
 			    }
 			    processor->runOrderedRuleAction(
 			        [processor, sendTo, text, description, pluginId, pluginRuntimeLocationHandle,
-			         pluginRuntimeInstanceId]
+					 pluginRuntimeInstanceId]
 			        {
 				        const WorldRuntime::Plugin *resolvedPlugin =
 				            processor->m_runtime && !pluginId.isEmpty()
-				                ? WorldCommandProcessorMutationAccess::pluginForLocation(
+						        ? WorldCommandProcessorMutationAccess::pluginForLocation(
 				                      *processor->m_runtime, pluginRuntimeLocationHandle,
 				                      pluginRuntimeInstanceId, -1)
-				                : nullptr;
+						        : nullptr;
 				        if (!pluginId.isEmpty() &&
-				            (!resolvedPlugin || !resolvedPlugin->enabled || resolvedPlugin->installPending))
+						    (!resolvedPlugin || !resolvedPlugin->enabled || resolvedPlugin->installPending))
 					        return;
 				        processor->sendToFromAccelerator(sendTo, text, description, resolvedPlugin);
 			        },
@@ -3164,7 +3167,7 @@ void WorldCommandProcessor::onCommandEntered(const QString &text)
 
 	enqueueOrRunInputCriticalAction(
 	    [processor = QPointer<WorldCommandProcessor>(this),
-	     command   = std::move(command)](CommandCompletion completion) mutable
+		 command   = std::move(command)](CommandCompletion completion) mutable
 	    {
 		    if (!processor)
 		    {
@@ -3309,7 +3312,7 @@ void WorldCommandProcessor::startIncomingLine(
 		    m_runtime->m_currentIncomingPresentationChunk,
 		    request.presentationWork
 		        ? QWeakPointer<WorldRuntime::IncomingPresentationChunk>(request.presentationWork->chunk)
-		        : m_runtime->m_currentIncomingPresentationChunk);
+				: m_runtime->m_currentIncomingPresentationChunk);
 	auto presentationBatch = parent
 	                             ? parent->presentationBatch
 	                             : (m_runtime ? m_runtime->acquireIncomingLinePresentationBatch() : nullptr);
@@ -3367,8 +3370,8 @@ void WorldCommandProcessor::startIncomingLine(
 
 	QVector<WorldRuntime::StyleSpan> normalizedSpans =
 	    QMudOutputWrapUtils::normalizeStyleSpansForTextLazily(line, spans,
-	                                                          [&]
-	                                                          {
+		                                                      [&]
+		                                                      {
 		                                                          loadDefaultColors();
 		                                                          WorldRuntime::StyleSpan fallback;
 		                                                          fallback.fore = defaultFore;
@@ -3515,9 +3518,9 @@ void WorldCommandProcessor::continueIncomingLineAfterPluginDecision(
 				m_view->clearPartialOutput();
 			const bool hasReplacementOutput =
 			    std::ranges::any_of(triggerResult.deferredScripts, [](const DeferredScript &script)
-			                        { return script.replaceMatchedLineOutput; }) ||
+				                    { return script.replaceMatchedLineOutput; }) ||
 			    std::ranges::any_of(triggerResult.triggerScripts, [](const TriggerScript &script)
-			                        { return script.replaceMatchedLineOutput; });
+				                    { return script.replaceMatchedLineOutput; });
 			if (hasReplacementOutput)
 			{
 				if (m_runtime)
@@ -3660,7 +3663,7 @@ void WorldCommandProcessor::advanceIncomingLineScripts(
 			    };
 			    if (processor)
 				    processor->runWithInputCriticalOperationScope(operation->inputCriticalOperationScope,
-				                                                  resumeLine);
+					                                              resumeLine);
 		    });
 		return;
 	}
@@ -3708,7 +3711,7 @@ void WorldCommandProcessor::advanceIncomingLineScripts(
 
 		auto executionScope =
 		    std::make_shared<TriggerExecutionScope>(m_runtime, script.runtimeLocationHandle, script.runtimeId,
-		                                            script.pluginId, true, script.indexHint);
+			                                        script.pluginId, true, script.indexHint);
 		const QPointer<WorldCommandProcessor> processor(this);
 		m_runtime->dispatchLuaStringsAndWildcardsAsync(
 		    engine, script.scriptName, LuaCallbackEvent::TriggerRoutine, {script.label, script.line},
@@ -3716,13 +3719,13 @@ void WorldCommandProcessor::advanceIncomingLineScripts(
 		    script.replaceMatchedLineOutput, operation->triggerMatchedLineBufferIndex,
 		    operation->triggerMatchedLineAbsoluteNumber,
 		    [processor, operation, executionScope, functionName = script.scriptName,
-		     worldFunction = !plugin](const LuaBatchDispatchResult &result) mutable
+			 worldFunction = !plugin](const LuaBatchDispatchResult &result) mutable
 		    {
 			    const bool            hasFunctionValid = result.hasFunctionValid;
 			    const bool            hasFunction      = result.hasFunction;
 			    std::function<void()> resumeLine = [processor, operation,
-			                                        executionScope = std::move(executionScope), functionName,
-			                                        worldFunction, hasFunctionValid, hasFunction]() mutable
+				                                    executionScope = std::move(executionScope), functionName,
+				                                    worldFunction, hasFunctionValid, hasFunction]() mutable
 			    {
 				    executionScope.reset();
 				    if (!processor)
@@ -3732,13 +3735,13 @@ void WorldCommandProcessor::advanceIncomingLineScripts(
 					    operation->worldFunctionPresence.insert(functionName, hasFunction);
 					    if (!hasFunction)
 						    processor->warnMissingWorldScriptFunction(QStringLiteral("Trigger"),
-						                                              functionName);
+							                                          functionName);
 				    }
 				    processor->advanceIncomingLineScripts(operation);
 			    };
 			    if (processor)
 				    processor->runWithInputCriticalOperationScope(operation->inputCriticalOperationScope,
-				                                                  resumeLine);
+					                                              resumeLine);
 		    });
 		return;
 	}
@@ -3961,7 +3964,7 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 		    m_runtime->m_currentIncomingPresentationChunk,
 		    item.presentationWork
 		        ? QWeakPointer<WorldRuntime::IncomingPresentationChunk>(item.presentationWork->chunk)
-		        : QWeakPointer<WorldRuntime::IncomingPresentationChunk>{});
+				: QWeakPointer<WorldRuntime::IncomingPresentationChunk>{});
 	const bool topLevel = !parent;
 	if (topLevel)
 	{
@@ -4008,7 +4011,7 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 			WorldRuntime::IncomingLineLuaObservationScope observationScope(m_runtime, item.observation);
 			const unsigned short                          previousActionSource =
 			    m_runtime ? m_runtime->currentActionSource()
-			              : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+				          : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
 			const bool previousDoingSimulate = m_runtime && m_runtime->doingSimulate();
 			const auto restoreRuntimeContext = qScopeGuard(
 			    [runtime = QPointer<WorldRuntime>(m_runtime), previousActionSource, previousDoingSimulate]
@@ -4271,7 +4274,7 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	const QPointer<WorldRuntime> runtimeGuard(m_runtime);
 	const unsigned short         previousActionSource =
 	    runtimeGuard ? runtimeGuard->currentActionSource()
-	                 : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+		             : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
 	if (runtimeGuard)
 		runtimeGuard->setCurrentActionSource(WorldRuntime::eUserTyping);
 	[[maybe_unused]] const auto restoreActionSource = qScopeGuard(
@@ -4366,7 +4369,7 @@ void WorldCommandProcessor::sendRawText(const QString &text, const bool echo, co
 	{
 		enqueueOrRunInputCriticalAction(
 		    [processor = QPointer<WorldCommandProcessor>(this), text, echo, queue, log,
-		     history](CommandCompletion completion)
+			 history](CommandCompletion completion)
 		    {
 			    if (!processor)
 			    {
@@ -4375,8 +4378,8 @@ void WorldCommandProcessor::sendRawText(const QString &text, const bool echo, co
 				    return;
 			    }
 			    processor->runOrderedRuleAction([processor, text, echo, queue, log, history]
-			                                    { processor->sendRawText(text, echo, queue, log, history); },
-			                                    std::move(completion));
+				                                { processor->sendRawText(text, echo, queue, log, history); },
+				                                std::move(completion));
 		    });
 		return;
 	}
@@ -4395,7 +4398,7 @@ void WorldCommandProcessor::sendRawTextWithTriggerPriority(const QString &text, 
 	{
 		enqueueOrRunInputCriticalAction(
 		    [processor = QPointer<WorldCommandProcessor>(this), text, echo, queue, log,
-		     history](CommandCompletion completion)
+			 history](CommandCompletion completion)
 		    {
 			    if (!processor)
 			    {
@@ -4462,7 +4465,7 @@ void WorldCommandProcessor::sendImmediateText(const QString &text, const bool ec
 	{
 		enqueueOrRunInputCriticalAction(
 		    [processor = QPointer<WorldCommandProcessor>(this), text, echo, log,
-		     history](CommandCompletion completion)
+			 history](CommandCompletion completion)
 		    {
 			    if (!processor)
 			    {
@@ -4471,8 +4474,8 @@ void WorldCommandProcessor::sendImmediateText(const QString &text, const bool ec
 				    return;
 			    }
 			    processor->runOrderedRuleAction([processor, text, echo, log, history]
-			                                    { processor->sendImmediateText(text, echo, log, history); },
-			                                    std::move(completion));
+				                                { processor->sendImmediateText(text, echo, log, history); },
+				                                std::move(completion));
 		    });
 		return;
 	}
@@ -4638,7 +4641,7 @@ void WorldCommandProcessor::handleWorldConnected()
 		    [self, runtime, generation, connectMethod, player, password, connectText, echoInput]
 		    {
 			    if (!self || !runtime || self->m_runtime != runtime.data() ||
-			        self->m_autoConnectDelayGeneration != generation || !runtime->isConnected())
+				    self->m_autoConnectDelayGeneration != generation || !runtime->isConnected())
 				    return;
 			    self->runWorldConnectActions(connectMethod, player, password, connectText, echoInput);
 		    });
@@ -4656,7 +4659,7 @@ void WorldCommandProcessor::runWorldConnectActions(const int connectMethod, cons
 	{
 		enqueueOrRunInputCriticalAction(
 		    [processor = QPointer<WorldCommandProcessor>(this), connectMethod, player, password, connectText,
-		     echoInput](CommandCompletion completion)
+			 echoInput](CommandCompletion completion)
 		    {
 			    if (!processor)
 			    {
@@ -4668,7 +4671,7 @@ void WorldCommandProcessor::runWorldConnectActions(const int connectMethod, cons
 			        [processor, connectMethod, player, password, connectText, echoInput]
 			        {
 				        processor->runWorldConnectActions(connectMethod, player, password, connectText,
-				                                          echoInput);
+						                                  echoInput);
 			        },
 			        std::move(completion));
 		    });
@@ -4761,7 +4764,7 @@ void WorldCommandProcessor::finishWorldDisconnected()
 
 		    QString backupError;
 		    if (!createDisconnectWeekdayBackup(savePath, *runtime, AppController::instance(), backupError) &&
-		        !backupError.isEmpty())
+			    !backupError.isEmpty())
 		    {
 			    self->note(QStringLiteral("Unable to create disconnect backup: %1").arg(backupError), true);
 		    }
@@ -5629,7 +5632,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		QVector<LuaCallbackRuleSnapshotChange> changedRuntimeLocations;
 		auto                                   recordRuntimeStateChange =
 		    [&changedRuntimeLocations](const quint64 locationHandle, const quint64 runtimeId,
-		                               const int indexHint, const LuaCallbackRuleSnapshotParts parts)
+			                           const int indexHint, const LuaCallbackRuleSnapshotParts parts)
 		{
 			if (!changedRuntimeLocations.isEmpty() &&
 			    changedRuntimeLocations.constLast().runtimeLocationHandle == locationHandle &&
@@ -5861,7 +5864,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			{
 				result.oneShotTriggers.push_back(
 				    {triggerRuntimeId, triggerRuntimeLocationHandle, scopePluginRuntimeInstanceId,
-				     scopePluginRuntimeLocationHandle, -1, decoded.index, scopePluginId});
+					 scopePluginRuntimeLocationHandle, -1, decoded.index, scopePluginId});
 			}
 
 			if (m_runtime->traceEnabled())
@@ -6120,10 +6123,20 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	return result;
 }
 
+bool WorldCommandProcessor::reloadDrained() const
+{
+	return !m_activeOutboundCommand && !m_activeOutboundTransaction && !m_pluginSendDecisionPending &&
+	       !m_pluginSentNotificationPending && !m_drainingPendingPluginSends &&
+	       m_pendingPluginSends.isEmpty() && m_pendingTriggerPriorityActions.isEmpty() &&
+	       m_pendingTriggerPriorityCommands == 0 && m_triggerPriorityActionExecutionDepth == 0 &&
+	       !m_timerEvaluationSequence && !m_activeIncomingLineOperation &&
+	       m_pendingIncomingStreamItems.isEmpty() && !m_processingIncomingLine &&
+	       !m_processingIncomingStreamAction && m_executionDepth == 0;
+}
 void WorldCommandProcessor::checkTimers()
 {
 	processQueuedCommands(false);
-	if (!m_runtime || !m_runtimeAutomationOwner)
+	if (!m_runtime || !m_runtimeAutomationOwner || m_runtime->reloadPreparing())
 		return;
 	if (m_timerEvaluationSequence)
 	{
@@ -6158,9 +6171,9 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		    styleRuns ? QSharedPointer<QVector<LuaStyleRun>>::create(*styleRuns) : nullptr;
 		enqueueOrRunInputCriticalAction(
 		    [processor = QPointer<WorldCommandProcessor>(this), sendTo, text, omitFromOutput, omitFromLog,
-		     variableName, description, pluginId, retainedStyleRuns, hasTriggerContext,
-		     replaceMatchedLineOutput, triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber,
-		     callbackEvent](CommandCompletion completion)
+			 variableName, description, pluginId, retainedStyleRuns, hasTriggerContext,
+			 replaceMatchedLineOutput, triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber,
+			 callbackEvent](CommandCompletion completion)
 		    {
 			    if (!processor)
 			    {
@@ -6170,13 +6183,13 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 			    }
 			    processor->runOrderedRuleAction(
 			        [processor, sendTo, text, omitFromOutput, omitFromLog, variableName, description,
-			         pluginId, retainedStyleRuns, hasTriggerContext, replaceMatchedLineOutput,
-			         triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber, callbackEvent]
+					 pluginId, retainedStyleRuns, hasTriggerContext, replaceMatchedLineOutput,
+					 triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber, callbackEvent]
 			        {
 				        processor->sendTo(sendTo, text, omitFromOutput, omitFromLog, variableName,
-				                          description, pluginId, retainedStyleRuns.data(), hasTriggerContext,
-				                          replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
-				                          triggerMatchedLineAbsoluteNumber, callbackEvent);
+						                  description, pluginId, retainedStyleRuns.data(), hasTriggerContext,
+						                  replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
+						                  triggerMatchedLineAbsoluteNumber, callbackEvent);
 			        },
 			        std::move(completion));
 		    });
@@ -6473,7 +6486,7 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 		{
 			const unsigned short actionSource =
 			    m_runtime ? m_runtime->currentActionSource()
-			              : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+				          : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
 			const QString encoded =
 			    QMudCommandQueue::encodeQueueEntry(strLine, queueIt, bEcho, logIt, actionSource);
 			if (const bool triggerPriority = !queueIt && m_triggerCommandPriorityDepth > 0; triggerPriority)
@@ -6597,7 +6610,7 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 		{
 			auto continuationFactory = makeLuaCallbackResultContinuationFactory(
 			    [processor = QPointer<WorldCommandProcessor>(this), str, echo, logIt, transport,
-			     &mutationCompletion, &operationCompletion, bypassSpamPrevention]() mutable
+				 &mutationCompletion, &operationCompletion, bypassSpamPrevention]() mutable
 			    {
 				    PendingPluginSendDecision state;
 				    state.processor            = processor;
@@ -6881,7 +6894,7 @@ void WorldCommandProcessor::startPluginSentNotification(const QString &str, cons
 	const bool triggerPriority      = transport == OutboundTransport::CausalDeferredWithTriggerPriority;
 	const WorldRuntime::CausalOutboundStageResult stageResult =
 	    causalDeferred ? m_runtime->stageCausalOutboundTransmission(payload, triggerPriority, transaction)
-	                   : WorldRuntime::CausalOutboundStageResult::Immediate;
+		               : WorldRuntime::CausalOutboundStageResult::Immediate;
 	if (stageResult == WorldRuntime::CausalOutboundStageResult::Cancelled)
 	{
 		transaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
@@ -7246,7 +7259,7 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 		const QPointer<WorldRuntime>       runtimeGuard(m_runtime);
 		const unsigned short               previousActionSource =
 		    runtimeGuard ? runtimeGuard->currentActionSource()
-		                 : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+			             : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
 		if (runtimeGuard)
 			runtimeGuard->setCurrentActionSource(decoded.actionSource);
 		[[maybe_unused]] const auto restoreActionSource = qScopeGuard(

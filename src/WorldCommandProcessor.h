@@ -41,6 +41,11 @@ class WorldCommandProcessor : public QObject
 
 	public:
 		/**
+		 * @brief Checks input processing, timer evaluation, and pending sends for reload.
+		 * @return Whether all active callback work has completed.
+		 */
+		bool reloadDrained() const;
+		/**
 		 * @brief Creates a command processor for one world/session.
 		 * @param parent Optional Qt parent object.
 		 */
@@ -855,13 +860,13 @@ class WorldCommandProcessor : public QObject
 		 * @return Cached decoded alias data.
 		 */
 		const AliasEvaluationCacheEntry      &
-        decodedAliasEvaluationCache(const QList<WorldRuntime::Alias> &aliases);
+		decodedAliasEvaluationCache(const QList<WorldRuntime::Alias> &aliases);
 		/**
 		 * @brief Clears cached decoded trigger evaluation data.
 		 */
 		void invalidateTriggerEvaluationCache();
 		/**
-		 * @brief Ensures cached palette/default output colours match runtime settings.
+		 * @brief Ensures cached palette/default output colors match runtime settings.
 		 * @param attrs World attributes used by output rendering.
 		 */
 		void ensurePaletteCache(const QMap<QString, QString> &attrs) const;
@@ -974,7 +979,7 @@ class WorldCommandProcessor : public QObject
 				bool                          bypassSpamPrevention{false};
 		};
 		/**
-		 * @brief Processes a send and either transmits or stages its encoded payload.
+		 * @brief Processes send and either transmits or stages its encoded payload.
 		 * @param text Text to send.
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
@@ -1008,7 +1013,7 @@ class WorldCommandProcessor : public QObject
 		 */
 		void cancelPendingPluginSends();
 		/**
-		 * @brief Finishes a send after OnPluginSend accepts it.
+		 * @brief Finishes send after OnPluginSend accepts it.
 		 * @param text Newline-terminated outbound text.
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
@@ -1046,7 +1051,7 @@ class WorldCommandProcessor : public QObject
 		beginAcceptedPluginSentNotification(const std::shared_ptr<PendingOutboundCommand>    &command,
 		                                    const QSharedPointer<OutboundCommandTransaction> &transaction);
 		/**
-		 * @brief Finishes host-side accounting after OnPluginSent completes or is cancelled after acceptance.
+		 * @brief Finishes host-side accounting after OnPluginSent completes or is canceled after acceptance.
 		 * @param command Accepted outbound command state.
 		 * @param transaction Physical-write transaction and causal continuation.
 		 * @param completionMode Whether work retained by the accepted command may continue.
@@ -1075,7 +1080,7 @@ class WorldCommandProcessor : public QObject
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
 		 * @param transport Transport timing and priority.
-		 * @param accepted Whether plugins accepted the send.
+		 * @param accepted Whether plugins accepted send.
 		 * @param mutationCompletion Deferred mutation completion retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
 		 * @param bypassSpamPrevention Skip insertion of another spam filler for this send.
@@ -1086,7 +1091,7 @@ class WorldCommandProcessor : public QObject
 		                                LogicalOperationCompletionPtr operationCompletion,
 		                                bool                          bypassSpamPrevention);
 		/**
-		 * @brief Completes a send that cannot cross its captured connection epoch.
+		 * @brief Completes send that cannot cross its captured connection epoch.
 		 * @param mutationCompletion Deferred mutation continuation retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
 		 * @param drainPendingSends Continue draining queued sends when `true`.
@@ -1099,7 +1104,7 @@ class WorldCommandProcessor : public QObject
 		 * @param mutationCompletion Deferred mutation continuation retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
 		 * @param drainPendingSends Continue draining queued sends when `true`.
-		 * @return `true` when the send was rejected and completed.
+		 * @return `true` when send was rejected and completed.
 		 */
 		[[nodiscard]] bool rejectInvalidOutboundContext(std::function<void(bool)>     &mutationCompletion,
 		                                                LogicalOperationCompletionPtr &operationCompletion,
@@ -1113,7 +1118,7 @@ class WorldCommandProcessor : public QObject
 		 * @param text Line text.
 		 * @param preambleKey Preamble option key.
 		 * @param postambleKey Postamble option key.
-		 * @param spans Optional output style spans for coloured HTML logging.
+		 * @param spans Optional output style spans for colored HTML logging.
 		 */
 		void logLine(const QString &text, const QString &preambleKey, const QString &postambleKey,
 		             const QVector<WorldRuntime::StyleSpan> &spans = {}) const;

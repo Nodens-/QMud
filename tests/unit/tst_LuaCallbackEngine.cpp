@@ -26107,6 +26107,7 @@ void tst_LuaCallbackEngine::incomingTelnetCallbackSuspensionDoesNotHoldIncomingS
 	QVERIFY(initialExecutor);
 	const QString callbackName      = luaCallbackEventFunctionName(LuaCallbackEvent::TelnetSubnegotiation);
 	const QString iacGaCallbackName = luaCallbackEventFunctionName(LuaCallbackEvent::IacGa);
+	QCOMPARE(iacGaCallbackName, QStringLiteral("OnPlugin_IAC_GA"));
 	const QString lineCallbackName  = luaCallbackEventFunctionName(LuaCallbackEvent::LineReceived);
 	const QString tickCallbackName  = luaCallbackEventFunctionName(LuaCallbackEvent::Tick);
 	const QString pluginId          = QStringLiteral("incoming.telnet.stream.plugin");
@@ -26123,7 +26124,7 @@ function OnPluginTelnetSubnegotiation(msg_type, data)
     assert(WindowCreate("telnet-presentation-window", 0, 0, 20, 10, 0, 16, 0) == eOK)
   end
 end
-function OnPluginIacGa()
+function OnPlugin_IAC_GA()
   SetVariable("telnet_order", (GetVariable("telnet_order") or "") .. "GA|")
 end
 )lua")

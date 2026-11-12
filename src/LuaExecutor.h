@@ -9,6 +9,9 @@
 
 #ifndef QMUD_LUAEXECUTOR_H
 #define QMUD_LUAEXECUTOR_H
+#include "GmcpProtocol.h"
+#include "helpers/PersistentStringMap.h"
+
 #include "helpers/VariableMapUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -47,7 +50,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <cstddef>
 #include <functional>
 #include <limits>
@@ -271,7 +273,7 @@ class LuaCallbackDeferredLineIdentityIndex final
  * @brief Shared cancellation generation for callbacks derived from one world connection.
  *
  * Network and reload ingress retain this object through queued callback commands and mutation journals. Replacing
- * the runtime's current generation marks all ordinary older work cancelled in constant time. Modal suspensions
+ * the runtime's current generation marks all ordinary older work canceled in constant time. Modal suspensions
  * register exact cleanup actions, so invalidation performs work only for suspended callbacks and never scans callback
  * queues or suspended-command containers.
  */
@@ -301,7 +303,7 @@ class LuaCallbackConnectionCancellationState final
 		/**
 		 * @brief Registers exact cleanup for a suspended callback.
 		 * @param cancellation Cleanup action to run when this generation is invalidated.
-		 * @return Registration identity, or zero when the generation is already cancelled.
+		 * @return Registration identity, or zero when the generation is already canceled.
 		 */
 		[[nodiscard]] RegistrationId registerSuspensionCancellation(std::function<void()> cancellation)
 		{
@@ -472,7 +474,7 @@ struct LuaCallbackOutputAnchorState
 		                      const std::memory_order order = std::memory_order_relaxed) noexcept
 		{
 			quint64 current = m_presentation.load(std::memory_order_relaxed);
-			quint64 desired = 0;
+			quint64 desired;
 			do
 			{
 				desired = (current & kPresentationStyleFlagsMask) | shiftedBufferIndex(bufferIndex) |
@@ -1011,7 +1013,7 @@ template <typename Value> class LuaCallbackPersistentSlotMap
  * Runtime-location slots are allocated densely and recycled. Each page slot retains the immutable values for every
  * generation that still belongs to that snapshot, distinguished by the complete runtime-location handle. Capturing
  * a map copies one shared directory root. A batch write copies one fixed-depth directory path per touched page and
- * each touched fixed-size page once. The normal one-generation case performs one directory lookup, one page lookup,
+ * each touched fixed-size page once. The normal one-generation case performs one directory lookup, one-page lookup,
  * and one handle comparison.
  *
  * @tparam Value Immutable value stored at a runtime-location slot.
@@ -1444,389 +1446,6 @@ template <typename Value> class LuaCallbackPersistentGenerationalInlineSlotMap
 };
 
 /**
- * @brief Immutable string-keyed map with structural sharing between callback snapshots.
- *
- * A write copies one fixed-depth hash path and the final collision bucket. Unchanged values and branches remain
- * shared, so publishing one named mutation never detaches a container proportional to the total entry count.
- * Hash collisions are resolved by the complete string key in the leaf bucket.
- *
- * @tparam Value Immutable value stored under a string key.
- */
-template <typename Value> class LuaCallbackPersistentStringMap
-{
-	public:
-		using ValuePointer = QSharedPointer<const Value>;
-
-		/** @brief Result of one exact-key mutation. */
-		struct MutationResult
-		{
-				ValuePointer       previousValue;
-				bool               changed{false};
-
-				/** @return Whether the key existed before the mutation. */
-				[[nodiscard]] bool existed() const noexcept
-				{
-					return !previousValue.isNull();
-				}
-		};
-
-	private:
-		static constexpr int     kBitsPerLevel = 5;
-		static constexpr int     kLevels       = 13;
-		static constexpr quint64 kBranchMask   = 0x1fU;
-
-		struct Bucket
-		{
-				quint64                      builderToken{0};
-				QHash<QString, ValuePointer> values;
-		};
-
-		struct Node
-		{
-				quint64                               builderToken{0};
-				quint32                               occupiedBranches{0};
-				QVector<QSharedPointer<const Node>>   children;
-				QVector<QSharedPointer<const Bucket>> buckets;
-		};
-
-		QSharedPointer<const Node>   m_root;
-		qsizetype                    m_size{0};
-
-		[[nodiscard]] static quint64 keyHash(const QString &key) noexcept
-		{
-			if constexpr (sizeof(size_t) >= sizeof(quint64))
-				return static_cast<quint64>(qHash(key, size_t{0}));
-			const auto high = static_cast<quint64>(qHash(key, size_t{0x4d595df4U}));
-			const auto low  = static_cast<quint64>(qHash(key, size_t{0x1b873593U}));
-			return (high << 32U) | low;
-		}
-
-		[[nodiscard]] static quint64 nextBuilderToken() noexcept
-		{
-			static std::atomic<quint64> nextToken{1};
-			quint64                     result = nextToken.fetch_add(1, std::memory_order_relaxed);
-			if (result == 0)
-				result = nextToken.fetch_add(1, std::memory_order_relaxed);
-			return result;
-		}
-
-		[[nodiscard]] static int branchForHash(const quint64 hash, const int level) noexcept
-		{
-			return static_cast<int>((hash >> (level * kBitsPerLevel)) & kBranchMask);
-		}
-
-		[[nodiscard]] static quint32 branchBit(const int branch) noexcept
-		{
-			return quint32{1} << static_cast<quint32>(branch);
-		}
-
-		[[nodiscard]] static qsizetype branchIndex(const quint32 bitmap, const quint32 bit) noexcept
-		{
-			return static_cast<qsizetype>(std::popcount(bitmap & (bit - 1U)));
-		}
-
-		[[nodiscard]] static QSharedPointer<Node> editableNode(const QSharedPointer<const Node> &source,
-		                                                       const quint64                     builderToken)
-		{
-			if (source && source->builderToken == builderToken)
-				return qSharedPointerConstCast<Node>(source);
-			auto result = source ? QSharedPointer<Node>::create(*source) : QSharedPointer<Node>::create();
-			result->builderToken = builderToken;
-			return result;
-		}
-
-		[[nodiscard]] static QSharedPointer<Bucket> editableBucket(const QSharedPointer<const Bucket> &source,
-		                                                           const quint64 builderToken)
-		{
-			if (source && source->builderToken == builderToken)
-				return qSharedPointerConstCast<Bucket>(source);
-			auto result = source ? QSharedPointer<Bucket>::create(*source) : QSharedPointer<Bucket>::create();
-			result->builderToken = builderToken;
-			return result;
-		}
-
-		[[nodiscard]] static QSharedPointer<const Node>
-		updateNode(const QSharedPointer<const Node> &source, const quint64 hash, const int level,
-		           const QString &key, const ValuePointer &value, const quint64 builderToken,
-		           MutationResult &mutationResult)
-		{
-			const int       branch  = branchForHash(hash, level);
-			const quint32   bit     = branchBit(branch);
-			const quint32   bitmap  = source ? source->occupiedBranches : 0U;
-			const bool      present = (bitmap & bit) != 0U;
-			const qsizetype index   = branchIndex(bitmap, bit);
-			if (level > 0)
-			{
-				const QSharedPointer<const Node> child = present ? source->children.at(index) : nullptr;
-				const QSharedPointer<const Node> updated =
-				    updateNode(child, hash, level - 1, key, value, builderToken, mutationResult);
-				if (updated == child)
-					return source;
-				auto result = editableNode(source, builderToken);
-				if (updated)
-				{
-					if (present)
-						result->children[index] = updated;
-					else
-					{
-						result->occupiedBranches |= bit;
-						result->children.insert(index, updated);
-					}
-				}
-				else if (present)
-				{
-					result->occupiedBranches &= ~bit;
-					result->children.removeAt(index);
-				}
-				return result->occupiedBranches == 0U ? QSharedPointer<const Node>{} : result;
-			}
-			else
-			{
-				const QSharedPointer<const Bucket> existing = present ? source->buckets.at(index) : nullptr;
-				mutationResult.previousValue = existing ? existing->values.value(key) : ValuePointer{};
-				if (!value && !mutationResult.previousValue)
-					return source;
-				if (value == mutationResult.previousValue)
-					return source;
-				mutationResult.changed = true;
-				auto result            = editableNode(source, builderToken);
-				auto bucket            = editableBucket(existing, builderToken);
-				if (value)
-					bucket->values.insert(key, value);
-				else
-					bucket->values.remove(key);
-				if (!bucket->values.isEmpty())
-				{
-					if (present)
-						result->buckets[index] = bucket;
-					else
-					{
-						result->occupiedBranches |= bit;
-						result->buckets.insert(index, bucket);
-					}
-				}
-				else if (present)
-				{
-					result->occupiedBranches &= ~bit;
-					result->buckets.removeAt(index);
-				}
-				return result->occupiedBranches == 0U ? QSharedPointer<const Node>{} : result;
-			}
-		}
-
-		template <typename Visitor>
-		static void visitNode(const QSharedPointer<const Node> &node, const int level, Visitor &visitor)
-		{
-			if (!node)
-				return;
-			if (level > 0)
-			{
-				for (const auto &child : node->children)
-					visitNode(child, level - 1, visitor);
-				return;
-			}
-			for (const auto &bucket : node->buckets)
-			{
-				if (!bucket)
-					continue;
-				for (auto it = bucket->values.cbegin(); it != bucket->values.cend(); ++it)
-					visitor(it.key(), it.value());
-			}
-		}
-
-		[[nodiscard]] static ValuePointer valueInRoot(const QSharedPointer<const Node> &root,
-		                                              const QString                    &key)
-		{
-			const quint64              hash = keyHash(key);
-			QSharedPointer<const Node> node = root;
-			for (int level = kLevels - 1; level > 0; --level)
-			{
-				if (!node)
-					return {};
-				const quint32 bit = branchBit(branchForHash(hash, level));
-				if ((node->occupiedBranches & bit) == 0U)
-					return {};
-				node = node->children.at(branchIndex(node->occupiedBranches, bit));
-			}
-			if (!node)
-				return {};
-			const quint32 bit = branchBit(branchForHash(hash, 0));
-			if ((node->occupiedBranches & bit) == 0U)
-				return {};
-			const auto &bucket = node->buckets.at(branchIndex(node->occupiedBranches, bit));
-			return bucket->values.value(key);
-		}
-
-	public:
-		/** @brief One replacement or removal applied by withUpdates(). */
-		struct Update
-		{
-				QString      key;
-				ValuePointer value;
-		};
-
-		/**
-		 * @brief Mutable transaction that reuses copied hash paths until it is frozen.
-		 *
-		 * A transaction is private to its caller. finish() publishes a new immutable map; starting another
-		 * transaction uses a new edit token and therefore cannot modify an already published version.
-		 */
-		class Transaction
-		{
-			public:
-				explicit Transaction(const LuaCallbackPersistentStringMap &source)
-				    : m_root(source.m_root), m_size(source.m_size), m_builderToken(nextBuilderToken())
-				{
-				}
-				Transaction(const Transaction &)                       = delete;
-				Transaction &operator=(const Transaction &)            = delete;
-				Transaction(Transaction &&)                            = delete;
-				Transaction                 &operator=(Transaction &&) = delete;
-
-				/** Applies one replacement or removal and returns its prior state. */
-				[[nodiscard]] MutationResult apply(const Update &update)
-				{
-					Q_ASSERT(m_builderToken != 0);
-					MutationResult result;
-					m_root = updateNode(m_root, keyHash(update.key), kLevels - 1, update.key, update.value,
-					                    m_builderToken, result);
-					if (result.changed && result.existed() != !update.value.isNull())
-						m_size += update.value ? 1 : -1;
-					return result;
-				}
-
-				/** @return Current transaction value for @p key, or an empty pointer when absent. */
-				[[nodiscard]] ValuePointer value(const QString &key) const
-				{
-					return valueInRoot(m_root, key);
-				}
-
-				/** @return Whether @p key is present in the current transaction. */
-				[[nodiscard]] bool contains(const QString &key) const
-				{
-					return !value(key).isNull();
-				}
-
-				/** @return Number of current transaction entries. */
-				[[nodiscard]] qsizetype size() const noexcept
-				{
-					return m_size;
-				}
-
-				/** Invokes @p visitor for every current transaction entry. */
-				template <typename Visitor> void forEach(Visitor visitor) const
-				{
-					visitNode(m_root, kLevels - 1, visitor);
-				}
-
-				/** @return Current transaction keys in unspecified order. */
-				[[nodiscard]] QStringList keys() const
-				{
-					QStringList result;
-					result.reserve(m_size);
-					forEach([&result](const QString &key, const ValuePointer &) { result.append(key); });
-					return result;
-				}
-
-				/** @return Immutable map containing every transaction mutation. */
-				[[nodiscard]] LuaCallbackPersistentStringMap finish() &&
-				{
-					LuaCallbackPersistentStringMap result;
-					result.m_root  = std::move(m_root);
-					result.m_size  = m_size;
-					m_builderToken = 0;
-					return result;
-				}
-
-			private:
-				QSharedPointer<const Node> m_root;
-				qsizetype                  m_size{0};
-				quint64                    m_builderToken{0};
-		};
-
-		/** @return Immutable value stored for @p key, or an empty pointer when absent. */
-		[[nodiscard]] ValuePointer value(const QString &key) const
-		{
-			return valueInRoot(m_root, key);
-		}
-
-		/** @return Whether @p key is present. */
-		[[nodiscard]] bool contains(const QString &key) const
-		{
-			return !value(key).isNull();
-		}
-
-		/** @return Number of entries. */
-		[[nodiscard]] qsizetype size() const noexcept
-		{
-			return m_size;
-		}
-
-		/** @return Whether the map has no entries. */
-		[[nodiscard]] bool isEmpty() const noexcept
-		{
-			return m_size == 0;
-		}
-
-		/**
-		 * @brief Applies exact replacements and removals.
-		 * @param updates Updates whose empty values remove their keys.
-		 * @return New map sharing all unaffected hash paths.
-		 */
-		[[nodiscard]] LuaCallbackPersistentStringMap withUpdates(const QVector<Update> &updates) const
-		{
-			Transaction transaction(*this);
-			for (const Update &update : updates)
-				static_cast<void>(transaction.apply(update));
-			return std::move(transaction).finish();
-		}
-
-		/** Invokes @p visitor for every stored key and immutable value. */
-		template <typename Visitor> void forEach(Visitor visitor) const
-		{
-			visitNode(m_root, kLevels - 1, visitor);
-		}
-
-		/** @return Every stored key in unspecified order. */
-		[[nodiscard]] QStringList keys() const
-		{
-			QStringList result;
-			result.reserve(m_size);
-			forEach([&result](const QString &key, const ValuePointer &) { result.append(key); });
-			return result;
-		}
-
-		/**
-		 * @brief Checks immutable storage identity without comparing entries.
-		 * @param other Map whose storage is compared.
-		 * @return Whether both maps share the same root and entry count.
-		 */
-		[[nodiscard]] bool sharesStorageWith(const LuaCallbackPersistentStringMap &other) const noexcept
-		{
-			return m_root == other.m_root && m_size == other.m_size;
-		}
-
-		bool operator==(const LuaCallbackPersistentStringMap &other) const
-		{
-			if (m_root == other.m_root)
-				return true;
-			if (m_size != other.m_size)
-				return false;
-			bool equal = true;
-			forEach(
-			    [&other, &equal](const QString &key, const ValuePointer &value)
-			    {
-				    if (equal)
-				    {
-					    const ValuePointer otherValue = other.value(key);
-					    equal                         = otherValue && *value == *otherValue;
-				    }
-			    });
-			return equal;
-		}
-};
-
-/**
  * @brief Ordered owner membership and immutable rule rows for one callback rule domain.
  * @tparam Row Serialized trigger, alias, or timer row.
  */
@@ -2150,6 +1769,7 @@ enum class LuaBatchFunctionNamePolicy
 	X(StringStopOnFalse, StopOnFalse, AggregateRemainingRecipients, AggregateNeutral, Required)              \
 	X(StringHandled, FunctionHandled, AggregateRemainingRecipients, AggregateNeutral, Required)              \
 	X(Bytes, LastResult, AggregateRemainingRecipients, AggregateNeutral, Required)                           \
+	X(GmcpMessage, None, AggregateRemainingRecipients, AggregateNeutral, Required)                           \
 	X(BytesInOut, BytesInOut, AggregateRemainingRecipients, AggregateNeutral, Required)                      \
 	X(StringInOut, StringInOut, AggregateRemainingRecipients, AggregateNeutral, Required)                    \
 	X(NumberAndStringStopOnTrue, StopOnTrue, AggregateRemainingRecipients, AggregateNeutral, Required)       \
@@ -2219,14 +1839,15 @@ enum class LuaBatchDispatchLane
 #define QMUD_LUA_CALLBACK_INCOMING_LINE_OBSERVATION_FIELDS(X)                                                \
 	X(NewLines, newLines, int, m_newLines)                                                                   \
 	X(TotalLinesReceived, totalLinesReceived, int, m_linesReceived)                                          \
-	X(InputPacketCount, inputPacketCount, int, m_inputPacketCount)                                           \
-	X(TotalUncompressedBytes, totalUncompressedBytes, qint64, m_telnet.totalUncompressedBytes())             \
-	X(TotalCompressedBytes, totalCompressedBytes, qint64, m_telnet.totalCompressedBytes())                   \
-	X(MccpType, mccpType, int, m_telnet.mccpType())                                                          \
+	X(InputPacketCount, inputPacketCount, int, compression.inputPacketCount)                                 \
+	X(TotalUncompressedBytes, totalUncompressedBytes, qint64, compression.totalUncompressedBytes)            \
+	X(TotalCompressedBytes, totalCompressedBytes, qint64, compression.totalCompressedBytes)                  \
+	X(MccpType, mccpType, int, compression.mccpType)                                                         \
+	X(IsCompressing, isCompressing, bool, compression.mccpType != 0)                                         \
 	X(MxpErrorCount, mxpErrorCount, int, m_mxpErrors)                                                        \
 	X(MxpTagCount, mxpTagCount, qint64, m_telnet.mxpTagCount())                                              \
 	X(MxpEntityCount, mxpEntityCount, qint64, m_telnet.mxpEntityCount())                                     \
-	X(BytesIn, bytesIn, qint64, m_bytesIn)                                                                   \
+	X(BytesIn, bytesIn, qint64, compression.bytesIn)                                                         \
 	X(Utf8ErrorCount, utf8ErrorCount, int, m_utf8ErrorCount)                                                 \
 	X(LastLineWithIacGa, lastLineWithIacGa, int, m_lastLineWithIacGa)                                        \
 	X(LastTelnetSubnegotiation, lastTelnetSubnegotiation, QString, m_lastTelnetSubnegotiation)
@@ -2303,7 +1924,7 @@ enum class LuaCallbackOrderingDomain : quint8
 	X(DrawOutputWindow, "OnPluginDrawOutputWindow", Deferrable, false)                                       \
 	X(Enable, "OnPluginEnable", Deferrable, false)                                                           \
 	X(GetFocus, "OnPluginGetFocus", Deferrable, false)                                                       \
-	X(IacGa, "OnPluginIacGa", TelnetNotification, true)                                                      \
+	X(IacGa, "OnPlugin_IAC_GA", TelnetNotification, true)                                                    \
 	X(Install, "OnPluginInstall", Deferrable, false)                                                         \
 	X(LineReceived, "OnPluginLineReceived", InputCritical, false)                                            \
 	X(ListChanged, "OnPluginListChanged", Deferrable, false)                                                 \
@@ -2325,6 +1946,8 @@ enum class LuaCallbackOrderingDomain : quint8
 	X(Send, "OnPluginSend", InputCritical, false)                                                            \
 	X(Sent, "OnPluginSent", InputCritical, false)                                                            \
 	X(TabComplete, "OnPluginTabComplete", InputCritical, false)                                              \
+	X(GmcpMessage, "onPluginGmcpMessage", Deferrable, false)                                                 \
+	X(GmcpStateChanged, "OnPluginGmcpStateChanged", Deferrable, false)                                       \
 	X(TelnetOption, "OnPluginTelnetOption", TelnetNotification, true)                                        \
 	X(TelnetRequest, "OnPluginTelnetRequest", InputCritical, true)                                           \
 	X(TelnetSubnegotiation, "OnPluginTelnetSubnegotiation", TelnetNotification, true)                        \
@@ -3568,6 +3191,7 @@ struct LuaCallbackStableSnapshotState
 #undef QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY
 struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
 {
+		std::shared_ptr<QMudGmcp::Publication>                          gmcpPublication;
 		// Dispatch-local presentation and runtime counters.
 		QSharedPointer<const LuaCallbackCommandUiPresentationSnapshot>  commandUiPresentation;
 		QSharedPointer<const LuaCallbackUdpPresentationSnapshot>        udpPresentation;
@@ -3684,9 +3308,10 @@ struct LuaCallbackSnapshot : LuaCallbackStableSnapshotState
  */
 struct LuaBatchDispatchRequest
 {
-		LuaBatchDispatchKind          kind{LuaBatchDispatchKind::NoArgs};
-		LuaBatchDispatchLane          lane{LuaBatchDispatchLane::Callback};
-		LuaCallbackEvent              callbackEvent{LuaCallbackEvent::None};
+		std::shared_ptr<const QMudGmcp::Message> gmcpMessageArg;
+		LuaBatchDispatchKind                     kind{LuaBatchDispatchKind::NoArgs};
+		LuaBatchDispatchLane                     lane{LuaBatchDispatchLane::Callback};
+		LuaCallbackEvent                         callbackEvent{LuaCallbackEvent::None};
 		LuaCallbackLineSnapshotPolicy lineSnapshotPolicy{LuaCallbackLineSnapshotPolicy::CountAndLast};
 		QVector<QSharedPointer<LuaCallbackEngine>>                            engines;
 		/** First engine in the shared recipient vector that this request dispatches. */
@@ -4410,7 +4035,7 @@ namespace QMudLuaDeferredRuntimeMutation
 	 * @brief Applies a result journal and invokes completion after every suspended mutation resumes.
 	 * @param result Dispatch result whose cleanup batches are consumed.
 	 * @param completion Completion invoked with `true` after the full ordered journal finishes, or `false`
-	 * when playback is cancelled.
+	 * when playback is canceled.
 	 */
 	void apply(LuaBatchDispatchResult &result, std::function<void(bool)> completion);
 } // namespace QMudLuaDeferredRuntimeMutation
@@ -4420,14 +4045,15 @@ namespace QMudLuaDeferredRuntimeMutation
  */
 struct LuaEngineObservedInitializationRequest
 {
-		LuaCallbackEngine                *engine{nullptr};
-		QSharedPointer<LuaCallbackEngine> workerLifetimeOwner;
-		WorldRuntime                     *runtime{nullptr};
-		QString                           scriptText;
-		QString                           pluginId;
-		QString                           pluginName;
-		QString                           pluginDirectory;
-		QSet<QString>                     callbackNames;
+		std::shared_ptr<QMudGmcp::Publication> gmcpPublication;
+		LuaCallbackEngine                     *engine{nullptr};
+		QSharedPointer<LuaCallbackEngine>      workerLifetimeOwner;
+		WorldRuntime                          *runtime{nullptr};
+		QString                                scriptText;
+		QString                                pluginId;
+		QString                                pluginName;
+		QString                                pluginDirectory;
+		QSet<QString>                          callbackNames;
 		std::function<void(const QString &, const QSet<QString> &, const QSet<QString> &)> observer;
 };
 

@@ -11,10 +11,78 @@
 #ifndef QMUD_WORLDSOCKETSERVICE_H
 #define QMUD_WORLDSOCKETSERVICE_H
 
+#include "GmcpProtocol.h"
 #include <QAbstractSocket>
+#include <QByteArray>
+#include <QDateTime>
+#include <QMetaType>
 #include <QObject>
 #include <QString>
 #include <QtGlobal>
+
+/**
+ * @brief Read accounting and statistics belonging to one decoded input batch.
+ *
+ * receivedBytes and debugPacket are delivered only with the first chunk of a socket read, including
+ * reads with no projected text. The runtime fills bytesIn and inputPacketCount before queuing transport-decoded text.
+ * Compression counts carry the worker contribution for legacy input, and combined world totals
+ * after runtime admission for transport-decoded input.
+ */
+struct WorldSocketInputMetadata
+{
+		bool       transportDecoded{false};
+		qint64     receivedBytes{0};
+		QByteArray debugPacket;
+		qint64     bytesIn{0};
+		int        inputPacketCount{0};
+		qint64     totalCompressedBytes{0};
+		qint64     totalUncompressedBytes{0};
+		int        mccpType{0};
+};
+Q_DECLARE_METATYPE(WorldSocketInputMetadata)
+
+/**
+ * @brief One automatic protocol write accepted by the transport and awaiting runtime accounting.
+ */
+struct WorldSocketProtocolWrite
+{
+		QByteArray payload;
+		QDateTime  timestamp;
+};
+
+/**
+ * @brief Application write result and earlier automatic writes not yet accounted for by the runtime.
+ */
+struct WorldSocketWriteResult
+{
+		qint64                          accepted{-1};
+		QList<WorldSocketProtocolWrite> precedingProtocolWrites;
+};
+
+/**
+ * @brief Immutable transport statistics; cumulative native decoder counts last for the world's lifetime.
+ */
+struct WorldSocketTransportStatistics
+{
+		qint64 compressedBytes{0};
+		qint64 uncompressedBytes{0};
+		int    mccpType{0};
+		bool   decodedByTransport{false};
+		/**
+		 * @brief Compares all transport statistic fields.
+		 * @param other Other snapshot.
+		 * @return Whether the statistics are identical.
+		 */
+		bool   operator==(const WorldSocketTransportStatistics &other) const = default;
+};
+/**
+ * @brief Lifetime-independent transport statistics endpoint, written only on the socket worker.
+ */
+struct WorldSocketStatisticsPublication
+{
+		QMudAtomicSharedPtr<const WorldSocketTransportStatistics> current{
+		    std::make_shared<const WorldSocketTransportStatistics>()};
+};
 
 /**
  * @brief Connection preferences bundle applied to world socket services.
@@ -22,6 +90,8 @@
 struct WorldSocketConnectionSettings
 {
 		bool    useUtf8{false};
+		bool    nativeGmcp{false};
+		bool    disableCompression{false};
 		bool    keepAlive{false};
 		bool    tlsEncryption{false};
 		int     tlsMethod{0};
@@ -105,6 +175,20 @@ class WorldSocketService : public QObject
 		 */
 		virtual qint64 sendPacket(const QByteArray &payload) = 0;
 		/**
+		 * @brief Writes an application packet and transfers any preceding unreported protocol writes.
+		 * @param payload Framed bytes to send.
+		 * @param gmcpSession Required native GMCP session identity, or zero for an ordinary write.
+		 * @return Accepted byte count and preceding protocol writes in physical write order, even on failure.
+		 */
+		virtual WorldSocketWriteResult writePacket(const QByteArray &payload, quint64 gmcpSession)
+		{
+			if (gmcpSession == 0)
+				return {sendPacket(payload), {}};
+			const QByteArray raw = QByteArray(payload.mid(3, payload.size() - 5))
+			                           .replace(QByteArray::fromHex("ffff"), QByteArray::fromHex("ff"));
+			return {sendGmcp(raw, gmcpSession) ? payload.size() : -1, {}};
+		}
+		/**
 		 * @brief Returns peer IP string for active connection.
 		 * @return Peer IP address string.
 		 */
@@ -134,19 +218,171 @@ class WorldSocketService : public QObject
 		 * @brief Reports whether socket is currently connecting.
 		 * @return `true` when connection attempt is in progress.
 		 */
-		[[nodiscard]] virtual bool isConnecting() const = 0;
+		[[nodiscard]] virtual bool                                              isConnecting() const = 0;
 		/**
 		 * @brief Reports whether socket is currently connected.
 		 * @return `true` when socket is connected.
 		 */
-		[[nodiscard]] virtual bool isConnected() const = 0;
+		[[nodiscard]] virtual bool                                              isConnected() const = 0;
+
+		/**
+		 * @brief Returns independently published transport statistics when supported.
+		 * @return Shared endpoint, or empty for services without worker decoding.
+		 */
+		[[nodiscard]] virtual std::shared_ptr<WorldSocketStatisticsPublication> transportStatistics() const
+		{
+			return {};
+		}
+		/**
+		 * @brief Returns native publication when available.
+		 * @return Shared endpoint or empty for legacy-only services.
+		 */
+		[[nodiscard]] virtual std::shared_ptr<QMudGmcp::Publication> gmcpPublication() const
+		{
+			return {};
+		}
+		/**
+		 * @brief Sends native data.
+		 * @param raw Unframed message.
+		 * @param generation Required identity.
+		 * @return Whether accepted.
+		 */
+		virtual bool sendGmcp(const QByteArray &raw, quint64 generation)
+		{
+			Q_UNUSED(raw);
+			Q_UNUSED(generation);
+			return false;
+		}
+		/**
+		 * @brief Sets world merge policy.
+		 * @param name Message name.
+		 * @param mode Merge mode.
+		 * @param force Override server.
+		 * @return Whether valid.
+		 */
+		virtual bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force)
+		{
+			Q_UNUSED(name);
+			Q_UNUSED(mode);
+			Q_UNUSED(force);
+			return false;
+		}
+		/**
+		 * @brief Updates advertised modules.
+		 * @param modules Effective support list.
+		 */
+		virtual void setGmcpModules(const QMap<QString, int> &modules)
+		{
+			Q_UNUSED(modules);
+		}
+		/**
+		 * @brief Controls capture of incoming packet bytes for runtime diagnostics.
+		 * @param enabled Whether subsequent reads retain their packet bytes.
+		 */
+		virtual void setIncomingPacketDebugEnabled(bool enabled)
+		{
+			Q_UNUSED(enabled);
+		}
+		/**
+		 * @brief Serializes a quiesced native connection.
+		 * @return Handoff data.
+		 */
+		[[nodiscard]] virtual QByteArray saveNativeState() const
+		{
+			return {};
+		}
+		/**
+		 * @brief Restores native state.
+		 * @param state Handoff data.
+		 * @return Whether restored.
+		 */
+		virtual bool restoreNativeState(const QByteArray &state)
+		{
+			return state.isEmpty();
+		}
+		/**
+		 * @brief Pauses socket delivery for reload.
+		 * @param paused Pause state.
+		 */
+		virtual void pauseTransport(bool paused)
+		{
+			Q_UNUSED(paused);
+		}
+
+		/**
+		 * @brief Freezes reception after processing bytes already buffered by Qt.
+		 */
+		virtual void freezeForReload()
+		{
+		}
+		/**
+		 * @brief Checks frozen input delivery.
+		 * @return Whether input and notifications have reached the runtime.
+		 */
+		[[nodiscard]] virtual bool reloadInputDrained() const
+		{
+			return true;
+		}
+		/**
+		 * @brief Flushes output without resuming reception.
+		 * @return Whether no writes remain buffered.
+		 */
+		virtual bool flushForReload()
+		{
+			return true;
+		}
+
+		/**
+		 * @brief Atomically adopts and restores native framing before reading.
+		 * @param descriptor Socket descriptor.
+		 * @param state Serialized native state.
+		 * @param error Output diagnostic.
+		 * @return Whether adopted.
+		 */
+		virtual bool adoptNativeSocketDescriptor(qintptr descriptor, const QByteArray &state, QString *error)
+		{
+			if (!state.isEmpty())
+			{
+				if (error)
+					*error = QStringLiteral("Native handoff is unavailable.");
+				return false;
+			}
+			return adoptConnectedSocketDescriptor(descriptor, error);
+		}
+
+		/**
+		 * @brief Updates MCCP negotiation preference.
+		 * @param disabled Whether to refuse subsequent offers.
+		 */
+		virtual void setCompressionDisabled(bool disabled)
+		{
+			Q_UNUSED(disabled);
+		}
 
 	signals:
 		/**
-		 * @brief Emitted when raw bytes arrive from server.
-		 * @param data Incoming raw bytes.
+		 * @brief Reports a native negotiation transition.
+		 * @param enabled Whether native GMCP is active.
 		 */
-		void rawDataReceived(const QByteArray &data);
+		void gmcpStateChanged(bool enabled);
+		/**
+		 * @brief Reports a native GMCP event.
+		 * @param record Raw history record.
+		 * @param message Optional application event.
+		 */
+		void gmcpObserved(const QMudGmcp::Record                         &record,
+		                  const std::shared_ptr<const QMudGmcp::Message> &message);
+		/**
+		 * @brief Reports native protocol bytes accepted for writing.
+		 * @param write Accepted bytes and their write timestamp.
+		 */
+		void nativeProtocolWritten(const WorldSocketProtocolWrite &write);
+		/**
+		 * @brief Delivers ordered socket input and its receive accounting.
+		 * @param data Projected bytes, or empty for a native read containing only consumed protocol data.
+		 * @param metadata Read accounting and statistics belonging to this batch; empty for legacy processing.
+		 */
+		void rawDataReceived(const QByteArray &data, const WorldSocketInputMetadata &metadata = {});
 		/**
 		 * @brief Emitted on transport/proxy/socket errors.
 		 * @param message Error text.

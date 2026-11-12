@@ -375,7 +375,7 @@ class AppController : public QObject
 		 * @brief Saves dirty world data before a runtime default override replaces a collection.
 		 * @param runtime Runtime whose current persistent state must be saved.
 		 * @param parent Parent for a required Save World dialog.
-		 * @param error Optional output error message; remains empty when Save World is cancelled.
+		 * @param error Optional output error message; remains empty when Save World is canceled.
 		 * @return `true` when no save was needed or the save completed.
 		 */
 		bool saveWorldBeforeDefaultOverride(WorldRuntime *runtime, QWidget *parent, QString *error = nullptr);
@@ -1205,6 +1205,11 @@ class AppController : public QObject
 		 */
 		void               initializeWorldRuntime(WorldRuntime *runtime) const;
 		/**
+		 * @brief Applies ordinary initialization and the Native GMCP default for a genuinely new world.
+		 * @param runtime Runtime to initialize without changing how connection fields are supplied.
+		 */
+		void                  initializeNewWorldRuntime(WorldRuntime *runtime) const;
+		/**
 		 * @brief Emits startup banner lines to runtime output.
 		 * @param runtime Runtime that receives startup banner output.
 		 */
@@ -1213,9 +1218,11 @@ class AppController : public QObject
 		 * @brief Opens and initializes one world document.
 		 * @param path World-document path.
 		 * @param autoConnectPolicy Preference-driven automatic-connect policy for this open.
+		 * @param recoveryState Preserved connection state to prepare before world initialization, or null for normal opens.
 		 * @return `true` when world document opens successfully.
 		 */
-		bool               openWorldDocument(const QString &path, InitialAutoConnectPolicy autoConnectPolicy);
+		bool               openWorldDocument(const QString &path, InitialAutoConnectPolicy autoConnectPolicy,
+		                                     const ReloadWorldState *recoveryState = nullptr);
 		/**
 		 * @brief Resolves world session-state directory under the data directory.
 		 * @return Absolute world session-state directory path.

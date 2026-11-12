@@ -344,7 +344,7 @@ function OnPluginTelnetSubnegotiation(msg_type, data)
   Send("qcmd-telnet-b73")
 end
 
-function OnPluginIacGa()
+function OnPlugin_IAC_GA()
   qcb_append_order("iac")
   Note("iac-note-c84")
   Send("qcmd-iac-c84")
@@ -582,18 +582,18 @@ end
 			return writeTextFile(
 			    QDir(pluginsDir).filePath(fileName),
 			    QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-			                   "<muclient>\n"
-			                   "  <plugin name=\"%1\" author=\"QMud Test\" id=\"%2\" language=\"lua\" "
-			                   "enabled=\"y\" save_state=\"n\" sequence=\"%3\">\n"
-			                   "    <script><![CDATA[%4]]></script>\n"
-			                   "  </plugin>\n"
-			                   "</muclient>\n")
+				               "<muclient>\n"
+				               "  <plugin name=\"%1\" author=\"QMud Test\" id=\"%2\" language=\"lua\" "
+				               "enabled=\"y\" save_state=\"n\" sequence=\"%3\">\n"
+				               "    <script><![CDATA[%4]]></script>\n"
+				               "  </plugin>\n"
+				               "</muclient>\n")
 			        .arg(name, id, QString::number(sequence), script));
 		};
 
 		const bool firstWritten =
 		    writePlugin(QStringLiteral("dispatch_policy_first.xml"), QStringLiteral("DispatchPolicyFirst"),
-		                kDispatchPolicyFirstPluginId, 100, QStringLiteral(R"lua(
+			            kDispatchPolicyFirstPluginId, 100, QStringLiteral(R"lua(
 function OnPluginCommand(command)
   Note("dispatch policy mutation boundary")
   return true
@@ -612,7 +612,7 @@ end
 )lua"));
 		const bool secondWritten =
 		    writePlugin(QStringLiteral("dispatch_policy_second.xml"), QStringLiteral("DispatchPolicySecond"),
-		                kDispatchPolicySecondPluginId, 200, QStringLiteral(R"lua(
+			            kDispatchPolicySecondPluginId, 200, QStringLiteral(R"lua(
 function OnPluginCommand(command)
   SetVariable("command_called", "yes")
   return false
@@ -628,7 +628,7 @@ end
 )lua"));
 		const bool thirdWritten =
 		    writePlugin(QStringLiteral("dispatch_policy_third.xml"), QStringLiteral("DispatchPolicyThird"),
-		                kDispatchPolicyThirdPluginId, 300, QStringLiteral(R"lua(
+			            kDispatchPolicyThirdPluginId, 300, QStringLiteral(R"lua(
 function OnPluginCommand(command)
   SetVariable("command_called", "yes")
   return true
@@ -661,34 +661,34 @@ end
 			return writeTextFile(
 			    QDir(pluginsDir).filePath(fileName),
 			    QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-			                   "<muclient>\n"
-			                   "  <plugin name=\"%1\" author=\"QMud Test\" id=\"%2\" language=\"lua\" "
-			                   "enabled=\"y\" save_state=\"n\" sequence=\"%3\">\n"
-			                   "    <script><![CDATA[%4]]></script>\n"
-			                   "  </plugin>\n"
-			                   "</muclient>\n")
+				               "<muclient>\n"
+				               "  <plugin name=\"%1\" author=\"QMud Test\" id=\"%2\" language=\"lua\" "
+				               "enabled=\"y\" save_state=\"n\" sequence=\"%3\">\n"
+				               "    <script><![CDATA[%4]]></script>\n"
+				               "  </plugin>\n"
+				               "</muclient>\n")
 			        .arg(name, id, QString::number(sequence), script));
 		};
 
 		const QString suspend = suspendAfterMutation ? QStringLiteral("  GetLineInfo(1, 1)\n") : QString();
 		const bool    mutatorWritten =
 		    writePlugin(QStringLiteral("eligibility_mutator.xml"), QStringLiteral("EligibilityMutator"),
-		                kEligibilityMutatorPluginId, 100,
-		                QStringLiteral("\nfunction OnPluginConnect()\n  %1\n%2"
-		                               "  SetVariable(\"mutator_completed\", \"yes\")\nend\n")
-		                    .arg(mutation, suspend));
+			            kEligibilityMutatorPluginId, 100,
+			            QStringLiteral("\nfunction OnPluginConnect()\n  %1\n%2"
+			                           "  SetVariable(\"mutator_completed\", \"yes\")\nend\n")
+			                .arg(mutation, suspend));
 		const bool victimWritten =
 		    writePlugin(QStringLiteral("eligibility_victim.xml"), QStringLiteral("EligibilityVictim"),
-		                kEligibilityVictimPluginId, 200,
-		                QStringLiteral(R"lua(
+			            kEligibilityVictimPluginId, 200,
+			            QStringLiteral(R"lua(
 function OnPluginConnect()
   CallPlugin("%1", "record_victim_delivery", "yes")
 end
 )lua")
-		                    .arg(kEligibilityRecorderPluginId));
+			                .arg(kEligibilityRecorderPluginId));
 		const bool recorderWritten =
 		    writePlugin(QStringLiteral("eligibility_recorder.xml"), QStringLiteral("EligibilityRecorder"),
-		                kEligibilityRecorderPluginId, 300, QStringLiteral(R"lua(
+			            kEligibilityRecorderPluginId, 300, QStringLiteral(R"lua(
 function record_victim_delivery(value)
   SetVariable("victim_delivered", value)
 end
@@ -888,8 +888,8 @@ end
 		    QStringLiteral("local send_status\nlocal disconnect_status\n") +
 		        (sendFirst ? sendStatement + disconnectStatement : disconnectStatement + sendStatement) +
 		        QStringLiteral("SetVariable(\"send_status\", string.format(\"%.0f\", send_status))\n"
-		                       "SetVariable(\"disconnect_status\", "
-		                       "string.format(\"%.0f\", disconnect_status))"));
+				               "SetVariable(\"disconnect_status\", "
+				               "string.format(\"%.0f\", disconnect_status))"));
 		return trigger;
 	}
 
@@ -911,7 +911,7 @@ end
 	}
 
 	/**
-	 * @brief Creates a direct script trigger that emits plain and coloured notes.
+	 * @brief Creates a direct script trigger that emits plain and colored notes.
 	 * @param match Trigger match text.
 	 * @return Trigger fixture.
 	 */
@@ -1413,7 +1413,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			const QString artifactDirectory =
 			    QDir(QCoreApplication::applicationDirPath())
 			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
-			                                 "trigger-output-screen-draw-log"));
+					                         "trigger-output-screen-draw-log"));
 			if (QDir(artifactDirectory).exists())
 				QVERIFY(QDir(artifactDirectory).removeRecursively());
 			QVERIFY(QDir().mkpath(QDir(artifactDirectory).filePath(QStringLiteral("logs"))));
@@ -1497,7 +1497,7 @@ end
 			const QString artifactDirectory =
 			    QDir(QCoreApplication::applicationDirPath())
 			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
-			                                 "full-buffer-script-note-log"));
+					                         "full-buffer-script-note-log"));
 			if (QDir(artifactDirectory).exists())
 				QVERIFY(QDir(artifactDirectory).removeRecursively());
 			QVERIFY(QDir().mkpath(QDir(artifactDirectory).filePath(QStringLiteral("logs"))));
@@ -1573,7 +1573,7 @@ ColourNote("#0000ff", "#000000", "mnop")
 			const QString artifactDirectory =
 			    QDir(QCoreApplication::applicationDirPath())
 			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
-			                                 "script-note-html-log"));
+					                         "script-note-html-log"));
 			if (QDir(artifactDirectory).exists())
 				QVERIFY(QDir(artifactDirectory).removeRecursively());
 			QVERIFY(QDir().mkpath(QDir(artifactDirectory).filePath(QStringLiteral("logs"))));
@@ -1652,19 +1652,19 @@ ColourTell("#ffffff", "#000000", "unfinished")
 			QCOMPARE(contents.count(QStringLiteral("[/N]")), 6);
 			QVERIFY(contents.contains(
 			    QStringLiteral("<font color=\"#ff0000\"><span style=\"color: #ff0000; background: #000000\">"
-			                   "red&lt;&amp;</span></font>")));
+				               "red&lt;&amp;</span></font>")));
 			QVERIFY(contents.contains(
 			    QStringLiteral("<font color=\"#00ff00\"><span style=\"color: #00ff00; background: #000000\">"
-			                   "green</span></font>")));
+				               "green</span></font>")));
 			QVERIFY(contents.contains(
 			    QStringLiteral("<font color=\"#000080\"><span style=\"color: #000080; background: #000000\">"
-			                   "blue</span></font>")));
+				               "blue</span></font>")));
 			QVERIFY(contents.contains(
 			    QStringLiteral("<font color=\"#800000\"><span style=\"color: #800000; background: #000000\">"
-			                   "ansi-red</span></font>")));
+				               "ansi-red</span></font>")));
 			QVERIFY(contents.contains(
 			    QStringLiteral("<font color=\"#ffff00\"><span style=\"color: #ffff00; background: #000000\">"
-			                   "rule</span></font>")));
+				               "rule</span></font>")));
 			QVERIFY(contents.contains(QStringLiteral("plain note")));
 			QVERIFY(contents.contains(QStringLiteral("multi-one")));
 			QVERIFY(contents.contains(QStringLiteral("multi-")));
@@ -1679,7 +1679,7 @@ ColourTell("#ffffff", "#000000", "unfinished")
 			const QString artifactDirectory =
 			    QDir(QCoreApplication::applicationDirPath())
 			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
-			                                 "dofile-plugin-import"));
+					                         "dofile-plugin-import"));
 			const QString pluginsDirectory =
 			    QDir(artifactDirectory).filePath(QStringLiteral("worlds/plugins"));
 			QVERIFY(QDir().mkpath(pluginsDirectory));
@@ -1929,7 +1929,7 @@ end
 			const QString artifactDirectory =
 			    QDir(QCoreApplication::applicationDirPath())
 			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
-			                                 "reload-controller-mccp-cleanup"));
+					                         "reload-controller-mccp-cleanup"));
 			QVERIFY(QDir().mkpath(artifactDirectory));
 
 			const QByteArray originalAssumeYes    = qgetenv("QMUD_RELOAD_ASSUME_YES");
@@ -2007,7 +2007,7 @@ end
 			const QString artifactDirectory =
 			    QDir(QCoreApplication::applicationDirPath())
 			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
-			                                 "tab-completion-symbol-options-round-trip"));
+					                         "tab-completion-symbol-options-round-trip"));
 			QVERIFY(QDir().mkpath(artifactDirectory));
 
 			const QString prefixOptionKey = QStringLiteral("tab_completion_excludes_symbol_prefix");
@@ -2693,8 +2693,8 @@ end
 			QByteArray payload = QByteArrayLiteral("Sample output before prompt.\r\n\r\n");
 			payload.append(
 			    QByteArrayLiteral("\x1B[3z\x1B[0;32m\x1B[1;33m<Ex>A</Ex><Ex>Bc</Ex>\x1B[0;32m 1:00pm "
-			                      "\x1B[1;31m10/10aa \x1B[1;34m200/200b \x1B[0;35m300cc "
-			                      "\x1B[0;32m4000dd\x1B[0;32m&gt; \x1B[0;37m"));
+				                  "\x1B[1;31m10/10aa \x1B[1;34m200/200b \x1B[0;35m300cc "
+				                  "\x1B[0;32m4000dd\x1B[0;32m&gt; \x1B[0;37m"));
 			runtime.receiveRawData(payload);
 
 			const QString expectedPrompt = QStringLiteral("ABc 1:00pm 10/10aa 200/200b 300cc 4000dd> ");
@@ -2876,7 +2876,7 @@ end
 			QVector<bool>                                      partialOverlayAtSpeech;
 			QMudNativePluginRegistry::setTestSpeechSink(
 			    [&events, &partialOverlayAtSpeech,
-			     &view = harness.view](const QMudNativePluginRegistry::TestSpeechEvent &event)
+				 &view = harness.view](const QMudNativePluginRegistry::TestSpeechEvent &event)
 			    {
 				    events.push_back(event);
 				    partialOverlayAtSpeech.push_back(
@@ -3020,7 +3020,7 @@ end
 			                 { publishedPartialLines.push_back(line); });
 			runtime.receiveRawData(
 			    QByteArrayLiteral("suspend-before-mxp\nprefix-\x1B[1z<!ENTITY continuation "
-			                      "'completed'>suffix"));
+				                  "'completed'>suffix"));
 			runtime.receiveRawData(QByteArrayLiteral(" completed\nfresh-partial"));
 
 			QTRY_COMPARE_WITH_TIMEOUT(pluginVariable(runtime, kMxpEntityCallbackPluginId,
@@ -3807,7 +3807,7 @@ end
 					    return false;
 				    presentationCommittedBeforeCancellation =
 				        std::ranges::any_of(runtime.lines(), [](const WorldRuntime::LineEntry &line)
-				                            { return line.text == QStringLiteral("cancellation output"); });
+						                    { return line.text == QStringLiteral("cancellation output"); });
 				    finalCompletionCalledBeforeCancellation = completionCalled;
 				    const auto suspendedIt = runtime.m_suspendedPluginCallbackDispatches.constBegin();
 				    runtimeResumeId        = suspendedIt.key();
@@ -4320,8 +4320,8 @@ end
 			quint64      nextResumeId  = 1;
 			auto         finishFallback =
 			    [&runtime, &nextCommandId,
-			     &nextResumeId](const LuaBatchDispatchKind kind,
-			                    LuaBatchDispatchResult     partial) -> std::pair<bool, LuaBatchDispatchResult>
+				 &nextResumeId](const LuaBatchDispatchKind kind,
+				                LuaBatchDispatchResult     partial) -> std::pair<bool, LuaBatchDispatchResult>
 			{
 				const quint64                                 commandId = nextCommandId++;
 				const quint64                                 resumeId  = nextResumeId++;
@@ -4493,7 +4493,7 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    queuedPayloads(runtime),
 			    (QStringList{QStringLiteral("qcmd-trigger-multi-a23"),
-			                 QStringLiteral("qcmd-trigger-multi-b58"), QStringLiteral("qcmd-tail-z77")}),
+				             QStringLiteral("qcmd-trigger-multi-b58"), QStringLiteral("qcmd-tail-z77")}),
 			    5000);
 		}
 
@@ -4532,7 +4532,7 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    queuedPayloads(runtime),
 			    (QStringList{QStringLiteral("qcmd-tail-z77"), QStringLiteral("qcmd-alias-multi-a23"),
-			                 QStringLiteral("qcmd-alias-multi-b58")}),
+				             QStringLiteral("qcmd-alias-multi-b58")}),
 			    5000);
 		}
 
@@ -4938,7 +4938,7 @@ end
 
 			const auto commandLine =
 			    std::ranges::find_if(runtime.lines(), [](const WorldRuntime::LineEntry &line)
-			                         { return line.text == QStringLiteral("trigger-command"); });
+				                     { return line.text == QStringLiteral("trigger-command"); });
 			QVERIFY(commandLine != runtime.lines().cend());
 			QVERIFY((commandLine->flags & WorldRuntime::LineInput) != 0);
 			QVERIFY((commandLine->flags & WorldRuntime::LineLog) != 0);
@@ -4969,7 +4969,7 @@ end
 			QCOMPARE(
 			    lines.sliced(lines.size() - 4),
 			    (QStringList{QStringLiteral("note-trigger-origin"), QStringLiteral("note-after-match"),
-			                 QStringLiteral("colour-note-after-match"), QStringLiteral("following-prompt")}));
+				             QStringLiteral("colour-note-after-match"), QStringLiteral("following-prompt")}));
 		}
 
 		static void ansiReplacementRetainsPriorTriggerOutputOrderAfterOmit()
@@ -5223,7 +5223,7 @@ ColourNote("red", "black", "single-note-two")
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    queuedPayloads(runtime),
 			    (QStringList{QStringLiteral("qcmd-lua-a91"), QStringLiteral("qcmd-lua-b26"),
-			                 QStringLiteral("qcmd-tail-z77")}),
+				             QStringLiteral("qcmd-tail-z77")}),
 			    5000);
 		}
 
@@ -5311,7 +5311,7 @@ ColourNote("red", "black", "single-note-two")
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    queuedPayloads(runtime),
 			    (QStringList{QStringLiteral("qcmd-lua-mixed-a19"), QStringLiteral("qcmd-lua-mixed-b42"),
-			                 QStringLiteral("qcmd-lua-mixed-c86"), QStringLiteral("qcmd-tail-z77")}),
+				             QStringLiteral("qcmd-lua-mixed-c86"), QStringLiteral("qcmd-tail-z77")}),
 			    5000);
 		}
 
@@ -5329,8 +5329,8 @@ ColourNote("red", "black", "single-note-two")
 			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
 			WorldRuntimeTestAccess::initializeLuaScriptText(
 			    runtime, QStringLiteral("function qcb_priority_check(name, line, wildcards, styles)\n"
-			                            "  Send(\"qcmd-callback-e71\")\n"
-			                            "end\n"));
+				                        "  Send(\"qcmd-callback-e71\")\n"
+				                        "end\n"));
 			WorldRuntimeTestAccess::triggers(runtime).push_back(makeNamedCallbackQueueNormalTrigger());
 			runtime.markTriggersChanged();
 
@@ -5609,14 +5609,14 @@ ColourNote("red", "black", "single-note-two")
 
 			const auto precursor =
 			    addRuntimeCallbackPlugin(runtime, QStringLiteral("000000000000000000000000"),
-			                             QStringLiteral("Earlier telnet recipient"), QStringLiteral(R"lua(
+				                         QStringLiteral("Earlier telnet recipient"), QStringLiteral(R"lua(
 function OnPluginTelnetSubnegotiation(msg_type, data)
   SetVariable("preceding_payload", data)
 end
 )lua"));
 			const auto source =
 			    addRuntimeCallbackPlugin(runtime, QStringLiteral("111111111111111111111111"),
-			                             QStringLiteral("Telnet source"), QStringLiteral(R"lua(
+				                         QStringLiteral("Telnet source"), QStringLiteral(R"lua(
 function OnPluginTelnetSubnegotiation(msg_type, data)
   SetVariable("gmcp_payload", data)
   BroadcastPlugin(1, "room.info")
@@ -5624,7 +5624,7 @@ end
 )lua"));
 			const auto recipient =
 			    addRuntimeCallbackPlugin(runtime, QStringLiteral("222222222222222222222222"),
-			                             QStringLiteral("Mapper recipient"), QStringLiteral(R"lua(
+				                         QStringLiteral("Mapper recipient"), QStringLiteral(R"lua(
 function OnPluginBroadcast(message, sender_id, sender_name, text)
   if message == 1 and text == "room.info" then
     Note("broadcast-note")
@@ -5656,12 +5656,12 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    outputTexts(),
 			    (QStringList{QStringLiteral("before-gmcp"), QStringLiteral("broadcast-note"),
-			                 QStringLiteral("room-description"), QStringLiteral("room-exits")}),
+				             QStringLiteral("room-description"), QStringLiteral("room-exits")}),
 			    5000);
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    harness.view.outputLines(),
 			    (QStringList{QStringLiteral("before-gmcp"), QStringLiteral("broadcast-note"),
-			                 QStringLiteral("room-description"), QStringLiteral("room-exits")}),
+				             QStringLiteral("room-description"), QStringLiteral("room-exits")}),
 			    5000);
 			QCOMPARE(pluginVariable(runtime, QStringLiteral("000000000000000000000000"),
 			                        QStringLiteral("preceding_payload")),
@@ -6520,8 +6520,19 @@ end
 		 */
 		static void nativeLuaAudioVariablesUsePluginStateLifecycle()
 		{
+			const QString buildDirectory = QStringLiteral(QMUD_TEST_BUILD_DIR);
+			const auto    previousHome   = qgetenv("QMUD_HOME");
+			const auto    restoreHome    = qScopeGuard(
+			    [&]
+			    {
+				    if (previousHome.isNull())
+					    qunsetenv("QMUD_HOME");
+				    else
+					    qputenv("QMUD_HOME", previousHome);
+			    });
+			qputenv("QMUD_HOME", buildDirectory.toUtf8());
 			PluginStateTestDirectory tempDir(
-			    QDir::current().filePath(QStringLiteral("native_audio_state_XXXXXX")));
+			    QDir(buildDirectory).filePath(QStringLiteral("native_audio_state_XXXXXX")));
 			QVERIFY(tempDir.isValid());
 
 			const QString stateDir = QDir(tempDir.path()).filePath(QStringLiteral("state"));
@@ -6551,7 +6562,7 @@ end
 			const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
 			{
 				WorldRuntime runtime;
-				runtime.setStartupDirectory(QDir::currentPath());
+				runtime.setStartupDirectory(buildDirectory);
 				runtime.setStateFilesDirectory(stateDir);
 				runtime.applyFromDocument(document);
 				QString loadError;
@@ -6582,7 +6593,7 @@ end
 			QVERIFY(QFileInfo::exists(stateFile));
 
 			WorldRuntime restored;
-			restored.setStartupDirectory(QDir::currentPath());
+			restored.setStartupDirectory(buildDirectory);
 			restored.setStateFilesDirectory(stateDir);
 			restored.applyFromDocument(document);
 			QCOMPARE(restored.pluginVariableValue(audioId.toUpper(), QStringLiteral("vol")),

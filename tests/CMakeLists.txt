@@ -112,6 +112,7 @@ qmud_add_qtest(tst_OutputWrapUtils
         unit/tst_OutputWrapUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/OutputWrapUtils.cpp"
         LIBRARIES
+        Qt6::Network
         Qt6::Gui
         LABELS
         unit)
@@ -144,6 +145,7 @@ qmud_add_qtest(tst_HyperlinkActionUtils
         unit/tst_HyperlinkActionUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
         LIBRARIES
+        Qt6::Network
         Qt6::Gui
         LABELS
         unit)
@@ -155,6 +157,7 @@ qmud_add_qtest(tst_MiniWindowUtils
         "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
         LIBRARIES
+        Qt6::Network
         Qt6::Widgets
         LABELS
         unit)
@@ -316,6 +319,7 @@ qmud_add_qtest(tst_WorldSessionStateUtils
         unit/tst_WorldSessionStateUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/WorldSessionStateUtils.cpp"
         LIBRARIES
+        Qt6::Network
         ${QMUD_ZLIB_TARGET}
         LABELS
         unit)
@@ -663,8 +667,10 @@ qmud_add_qtest(tst_WorldSocket_KeepAlive
         integration/tst_WorldSocket_KeepAlive.cpp
         "${CMAKE_SOURCE_DIR}/src/WorldSocketService.h"
         "${CMAKE_SOURCE_DIR}/src/WorldSocket.cpp"
+        "${CMAKE_SOURCE_DIR}/src/WorldSocket.h"
+        "${CMAKE_SOURCE_DIR}/src/GmcpProtocol.cpp"
         LIBRARIES
-        Qt6::Network
+        Qt6::Network ${QMUD_ZLIB_TARGET}
         LABELS
         integration
         TIMEOUT
@@ -681,6 +687,7 @@ qmud_add_qtest(tst_WorldRuntime_PluginLifecycle
         integration
         TIMEOUT
         120)
+target_compile_definitions(tst_WorldRuntime_PluginLifecycle PRIVATE QMUD_TEST_BUILD_DIR="${CMAKE_BINARY_DIR}")
 
 qmud_add_qtest(tst_WorldObserverLifecycle
         GUI
@@ -828,6 +835,8 @@ qmud_add_qtest(tst_WorldCommandProcessor_TimerAccounting
         SOURCES
         integration/tst_WorldCommandProcessor_TimerAccounting.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/TimerSchedulingUtils.cpp"
+        LIBRARIES
+        Qt6::Network
         LABELS
         integration
         TIMEOUT
@@ -1008,3 +1017,17 @@ if (QMUD_ENABLE_GUI_TESTS)
             TIMEOUT
             20)
 endif ()
+
+qmud_add_qtest(tst_GmcpProtocol
+        SOURCES unit/tst_GmcpProtocol.cpp "${CMAKE_SOURCE_DIR}/src/GmcpProtocol.cpp"
+        LABELS unit)
+
+qmud_add_qtest(tst_GmcpIntegration GUI
+        SOURCES integration/tst_GmcpIntegration.cpp
+        LIBRARIES qmud_app_core
+        LABELS integration
+        TIMEOUT 90)
+
+set_property(TEST tst_GmcpIntegration APPEND PROPERTY ENVIRONMENT "QMUD_HOME=${CMAKE_BINARY_DIR}")
+set_tests_properties(tst_GmcpIntegration PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_definitions(tst_GmcpIntegration PRIVATE QMUD_TEST_BUILD_DIR="${CMAKE_BINARY_DIR}")

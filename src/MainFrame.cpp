@@ -794,6 +794,8 @@ void MainWindow::buildMenus()
 	gameMenu->addSeparator();
 	addActionToMenu(gameMenu, QStringLiteral("Immediate"), QStringLiteral("&Immediate...\tCtrl+I"),
 	                QKeySequence(QStringLiteral("Ctrl+I")));
+	addActionToMenu(gameMenu, QStringLiteral("GmcpBrowser"), QStringLiteral("GMCP Browser..."))
+	    ->setEnabled(false);
 	addActionToMenu(gameMenu, QStringLiteral("EditScriptFile"),
 	                QStringLiteral("&Edit Script File...\tShift+Ctrl+H"),
 	                QKeySequence(QStringLiteral("Shift+Ctrl+H")));
@@ -1510,12 +1512,30 @@ void MainWindow::observeLuaCallbackPresentationRuntime(const WorldRuntime *runti
 		return;
 	connect(runtime, &WorldRuntime::worldAttributeChanged, this,
 	        &MainWindow::onLuaCallbackPresentationWorldAttributeChanged, Qt::UniqueConnection);
+	connect(runtime, &WorldRuntime::nativeGmcpAvailabilityChanged, this,
+	        &MainWindow::refreshGmcpBrowserAction, Qt::UniqueConnection);
 }
 
 void MainWindow::onLuaCallbackPresentationWorldAttributeChanged(const QString &key) const
 {
+	if (key == QStringLiteral("native_gmcp"))
+		refreshGmcpBrowserAction();
 	if (key == QStringLiteral("id") || key == QStringLiteral("name"))
 		m_luaCallbackMainWindowPresentationDirty = true;
+}
+
+void MainWindow::refreshGmcpBrowserAction() const
+{
+	if (auto *action = m_actions.value(QStringLiteral("GmcpBrowser")))
+	{
+#ifndef NDEBUG
+		action->setEnabled(true);
+#else
+		const auto *world   = activeWorldChildWindow();
+		const auto *runtime = world ? world->runtime() : nullptr;
+		action->setEnabled(runtime && runtime->nativeGmcpAvailable());
+#endif
+	}
 }
 
 void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
@@ -2486,7 +2506,7 @@ void MainWindow::processTimers()
 	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = entry.runtime;
-		if (!runtime)
+		if (!runtime || runtime->reloadPreparing())
 			continue;
 
 		if (reconnectEnabled)
@@ -2751,6 +2771,7 @@ void MainWindow::refreshActionState()
 		const bool enableImmediate = hasWorld && runtime->luaScriptingAvailable();
 		m_actions.value(QStringLiteral("Immediate"))->setEnabled(enableImmediate);
 	}
+	refreshGmcpBrowserAction();
 	if (m_actions.contains(QStringLiteral("EditScriptFile")))
 	{
 		const QString scriptFile =
@@ -3208,29 +3229,28 @@ bool MainWindow::activateNotepad(const QString &title, WorldRuntime *relatedRunt
 	const QString    ownerWorldId =
 	    owner ? owner->worldAttributes().value(QStringLiteral("id")).trimmed() : QString();
 	const bool hasOwner = owner != nullptr;
-	for (QMdiSubWindow *sub : m_mdiArea->subWindowList(QMdiArea::CreationOrder))
-	{
-		auto *text = qobject_cast<TextChildWindow *>(sub);
-		if (!text)
-			continue;
-		if (text->windowTitle().compare(title, Qt::CaseInsensitive) != 0)
-			continue;
+	return std::ranges::any_of(
+	    m_mdiArea->subWindowList(QMdiArea::CreationOrder),
+	    [this, &title, hasOwner, ownerToken, &ownerWorldId](QMdiSubWindow *sub)
+	    {
+		    auto *text = qobject_cast<TextChildWindow *>(sub);
+		    if (!text || text->windowTitle().compare(title, Qt::CaseInsensitive) != 0)
+			    return false;
 
-		if (hasOwner)
-		{
-			if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, ownerToken, ownerWorldId, false))
-				continue;
-		}
-		else if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, 0, QString(), false))
-			continue;
+		    if (hasOwner)
+		    {
+			    if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, ownerToken, ownerWorldId,
+			                                                             false))
+				    return false;
+		    }
+		    else if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, 0, QString(), false))
+			    return false;
 
-		activateMdiSubWindow(text);
-		text->show();
-		text->raise();
-		return true;
-	}
-
-	return false;
+		    activateMdiSubWindow(text);
+		    text->show();
+		    text->raise();
+		    return true;
+	    });
 }
 
 static WorldRuntime *resolveRelatedRuntime(const MainWindow *frame, WorldRuntime *explicitRuntime)

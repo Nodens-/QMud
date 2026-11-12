@@ -1,5 +1,5 @@
 # QMud Lua API inventory export
-# Exported (UTC): 2026-09-08T08:23:10Z
+# Exported (UTC): 2026-11-11T02:06:48Z
 
 __gc
 __tostring
