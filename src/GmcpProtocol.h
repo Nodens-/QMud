@@ -14,12 +14,24 @@
 #include <QDateTime>
 #include <QJsonValue>
 #include <QMap>
+#include <QObject>
 #include <QSet>
 #include <functional>
 #include <memory>
 
 namespace QMudGmcp
 {
+	/**
+	 * @brief Persistent world preferences for automatic Core messages.
+	 */
+	struct CoreOptions
+	{
+			bool pingEnabled{true};
+			int  pingIntervalMinutes{5};
+			bool sendRtt{true};
+			bool keepAliveEnabled{true};
+			int  keepAliveIntervalMinutes{15};
+	};
 	/**
 	 * @brief Policy for applying a received JSON payload.
 	 */
@@ -75,6 +87,7 @@ namespace QMudGmcp
 			quint64                                 generation{0};
 			quint64                                 session{0};
 			quint64                                 revision{0};
+			qint64                                  roundTripMs{-1};
 			LuaCallbackPersistentStringMap<Message> messages;
 			PackageIndex                            packages;
 			QSet<QString>                           namespaces;
@@ -241,26 +254,26 @@ namespace QMudGmcp
 	 * @param error Output validation diagnostic.
 	 * @return Whether the message contains valid UTF-8 and optional JSON.
 	 */
-	bool       decode(const QByteArray &raw, Message &message, QString &error);
+	bool               decode(const QByteArray &raw, Message &message, QString &error);
 	/**
 	 * @brief Frames a message with Telnet IAC escaping.
 	 * @param raw Unframed message bytes.
 	 * @return Telnet subnegotiation bytes.
 	 */
-	QByteArray frame(const QByteArray &raw);
+	QByteArray         frame(const QByteArray &raw);
 	/**
 	 * @brief Converts a merge mode to its wire name.
 	 * @param mode Mode to encode.
 	 * @return Reserved-property value.
 	 */
-	QString    modeName(MergeMode mode);
+	QString            modeName(MergeMode mode);
 	/**
 	 * @brief Parses one reserved-property mode name.
 	 * @param name Mode text.
 	 * @param mode Output mode.
 	 * @return Whether the text names a supported mode.
 	 */
-	bool       parseMode(const QString &name, MergeMode &mode);
+	bool               parseMode(const QString &name, MergeMode &mode);
 	/**
 	 * @brief Identifies the native-owned merge extension capability independently of name casing.
 	 * @param name Candidate capability or module name.
@@ -271,7 +284,7 @@ namespace QMudGmcp
 	/**
 	 * @brief GMCP-only negotiation, payload processing, publication, and persistence.
 	 */
-	class Session
+	class Session : public QObject
 	{
 		public:
 			/**
@@ -281,7 +294,7 @@ namespace QMudGmcp
 			/**
 			 * @brief Publishes closed state and releases resources without invoking observers.
 			 */
-			~Session();
+			~Session() override;
 			/**
 			 * @brief Disables copying a stateful session.
 			 */
@@ -311,12 +324,12 @@ namespace QMudGmcp
 			 * @param verb Telnet command.
 			 * @param payload Unescaped GMCP payload for a subnegotiation, empty otherwise.
 			 */
-			void                     receive(unsigned char verb, const QByteArray &payload = {});
+			void receive(unsigned char verb, const QByteArray &payload = {});
 			/**
 			 * @brief Records one complete GMCP message accepted by the transport.
 			 * @param payload Unescaped outgoing GMCP message.
 			 */
-			void                     observeSent(const QByteArray &payload);
+			void observeSent(const QByteArray &payload);
 			/**
 			 * @brief Configures the world-wide local merge policy for future messages.
 			 * @param name Exact GMCP message name, matched without case.
@@ -324,24 +337,37 @@ namespace QMudGmcp
 			 * @param force Whether to override server declarations.
 			 * @return Whether the name is valid.
 			 */
-			bool                     setMergePolicy(const QString &name, MergeMode mode, bool force = false);
+			bool setMergePolicy(const QString &name, MergeMode mode, bool force = false);
 			/**
 			 * @brief Sends a validated native GMCP message.
 			 * @param raw Message without Telnet framing.
 			 * @param generation Required session identity.
 			 * @return Whether the active transport accepted the message.
 			 */
-			bool                     send(const QByteArray &raw, quint64 generation);
+			bool send(const QByteArray &raw, quint64 generation);
 			/**
 			 * @brief Sets registered module support independently of native client capabilities.
 			 * @param modules Module names mapped to positive versions; Client.GMCPMerge entries are ignored.
 			 */
-			void                     setModules(const QMap<QString, int> &modules);
+			void setModules(const QMap<QString, int> &modules);
+			/**
+			 * @brief Updates Core schedules and RTT disclosure on the owning transport thread.
+			 * @param options Persistent world settings; intervals are expressed in minutes.
+			 */
+			void setCoreOptions(const CoreOptions &options);
+			/**
+			 * @brief Reports the last measured RTT, or -1 when a connection has no measurement.
+			 */
+			std::function<void(qint64)>          roundTripChanged;
+			/**
+			 * @brief Delivers a server's Core.Goodbye string for world output.
+			 */
+			std::function<void(const QString &)> goodbye;
 			/**
 			 * @brief Saves GMCP ownership, negotiation, application data, policies, and module support.
 			 * @return Serializable GMCP state. Transport preservation eligibility is checked by its owner.
 			 */
-			[[nodiscard]] QByteArray save() const;
+			[[nodiscard]] QByteArray             save() const;
 			/**
 			 * @brief Restores native state before descriptor adoption resumes input.
 			 * @param bytes Previously saved state.

@@ -177,7 +177,7 @@ struct WorldSocket::Worker
 		 * @brief Queues an operation while the Qt network event loop is frozen.
 		 * @param operation Worker operation, or empty to resume the event loop.
 		 */
-		void                                 control(std::function<void()> operation) const
+		void control(std::function<void()> operation) const
 		{
 			{
 				QMutexLocker lock(&controlMutex);
@@ -370,6 +370,9 @@ WorldSocket::WorldSocket(QObject *parent) : WorldSocketService(parent), m_worker
 		    m_worker->forward(&WorldSocketService::tlsEncrypted, &WorldSocketService::tlsEncrypted);
 		    m_worker->forward(&WorldSocketService::gmcpStateChanged, &WorldSocketService::gmcpStateChanged);
 		    m_worker->forward(&WorldSocketService::gmcpObserved, &WorldSocketService::gmcpObserved);
+		    m_worker->forward(&WorldSocketService::gmcpRoundTripChanged,
+		                      &WorldSocketService::gmcpRoundTripChanged);
+		    m_worker->forward(&WorldSocketService::gmcpGoodbye, &WorldSocketService::gmcpGoodbye);
 		    m_worker->forwardProtocolWrites();
 	    });
 }
@@ -593,6 +596,10 @@ bool WorldSocket::setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mo
 {
 	return m_worker->call([&] { return m_worker->transport->setGmcpMergePolicy(name, mode, force); });
 }
+void WorldSocket::setGmcpCoreOptions(const QMudGmcp::CoreOptions &options)
+{
+	m_worker->call([&] { m_worker->transport->setGmcpCoreOptions(options); });
+}
 void WorldSocket::setGmcpModules(const QMap<QString, int> &modules)
 {
 	m_worker->call([&] { m_worker->transport->setGmcpModules(modules); });
@@ -809,7 +816,9 @@ WorldSocketTransport::WorldSocketTransport(QObject *parent) : WorldSocketService
 			m_socket->abort();
 		}
 	};
-	m_gmcp.stateChanged = [this](bool enabled) { emit gmcpStateChanged(enabled); };
+	m_gmcp.stateChanged     = [this](bool enabled) { emit gmcpStateChanged(enabled); };
+	m_gmcp.roundTripChanged = [this](qint64 milliseconds) { emit gmcpRoundTripChanged(milliseconds); };
+	m_gmcp.goodbye          = [this](const QString &message) { emit gmcpGoodbye(message); };
 	m_gmcp.fatal = m_stream.fatal = [this](const QString &error)
 	{
 		m_stream.stopDecoding();
@@ -910,7 +919,8 @@ void WorldSocketTransport::setProxySettings(int proxyType, const QString &server
 void WorldSocketTransport::applyConnectionSettings(const WorldSocketConnectionSettings &settings)
 {
 	setUseUtf8(settings.useUtf8);
-	m_nativeGmcp         = settings.nativeGmcp;
+	m_nativeGmcp = settings.nativeGmcp;
+	m_gmcp.setCoreOptions(settings.gmcpCore);
 	m_disableCompression = settings.disableCompression;
 	setKeepAliveEnabled(settings.keepAlive);
 	m_tlsEncryption                   = settings.tlsEncryption;
@@ -1218,6 +1228,10 @@ bool WorldSocketTransport::sendGmcp(const QByteArray &raw, quint64 generation)
 bool WorldSocketTransport::setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force)
 {
 	return m_gmcp.setMergePolicy(name, mode, force);
+}
+void WorldSocketTransport::setGmcpCoreOptions(const QMudGmcp::CoreOptions &options)
+{
+	m_gmcp.setCoreOptions(options);
 }
 void WorldSocketTransport::setGmcpModules(const QMap<QString, int> &modules)
 {

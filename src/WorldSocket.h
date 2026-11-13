@@ -268,6 +268,11 @@ class WorldSocketTransport : public WorldSocketService
 		 */
 		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force) override;
 		/**
+		 * @brief Updates automatic GMCP Core scheduling on the transport thread.
+		 * @param options Persistent world settings.
+		 */
+		void setGmcpCoreOptions(const QMudGmcp::CoreOptions &options) override;
+		/**
 		 * @brief Updates advertised modules.
 		 * @param modules Effective support list.
 		 */
@@ -456,17 +461,17 @@ class WorldSocket : public WorldSocketService
 		 * @brief Returns remote address string.
 		 * @return Remote peer address string.
 		 */
-		[[nodiscard]] QString peerAddressString() const override;
+		[[nodiscard]] QString  peerAddressString() const override;
 		/**
 		 * @brief Returns remote IPv4 address value.
 		 * @return Remote peer IPv4 address.
 		 */
-		[[nodiscard]] quint32 peerAddressV4() const override;
+		[[nodiscard]] quint32  peerAddressV4() const override;
 		/**
 		 * @brief Returns native descriptor for active socket.
 		 * @return Native descriptor, or `-1` when unavailable.
 		 */
-		[[nodiscard]] qintptr nativeSocketDescriptor() const override;
+		[[nodiscard]] qintptr  nativeSocketDescriptor() const override;
 		/**
 		 * @brief Adopts an already-connected native descriptor.
 		 * @param descriptor Native descriptor to adopt.
@@ -519,6 +524,11 @@ class WorldSocket : public WorldSocketService
 		 * @return Whether valid.
 		 */
 		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force) override;
+		/**
+		 * @brief Updates automatic GMCP Core scheduling on the transport thread.
+		 * @param options Persistent world settings.
+		 */
+		void setGmcpCoreOptions(const QMudGmcp::CoreOptions &options) override;
 		/**
 		 * @brief Updates advertised modules.
 		 * @param modules Effective support list.

@@ -89,19 +89,20 @@ struct WorldSocketStatisticsPublication
  */
 struct WorldSocketConnectionSettings
 {
-		bool    useUtf8{false};
-		bool    nativeGmcp{false};
-		bool    disableCompression{false};
-		bool    keepAlive{false};
-		bool    tlsEncryption{false};
-		int     tlsMethod{0};
-		bool    disableTlsCertificateValidation{false};
-		QString tlsServerName;
-		int     proxyType{0};
-		QString proxyServer;
-		quint16 proxyPort{0};
-		QString proxyUsername;
-		QString proxyPassword;
+		bool                  useUtf8{false};
+		bool                  nativeGmcp{false};
+		QMudGmcp::CoreOptions gmcpCore;
+		bool                  disableCompression{false};
+		bool                  keepAlive{false};
+		bool                  tlsEncryption{false};
+		int                   tlsMethod{0};
+		bool                  disableTlsCertificateValidation{false};
+		QString               tlsServerName;
+		int                   proxyType{0};
+		QString               proxyServer;
+		quint16               proxyPort{0};
+		QString               proxyUsername;
+		QString               proxyPassword;
 };
 
 /**
@@ -359,7 +360,26 @@ class WorldSocketService : public QObject
 			Q_UNUSED(disabled);
 		}
 
+		/**
+		 * @brief Updates automatic GMCP Core scheduling independently of connection handler ownership.
+		 * @param options Persistent world settings.
+		 */
+		virtual void setGmcpCoreOptions(const QMudGmcp::CoreOptions &options)
+		{
+			Q_UNUSED(options);
+		}
+
 	signals:
+		/**
+		 * @brief Reports a measured GMCP RTT or -1 when unavailable.
+		 * @param milliseconds Latest measured round-trip duration.
+		 */
+		void gmcpRoundTripChanged(qint64 milliseconds);
+		/**
+		 * @brief Delivers a received GMCP Goodbye string.
+		 * @param message Server text for world output.
+		 */
+		void gmcpGoodbye(const QString &message);
 		/**
 		 * @brief Reports a native negotiation transition.
 		 * @param enabled Whether native GMCP is active.

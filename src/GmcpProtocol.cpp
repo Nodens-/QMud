@@ -8,13 +8,16 @@
 #include "GmcpProtocol.h"
 #include "Version.h"
 #include <QDataStream>
+#include <QElapsedTimer>
 #include <QIODevice>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QScopedValueRollback>
 #include <QStringDecoder>
 #include <QThreadPool>
+#include <QTimer>
 #include <algorithm>
 #include <utility>
 #include <vector>
@@ -195,8 +198,22 @@ namespace QMudGmcp
 			 * @brief Binds private state to its owning session before any protocol operation can run.
 			 * @param session Session that owns this state and its observers.
 			 */
-			explicit Impl(Session &session) : owner(&session)
+			explicit Impl(Session &session) : owner(&session), pingTimer(&session), keepAliveTimer(&session)
 			{
+				pingTimer.setObjectName(QStringLiteral("gmcpCorePing"));
+				keepAliveTimer.setObjectName(QStringLiteral("gmcpCoreKeepAlive"));
+				QObject::connect(&pingTimer, &QTimer::timeout, &session,
+				                 [this]
+				                 {
+					                 if (active() && core.pingEnabled)
+						                 send(pingMessage());
+				                 });
+				QObject::connect(&keepAliveTimer, &QTimer::timeout, &session,
+				                 [this]
+				                 {
+					                 if (active() && core.keepAliveEnabled)
+						                 send(QByteArrayLiteral("Core.KeepAlive"));
+				                 });
 			}
 			struct Policy
 			{
@@ -212,19 +229,82 @@ namespace QMudGmcp
                 {QStringLiteral("Comm"), 1},
                 {QStringLiteral("Room"), 1}
             };
-			bool    publishedEnabled{false};
-			bool    modulesChangedWhileRestoring{false};
-			bool    refusedGmcpDo{false};
-			quint64 sequence{0};
+			bool          publishedEnabled{false};
+			bool          modulesChangedWhileRestoring{false};
+			bool          refusedGmcpDo{false};
+			quint64       sequence{0};
+			CoreOptions   core;
+			QTimer        pingTimer;
+			QTimer        keepAliveTimer;
+			qint64        pingSentAt{-1};
+			qint64        publishedRoundTrip{-1};
+			bool          replyingToPing{false};
+			bool          timersActive{false};
+			/**
+			 * @brief Samples monotonic milliseconds comparable across a reload of the same process session.
+			 * @return Monotonic timestamp on this machine's current boot.
+			 */
+			static qint64 monotonicMilliseconds()
+			{
+				QElapsedTimer clock;
+				clock.start();
+				return clock.msecsSinceReference();
+			}
+			/**
+			 * @brief Checks whether automatic Core messages may use the attached native connection.
+			 * @return Whether native GMCP is negotiated and restoration has completed.
+			 */
+			[[nodiscard]] bool active() const
+			{
+				return state.nativeAvailable() && state.negotiated && !state.restoring;
+			}
+			/**
+			 * @brief Builds a Ping with optional previously measured RTT.
+			 * @return Unframed Ping message.
+			 */
+			[[nodiscard]] QByteArray pingMessage() const
+			{
+				auto raw = QByteArrayLiteral("Core.Ping");
+				if (core.sendRtt && state.roundTripMs >= 0)
+					raw += ' ' + QByteArray::number(state.roundTripMs);
+				return raw;
+			}
+			/**
+			 * @brief Starts, stops, or reschedules only Core timers whose effective settings changed.
+			 */
+			void updateCoreTimers()
+			{
+				timersActive      = active();
+				const auto update = [this](QTimer &timer, bool enabled, int minutes)
+				{
+					const auto interval = std::chrono::minutes(minutes);
+					if (!active() || !enabled)
+						timer.stop();
+					else if (!timer.isActive() || timer.intervalAsDuration() != interval)
+						timer.start(interval);
+				};
+				update(pingTimer, core.pingEnabled, core.pingIntervalMinutes);
+				update(keepAliveTimer, core.keepAliveEnabled, core.keepAliveIntervalMinutes);
+				if (!state.native || !state.negotiated || state.closed || !core.pingEnabled)
+					pingSentAt = -1;
+			}
 
 			/**
 			 * @brief Publishes the current immutable version.
 			 */
-			void    publish()
+			void publish()
 			{
+				if (active() != timersActive)
+					updateCoreTimers();
 				++state.revision;
 				publication->current.store(std::make_shared<const Snapshot>(state),
 				                           std::memory_order_release);
+				if (publishedRoundTrip != state.roundTripMs)
+				{
+					publishedRoundTrip = state.roundTripMs;
+					if (owner->roundTripChanged)
+						owner->roundTripChanged(state.roundTripMs);
+				}
 				const bool enabled = state.native && state.negotiated && !state.closed;
 				if (!state.restoring && enabled != publishedEnabled)
 				{
@@ -313,7 +393,18 @@ namespace QMudGmcp
 					record(payload, false, error);
 					return;
 				}
-				const QString key = decoded.name.toLower();
+				const QString key         = decoded.name.toLower();
+				bool          replyToPing = false;
+				if (key == QLatin1String("core.ping") && core.pingEnabled)
+				{
+					if (pingSentAt >= 0)
+					{
+						state.roundTripMs = qMax<qint64>(0, monotonicMilliseconds() - pingSentAt);
+						pingSentAt        = -1;
+					}
+					else
+						replyToPing = true;
+				}
 				if (decoded.payload.isObject())
 				{
 					auto          object   = decoded.payload.toObject();
@@ -355,6 +446,13 @@ namespace QMudGmcp
                 });
 				publish();
 				record(payload, false, error, message);
+				if (replyToPing)
+				{
+					const QScopedValueRollback replying(replyingToPing, true);
+					send(pingMessage());
+				}
+				if (key == QLatin1String("core.goodbye") && decoded.payload.isString() && owner->goodbye)
+					owner->goodbye(decoded.payload.toString());
 			}
 			/**
 			 * @brief Handles one complete GMCP negotiation or subnegotiation.
@@ -397,6 +495,7 @@ namespace QMudGmcp
 					state.namespaces.clear();
 					state.session = nextSession.fetch_add(1, std::memory_order_relaxed);
 					state.serverModes.clear();
+					state.roundTripMs = -1;
 					publish();
 				}
 				else if (verb == Do && !refusedGmcpDo)
@@ -414,10 +513,12 @@ namespace QMudGmcp
 	}
 	Session::~Session()
 	{
-		stateChanged = {};
-		observed     = {};
-		fatal        = {};
-		write        = {};
+		roundTripChanged = {};
+		goodbye          = {};
+		stateChanged     = {};
+		observed         = {};
+		fatal            = {};
+		write            = {};
 		close();
 	}
 	std::shared_ptr<Publication> Session::publication() const
@@ -458,6 +559,7 @@ namespace QMudGmcp
 		data.state.packages           = {};
 		data.state.namespaces.clear();
 		data.state.serverModes.clear();
+		data.state.roundTripMs = -1;
 		data.publish();
 	}
 	bool Session::setMergePolicy(const QString &name, MergeMode mode, bool force)
@@ -497,6 +599,14 @@ namespace QMudGmcp
 		else if (data.state.negotiated)
 			data.supports();
 	}
+	void Session::setCoreOptions(const CoreOptions &options)
+	{
+		auto &data                         = impl();
+		data.core                          = options;
+		data.core.pingIntervalMinutes      = qBound(1, options.pingIntervalMinutes, 120);
+		data.core.keepAliveIntervalMinutes = qBound(1, options.keepAliveIntervalMinutes, 120);
+		data.updateCoreTimers();
+	}
 	void Session::receive(unsigned char verb, const QByteArray &payload)
 	{
 		auto &data = impl();
@@ -524,6 +634,7 @@ namespace QMudGmcp
 		stream << data.local.size();
 		for (auto it = data.local.constBegin(); it != data.local.constEnd(); ++it)
 			stream << it.key() << modeName(it->mode) << it->force;
+		stream << data.state.roundTripMs << data.pingSentAt;
 		return bytes;
 	}
 	bool Session::restore(const QByteArray &bytes, quint64 generation, bool activate)
@@ -610,10 +721,14 @@ namespace QMudGmcp
 				return false;
 			local.insert(key, {mode, force});
 		}
-		if (stream.status() != QDataStream::Ok || !stream.atEnd())
+		qint64 pingSentAt = -1;
+		stream >> replacement.roundTripMs >> pingSentAt;
+		if (replacement.roundTripMs < -1 || pingSentAt < -1 || stream.status() != QDataStream::Ok ||
+		    !stream.atEnd())
 			return false;
 		data.state                        = std::move(replacement);
 		data.sequence                     = sequence;
+		data.pingSentAt                   = pingSentAt;
 		data.modules                      = modules;
 		data.modulesChangedWhileRestoring = false;
 		data.local                        = local;
@@ -659,6 +774,9 @@ namespace QMudGmcp
 		Message decoded;
 		QString error;
 		decode(payload, decoded, error);
+		if (data.active() && data.core.pingEnabled && !data.replyingToPing &&
+		    decoded.name.compare(QLatin1String("Core.Ping"), Qt::CaseInsensitive) == 0)
+			data.pingSentAt = Impl::monotonicMilliseconds();
 		data.record(payload, true, error);
 	}
 

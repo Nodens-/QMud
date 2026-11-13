@@ -210,5 +210,5 @@ namespace
 
 } // namespace
 
-QTEST_MAIN(tst_PluginPathUtils)
+QTEST_GUILESS_MAIN(tst_PluginPathUtils)
 #include "tst_PluginPathUtils.moc"

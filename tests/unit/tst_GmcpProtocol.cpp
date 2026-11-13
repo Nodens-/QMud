@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSemaphore>
+#include <QTimer>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QThread>
 #include <QtTest/QTest>
@@ -49,6 +50,93 @@ namespace
 	{
 			Q_OBJECT
 		private slots:
+			/**
+			 * @brief Exercises Core schedules, RTT disclosure, server-initiated Ping, Goodbye, and reload state.
+			 */
+			static void coreMessages()
+			{
+				QMudGmcp::Session session;
+				QList<QByteArray> writes;
+				auto              attach = [&](QMudGmcp::Session &target)
+				{
+					target.write = [&target, &writes](const QByteArray &bytes) -> qint64
+					{
+						writes.append(bytes);
+						if (bytes.startsWith(QByteArray::fromHex("fffac9")))
+							target.observeSent(bytes.mid(3, bytes.size() - 5));
+						return bytes.size();
+					};
+				};
+				attach(session);
+				session.reset(true, 1);
+				auto *ping      = session.findChild<QTimer *>(QStringLiteral("gmcpCorePing"));
+				auto *keepAlive = session.findChild<QTimer *>(QStringLiteral("gmcpCoreKeepAlive"));
+				QVERIFY(ping && keepAlive);
+				QVERIFY(!ping->isActive() && !keepAlive->isActive());
+				session.receive(251);
+				QCOMPARE(writes.size(), 3);
+				QVERIFY(ping->isActive() && keepAlive->isActive());
+				QCOMPARE(ping->interval(), 5 * 60 * 1000);
+				QCOMPARE(keepAlive->interval(), 15 * 60 * 1000);
+				writes.clear();
+				QVERIFY(QMetaObject::invokeMethod(ping, "timeout", Qt::DirectConnection));
+				QCOMPARE(writes, QList<QByteArray>{QMudGmcp::frame("Core.Ping")});
+				session.receive(250, "Core.Ping");
+				const auto rtt = session.publication()->current.load()->roundTripMs;
+				QVERIFY(rtt >= 0);
+				QCOMPARE(writes.size(), 1); // A response completes the measurement without an echo.
+				writes.clear();
+				session.receive(250, "Core.Ping");
+				QCOMPARE(writes, QList<QByteArray>{QMudGmcp::frame("Core.Ping " + QByteArray::number(rtt))});
+				QCOMPARE(session.publication()->current.load()->roundTripMs, rtt);
+				writes.clear();
+				QVERIFY(QMetaObject::invokeMethod(ping, "timeout", Qt::DirectConnection));
+				QCOMPARE(writes, QList<QByteArray>{QMudGmcp::frame("Core.Ping " + QByteArray::number(rtt))});
+				session.receive(250, "Core.Ping");
+				QCOMPARE(writes.size(), 1);
+				writes.clear();
+				QMudGmcp::CoreOptions options;
+				options.sendRtt                  = false;
+				options.pingIntervalMinutes      = 1;
+				options.keepAliveIntervalMinutes = 120;
+				session.setCoreOptions(options);
+				QCOMPARE(ping->interval(), 60 * 1000);
+				QCOMPARE(keepAlive->interval(), 120 * 60 * 1000);
+				QVERIFY(QMetaObject::invokeMethod(ping, "timeout", Qt::DirectConnection));
+				QCOMPARE(writes, QList<QByteArray>{QMudGmcp::frame("Core.Ping")});
+				const auto        pending = session.save();
+				QMudGmcp::Session restored;
+				attach(restored);
+				QVERIFY(restored.restore(pending, 2, false));
+				QVERIFY(!restored.findChild<QTimer *>(QStringLiteral("gmcpCorePing"))->isActive());
+				restored.activateRestoration(2);
+				writes.clear();
+				restored.receive(250, "Core.Ping");
+				QVERIFY(restored.publication()->current.load()->roundTripMs >= 0);
+				QVERIFY(writes.isEmpty()); // The outstanding request survives socket reattachment.
+				session.receive(250, "Core.Ping");
+				QVERIFY(writes.isEmpty());
+				session.receive(250, "Core.Ping");
+				QCOMPARE(writes, QList<QByteArray>{QMudGmcp::frame("Core.Ping")});
+				writes.clear();
+				QVERIFY(QMetaObject::invokeMethod(keepAlive, "timeout", Qt::DirectConnection));
+				QCOMPARE(writes, QList<QByteArray>{QMudGmcp::frame("Core.KeepAlive")});
+				QString goodbye;
+				session.goodbye = [&](const QString &text) { goodbye = text; };
+				session.receive(250, "Core.Goodbye \"Synthetic farewell\"");
+				QCOMPARE(goodbye, QStringLiteral("Synthetic farewell"));
+				options.pingEnabled = options.keepAliveEnabled = false;
+				session.setCoreOptions(options);
+				QVERIFY(!ping->isActive() && !keepAlive->isActive());
+				writes.clear();
+				session.receive(250, "Core.Ping");
+				QVERIFY(writes.isEmpty());
+				session.close();
+				QCOMPARE(session.publication()->current.load()->roundTripMs, qint64{-1});
+				restored.close();
+				QVERIFY(!restored.findChild<QTimer *>(QStringLiteral("gmcpCorePing"))->isActive());
+			}
+
 			/**
 			 * @brief Keeps merge extension version 1 independent of module registration changes.
 			 */

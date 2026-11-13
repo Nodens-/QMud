@@ -141,12 +141,12 @@ class AppControllerTestAccess final
 			controller.runWorldStartupPostRestore(runtime, std::move(completion));
 		}
 		/**
-		 * @brief Runs reload preparation with the fixture's dry-run environment.
+		 * @brief Runs confirmed reload preparation with the fixture's dry-run environment.
 		 * @param controller Application controller.
 		 */
 		static void reload(AppController &controller)
 		{
-			controller.handleReloadQmud(false);
+			controller.handleReloadQmud(false, true);
 		}
 };
 
@@ -208,7 +208,7 @@ namespace
 			 * @brief Observes accepted wire writes through the production outgoing frame parser.
 			 * @param bytes Accepted bytes.
 			 */
-			void observeSent(const QByteArray &bytes)
+			void observeWireSent(const QByteArray &bytes)
 			{
 				stream.observeSent(bytes);
 			}
@@ -223,7 +223,7 @@ namespace
 			/**
 			 * @brief Closes both protocol and stream without resetting lifetime statistics.
 			 */
-			void close()
+			void closeConnection()
 			{
 				stream.close();
 				QMudGmcp::Session::close();
@@ -232,7 +232,7 @@ namespace
 			 * @brief Checks transport eligibility before serializing GMCP state.
 			 * @return GMCP state, or empty when transport needs reconnect.
 			 */
-			[[nodiscard]] QByteArray save() const
+			[[nodiscard]] QByteArray saveConnection() const
 			{
 				return stream.atBoundary() ? QMudGmcp::Session::save() : QByteArray{};
 			}
@@ -243,7 +243,7 @@ namespace
 			 * @param activate Whether to activate immediately.
 			 * @return Whether restoration succeeded.
 			 */
-			bool restore(const QByteArray &bytes, quint64 generation, bool activate = true)
+			bool restoreConnection(const QByteArray &bytes, quint64 generation, bool activate = true)
 			{
 				if (!QMudGmcp::Session::restore(bytes, generation, activate))
 					return false;
@@ -573,6 +573,44 @@ namespace
 			Q_OBJECT
 		private slots:
 			/**
+			 * @brief Delivers worker-measured Core RTT and Goodbye output through the real socket lifecycle.
+			 */
+			static void coreRuntimeMessages()
+			{
+				WorldRuntime runtime;
+				WorldView    view;
+				view.setRuntime(&runtime);
+				const auto detach = qScopeGuard([&] { view.setRuntime(nullptr); });
+				view.show();
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("native_gmcp"), QStringLiteral("1"));
+				QSignalSpy roundTrips(&runtime, &WorldRuntime::gmcpRoundTripChanged);
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+				QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_VERIFY(runtime.isConnected() && server.hasPendingConnections());
+				auto *peer = server.nextPendingConnection();
+				QCOMPARE(peer->write(QByteArray::fromHex("fffbc9")), qint64{3});
+				peer->flush();
+				QTRY_VERIFY(runtime.gmcpPublication()->current.load()->negotiated);
+				const auto session = runtime.gmcpPublication()->current.load()->session;
+				QVERIFY(runtime.sendGmcp("Core.Ping", session));
+				const auto response = QMudGmcp::frame("Core.Ping");
+				QCOMPARE(peer->write(response), response.size());
+				peer->flush();
+				QTRY_VERIFY(runtime.gmcpPublication()->current.load()->roundTripMs >= 0);
+				QTRY_VERIFY(!roundTrips.isEmpty());
+				const auto goodbye = QMudGmcp::frame("Core.Goodbye \"Synthetic final message\"");
+				QCOMPARE(peer->write(goodbye), goodbye.size());
+				peer->disconnectFromHost();
+				QTRY_VERIFY(std::ranges::any_of(
+				    runtime.lines(), [](const WorldRuntime::LineEntry &line)
+				    { return line.text.contains(QStringLiteral("Synthetic final message")); }));
+				QTRY_VERIFY(!runtime.isConnected());
+				runtime.setWorldFileModified(false);
+			}
+
+			/**
 			 * @brief Dispatches a synthetic OOB option without installing any GMCP handler.
 			 */
 			static void transportIndependentOption()
@@ -666,15 +704,15 @@ namespace
 				session.startTlsFollowsSent = [&] { ++upgrades; };
 				const auto gmcp             = QMudGmcp::frame("Test.Send {\"value\":3}");
 				for (const char c : gmcp)
-					session.observeSent(QByteArray(1, c));
+					session.observeWireSent(QByteArray(1, c));
 				QCOMPARE(records.size(), 1);
 				QVERIFY(records.first().outgoing);
 				QCOMPARE(records.first().raw, QByteArray("Test.Send {\"value\":3}"));
 				const auto tls = QByteArray::fromHex("fffa2e01fff0");
 				for (const char c : tls)
-					session.observeSent(QByteArray(1, c));
+					session.observeWireSent(QByteArray(1, c));
 				QCOMPARE(upgrades, 1);
-				session.observeSent(QByteArray::fromHex("fffa6401fffffa2e01fffff0fff0"));
+				session.observeWireSent(QByteArray::fromHex("fffa6401fffffa2e01fffff0fff0"));
 				QCOMPARE(upgrades, 1);
 			}
 			/**
@@ -802,17 +840,17 @@ namespace
 				activate(before);
 				before.receive(offer);
 				before.receive(start.left(2));
-				QVERIFY(before.save().isEmpty());
+				QVERIFY(before.saveConnection().isEmpty());
 				before.setCompressionDisabled(true);
 				QCOMPARE(before.receive(start.mid(2) + zipped + "tail"), QByteArray("leftrighttail"));
-				QVERIFY(!before.save().isEmpty());
+				QVERIFY(!before.saveConnection().isEmpty());
 
 				session.reset(true, 3, false);
 				session.receive(offer);
 				session.receive(start + zipped.left(2));
 				QVERIFY(session.stream.statistics().mccpType != 0);
 				session.setCompressionDisabled(true);
-				session.close();
+				session.closeConnection();
 				QCOMPARE(session.stream.statistics().mccpType, 0);
 				session.reset(true, 4, true);
 				writes.clear();
@@ -1210,7 +1248,7 @@ namespace
 				const auto saved = socket.saveNativeState();
 				QVERIFY(!saved.isEmpty());
 				GmcpWireFixture restored;
-				QVERIFY(restored.restore(saved, 2));
+				QVERIFY(restored.restoreConnection(saved, 2));
 				peer->write(QMudGmcp::frame("Test.Frozen {\"value\":9}"));
 				peer->flush();
 				QCOMPARE(socket.sendPacket({}), 0);
@@ -1758,21 +1796,15 @@ end
 				static_cast<void>(runtime.deletePluginVariable(id, QStringLiteral("input_drained")));
 				QVERIFY(queueNativeBatch(*socket, *peer, QByteArray("synthetic input\n")));
 				QVERIFY(runtime.pluginVariableValue(id, QStringLiteral("input_drained")).isEmpty());
-				const auto oldAssume          = qgetenv("QMUD_RELOAD_ASSUME_YES");
 				const auto oldDryRun          = qgetenv("QMUD_RELOAD_DRY_RUN");
 				const auto restoreEnvironment = qScopeGuard(
 				    [&]
 				    {
-					    if (oldAssume.isNull())
-						    qunsetenv("QMUD_RELOAD_ASSUME_YES");
-					    else
-						    qputenv("QMUD_RELOAD_ASSUME_YES", oldAssume);
 					    if (oldDryRun.isNull())
 						    qunsetenv("QMUD_RELOAD_DRY_RUN");
 					    else
 						    qputenv("QMUD_RELOAD_DRY_RUN", oldDryRun);
 				    });
-				qputenv("QMUD_RELOAD_ASSUME_YES", "1");
 				qputenv("QMUD_RELOAD_DRY_RUN", "1");
 				AppControllerTestAccess::reload(controller);
 				QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("saved_after_drain")),
@@ -1850,7 +1882,7 @@ end
 				QVERIFY(!saved.isEmpty());
 				QVERIFY(!saved.contains(QByteArray(1024, 'q')));
 				GmcpWireFixture restored;
-				QVERIFY(restored.restore(saved, 2));
+				QVERIFY(restored.restoreConnection(saved, 2));
 				QCOMPARE(restored.publication()
 				             ->current.load()
 				             ->messages.value(QStringLiteral("test.state"))
@@ -4332,7 +4364,7 @@ end
 				QVERIFY(
 				    run(runtime, QStringLiteral("local k='a'..string.char(0)..'b'; assert(savedKeys[k]==1 "
 				                                "and gmcpGet('Test.Keys')[k]==9)")));
-				session.close();
+				session.closeConnection();
 				QVERIFY(run(runtime,
 				            QStringLiteral("assert(savedKeys['a'..string.char(0)..'b']==1 and gmcp==nil); "
 				                           "local ok,err=pcall(gmcpGet,'Test.Keys'); assert(not ok and "
@@ -4509,15 +4541,15 @@ assert(branchCount==1)
 local fresh,freshCount=collectGmcpNamespace(liveNamespace)
 assert(freshCount==3 and fresh.branch.Value==2 and fresh.added==3)
 )lua")));
-				const auto saved = session.save();
+				const auto saved = session.saveConnection();
 				QVERIFY(!saved.isEmpty());
-				session.close();
+				session.closeConnection();
 				QVERIFY(run(runtime, QStringLiteral(R"lua(
 assert(gmcp==nil and savedNamespace.Branch.Value==1)
 local empty,n=collectGmcpNamespace(liveNamespace)
 assert(n==0 and next(empty)==nil)
 )lua")));
-				QVERIFY(session.restore(saved, 2));
+				QVERIFY(session.restoreConnection(saved, 2));
 				QVERIFY(run(runtime, QStringLiteral(R"lua(
 local roots,n=collectGmcpNamespace(gmcp)
 assert(n==3 and roots.test and roots.other and roots.newroot)
@@ -4571,7 +4603,7 @@ assert(savedNamespace.Branch.Value==1)
 				    runtime,
 				    QStringLiteral(
 				        "assert(saved.value==1 and gmcp.Test.State.value==2 and gmcpGet('missing')==nil)")));
-				session.close();
+				session.closeConnection();
 				QVERIFY(run(
 				    runtime,
 				    QStringLiteral("assert(gmcp==nil and saved.value==1); local ok,err=pcall(gmcpIsEnabled); "

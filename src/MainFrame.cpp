@@ -2020,7 +2020,7 @@ void MainWindow::setConnectedState(const bool connected)
 
 void MainWindow::updateConnectionActions(const WorldRuntime *runtime) const
 {
-	const bool hasRuntime = runtime != nullptr;
+	const bool hasRuntime = runtime != nullptr && !runtime->initialConfigurationPending();
 	const bool connected  = hasRuntime && runtime->isConnected();
 	const bool connecting = hasRuntime && runtime->isConnecting();
 	bool       canConnect = false;
@@ -2745,9 +2745,11 @@ void MainWindow::refreshActionState()
 	if (m_actions.contains(QStringLiteral("PluginWizard")))
 		m_actions.value(QStringLiteral("PluginWizard"))->setEnabled(hasWorld);
 	if (m_actions.contains(QStringLiteral("Save")))
-		m_actions.value(QStringLiteral("Save"))->setEnabled(hasWorld || hasText);
+		m_actions.value(QStringLiteral("Save"))
+		    ->setEnabled((hasWorld && !runtime->initialConfigurationPending()) || hasText);
 	if (m_actions.contains(QStringLiteral("SaveAs")))
-		m_actions.value(QStringLiteral("SaveAs"))->setEnabled(hasWorld || hasText);
+		m_actions.value(QStringLiteral("SaveAs"))
+		    ->setEnabled((hasWorld && !runtime->initialConfigurationPending()) || hasText);
 	if (m_actions.contains(QStringLiteral("ConfigureTriggers")))
 		m_actions.value(QStringLiteral("ConfigureTriggers"))->setEnabled(hasWorld);
 	if (m_actions.contains(QStringLiteral("ConfigureAliases")))

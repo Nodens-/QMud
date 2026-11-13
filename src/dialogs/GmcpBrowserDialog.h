@@ -26,7 +26,7 @@ class GmcpBrowserDialog final : public QWidget
 		/**
 		 * @brief Opens or raises the world's single browser.
 		 * @param runtime Owning world, or null for debug layout inspection.
-		 * @param parent GUI owner.
+		 * @param parent GUI owner when creating the browser; an existing browser keeps its owner.
 		 */
 		static void open(WorldRuntime *runtime, QWidget *parent);
 		/**

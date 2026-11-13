@@ -9,6 +9,7 @@
 #include "dialogs/WorldTimerDialog.h"
 #include "StringUtils.h"
 #include "WorldOptions.h"
+#include "dialogs/WorldPreferencesDialog.h"
 #include "helpers/WorldEditUtils.h"
 
 #include <QCheckBox>
@@ -21,7 +22,6 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
@@ -31,7 +31,14 @@
 
 namespace
 {
-	bool editTextDialog(QWidget *parent, const QString &title, QString &text)
+	/**
+	 * @brief Collects text changes from a modeless expression editor.
+	 * @param parent Owning rule editor.
+	 * @param title Dialog title.
+	 * @param text Caller-frame text updated on acceptance.
+	 * @return Operation yielding whether edited text was accepted.
+	 */
+	QMudPreferences::Operation<bool> editTextDialog(QWidget *parent, QString title, QString &text)
 	{
 		QDialog dlg(parent);
 		dlg.setWindowTitle(title);
@@ -51,10 +58,10 @@ namespace
 		QObject::connect(buttonsPtr, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
 		QObject::connect(buttonsPtr, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 		layoutPtr->addWidget(buttons.release());
-		if (dlg.exec() != QDialog::Accepted)
-			return false;
+		if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+			co_return false;
 		text = editPtr->toPlainText();
-		return true;
+		co_return true;
 	}
 } // namespace
 
@@ -74,10 +81,10 @@ WorldRuntime::Timer WorldTimerDialog::timer() const
 	return m_timer;
 }
 
-void WorldTimerDialog::accept()
+QMudPreferences::Operation<void> WorldTimerDialog::acceptAsync()
 {
-	if (!validateTimer())
-		return;
+	if (!(co_await validateTimer()))
+		co_return;
 
 	QMap<QString, QString> &attrs = m_timer.attributes;
 	attrs.insert(QStringLiteral("at_time"), qmudBoolToYn(isAtTime()));
@@ -105,12 +112,20 @@ void WorldTimerDialog::accept()
 
 	QDialog::accept();
 }
+void WorldTimerDialog::accept()
+{
+	(void)acceptAsync();
+}
 
-void WorldTimerDialog::onEditSend()
+QMudPreferences::Operation<void> WorldTimerDialog::onEditSendAsync()
 {
 	if (QString text = m_send->toPlainText();
-	    editTextDialog(this, QStringLiteral("Edit timer 'send' text"), text))
+	    (co_await editTextDialog(this, QStringLiteral("Edit timer 'send' text"), text)))
 		m_send->setPlainText(text);
+}
+void WorldTimerDialog::onEditSend()
+{
+	(void)onEditSendAsync();
 }
 
 void WorldTimerDialog::onSendToChanged(int) const
@@ -295,10 +310,10 @@ void WorldTimerDialog::buildUi()
 	connect(m_buttons, &QDialogButtonBox::accepted, this, &WorldTimerDialog::accept);
 	connect(m_buttons, &QDialogButtonBox::rejected, this, &WorldTimerDialog::reject);
 	connect(m_buttons->button(QDialogButtonBox::Help), &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
-		        QMessageBox::information(this, QStringLiteral("Help"),
-		                                 QStringLiteral("Help is not available for this dialog."));
+		        (co_await QMudPreferences::information(
+		            this, QStringLiteral("Help"), QStringLiteral("Help is not available for this dialog.")));
 	        });
 	mainLayoutPtr->addWidget(m_buttons);
 
@@ -355,7 +370,7 @@ void WorldTimerDialog::loadTimer() const
 	onSendToChanged(m_sendTo->currentIndex());
 }
 
-bool WorldTimerDialog::validateTimer()
+QMudPreferences::Operation<bool> WorldTimerDialog::validateTimer()
 {
 	const QString label     = m_label->text().trimmed();
 	const QString procedure = m_script->text().trimmed();
@@ -376,17 +391,19 @@ bool WorldTimerDialog::validateTimer()
 		    m_offsetHour->value() * 3600.0 + m_offsetMinute->value() * 60.0 + m_offsetSecond->value();
 		if (interval <= 0.0)
 		{
-			QMessageBox::warning(this, QStringLiteral("QMud"),
-			                     QStringLiteral("The timer interval must be greater than zero."));
+			(co_await QMudPreferences::warning(
+			    this, QStringLiteral("QMud"),
+			    QStringLiteral("The timer interval must be greater than zero.")));
 			m_everyHour->setFocus();
-			return false;
+			co_return false;
 		}
 		if (offset >= interval)
 		{
-			QMessageBox::warning(this, QStringLiteral("QMud"),
-			                     QStringLiteral("The timer offset must be less than the timer period."));
+			(co_await QMudPreferences::warning(
+			    this, QStringLiteral("QMud"),
+			    QStringLiteral("The timer offset must be less than the timer period.")));
 			m_offsetHour->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -400,22 +417,22 @@ bool WorldTimerDialog::validateTimer()
 			if (const QString other = timer.attributes.value(QStringLiteral("name"));
 			    !other.isEmpty() && other.compare(label, Qt::CaseInsensitive) == 0)
 			{
-				QMessageBox::warning(
+				(co_await QMudPreferences::warning(
 				    this, QStringLiteral("QMud"),
-				    QStringLiteral("The timer label \"%1\" is already in the list of timers.").arg(label));
+				    QStringLiteral("The timer label \"%1\" is already in the list of timers.").arg(label)));
 				m_label->setFocus();
-				return false;
+				co_return false;
 			}
 		}
 
 		if (WorldEditUtils::checkLabelInvalid(label, false))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The label must start with a letter and consist of letters, numbers "
-			                   "or the underscore character."));
+			                   "or the underscore character.")));
 			m_label->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -423,23 +440,23 @@ bool WorldTimerDialog::validateTimer()
 	{
 		if (sendToValue() == eSendToVariable)
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
-			    QStringLiteral("When sending to a variable you must specify a variable name."));
+			    QStringLiteral("When sending to a variable you must specify a variable name.")));
 			m_variable->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 	else
 	{
 		if (WorldEditUtils::checkLabelInvalid(variable, false))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The variable name must start with a letter and consist of letters, "
-			                   "numbers or the underscore character."));
+			                   "numbers or the underscore character.")));
 			m_variable->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -450,35 +467,35 @@ bool WorldTimerDialog::validateTimer()
 		if (const QString result = WorldEditUtils::evaluateSpeedwalk(contents, filler);
 		    !result.isEmpty() && result.at(0) == QLatin1Char('*'))
 		{
-			QMessageBox::warning(this, QStringLiteral("QMud"), result.mid(1));
+			(co_await QMudPreferences::warning(this, QStringLiteral("QMud"), result.mid(1)));
 			m_send->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
 	if (contents.isEmpty() && procedure.isEmpty())
 	{
-		QMessageBox::warning(
+		(co_await QMudPreferences::warning(
 		    this, QStringLiteral("QMud"),
-		    QStringLiteral("The timer contents cannot be blank unless you specify a script subroutine."));
+		    QStringLiteral("The timer contents cannot be blank unless you specify a script subroutine.")));
 		m_send->setFocus();
-		return false;
+		co_return false;
 	}
 
 	if (!procedure.isEmpty())
 	{
 		if (WorldEditUtils::checkLabelInvalid(procedure, true))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The script subroutine name must start with a letter and consist of "
-			                   "letters, numbers or the underscore character."));
+			                   "letters, numbers or the underscore character.")));
 			m_script->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
-	return true;
+	co_return true;
 }
 
 bool WorldTimerDialog::isIncluded() const

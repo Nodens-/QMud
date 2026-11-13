@@ -158,7 +158,11 @@ namespace QMudNativePluginRegistry
 struct lua_State;
 #endif
 
-/** @brief One accepted WindowResize operation in callback execution order. */
+/**
+
+ * @brief One accepted WindowResize operation in callback execution order.
+
+ */
 struct LuaCallbackMiniWindowResizeMutation
 {
 		int  width{0};
@@ -189,7 +193,11 @@ struct LuaCallbackMiniWindowCreateMutation
 		bool               freshIdentityRequested{false};
 };
 
-/** @brief Presentation work required after an authoritative miniwindow mutation. */
+/**
+
+ * @brief Presentation work required after an authoritative miniwindow mutation.
+
+ */
 enum class MiniWindowChangeEffect : quint8
 {
 	Visual = 0x01,
@@ -330,54 +338,59 @@ class WorldRuntime : public QObject
 		 */
 		void refreshGmcpModules();
 		/**
+		 * @brief Reads automatic Core preferences without changing the active handler mode.
+		 * @return Validated Core settings with intervals in minutes.
+		 */
+		QMudGmcp::CoreOptions gmcpCoreOptions() const;
+		/**
 		 * @brief Releases registrations after their Lua state is reset or detached.
 		 * @param engineInstance Immutable engine identity.
 		 */
-		void releaseGmcpModules(quint64 engineInstance);
+		void                  releaseGmcpModules(quint64 engineInstance);
 		/**
 		 * @brief Serializes GMCP session data after frozen input has drained.
 		 * @return Saved GMCP state, or empty when the connection cannot be reused.
 		 */
-		QByteArray           saveNativeGmcpState() const;
+		QByteArray            saveNativeGmcpState() const;
 		/**
 		 * @brief Publishes preserved native or legacy state before startup Lua runs.
 		 * @param state Saved GMCP state, empty for legacy ownership.
 		 * @return Whether the state was prepared successfully.
 		 */
-		bool                 prepareNativeGmcpRestore(const QByteArray &state);
+		bool                  prepareNativeGmcpRestore(const QByteArray &state);
 		/**
 		 * @brief Freezes reception and begins draining already received work for reload.
 		 */
-		void                 freezeForReload();
+		void                  freezeForReload();
 		/**
 		 * @brief Checks reload preparation state.
 		 * @return Whether new periodic work is paused for reload.
 		 */
-		bool                 reloadPreparing() const;
+		bool                  reloadPreparing() const;
 		/**
 		 * @brief Checks complete input and causal callback delivery.
 		 * @return Whether frozen work has completed.
 		 */
-		bool                 reloadDrained() const;
+		bool                  reloadDrained() const;
 		/**
 		 * @brief Checks execution frames that must unwind before reload preparation.
 		 * @return Whether runtime execution is currently on the caller stack.
 		 */
-		bool                 reloadExecutionActive() const;
+		bool                  reloadExecutionActive() const;
 		/**
 		 * @brief Flushes frozen transport output.
 		 * @return Whether no writes remain buffered.
 		 */
-		bool                 flushForReload() const;
+		bool                  flushForReload() const;
 		/**
 		 * @brief Resumes reception after an unsuccessful reload attempt.
 		 */
-		void                 resumeTransportAfterReload();
+		void                  resumeTransportAfterReload();
 
-		static constexpr int kAcceleratorFirstCommand = 12000;
-		static constexpr int kAcceleratorCount        = 1000;
-		static constexpr int kSameColour              = 65535;
-		static constexpr int kMaxSoundBuffers         = 10;
+		static constexpr int  kAcceleratorFirstCommand = 12000;
+		static constexpr int  kAcceleratorCount        = 1000;
+		static constexpr int  kSameColour              = 65535;
+		static constexpr int  kMaxSoundBuffers         = 10;
 		/**
 		 * @brief Output metrics reported by @ref windowOutputText.
 		 */
@@ -913,7 +926,9 @@ class WorldRuntime : public QObject
 				QString            text;
 				int                flags{0};
 				bool               hardReturn{true};
-				/** @brief Marks a reserved incoming row until its line processing ends. */
+				/**
+				 * @brief Marks a reserved incoming row until its line processing ends.
+				 */
 				bool               incomingPresentationPending{false};
 				QVector<StyleSpan> spans;
 				QDateTime          time;
@@ -973,7 +988,9 @@ class WorldRuntime : public QObject
 		 */
 		struct LuaCallbackOutputIdentity
 		{
-				/** @brief Creates an empty callback-output identity. */
+				/**
+				 * @brief Creates an empty callback-output identity.
+				 */
 				LuaCallbackOutputIdentity() noexcept
 				    : expectsAnchorReplacement(false), fillsCurrentLine(false)
 				{
@@ -1745,8 +1762,8 @@ class WorldRuntime : public QObject
 		 */
 		XmlImportResult
 		     importPluginXml(const QString &xml, const QString &pluginId,
-			                 const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
-			                 unsigned long                                           mask);
+		                     const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
+		                     unsigned long                                           mask);
 		/**
 		 * @brief Unloads installed plugin.
 		 * @param pluginId Plugin id to unload.
@@ -2033,7 +2050,9 @@ class WorldRuntime : public QObject
 		 * @param scripted Mark save as scripted when `true`.
 		 */
 		void savePluginStateAsync(const QString &pluginId, bool scripted);
-		/** @brief Runs final plugin close/save callbacks once and seals further state publication. */
+		/**
+		 * @brief Runs final plugin close/save callbacks once and seals further state publication.
+		 */
 		void finalizePluginStateForClose();
 		/**
 		 * @brief Returns plugin metadata value by info selector code.
@@ -2559,7 +2578,9 @@ class WorldRuntime : public QObject
 		 * @return Immutable miniwindow pointer, or `nullptr` when missing.
 		 */
 		[[nodiscard]] const MiniWindow *miniWindow(const QString &name) const;
-		/** @brief Publishes current layout and mouse state for one miniwindow callback snapshot row. */
+		/**
+		 * @brief Publishes current layout and mouse state for one miniwindow callback snapshot row.
+		 */
 		void                            publishMiniWindowPresentation(const QString &windowName);
 		/**
 		 * @brief Converts an output display coordinate to canonical coordinates for an absolute miniwindow.
@@ -3949,17 +3970,26 @@ class WorldRuntime : public QObject
 		 */
 		bool                                 saveWorldFile(const QString &fileName, QString *error = nullptr);
 		/**
+		 * @brief Delivers save callbacks without blocking, then writes on the runtime thread if still current.
+		 * @param fileName Destination world file path.
+		 * @param isCurrent Checks whether the requesting editor remains valid and has not canceled.
+		 * @param completion Receives the save result while the request remains current.
+		 */
+		void saveWorldFileContinuable(const QString &fileName, std::function<bool()> isCurrent,
+		                              std::function<void(bool, const QString &)> completion);
+
+		/**
 		 * @brief Saves world file asynchronously.
 		 * @param fileName Destination world file path.
 		 * @param completion Completion callback with success flag and error text.
 		 */
-		void                      saveWorldFileAsync(const QString                             &fileName,
-		                                             std::function<void(bool, const QString &)> completion);
+		void saveWorldFileAsync(const QString                             &fileName,
+		                        std::function<void(bool, const QString &)> completion);
 		/**
 		 * @brief Sets plugins directory path.
 		 * @param path Plugins directory path.
 		 */
-		void                      setPluginsDirectory(const QString &path);
+		void setPluginsDirectory(const QString &path);
 		/**
 		 * @brief Returns plugins directory path.
 		 * @return Plugins directory path.
@@ -4155,6 +4185,17 @@ class WorldRuntime : public QObject
 		 * finishes normally so its engine state and runtime mutation journal remain consistent.
 		 */
 		void                                 beginWorldSessionClose();
+		/**
+		 * @brief Marks a new world as awaiting acceptance of its initial Preferences.
+		 * @param pending True until initial setup is accepted or discarded.
+		 */
+		void                                 setInitialConfigurationPending(bool pending);
+		/**
+		 * @brief Checks whether initial world setup is still pending.
+		 * @return True while creation has not been accepted.
+		 */
+		bool                                 initialConfigurationPending() const;
+
 		/**
 		 * @brief Returns whether the primary world session has committed to closing.
 		 * @return `true` after the primary world window's close was accepted.
@@ -5443,7 +5484,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginCommandContinuable(const QString                        &text,
-			                              LuaCallbackResultContinuationFactory &continuationFactory);
+		                                  LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin command-changed callback chain.
 		 */
@@ -5462,7 +5503,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginSendContinuable(const QString                        &text,
-			                           LuaCallbackResultContinuationFactory &continuationFactory);
+		                               LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin command-entered transform callback.
 		 * @param text Command text, possibly modified in place.
@@ -5476,7 +5517,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginCommandEnteredContinuable(const QString                        &text,
-			                                     LuaCallbackResultContinuationFactory &continuationFactory);
+		                                         LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin tab-complete transform callback.
 		 * @param text Completion text, possibly modified in place.
@@ -5490,7 +5531,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginLineReceivedContinuable(const QString                        &text,
-			                                   LuaCallbackResultContinuationFactory &continuationFactory);
+		                                       LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin play-sound callback chain.
 		 * @param sound Sound identifier or path.
@@ -5532,7 +5573,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginSentContinuable(const LuaBatchDispatchRequest        &request,
-			                           LuaCallbackResultContinuationFactory &continuationFactory);
+		                               LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin partial-line callback.
 		 * @param text Partial line text.
@@ -5570,62 +5611,62 @@ class WorldRuntime : public QObject
 		 * @brief Returns whether a draw-output callback is currently executing.
 		 * @return `true` while callback-caused draw notifications must be suppressed.
 		 */
-		[[nodiscard]] bool    drawOutputWindowCallbackActive() const;
+		[[nodiscard]] bool drawOutputWindowCallbackActive() const;
 		/**
 		 * @brief Returns script-error output suppression flag.
 		 * @return `true` when script errors are suppressed from world output.
 		 */
-		[[nodiscard]] bool    suppressScriptErrorOutputToWorld() const;
+		[[nodiscard]] bool suppressScriptErrorOutputToWorld() const;
 		/**
 		 * @brief Returns draw-output notification count.
 		 * @return Output-window redraw count.
 		 */
-		[[nodiscard]] int     outputWindowRedrawCount() const;
+		[[nodiscard]] int  outputWindowRedrawCount() const;
 		/**
 		 * @brief Dispatches output-selection-changed notification.
 		 */
-		void                  notifyOutputSelectionChanged();
+		void               notifyOutputSelectionChanged();
 		/**
 		 * @brief Reloads plugin by id.
 		 * @param pluginId Plugin id.
 		 * @param error Optional output error message.
 		 * @return API status code.
 		 */
-		int                   reloadPlugin(const QString &pluginId, QString *error = nullptr);
+		int                reloadPlugin(const QString &pluginId, QString *error = nullptr);
 		/**
 		 * @brief Starts MXP mode state.
 		 */
-		void                  mxpStartUp();
+		void               mxpStartUp();
 		/**
 		 * @brief Stops MXP mode state.
 		 */
-		void                  mxpShutDown();
+		void               mxpShutDown();
 		/**
 		 * @brief Dispatches world and plugin MXP lifecycle callbacks in order without blocking.
 		 * @param starting Dispatch start callbacks when `true`, stop callbacks otherwise.
 		 */
-		void                  dispatchMxpLifecycleCallbacksContinuable(bool starting);
+		void               dispatchMxpLifecycleCallbacksContinuable(bool starting);
 		/**
 		 * @brief Resets MXP runtime state.
 		 */
-		void                  resetMxp();
+		void               resetMxp();
 		/**
 		 * @brief Clears open/custom MXP tag state.
 		 */
-		void                  resetMxpTags();
+		void               resetMxpTags();
 		/**
 		 * @brief Clears cached host/proxy IP state.
 		 */
-		void                  resetIpCache();
+		void               resetIpCache();
 		/**
 		 * @brief Recomputes and resets all timers.
 		 */
-		void                  resetAllTimers();
+		void               resetAllTimers();
 		/**
 		 * @brief Returns whether IP cache currently exists.
 		 * @return `true` when cached IP information is available.
 		 */
-		[[nodiscard]] bool    hasCachedIp() const;
+		[[nodiscard]] bool hasCachedIp() const;
 		/**
 		 * @brief MXP state and logging APIs.
 		 */
@@ -5633,24 +5674,47 @@ class WorldRuntime : public QObject
 		 * @brief Returns built-in MXP element definition count.
 		 * @return Built-in MXP element count.
 		 */
-		static int            mxpBuiltinElementCount();
+		static int         mxpBuiltinElementCount();
 		/**
 		 * @brief Returns built-in MXP entity definition count.
 		 * @return Built-in MXP entity count.
 		 */
-		static int            mxpBuiltinEntityCount();
+		static int         mxpBuiltinEntityCount();
 		/**
 		 * @brief Returns currently open MXP tag count.
 		 * @return Open MXP tag count.
 		 */
-		[[nodiscard]] int     mxpOpenTagCount() const;
+		[[nodiscard]] int  mxpOpenTagCount() const;
 		/**
 		 * @brief Opens log file.
 		 * @param logFileName Log file path.
 		 * @param append Append when `true`, truncate otherwise.
 		 * @return API status code.
 		 */
-		int                   openLog(const QString &logFileName, bool append);
+		int                openLog(const QString &logFileName, bool append);
+		/**
+		 * @brief Collects logging diagnostics during a synchronous owning-thread operation.
+		 *
+		 * The scope must end before suspending or delivering GUI events. Nested scopes restore their predecessor.
+		 */
+		class LogDiagnosticScope
+		{
+			public:
+				/**
+				 * @brief Redirects this runtime's logging diagnostics into the supplied list.
+				 * @param runtime Runtime whose logging operations are being applied.
+				 * @param diagnostics Messages retained in occurrence order.
+				 */
+				LogDiagnosticScope(WorldRuntime &runtime, QStringList &diagnostics);
+				/**
+				 * @brief Restores the previous diagnostic destination on scope exit.
+				 */
+				~LogDiagnosticScope();
+				Q_DISABLE_COPY_MOVE(LogDiagnosticScope)
+			private:
+				QPointer<WorldRuntime> m_runtime;
+				QStringList           *m_previous;
+		};
 		/**
 		 * @brief Closes active log file.
 		 * @return API status code.
@@ -5723,14 +5787,18 @@ class WorldRuntime : public QObject
 		 * @param available Whether application sound support is available for this execution.
 		 */
 		void                  setSoundAvailable(bool available);
-		/** @brief Applies an accepted world-preference sound-directory change to the active sound session. */
+		/**
+		 * @brief Applies an accepted world-preference sound-directory change to the active sound session.
+		 */
 		void                  updateWorldSoundDirectory() const;
 		/**
 		 * @brief Registers this world with the process-wide sound engine.
 		 * @param engine Application-owned sound engine that outlives this runtime.
 		 */
 		void                  attachSoundEngine(SoundEngine *engine);
-		/** @brief Closes this world's sound session and removes engine callbacks. */
+		/**
+		 * @brief Closes this world's sound session and removes engine callbacks.
+		 */
 		void                  detachSoundEngine();
 		/**
 		 * @brief Sets world window title override.
@@ -5755,6 +5823,15 @@ class WorldRuntime : public QObject
 
 	signals:
 		/**
+		 * @brief Announces a change in whether initial world setup is pending.
+		 * @param pending True while the world is still being configured.
+		 */
+		void initialConfigurationPendingChanged(bool pending);
+		/**
+		 * @brief Announces accepted session closure before bound editors lose their runtime or view.
+		 */
+		void worldSessionClosing();
+		/**
 		 * @brief Announces an imminent append to native GMCP history.
 		 */
 		void gmcpHistoryAboutToAppend();
@@ -5776,6 +5853,11 @@ class WorldRuntime : public QObject
 		 * @brief Reports a GMCP history or publication change.
 		 */
 		void gmcpChanged();
+		/**
+		 * @brief Reports a measured GMCP RTT or -1 when no measurement exists.
+		 * @param milliseconds Latest measured round-trip duration.
+		 */
+		void gmcpRoundTripChanged(qint64 milliseconds);
 		/**
 		 * @brief Reports a received package and its exact immutable publication version.
 		 * @param record Published version observed with the message.
@@ -6585,12 +6667,16 @@ class WorldRuntime : public QObject
 		struct MxpPayloadProcessingState;
 		struct IncomingLinePresentationBatch;
 		struct IncomingPresentationChunk;
-		/** @brief Owns one admitted unit of stream or protocol work until terminal completion. */
+		/**
+		 * @brief Owns one admitted unit of stream or protocol work until terminal completion.
+		 */
 		struct IncomingPresentationWork
 		{
 				QPointer<WorldRuntime>                    runtime;
 				QSharedPointer<IncomingPresentationChunk> chunk;
-				/** @brief Settles the unit on its runtime thread after its last owner releases it. */
+				/**
+				 * @brief Settles the unit on its runtime thread after its last owner releases it.
+				 */
 				~IncomingPresentationWork();
 		};
 		/**
@@ -6675,7 +6761,9 @@ class WorldRuntime : public QObject
 		 * @return Owning lease closed after the line and its nested work finish, or empty during destruction.
 		 */
 		[[nodiscard]] QSharedPointer<IncomingLinePresentationBatch> acquireIncomingLinePresentationBatch();
-		/** @brief Closes one completed active-line presentation lease. */
+		/**
+		 * @brief Closes one completed active-line presentation lease.
+		 */
 		void                                                        finishIncomingLinePresentationBatch();
 		/**
 		 * @brief Parses one raw ingress payload within its active operation context.
@@ -6890,7 +6978,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] LuaBatchDispatchRequest
 		                          currentPluginCallbackDispatchRequest(PluginCallbackDispatchCommand &command,
-								                                       int                            firstRecipientIndex = 0);
+		                                                               int                            firstRecipientIndex = 0);
 		/**
 		 * @brief Checks whether plugin should receive async result callback for API name.
 		 * @param plugin Plugin state entry.
@@ -7169,7 +7257,7 @@ class WorldRuntime : public QObject
 			return (domainMask &
 			        luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::Plugins)) != 0U
 			           ? domainMask | luaCallbackPluginIndexedStableSnapshotDomainsMask()
-					   : domainMask;
+			           : domainMask;
 		}
 		/**
 		 * @brief Invalidates the cached stable callback-dispatch snapshot.
@@ -7184,11 +7272,17 @@ class WorldRuntime : public QObject
 		 * for the next snapshot boundary.
 		 */
 		void applyPendingLuaCallbackSnapshotPatches(bool publishTargetedRulePatches) const;
-		/** @brief Records one authoritative custom-entity change for immutable callback snapshots. */
+		/**
+		 * @brief Records one authoritative custom-entity change for immutable callback snapshots.
+		 */
 		void recordLuaCallbackEntityChange(const QByteArray &name, const QByteArray &value, bool present);
-		/** @brief Records one custom-element change, or rebuilds the domain after a complete replacement. */
+		/**
+		 * @brief Records one custom-element change, or rebuilds the domain after a complete replacement.
+		 */
 		void recordLuaCallbackCustomElementChange(const QByteArray &name);
-		/** @brief Clears callback entity slot state at a protocol reset boundary. */
+		/**
+		 * @brief Clears callback entity slot state at a protocol reset boundary.
+		 */
 		void clearLuaCallbackEntityState();
 		/**
 		 * @brief Applies one deferred callback entity write when its captured identity still matches.
@@ -7197,7 +7291,9 @@ class WorldRuntime : public QObject
 		 * @param capturedSlot Entity slot observed by the callback, or zero when absent.
 		 */
 		void applyLuaCallbackEntityValue(const QString &name, const QString &value, quint32 capturedSlot);
-		/** @brief Publishes pending custom-entity slot and name-index updates. */
+		/**
+		 * @brief Publishes pending custom-entity slot and name-index updates.
+		 */
 		void publishPendingLuaCallbackEntityChanges() const;
 		/**
 		 * @brief Queues or applies an owner-thread patch for one stable snapshot domain.
@@ -7487,7 +7583,7 @@ class WorldRuntime : public QObject
 					return storedIndex +
 					       (deferredHiddenPhysicalIndex >= 0 && storedIndex >= deferredHiddenPhysicalIndex
 					            ? 1
-								: 0);
+					            : 0);
 				}
 				/**
 				 * @brief Maps stored logical indexing to a one-based Lua buffer index.
@@ -7504,7 +7600,7 @@ class WorldRuntime : public QObject
 					return physicalIndex + 1 -
 					       (deferredHiddenPhysicalIndex >= 0 && physicalIndex > deferredHiddenPhysicalIndex
 					            ? 1
-								: 0);
+					            : 0);
 				}
 		};
 		/**
@@ -7558,7 +7654,7 @@ class WorldRuntime : public QObject
 		 * @return Stored line pointer, or `nullptr` for an invalid index or an unbuffered pending line.
 		 */
 		[[nodiscard]] const LineEntry      *
-		luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
+        luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
 		                                            const LuaContextBufferPresentation &presentation) const;
 		/**
 		 * @brief Resolves a callback matched line from its maintained or captured position.
@@ -7961,7 +8057,7 @@ class WorldRuntime : public QObject
 		 * @brief Applies one completed plugin sound decision.
 		 * @param operation Sound operation associated with the decision.
 		 * @param handled Whether a Lua plugin handled the operation.
-		 * @return Final sound status.
+		 * @return Final sound sta		tus.
 		 */
 		int         completeSoundPluginDecision(const PendingSoundOperation &operation, bool handled) const;
 		/**
@@ -8053,9 +8149,9 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool
 		     buildActiveStateNoArgCallbackCommand(const QVector<QSharedPointer<LuaCallbackEngine>> &engines,
-			                                      const QString &functionName, LuaCallbackEvent callbackEvent,
-			                                      bool                           revalidateObservedRecipients,
-			                                      PluginCallbackDispatchCommand &command);
+		                                          const QString &functionName, LuaCallbackEvent callbackEvent,
+		                                          bool                           revalidateObservedRecipients,
+		                                          PluginCallbackDispatchCommand &command);
 		/**
 		 * @brief Drains queued plugin callback commands.
 		 * @param completionCommandId Optional command-id barrier; `0` drains all currently queued commands.
@@ -8301,7 +8397,7 @@ class WorldRuntime : public QObject
 		 * @return Matching active slot, or `nullptr` for a stale handle.
 		 */
 		[[nodiscard]] const CausalOutboundScopeSlot      *
-		causalOutboundScopeSlot(const CausalOutboundScopeHandle &scope) const;
+        causalOutboundScopeSlot(const CausalOutboundScopeHandle &scope) const;
 		void runWithCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group,
 		                                const std::function<void()>               &work);
 		[[nodiscard]] QSharedPointer<CausalOutboundGroup> currentCausalOutboundGroup() const;
@@ -8725,7 +8821,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
-			                        QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
+		                            QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
 		/**
 		 * @brief Captures and queues state belonging to the original save callback owner.
 		 * @param resolvedPluginId Canonical plugin identifier.
@@ -8741,6 +8837,14 @@ class WorldRuntime : public QObject
 		 * @brief Generates a missing world identity through the authoritative attribute mutation path.
 		 */
 		void ensureWorldUniqueId();
+		/**
+		 * @brief Captures and writes current world data after save callbacks have completed.
+		 * @param fileName Destination world file path.
+		 * @param error Optional output error message.
+		 * @return True when persistence succeeded.
+		 */
+		bool saveWorldFileAfterCallbacks(const QString &fileName, QString *error);
+
 		void continueSaveWorldFileAsync(const QString                             &fileName,
 		                                std::function<void(bool, const QString &)> completion);
 		/**
@@ -8770,6 +8874,11 @@ class WorldRuntime : public QObject
 		 * @return `true` when compression succeeds.
 		 */
 		static bool           gzipFileInPlace(const QString &sourceFileName, QString *errorMessage);
+		/**
+		 * @brief Collects a logging diagnostic or presents it using the normal logging behavior.
+		 * @param message Diagnostic text in occurrence order.
+		 */
+		void                  reportLogDiagnostic(const QString &message) const;
 		/**
 		 * @brief Performs log rotation if configured threshold was reached.
 		 * @return API status code.
@@ -8876,9 +8985,13 @@ class WorldRuntime : public QObject
 		 * @param request Validated sound request from its owning protocol parser.
 		 */
 		void executeNativeSoundRequest(const QMudNativeSoundRequest &request) const;
-		/** @brief Stops active MSP sound and music without changing Telnet negotiation state. */
+		/**
+		 * @brief Stops active MSP sound and music without changing Telnet negotiation state.
+		 */
 		void stopNativeMspPlayback() const;
-		/** @brief Stops native protocol playback and clears connection-scoped download defaults. */
+		/**
+		 * @brief Stops native protocol playback and clears connection-scoped download defaults.
+		 */
 		void resetNativeProtocolSoundState();
 		struct ResolvedOutputColourCache
 		{
@@ -9376,8 +9489,8 @@ class WorldRuntime : public QObject
 			private:
 				std::shared_ptr<PluginCallbackLaneQueueHandle>
 				            insert(PluginCallbackLaneQueueStorage::const_iterator position,
-							       PluginCallbackLaneCommand command, bool blocksInputCriticalInsertion,
-							       bool prependNonBlockingIndex);
+				                   PluginCallbackLaneCommand command, bool blocksInputCriticalInsertion,
+				                   bool prependNonBlockingIndex);
 				void        unlinkNonBlocking(PluginCallbackLaneQueueNode &node);
 				/**
 				 * @brief Detaches a queue node's externally held removal handle.
@@ -9457,6 +9570,7 @@ class WorldRuntime : public QObject
 		bool                                     m_pluginCallbackDispatchDrainQueued{false};
 		bool                                     m_pluginCallbackDispatchShuttingDown{false};
 		bool                                     m_runtimeDestructionStarted{false};
+		bool                                     m_initialConfigurationPending{false};
 		int                                      m_pluginCallbackCompletionDeliveryDepth{0};
 		int                                      m_pluginCallbackMutationPlaybackDepth{0};
 		int                                      m_windowAddHotspotMutationPlaybackDepth{0};
@@ -9531,6 +9645,7 @@ class WorldRuntime : public QObject
 		QSet<QString>                               m_specialFontPaths;
 		QVector<QString>                            m_specialFontPathOrder;
 		QVector<int>                                m_specialFontIds;
+		QStringList                                *m_logDiagnostics{nullptr};
 		QFile                                       m_logFile;
 		QString                                     m_logFileName;
 		QString                                     m_logRotationBaseFileName;
@@ -9765,6 +9880,7 @@ class WorldRuntime : public QObject
 		 */
 		mutable QSharedPointer<LuaCallbackSnapshot>       m_luaCallbackDispatchSnapshotBaseCache;
 		mutable QSharedPointer<const LuaCallbackSnapshot> m_luaCallbackTurnChatSnapshotCache;
+
 		mutable bool m_luaCallbackTurnChatSnapshotInvalidationQueued{false};
 		mutable QSharedPointer<const LuaCallbackCommandUiPresentationSnapshot>
 		    m_luaCallbackCommandUiPresentationSnapshot;

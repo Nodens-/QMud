@@ -51,7 +51,7 @@ namespace QMudWorldPreferencesRouting
 		WorldPreferencesDialog::Page page = WorldPreferencesDialog::PageGeneral;
 		if (cmdName == QStringLiteral("Preferences"))
 		{
-			if (constexpr int maxPage = WorldPreferencesDialog::PageChat;
+			if (constexpr int maxPage = WorldPreferencesDialog::PageGmcp;
 			    lastPreferencesPage >= 0 && lastPreferencesPage <= maxPage)
 				page = static_cast<WorldPreferencesDialog::Page>(lastPreferencesPage);
 		}

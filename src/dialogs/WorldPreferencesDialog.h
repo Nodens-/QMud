@@ -10,14 +10,316 @@
 #ifndef QMUD_WORLD_PREFERENCES_DIALOG_H
 #define QMUD_WORLD_PREFERENCES_DIALOG_H
 
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QDialog>
+#include <QFileDialog>
 #include <QFont>
 #include <QHash>
 #include <QMap>
+#include <QMessageBox>
+#include <QPointer>
 #include <QSet>
 #include <QVector>
+#include <coroutine>
+#include <exception>
 #include <memory>
 #include <optional>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+class WorldPreferencesDialog;
+class WorldRuntime;
+
+/**
+ * @brief GUI-thread continuations used by Preferences and its modeless editors.
+ */
+namespace QMudPreferences
+{
+	/**
+	 * @brief Cancellation propagated when an editor's owning window finishes.
+	 */
+	struct Canceled
+	{
+	};
+
+	/**
+	 * @brief Shared completion state independent of a coroutine frame's lifetime.
+	 * @tparam T Result produced by an operation.
+	 */
+	template <typename T> struct Completion
+	{
+			std::optional<T>        result;
+			std::coroutine_handle<> continuation;
+			bool                    ready{false};
+			bool                    canceled{false};
+	};
+
+	/**
+	 * @brief Eager GUI operation that can be awaited or completed independently.
+	 * @tparam T Result value, or void for an operation without a result.
+	 */
+	template <typename T = void> class Operation;
+
+	/**
+	 * @brief Promise result storage for a GUI operation.
+	 * @tparam T Stored result type.
+	 */
+	template <typename T> struct ResultPromise
+	{
+			std::shared_ptr<Completion<T>> completion{std::make_shared<Completion<T>>()};
+			/**
+			 * @brief Stores the completed result.
+			 * @param value Completed value.
+			 */
+			void                           return_value(T value)
+			{
+				completion->result = std::move(value);
+			}
+	};
+
+	/**
+	 * @brief Result storage for operations without a value.
+	 */
+	template <> struct ResultPromise<void>
+	{
+			std::shared_ptr<Completion<std::monostate>> completion{
+			    std::make_shared<Completion<std::monostate>>()};
+			/**
+			 * @brief Completes an operation without a value.
+			 */
+			void return_void() const
+			{
+				Q_ASSERT(completion && !completion->ready);
+			}
+	};
+
+	template <typename T> class Operation
+	{
+			using Value = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
+			std::shared_ptr<Completion<Value>> m_completion;
+
+		public:
+			/**
+			 * @brief Coroutine promise with cancellation-aware completion.
+			 */
+			struct promise_type : ResultPromise<T>
+			{
+					/**
+					 * @brief Returns a handle to the independent completion state.
+					 * @return Awaitable operation.
+					 */
+					Operation get_return_object()
+					{
+						return Operation(this->completion);
+					}
+					/**
+					 * @brief Starts operations on their calling GUI thread immediately.
+					 * @return An unsuspended initial state.
+					 */
+					[[nodiscard]] std::suspend_never initial_suspend() const noexcept
+					{
+						Q_ASSERT(this->completion && !this->completion->ready);
+						return {};
+					}
+					/**
+					 * @brief Resumes an awaiting caller after local editor state has unwound.
+					 */
+					struct Finish : std::suspend_never
+					{
+							std::shared_ptr<Completion<Value>> completion;
+							/**
+							 * @brief Publishes completion and resumes its awaiting caller.
+							 * @return True so the finished frame is released automatically.
+							 */
+							[[nodiscard]] bool                 await_ready() const noexcept
+							{
+								completion->ready = true;
+								if (const auto continuation = std::exchange(completion->continuation, {}))
+									continuation.resume();
+								return true;
+							}
+					};
+					/**
+					 * @brief Releases the frame and reports completion.
+					 * @return Completion awaiter.
+					 */
+					Finish final_suspend() const noexcept
+					{
+						return {{}, this->completion};
+					}
+					/**
+					 * @brief Propagates cancellation and terminates on unexpected GUI-operation exceptions.
+					 */
+					void unhandled_exception() const
+					{
+						try
+						{
+							throw;
+						}
+						catch (const Canceled &)
+						{
+							this->completion->canceled = true;
+						}
+						catch (...)
+						{
+							std::terminate();
+						}
+					}
+			};
+			/**
+			 * @brief Binds an operation to its independent completion.
+			 * @param completion Coroutine completion state.
+			 */
+			explicit Operation(std::shared_ptr<Completion<Value>> completion)
+			    : m_completion(std::move(completion))
+			{
+			}
+			/**
+			 * @brief Checks whether the operation completed synchronously.
+			 * @return True when no suspension is needed.
+			 */
+			[[nodiscard]] bool await_ready() const noexcept
+			{
+				return m_completion->ready;
+			}
+			/**
+			 * @brief Retains the awaiting caller until completion.
+			 * @param continuation Awaiting coroutine.
+			 */
+			void await_suspend(std::coroutine_handle<> continuation) const noexcept
+			{
+				m_completion->continuation = continuation;
+			}
+			/**
+			 * @brief Returns a completed result or propagates owner cancellation.
+			 * @return Completed value for non-void operations.
+			 */
+			T await_resume() const
+			{
+				if (m_completion->canceled)
+					throw Canceled{};
+				if constexpr (std::is_void_v<T>)
+					return;
+				else
+					return std::move(*m_completion->result);
+			}
+	};
+
+	/**
+	 * @brief Shows an editor without a nested event loop and waits for its result.
+	 * @param dialog Coroutine-owned editor; deletion remains with its calling frame.
+	 * @return Accepted or rejected result.
+	 */
+	Operation<int>                      wait(QDialog &dialog);
+	/**
+	 * @brief Awaits cancellable save callbacks and persistence without retaining editor pointers in callbacks.
+	 * @param owner Preferences editor owning this request.
+	 * @param runtime World whose current data is saved.
+	 * @param fileName Destination world file path.
+	 * @return Save success and error text, or owner cancellation.
+	 */
+	Operation<std::pair<bool, QString>> saveWorldFile(WorldPreferencesDialog *owner, WorldRuntime *runtime,
+	                                                  QString fileName);
+
+	/**
+	 * @brief Shows a modeless message while retaining its calling operation.
+	 * @param parent Owning editor.
+	 * @param icon Message category.
+	 * @param title Window title.
+	 * @param text Message text.
+	 * @param buttons Available choices.
+	 * @param defaultButton Initially selected choice.
+	 * @return Selected choice.
+	 */
+	Operation<QMessageBox::StandardButton>
+	message(QWidget *parent, QMessageBox::Icon icon, QString title, QString text,
+	        QMessageBox::StandardButtons buttons,
+	        QMessageBox::StandardButton  defaultButton = QMessageBox::NoButton);
+	/**
+	 * @brief Shows an informational message modelessly.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param text Message text.
+	 * @param buttons Available choices.
+	 * @param defaultButton Initially selected choice.
+	 * @return Selected choice.
+	 */
+	Operation<QMessageBox::StandardButton>
+	information(QWidget *parent, QString title, QString text,
+	            QMessageBox::StandardButtons buttons       = QMessageBox::Ok,
+	            QMessageBox::StandardButton  defaultButton = QMessageBox::NoButton);
+	/**
+	 * @brief Shows a warning modelessly.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param text Message text.
+	 * @param buttons Available choices.
+	 * @param defaultButton Initially selected choice.
+	 * @return Selected choice.
+	 */
+	Operation<QMessageBox::StandardButton>
+	warning(QWidget *parent, QString title, QString text,
+	        QMessageBox::StandardButtons buttons       = QMessageBox::Ok,
+	        QMessageBox::StandardButton  defaultButton = QMessageBox::NoButton);
+	/**
+	 * @brief Shows a question modelessly.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param text Message text.
+	 * @param buttons Available choices.
+	 * @param defaultButton Initially selected choice.
+	 * @return Selected choice.
+	 */
+	Operation<QMessageBox::StandardButton>
+	                   question(QWidget *parent, QString title, QString text,
+					            QMessageBox::StandardButtons buttons = QMessageBox::Yes | QMessageBox::No,
+					            QMessageBox::StandardButton  defaultButton = QMessageBox::NoButton);
+	/**
+	 * @brief Selects a file or directory without a nested event loop.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param directory Initial path.
+	 * @param filter File filters.
+	 * @param mode Selection mode.
+	 * @param acceptMode Open or save behavior.
+	 * @param options File-picker options.
+	 * @return Selected path, or empty on cancellation.
+	 */
+	Operation<QString> selectPath(QWidget *parent, QString title, QString directory, QString filter,
+	                              QFileDialog::FileMode mode, QFileDialog::AcceptMode acceptMode,
+	                              QFileDialog::Options options = {});
+	/**
+	 * @brief Selects an existing file modelessly.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param directory Initial path.
+	 * @param filter File filters.
+	 * @return Selected file, or empty on cancellation.
+	 */
+	Operation<QString> getOpenFileName(QWidget *parent, QString title, QString directory = {},
+	                                   QString filter = {});
+	/**
+	 * @brief Selects a save destination modelessly.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param directory Initial path.
+	 * @param filter File filters.
+	 * @return Selected file, or empty on cancellation.
+	 */
+	Operation<QString> getSaveFileName(QWidget *parent, QString title, QString directory = {},
+	                                   QString filter = {});
+	/**
+	 * @brief Selects an existing directory modelessly.
+	 * @param parent Owning editor.
+	 * @param title Window title.
+	 * @param directory Initial path.
+	 * @param options Directory-picker options.
+	 * @return Selected directory, or empty on cancellation.
+	 */
+	Operation<QString> getExistingDirectory(QWidget *parent, QString title, QString directory = {},
+	                                        QFileDialog::Options options = QFileDialog::ShowDirsOnly);
+} // namespace QMudPreferences
 
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -35,7 +337,6 @@ class QLabel;
 class QPushButton;
 class QToolButton;
 
-class WorldRuntime;
 class WorldView;
 class WorldDocument;
 
@@ -72,7 +373,8 @@ class WorldPreferencesDialog : public QDialog
 			PagePrinting,
 			PageConnecting,
 			PageMxp,
-			PageChat
+			PageChat,
+			PageGmcp
 		};
 
 		/**
@@ -91,11 +393,40 @@ class WorldPreferencesDialog : public QDialog
 		 * @brief Selects initially visible preferences page.
 		 * @param page Page enum value to activate.
 		 */
-		void setInitialPage(Page page);
+		void               setInitialPage(Page page);
 		/**
 		 * @brief Validates and applies edited world preferences from populated pages.
 		 */
-		void accept() override;
+		void               accept() override;
+
+		/**
+		 * @brief Invalidates the editor before its bound session or view disappears.
+		 */
+		void               invalidate();
+		/**
+		 * @brief Checks whether an unfinished editor may still use its world binding.
+		 * @return True while its session and primary view binding are valid.
+		 */
+		[[nodiscard]] bool bindingValid() const;
+		/**
+		 * @brief Routes a page request after any pending child editor has completed.
+		 * @param page Requested Preferences page.
+		 */
+		void               requestPage(Page page);
+		/**
+		 * @brief Retains parent editing state while a child operation is suspended.
+		 */
+		void               beginChildOperation();
+		/**
+		 * @brief Releases a child operation and applies deferred navigation when idle.
+		 */
+		void               endChildOperation();
+
+	signals:
+		/**
+		 * @brief Cancels suspended child operations before editor data is released.
+		 */
+		void operationsCanceled();
 
 	protected:
 		/**
@@ -131,11 +462,11 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                        finalizeInitialDialogSizing();
 		/**
-		 * @brief Keeps the Custom Colours swatch columns equally sized for exact swap-button alignment.
+		 * @brief Keeps the Custom Colors swatch columns equally sized for exact swap-button alignment.
 		 */
 		void                        refreshCustomColourColumnWidths() const;
 		/**
-		 * @brief Recalculates ANSI colour headers and marker swatches from current font and style metrics.
+		 * @brief Recalculates ANSI color headers and marker swatches from current font and style metrics.
 		 */
 		void                        refreshAnsiColourGeometry() const;
 		/**
@@ -193,17 +524,16 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		[[nodiscard]] static std::optional<Page> pageForWorldOption(const QString &key, bool multiline);
 		/**
-		 * @brief Opens color editor for table cell.
-		 * @param table Target table containing the editable color cell.
-		 * @param row Row index of the color cell.
-		 * @param column Column index of the color cell.
-		 */
-		void                                     editColourCell(QTableWidget *table, int row, int column);
-		/**
 		 * @brief Opens macro editor for the selected row.
 		 * @param row Macro row index to edit.
 		 */
 		void                                     editMacroAtRow(int row);
+		/**
+		 * @brief Asynchronously opens macro editor for the selected row.
+		 * @param row Macro row index to edit.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void>         editMacroAtRowAsync(int row);
 		/**
 		 * @brief Finds macro rows matching text criteria.
 		 * @param text Search text or regex pattern.
@@ -211,238 +541,272 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                                     findMacro(const QString &text, bool continueFromCurrent);
 		/**
+		 * @brief Asynchronously finds macro rows matching text criteria.
+		 * @param text Search text or regex pattern.
+		 * @param continueFromCurrent Continue from current selection when `true`.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void>         findMacroAsync(QString text, bool continueFromCurrent);
+		/**
 		 * @brief Saves macro list to XML/file.
 		 * @param fileName Target file path.
-		 * @return `true` on successful write.
+		 * @return Operation yielding `true` on successful write.
 		 */
-		[[nodiscard]] bool                       saveMacrosToFile(const QString &fileName) const;
+		[[nodiscard]] QMudPreferences::Operation<bool> saveMacrosToFile(QString fileName) const;
 		/**
 		 * @brief Loads macro list from XML/file.
 		 * @param fileName Source file path.
-		 * @return `true` on successful load and parse.
+		 * @return Operation yielding `true` on successful load and parse.
 		 */
-		bool                                     loadMacrosFromFile(const QString &fileName);
+		QMudPreferences::Operation<bool>               loadMacrosFromFile(QString fileName);
 		/**
 		 * @brief Saves trigger list to XML/file.
 		 * @param fileName Target file path.
-		 * @return `true` on successful write.
+		 * @return Operation yielding `true` on successful write.
 		 */
-		[[nodiscard]] bool                       saveTriggersToFile(const QString &fileName);
+		[[nodiscard]] QMudPreferences::Operation<bool> saveTriggersToFile(QString fileName);
 		/**
 		 * @brief Loads triggers from XML/file.
 		 * @param fileName Source file path.
 		 * @param replace Replace existing triggers when `true`.
-		 * @return `true` on successful load and merge/replace.
+		 * @return Operation yielding `true` on successful load and merge/replace.
 		 */
-		bool                                     loadTriggersFromFile(const QString &fileName, bool replace);
+		QMudPreferences::Operation<bool>               loadTriggersFromFile(QString fileName, bool replace);
 		/**
 		 * @brief Saves alias list to XML/file.
 		 * @param fileName Target file path.
-		 * @return `true` on successful write.
+		 * @return Operation yielding `true` on successful write.
 		 */
-		[[nodiscard]] bool                       saveAliasesToFile(const QString &fileName);
+		[[nodiscard]] QMudPreferences::Operation<bool> saveAliasesToFile(QString fileName);
 		/**
 		 * @brief Loads aliases from XML/file.
 		 * @param fileName Source file path.
 		 * @param replace Replace existing aliases when `true`.
-		 * @return `true` on successful load and merge/replace.
+		 * @return Operation yielding `true` on successful load and merge/replace.
 		 */
-		bool                                     loadAliasesFromFile(const QString &fileName, bool replace);
+		QMudPreferences::Operation<bool>               loadAliasesFromFile(QString fileName, bool replace);
 		/**
 		 * @brief Saves timer list to XML/file.
 		 * @param fileName Target file path.
-		 * @return `true` on successful write.
+		 * @return Operation yielding `true` on successful write.
 		 */
-		[[nodiscard]] bool                       saveTimersToFile(const QString &fileName);
+		[[nodiscard]] QMudPreferences::Operation<bool> saveTimersToFile(QString fileName);
 		/**
 		 * @brief Loads timers from XML/file.
 		 * @param fileName Source file path.
 		 * @param replace Replace existing timers when `true`.
-		 * @return `true` on successful load and merge/replace.
+		 * @return Operation yielding `true` on successful load and merge/replace.
 		 */
-		bool                                     loadTimersFromFile(const QString &fileName, bool replace);
+		QMudPreferences::Operation<bool>               loadTimersFromFile(QString fileName, bool replace);
 		/**
 		 * @brief Saves variables to XML/file.
 		 * @param fileName Target file path.
-		 * @return `true` on successful write.
+		 * @return Operation yielding `true` on successful write.
 		 */
-		[[nodiscard]] bool                       saveVariablesToFile(const QString &fileName);
+		[[nodiscard]] QMudPreferences::Operation<bool> saveVariablesToFile(QString fileName);
 		/**
 		 * @brief Loads variables from XML/file.
 		 * @param fileName Source file path.
-		 * @return `true` on successful load.
+		 * @return Operation yielding `true` on successful load.
 		 */
-		bool                                     loadVariablesFromFile(const QString &fileName);
+		QMudPreferences::Operation<bool>               loadVariablesFromFile(QString fileName);
 		/**
 		 * @brief Page population helpers.
 		 */
-		void                                     populateGeneral();
+		void                                           populateGeneral();
 		/**
 		 * @brief Populates sound page controls.
 		 */
-		void                                     populateSound() const;
+		void                                           populateSound() const;
 		/**
 		 * @brief Populates custom color page controls.
 		 */
-		void                                     populateCustomColours();
+		void                                           populateCustomColours();
 		/**
 		 * @brief Populates logging page controls.
 		 */
-		void                                     populateLogging() const;
+		void                                           populateLogging() const;
 		/**
 		 * @brief Populates ANSI color page controls.
 		 */
-		void                                     populateAnsiColours();
+		void                                           populateAnsiColours();
 		/**
 		 * @brief Populates macro list page controls.
 		 */
-		void                                     populateMacros();
+		void                                           populateMacros();
 		/**
 		 * @brief Populates output page controls.
 		 */
-		void                                     populateOutput();
+		void                                           populateOutput();
 		/**
 		 * @brief Populates command page controls.
 		 */
-		void                                     populateCommands();
+		void                                           populateCommands();
 		/**
 		 * @brief Populates scripting page controls.
 		 */
-		void                                     populateScripting() const;
+		void                                           populateScripting() const;
 		/**
 		 * @brief Populates send-to-world page controls.
 		 */
-		void                                     populateSendToWorld() const;
+		void                                           populateSendToWorld() const;
 		/**
 		 * @brief Populates notes page controls.
 		 */
-		void                                     populateNotes() const;
+		void                                           populateNotes() const;
 		/**
 		 * @brief Populates keypad page controls.
 		 */
-		void                                     populateKeypad();
+		void                                           populateKeypad();
 		/**
 		 * @brief Populates paste page controls.
 		 */
-		void                                     populatePaste() const;
+		void                                           populatePaste() const;
 		/**
 		 * @brief Populates info/statistics page controls.
 		 */
-		void                                     populateInfo();
+		void                                           populateInfo();
 		/**
 		 * @brief Populates trigger list page controls.
 		 */
-		void                                     populateTriggers();
+		void                                           populateTriggers();
 		/**
 		 * @brief Populates alias list page controls.
 		 */
-		void                                     populateAliases();
+		void                                           populateAliases();
 		/**
 		 * @brief Populates timer list page controls.
 		 */
-		void                                     populateTimers();
+		void                                           populateTimers();
 		/**
 		 * @brief Populates variable list page controls.
 		 */
-		void                                     populateVariables();
+		void                                           populateVariables();
 		/**
 		 * @brief Populates auto-say page controls.
 		 */
-		void                                     populateAutoSay() const;
+		void                                           populateAutoSay() const;
 		/**
 		 * @brief Populates printing page controls.
 		 */
-		void                                     populatePrinting();
+		void                                           populatePrinting();
 		/**
 		 * @brief Populates connecting page controls.
 		 */
-		void                                     populateConnecting() const;
+		void                                           populateConnecting() const;
+		/**
+		 * @brief Populates persistent GMCP controls and the current connection RTT.
+		 */
+		void                                           populateGmcp() const;
+		/**
+		 * @brief Applies Native GMCP, Ping, and KeepAlive control dependencies.
+		 */
+		void                                           updateGmcpControls() const;
 		/**
 		 * @brief Populates MXP page controls.
 		 */
-		void                                     populateMxp() const;
+		void                                           populateMxp() const;
 		/**
 		 * @brief Populates chat page controls.
 		 */
-		void                                     populateChat() const;
+		void                                           populateChat() const;
 		/**
 		 * @brief Derived-state and control-update helpers.
 		 */
-		void                                     updateScriptNoteSwatches() const;
+		void                                           updateScriptNoteSwatches() const;
 		/**
 		 * @brief Updates scripting note color combo item roles from custom colors.
 		 */
-		void                                     updateScriptNoteColourItems() const;
+		void                                           updateScriptNoteColourItems() const;
 		/**
 		 * @brief Recalculates memory usage estimates for scripts/rules.
 		 * @param allowProgress Show progress UI for expensive runs when `true`.
 		 */
-		void                                     calculateMemoryUsage(bool allowProgress);
+		void                                           calculateMemoryUsage(bool allowProgress);
+		/**
+		 * @brief Calculates output-buffer usage without blocking a progress dialog's event delivery.
+		 * @param allowProgress Whether a large buffer is processed in cancellable batches.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void>               calculateMemoryUsageAsync(bool allowProgress);
 		/**
 		 * @brief Updates enable state of clear-cached-data button.
 		 */
-		void                                     updateClearCachedButton() const;
+		void                                           updateClearCachedButton() const;
 		/**
 		 * @brief Updates TLS mode UI enable state.
 		 */
-		void                                     updateTlsEncryptionState() const;
+		void                                           updateTlsEncryptionState() const;
 		/**
 		 * @brief Finds text within notes editor.
 		 * @param again Continue search from current position when `true`.
 		 */
-		void                                     doNotesFind(bool again);
+		void                                           doNotesFind(bool again);
+		/**
+		 * @brief Asynchronously finds text within notes editor.
+		 * @param again Continue search from current position when `true`.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void>               doNotesFindAsync(bool again);
 		/**
 		 * @brief Applies swatch color style to line-edit field.
 		 * @param edit Target line edit showing a color value.
 		 * @param colour Color to apply.
 		 */
-		void setLineEditSwatch(QLineEdit *edit, const QColor &colour) const;
+		void                             setLineEditSwatch(QLineEdit *edit, const QColor &colour) const;
 		/**
 		 * @brief Opens color picker for line-edit swatch field.
 		 * @param edit Target line edit whose color value will be updated.
 		 * @param title Dialog title text.
 		 */
-		void openLineEditColourPicker(QLineEdit *edit, const QString &title);
+		void                             openLineEditColourPicker(QLineEdit *edit, const QString &title);
+		/**
+		 * @brief Asynchronously opens color picker for line-edit swatch field.
+		 * @param edit Target line edit whose color value will be updated.
+		 * @param title Dialog title text.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> openLineEditColourPickerAsync(QLineEdit *edit, QString title);
 		/**
 		 * @brief Updates auto-copy-html option dependencies.
 		 */
-		void updateAutoCopyHtmlState() const;
+		void                             updateAutoCopyHtmlState() const;
 		/**
 		 * @brief Updates legacy text encoding option dependencies.
 		 */
-		void updateLegacyEncodingState() const;
+		void                             updateLegacyEncodingState() const;
 		/**
 		 * @brief Updates output font controls.
 		 */
-		void updateOutputFontControls() const;
+		void                             updateOutputFontControls() const;
 		/**
-		 * @brief Updates default-colours option dependencies.
+		 * @brief Updates default-colors option dependencies.
 		 */
-		void updateDefaultColoursState();
+		void                             updateDefaultColoursState();
 		/**
 		 * @brief Updates input font controls.
 		 */
-		void updateInputFontControls() const;
+		void                             updateInputFontControls() const;
 		/**
 		 * @brief Updates command auto-resize controls.
 		 */
-		void updateCommandAutoResizeControls() const;
+		void                             updateCommandAutoResizeControls() const;
 		/**
 		 * @brief Updates macro page button states.
 		 */
-		void updateMacroControls() const;
+		void                             updateMacroControls() const;
 		/**
 		 * @brief Updates alias page button states.
 		 */
-		void updateAliasControls() const;
+		void                             updateAliasControls() const;
 		/**
 		 * @brief Updates trigger page button states.
 		 */
-		void updateTriggerControls() const;
+		void                             updateTriggerControls() const;
 		/**
 		 * @brief Updates timer page button states.
 		 */
-		void updateTimerControls() const;
+		void                             updateTimerControls() const;
 		/**
 		 * @brief Handles one user-requested default override state transition in the dialog.
 		 * @param optionName Canonical `use_default_*` option name.
@@ -451,92 +815,101 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void handleDefaultOverrideToggle(const QString &optionName, QCheckBox *checkBox, bool enabled);
 		/**
+		 * @brief Asynchronously handles one user-requested default override state transition in the dialog.
+		 * @param optionName Canonical `use_default_*` option name.
+		 * @param checkBox Checkbox whose state changed.
+		 * @param enabled Requested override state.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> handleDefaultOverrideToggleAsync(QString    optionName,
+		                                                                  QCheckBox *checkBox, bool enabled);
+		/**
 		 * @brief Discards staged edits and resets one override-controlled editor to its transition baseline.
 		 * @param optionName Canonical `use_default_*` option name.
 		 * @param enabled Requested override state.
 		 * @param collectionDocument Selected default or saved-world collection document.
 		 */
-		void resetDefaultOverrideEditor(const QString &optionName, bool enabled,
-		                                const WorldDocument *collectionDocument);
+		void                             resetDefaultOverrideEditor(const QString &optionName, bool enabled,
+		                                                            const WorldDocument *collectionDocument);
 		/**
 		 * @brief Confirms replacement of the current collection by a configured default.
 		 * @param optionName Canonical collection override option name.
-		 * @return `true` when the transition may proceed.
+		 * @return Operation yielding `true` when the transition may proceed.
 		 */
-		[[nodiscard]] bool  confirmDefaultOverrideEnable(const QString &optionName);
+		[[nodiscard]] QMudPreferences::Operation<bool> confirmDefaultOverrideEnable(QString optionName);
 		/**
 		 * @brief Updates variable page button states.
 		 */
-		void                updateVariableControls() const;
+		void                                           updateVariableControls() const;
 		/**
 		 * @brief Switches rule views and transfers selection once by runtime identity.
 		 */
-		void                updateRuleViewModes() const;
+		void                                           updateRuleViewModes() const;
 		/**
 		 * @brief Updates spell-check UI enable state.
 		 */
-		void                updateSpellCheckState() const;
+		void                                           updateSpellCheckState() const;
 		/**
 		 * @brief Default-resource availability and font helpers.
 		 * @return `true` when the default output font global option is available.
 		 */
-		static bool         hasDefaultOutputFont();
+		static bool                                    hasDefaultOutputFont();
 		/**
 		 * @brief Returns true when default colors file exists.
 		 * @return `true` when default colors resource file is present.
 		 */
-		static bool         hasDefaultColoursFile();
+		static bool                                    hasDefaultColoursFile();
 		/**
 		 * @brief Returns true when default input font exists.
 		 * @return `true` when default input font global option is available.
 		 */
-		static bool         hasDefaultInputFont();
+		static bool                                    hasDefaultInputFont();
 		/**
 		 * @brief Returns true when default macros file exists.
 		 * @return `true` when default macros resource file is present.
 		 */
-		static bool         hasDefaultMacrosFile();
+		static bool                                    hasDefaultMacrosFile();
 		/**
 		 * @brief Returns true when default triggers file exists.
 		 * @return `true` when default triggers resource file is present.
 		 */
-		static bool         hasDefaultTriggersFile();
+		static bool                                    hasDefaultTriggersFile();
 		/**
 		 * @brief Returns true when default timers file exists.
 		 * @return `true` when default timers resource file is present.
 		 */
-		static bool         hasDefaultTimersFile();
+		static bool                                    hasDefaultTimersFile();
 		/**
 		 * @brief Returns true when default aliases file exists.
 		 * @return `true` when default aliases resource file is present.
 		 */
-		static bool         hasDefaultAliasesFile();
+		static bool                                    hasDefaultAliasesFile();
 		/**
 		 * @brief Builds output font from dialog controls.
 		 * @return Font built from current output-font widgets.
 		 */
-		[[nodiscard]] QFont outputFontFromDialog() const;
+		[[nodiscard]] QFont                            outputFontFromDialog() const;
 		/**
 		 * @brief Returns current output font from world view.
 		 * @return Effective output font currently used by the view.
 		 */
-		[[nodiscard]] QFont outputFontFromView() const;
+		[[nodiscard]] QFont                            outputFontFromView() const;
 		/**
 		 * @brief Computes average character width for a font.
 		 * @param font Font to measure.
 		 * @return Average character width in pixels.
 		 */
-		static int          averageCharWidth(const QFont &font);
+		static int                                     averageCharWidth(const QFont &font);
 		/**
 		 * @brief Keypad view-mode data marshaling helpers.
 		 * @param ctrlView Use Ctrl-modifier keypad view when `true`, base view otherwise.
 		 */
-		void                storeKeypadFields(bool ctrlView);
+		void                                           storeKeypadFields(bool ctrlView);
 		/**
 		 * @brief Loads keypad controls from selected view-mode buffer.
 		 * @param ctrlView Use Ctrl-modifier keypad view when `true`, base view otherwise.
 		 */
-		void                loadKeypadFields(bool ctrlView);
+		void                                           loadKeypadFields(bool ctrlView);
 		enum class WorkingListValidationScope
 		{
 			All,
@@ -548,9 +921,9 @@ class WorldPreferencesDialog : public QDialog
 		/**
 		 * @brief Validates that the selected resolved lists have unique nonempty names where required.
 		 * @param scope Collections included in this validation pass.
-		 * @return `true` when the selected collections can be committed or exported.
+		 * @return Operation yielding `true` when the selected collections can be committed or exported.
 		 */
-		bool validateWorkingListNames(WorkingListValidationScope scope);
+		QMudPreferences::Operation<bool> validateWorkingListNames(WorkingListValidationScope scope);
 		/**
 		 * @brief Commits staged rule and variable list operations to the runtime.
 		 * @param suppressedDefaultOptions Override domains being transitioned whose staged edits must be discarded.
@@ -589,13 +962,24 @@ class WorldPreferencesDialog : public QDialog
 		[[nodiscard]] OptionValues           collectWorldOptionValues() const;
 		/**
 		 * @brief Collects non-attribute values represented by one page.
-		 * @param page Page whose colour, macro, keypad, or printing values are requested.
+		 * @param page Page whose color, macro, keypad, or printing values are requested.
 		 * @return Stable key/value representation used for per-item delta detection.
 		 */
 		[[nodiscard]] QMap<QString, QString> collectAuxiliaryPageValues(Page page) const;
 
-		WorldRuntime                        *m_runtime{nullptr};
-		WorldView                           *m_view{nullptr};
+		QPointer<WorldRuntime>               m_runtime;
+		QPointer<WorldView>                  m_view;
+		bool                                 m_invalidated{false};
+		bool                                 m_finishing{false};
+		bool                                 m_accepting{false};
+		int                                  m_childOperations{0};
+		QVector<QPointer<QWidget>>           m_disabledChildControls;
+		std::optional<Page>                  m_requestedPage;
+		/**
+		 * @brief Asynchronously validates and applies edited world preferences from populated pages.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void>     acceptAsync();
 		std::unique_ptr<WorkingLists>        m_workingLists;
 		QTreeWidget                         *m_pageTree{nullptr};
 		QStackedWidget                      *m_pages{nullptr};
@@ -977,6 +1361,16 @@ class WorldPreferencesDialog : public QDialog
 		QSpinBox                            *m_connectDelay{nullptr};
 		QCheckBox   *m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops{nullptr};
 		QCheckBox   *m_nativeGmcp{nullptr};
+		QWidget     *m_gmcpControls{nullptr};
+		QCheckBox   *m_gmcpPing{nullptr};
+		QLabel      *m_gmcpRoundTripCaption{nullptr};
+		QLabel      *m_gmcpRoundTrip{nullptr};
+		QWidget     *m_gmcpPingControls{nullptr};
+		QSpinBox    *m_gmcpPingInterval{nullptr};
+		QCheckBox   *m_gmcpSendRtt{nullptr};
+		QCheckBox   *m_gmcpKeepAlive{nullptr};
+		QWidget     *m_gmcpKeepAliveControls{nullptr};
+		QSpinBox    *m_gmcpKeepAliveInterval{nullptr};
 		QCheckBox   *m_onlyNegotiateTelnetOptionsOnce{nullptr};
 		QLabel      *m_connectLineCount{nullptr};
 

@@ -45,6 +45,7 @@ class WorldChildWindow;
 class WorldDocument;
 class WorldRuntime;
 class WorldView;
+class WorldPreferencesDialog;
 class SoundEngine;
 class QMdiSubWindow;
 class NameGenerator;
@@ -54,6 +55,11 @@ class QNetworkAccessManager;
 class QThread;
 class QTimer;
 class QWidget;
+namespace QMudPreferences
+{
+	template <typename T> class Operation;
+}
+
 class AppControllerTestAccess;
 class tst_AppControllerFileOpen;
 class tst_WorldObserverLifecycle;
@@ -376,38 +382,40 @@ class AppController : public QObject
 		 * @param runtime Runtime whose current persistent state must be saved.
 		 * @param parent Parent for a required Save World dialog.
 		 * @param error Optional output error message; remains empty when Save World is canceled.
-		 * @return `true` when no save was needed or the save completed.
+		 * @return Operation yielding true when no save was needed or the save completed.
 		 */
-		bool saveWorldBeforeDefaultOverride(WorldRuntime *runtime, QWidget *parent, QString *error = nullptr);
+		QMudPreferences::Operation<bool> saveWorldBeforeDefaultOverride(WorldRuntime           *runtime,
+		                                                                WorldPreferencesDialog *parent,
+		                                                                QString *error = nullptr);
 		/**
 		 * @brief Returns next monotonically increasing unique number.
 		 * @return Unique number value.
 		 */
-		qint64 nextUniqueNumber();
+		qint64                           nextUniqueNumber();
 		/**
 		 * @brief Seeds shared random generator.
 		 * @param seed Seed value.
 		 */
-		void   seedRandom(quint32 seed);
+		void                             seedRandom(quint32 seed);
 		/**
 		 * @brief Seeds random generator from seed array.
 		 * @param values Seed values.
 		 */
-		void   seedRandomFromArray(const QVector<quint32> &values);
+		void                             seedRandomFromArray(const QVector<quint32> &values);
 		/**
 		 * @brief Returns random value in [0,1).
 		 * @return Random unit value.
 		 */
-		double nextRandomUnit();
+		double                           nextRandomUnit();
 		/**
 		 * @brief Creates activity document if not already present.
 		 */
-		void   ensureActivityDocument();
+		void                             ensureActivityDocument();
 		/**
 		 * @brief Reacts to world script-file change notification.
 		 * @param runtime Runtime that reported script file change.
 		 */
-		void   processScriptFileChange(WorldRuntime *runtime);
+		void                             processScriptFileChange(WorldRuntime *runtime);
 		/**
 		 * @brief Result summary returned by XML import operations.
 		 */
@@ -1154,12 +1162,16 @@ class AppController : public QObject
 		/**
 		 * @brief Handles reload-QMud action with socket handoff/reconnect policies.
 		 * @param persistRuntimePreferences Persist current QMud DB-backed runtime preferences.
+		 * @param autoConfirmReload Skip confirmation and discard open Preferences edits for this request.
+		 * @param executablePath Requested replacement executable, or empty for the normal executable.
+		 * @param restartFallback Runs if the attempt returns, after reload cleanup; retained during deferral.
 		 */
-		void                  handleReloadQmud(bool persistRuntimePreferences = true);
+		void handleReloadQmud(bool persistRuntimePreferences = true, bool autoConfirmReload = false,
+		                      QString executablePath = {}, std::function<void()> restartFallback = {});
 		/**
 		 * @brief Handles explicit MUSHclient directory import.
 		 */
-		void                  handleImportFromMushclient();
+		void handleImportFromMushclient();
 		/**
 		 * @brief Saves runtime state before a process restart.
 		 * @param title Dialog title used for errors.
@@ -1208,7 +1220,7 @@ class AppController : public QObject
 		 * @brief Applies ordinary initialization and the Native GMCP default for a genuinely new world.
 		 * @param runtime Runtime to initialize without changing how connection fields are supplied.
 		 */
-		void                  initializeNewWorldRuntime(WorldRuntime *runtime) const;
+		void               initializeNewWorldRuntime(WorldRuntime *runtime) const;
 		/**
 		 * @brief Emits startup banner lines to runtime output.
 		 * @param runtime Runtime that receives startup banner output.
@@ -1269,80 +1281,119 @@ class AppController : public QObject
 		 * @param runtime World runtime.
 		 * @param completion Completion callback invoked after pending plugin installs commit.
 		 */
-		void        runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion) const;
+		void runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion) const;
 		/**
 		 * @brief Auto-connects runtime when settings and execution policy request it.
 		 * @param runtime Runtime to auto-connect.
 		 * @param suppressForOpen Suppress automatic connection for this individual open request.
 		 */
-		void        maybeAutoConnectWorld(WorldRuntime *runtime, bool suppressForOpen = false) const;
+		void maybeAutoConnectWorld(WorldRuntime *runtime, bool suppressForOpen = false) const;
 		/**
 		 * @brief Displays the current tracked scrollback-restore count.
 		 */
-		void        showRestoreScrollbackStatus() const;
-		void        beginRestoreScrollbackStatus() const;
-		void        preseedRestoreScrollbackStatus(int count) const;
-		void        endRestoreScrollbackStatus() const;
-		MainWindow *m_mainWindow{nullptr};
-		QDateTime   m_whenClientStarted;
-		QString     m_version;
-		QString     m_workingDir;
-		QString     m_fileBrowsingDir;
-		QString     m_preferencesDatabaseName;
-		QString     m_locale;
-		QString     m_translatorFile;
-		QMap<QString, int>                   m_globalIntPrefs;
-		QMap<QString, QString>               m_globalStringPrefs;
-		WorldViewGlobalSettings              m_worldViewGlobalSettings;
-		QString                              m_luaScript;
-		QString                              m_pluginsDirectory;
-		QString                              m_fixedPitchFont;
-		QString                              m_lastGlobalChangeFrom;
-		QString                              m_lastGlobalChangeTo;
-		QString                              m_lastGlobalReplaceFind;
-		QString                              m_lastGlobalReplaceReplace;
-		QString                              m_lastFunctionListFilter;
-		QString                              m_lastQuickConnectWorldName;
-		QString                              m_lastQuickConnectHost;
-		QString                              m_lastDebugWorldInput;
-		quint16                              m_lastQuickConnectPort{4000};
-		bool                                 m_lastGlobalReplaceRegexp{false};
-		bool                                 m_lastGlobalReplaceEachLine{false};
-		bool                                 m_lastGlobalReplaceEscapeSequences{false};
-		QString                              m_lastMapperSpecialAction;
-		QString                              m_lastMapperSpecialReverse;
-		QString                              m_lastSendToAllWorlds;
-		QString                              m_asciiArtText;
-		QString                              m_printSetupPrinterName;
-		QPageLayout                          m_printSetupLayout;
-		bool                                 m_echoSendToAll{true};
-		bool                                 m_hasPrintSetup{false};
-		QStringList                          m_recallFindHistory;
-		QString                              m_recallLinePreamble;
-		bool                                 m_recallMatchCase{false};
-		bool                                 m_recallRegexp{false};
-		bool                                 m_recallCommands{true};
-		bool                                 m_recallOutput{true};
-		bool                                 m_recallNotes{true};
-		QHash<class WorldRuntime *, int>     m_savedWrapColumns;
-		bool                                 m_autoOpen{true};
-		NewDocumentType                      m_typeOfNewDocument{eNormalNewDocument};
-		QSplashScreen                       *m_splash{nullptr};
-		bool                                 m_deferMainWindowShowUntilSplash{false};
-		bool                                 m_showMainWindowMaximizedAfterSplash{false};
-		bool                                 m_splashMinDelayElapsed{false};
-		bool                                 m_initializeFinished{false};
-		bool                                 m_initializeSucceeded{false};
-		bool                                 m_soundInitializationResolved{false};
-		bool                                 m_startupFinalized{false};
-		bool                                 m_fileAssociationDispatchReady{false};
-		bool                                 m_startupFirstTime{false};
-		QList<PendingFileAssociationRequest> m_pendingFileAssociationRequests;
-		bool                                 m_startupNeedsUpgradeWelcome{false};
-		mutable bool                         m_deferUpgradeWelcomeUntilStartupRestores{false};
-		mutable bool                         m_startupRestoreDispatchComplete{false};
-		QTranslator                         *m_qtTranslator{nullptr};
-		lua_State                           *m_translatorLua{nullptr};
+		void showRestoreScrollbackStatus() const;
+		void beginRestoreScrollbackStatus() const;
+		void preseedRestoreScrollbackStatus(int count) const;
+		void endRestoreScrollbackStatus() const;
+		/**
+		 * @brief Opens or raises the one modeless Preferences editor for a world.
+		 * @param runtime World whose staged settings are edited.
+		 * @param page Initial or explicitly requested page index.
+		 * @return Existing or newly created editor, or null for a closing world.
+		 */
+		WorldPreferencesDialog *showWorldPreferences(WorldRuntime *runtime, int page);
+		/**
+		 * @brief Checks or discards open Preferences editors before process replacement.
+		 * @param title Existing restart or reload action title.
+		 * @param discard Reject staged edits and cancel child operations instead of blocking the action.
+		 * @return True when no Preferences editor remains open.
+		 */
+		bool                    preferencesClosedForRestart(const QString &title, bool discard = false);
+		QHash<WorldRuntime *, QPointer<WorldPreferencesDialog>> m_worldPreferences;
+		/**
+		 * @brief Completes or discards a world's initial Preferences exactly once.
+		 * @param runtime Provisional world whose editor finished.
+		 * @param result Accepted or rejected editor result.
+		 */
+		void completeNewWorldConfiguration(WorldRuntime *runtime, int result);
+		/**
+		 * @brief Releases a discarded runtime after its primary binding has ended.
+		 * @param runtime Provisional runtime whose owner has detached or been destroyed.
+		 */
+		void releaseNewWorldConfiguration(WorldRuntime *runtime);
+		/**
+		 * @brief Creation context retained through editor replacement and window destruction.
+		 */
+		struct NewWorldConfiguration
+		{
+				QPointer<MainWindow>       frame;
+				QPointer<WorldChildWindow> window;
+				QPointer<WorldRuntime>     previouslyActiveRuntime;
+				bool                       suppressAutoConnect{false};
+				bool                       discarding{false};
+		};
+		QHash<WorldRuntime *, NewWorldConfiguration> m_newWorldConfigurations;
+
+		MainWindow                                  *m_mainWindow{nullptr};
+		QDateTime                                    m_whenClientStarted;
+		QString                                      m_version;
+		QString                                      m_workingDir;
+		QString                                      m_fileBrowsingDir;
+		QString                                      m_preferencesDatabaseName;
+		QString                                      m_locale;
+		QString                                      m_translatorFile;
+		QMap<QString, int>                           m_globalIntPrefs;
+		QMap<QString, QString>                       m_globalStringPrefs;
+		WorldViewGlobalSettings                      m_worldViewGlobalSettings;
+		QString                                      m_luaScript;
+		QString                                      m_pluginsDirectory;
+		QString                                      m_fixedPitchFont;
+		QString                                      m_lastGlobalChangeFrom;
+		QString                                      m_lastGlobalChangeTo;
+		QString                                      m_lastGlobalReplaceFind;
+		QString                                      m_lastGlobalReplaceReplace;
+		QString                                      m_lastFunctionListFilter;
+		QString                                      m_lastQuickConnectWorldName;
+		QString                                      m_lastQuickConnectHost;
+		QString                                      m_lastDebugWorldInput;
+		quint16                                      m_lastQuickConnectPort{4000};
+		bool                                         m_lastGlobalReplaceRegexp{false};
+		bool                                         m_lastGlobalReplaceEachLine{false};
+		bool                                         m_lastGlobalReplaceEscapeSequences{false};
+		QString                                      m_lastMapperSpecialAction;
+		QString                                      m_lastMapperSpecialReverse;
+		QString                                      m_lastSendToAllWorlds;
+		QString                                      m_asciiArtText;
+		QString                                      m_printSetupPrinterName;
+		QPageLayout                                  m_printSetupLayout;
+		bool                                         m_echoSendToAll{true};
+		bool                                         m_hasPrintSetup{false};
+		QStringList                                  m_recallFindHistory;
+		QString                                      m_recallLinePreamble;
+		bool                                         m_recallMatchCase{false};
+		bool                                         m_recallRegexp{false};
+		bool                                         m_recallCommands{true};
+		bool                                         m_recallOutput{true};
+		bool                                         m_recallNotes{true};
+		QHash<class WorldRuntime *, int>             m_savedWrapColumns;
+		bool                                         m_autoOpen{true};
+		NewDocumentType                              m_typeOfNewDocument{eNormalNewDocument};
+		QSplashScreen                               *m_splash{nullptr};
+		bool                                         m_deferMainWindowShowUntilSplash{false};
+		bool                                         m_showMainWindowMaximizedAfterSplash{false};
+		bool                                         m_splashMinDelayElapsed{false};
+		bool                                         m_initializeFinished{false};
+		bool                                         m_initializeSucceeded{false};
+		bool                                         m_soundInitializationResolved{false};
+		bool                                         m_startupFinalized{false};
+		bool                                         m_fileAssociationDispatchReady{false};
+		bool                                         m_startupFirstTime{false};
+		QList<PendingFileAssociationRequest>         m_pendingFileAssociationRequests;
+		bool                                         m_startupNeedsUpgradeWelcome{false};
+		mutable bool                                 m_deferUpgradeWelcomeUntilStartupRestores{false};
+		mutable bool                                 m_startupRestoreDispatchComplete{false};
+		QTranslator                                 *m_qtTranslator{nullptr};
+		lua_State                                   *m_translatorLua{nullptr};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		struct IdleSpellCheckerState
 		{
@@ -1390,6 +1441,7 @@ class AppController : public QObject
 		const bool                       m_disableAutoConnectForExecution;
 		bool                             m_soundAvailableForExecution;
 		bool                             m_reloadInProgress{false};
+		bool                             m_restartPreparationActive{false};
 		QTimer                          *m_updateCheckTimer{nullptr};
 		QNetworkAccessManager           *m_updateNetworkManager{nullptr};
 		QPointer<QDialog>                m_updateAvailableDialog;
@@ -1402,7 +1454,6 @@ class AppController : public QObject
 		bool                             m_updatePackageDownloadInProgress{false};
 		bool                             m_updateCheckInProgress{false};
 		bool                             m_reloadLaunchRequested{false};
-		QString                          m_reloadTargetExecutableOverride;
 		int                              m_reloadAttempts{0};
 		int                              m_reloadExecFailures{0};
 		int                              m_reloadRecoveryRuns{0};

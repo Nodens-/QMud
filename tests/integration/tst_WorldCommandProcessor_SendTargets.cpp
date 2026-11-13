@@ -76,6 +76,6 @@ namespace
 
 } // namespace
 
-QTEST_MAIN(tst_WorldCommandProcessor_SendTargets)
+QTEST_GUILESS_MAIN(tst_WorldCommandProcessor_SendTargets)
 
 #include "tst_WorldCommandProcessor_SendTargets.moc"

@@ -281,6 +281,6 @@ namespace
 	};
 } // namespace
 
-QTEST_MAIN(tst_UpdateCheckUtils)
+QTEST_GUILESS_MAIN(tst_UpdateCheckUtils)
 
 #include "tst_UpdateCheckUtils.moc"
