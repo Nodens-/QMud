@@ -260,8 +260,8 @@ class WorldSocketTransport : public WorldSocketService
 		 */
 		bool sendGmcp(const QByteArray &raw, quint64 generation) override;
 		/**
-		 * @brief Sets world merge policy.
-		 * @param name Message name.
+		 * @brief Sets an inheritable world merge policy.
+		 * @param name Package or message path whose descendants inherit this policy.
 		 * @param mode Merge mode.
 		 * @param force Override server.
 		 * @return Whether valid.
@@ -517,8 +517,8 @@ class WorldSocket : public WorldSocketService
 		 */
 		bool sendGmcp(const QByteArray &raw, quint64 generation) override;
 		/**
-		 * @brief Sets world merge policy.
-		 * @param name Message name.
+		 * @brief Sets an inheritable world merge policy.
+		 * @param name Package or message path whose descendants inherit this policy.
 		 * @param mode Merge mode.
 		 * @param force Override server.
 		 * @return Whether valid.

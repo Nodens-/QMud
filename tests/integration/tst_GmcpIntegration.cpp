@@ -2120,8 +2120,8 @@ end
 #endif
 
 			/**
-			 * @brief Keeps legacy globals untouched, rejects unavailable APIs, and follows connection-latched
-			 * native mode across reconnects.
+			 * @brief Reports native negotiation, preserves legacy globals, and rejects unavailable data APIs
+			 * across connection-latched native mode changes.
 			 */
 			static void luaNativeAvailability()
 			{
@@ -2129,9 +2129,11 @@ end
 				QString      error;
 				QVERIFY2(run(runtime, QStringLiteral(R"lua(
 assert(gmcp==nil and gmcpNull==nil)
+assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)
 legacyGmcp={Test={value=1}}; gmcp=legacyGmcp
 legacyNull={}; gmcpNull=legacyNull
 function assertGmcpUnavailable()
+ assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)
  local calls={
   function() return gmcpSend('Test.State','{}') end,
   function() return gmcpGet('Test.State') end,
@@ -2140,7 +2142,6 @@ function assertGmcpUnavailable()
   function() return gmcpType(nil) end,
   function() return gmcpGetRaw('Test.State') end,
   function() return gmcpGetMessages() end,
-  function() return gmcpIsEnabled() end,
   function() return gmcpRegisterModule('Test.Unavailable',1) end,
   function() return gmcpUnregisterModule('Test.Unavailable') end,
   function() return world.gmcpSend('Test.State','{}') end,
@@ -2150,7 +2151,6 @@ function assertGmcpUnavailable()
   function() return world.gmcpType(nil) end,
   function() return world.gmcpGetRaw('Test.State') end,
   function() return world.gmcpGetMessages() end,
-  function() return world.gmcpIsEnabled() end,
   function() return world.gmcpRegisterModule('Test.Unavailable',1) end,
   function() return world.gmcpUnregisterModule('Test.Unavailable') end
  }
@@ -2182,7 +2182,8 @@ assert(SetOption('native_gmcp',1)==0)
 				QVERIFY2(run(runtime, QStringLiteral(R"lua(
 assert(type(gmcp)=='userdata' and type(gmcpNull)=='userdata')
 nativeGmcp=gmcp; nativeNull=gmcpNull
-assert(not gmcpIsEnabled() and gmcpGet('Test.State')==nil and gmcpGetRaw('Test.State')==nil)
+assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)
+assert(gmcpGet('Test.State')==nil and gmcpGetRaw('Test.State')==nil)
 assert(#gmcpGetMessages()==0 and gmcpSend('Test.State','{}')~=0)
 assert(gmcpRegisterModule('Test.BeforeNegotiation',2)==0)
 assert(SetOption('native_gmcp',0)==0)
@@ -2211,7 +2212,8 @@ assert(gmcp==nativeGmcp and not gmcpIsEnabled())
 				    QStringLiteral("test.state")));
 				QVERIFY2(run(runtime,
 				             QStringLiteral("assert(gmcp==nativeGmcp and gmcpNull==nativeNull and "
-				                            "gmcpIsEnabled() and gmcpGet('Test.State').value==3)"),
+				                            "gmcpIsEnabled()==true and world.gmcpIsEnabled()==true and "
+				                            "gmcpGet('Test.State').value==3)"),
 				             &error),
 				         qPrintable(error));
 				runtime.closeSocketForReloadReconnect();
@@ -2227,12 +2229,12 @@ assert(gmcp==nativeGmcp and not gmcpIsEnabled())
 				refused.close();
 				QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), port));
 				QTRY_VERIFY(!runtime.isConnected() && !runtime.isConnecting());
-				QVERIFY2(run(runtime,
-				             QStringLiteral("assert(gmcp==replacementGmcp and gmcpNull==replacementNull); "
-				                            "local ok,err=pcall(gmcpIsEnabled); assert(not ok and "
-				                            "err:find('GMCP is not available',1,true))"),
-				             &error),
-				         qPrintable(error));
+				QVERIFY2(
+				    run(runtime,
+				        QStringLiteral("assert(gmcp==replacementGmcp and gmcpNull==replacementNull); "
+				                       "assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)"),
+				        &error),
+				    qPrintable(error));
 				runtime.setWorldFileModified(false);
 			}
 
@@ -4604,10 +4606,9 @@ assert(savedNamespace.Branch.Value==1)
 				    QStringLiteral(
 				        "assert(saved.value==1 and gmcp.Test.State.value==2 and gmcpGet('missing')==nil)")));
 				session.closeConnection();
-				QVERIFY(run(
-				    runtime,
-				    QStringLiteral("assert(gmcp==nil and saved.value==1); local ok,err=pcall(gmcpIsEnabled); "
-				                   "assert(not ok and err:find('GMCP is not available',1,true))")));
+				QVERIFY(run(runtime, QStringLiteral(
+				                         "assert(gmcp==nil and saved.value==1); "
+				                         "assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)")));
 			}
 			/**
 			 * @brief Exercises retained-value lookup, Lua serialization, independent table copies, and scalar wrapping.
@@ -4792,6 +4793,102 @@ assert(gmcp.Test.State.value==1)
 				QVERIFY(**completion);
 				source.setWorldFileModified(false);
 				target.setWorldFileModified(false);
+			}
+
+			/**
+			 * @brief Delivers inherited state to plugins and preserves browser versions across parent policy changes.
+			 */
+			static void inheritedPolicyViews()
+			{
+				QTemporaryDir directory(QDir(QStringLiteral(QMUD_TEST_BUILD_DIR))
+				                            .filePath(QStringLiteral("worlds/gmcp-inheritance-XXXXXX")));
+				QVERIFY(directory.isValid());
+				const QString   id = QStringLiteral("151515151515151515151515");
+				GmcpWireFixture session;
+				session.write = [](const QByteArray &bytes) -> qint64 { return bytes.size(); };
+				session.reset(true, 1, false);
+				session.receive(QByteArray::fromHex("fffbc9"));
+				WorldRuntime runtime;
+				WorldView    view;
+				view.setRuntime(&runtime);
+				const auto detach = qScopeGuard([&] { view.setRuntime(nullptr); });
+				view.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&view));
+				runtime.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+				runtime.setPluginsDirectory(directory.path());
+				WorldRuntimeTestAccess::setGmcpPublication(runtime, session.publication());
+				session.observed = [&](const auto &record, const auto &message)
+				{ WorldRuntimeTestAccess::deliverGmcpRecord(runtime, record, message); };
+				QVERIFY(
+				    writeGmcpPlugin(directory.path(), QStringLiteral("inheritance"), id, QStringLiteral(R"lua(
+local retained
+function onPluginGmcpMessage(name,payload,state,raw)
+ if name:lower()~='test.state.details' then return end
+ assert(payload.nested.retained==nil or payload.nested.value==1)
+ if payload.nested.value==2 then
+  assert(state.nested.retained==1 and state.nested.value==2)
+  assert(gmcpGet(state,'nested.retained')==1)
+  assert(raw=='Test.State.Details {"nested":{"value":2}}')
+  retained=state
+ elseif payload.nested.value==3 then
+  assert(state.nested.retained==nil and state.nested.value==3)
+  assert(retained.nested.retained==1 and retained.nested.value==2)
+  assert(gmcpGet(name).nested.value==3)
+  SetVariable('inheritance_seen','passed')
+ end
+end
+)lua")));
+				QString error;
+				QVERIFY2(runtime.loadPluginFile(QStringLiteral("inheritance.xml"), &error),
+				         qPrintable(error));
+				QTRY_VERIFY(!runtime.pluginForId(id)->installPending);
+				QVERIFY(run(runtime, QStringLiteral("function GmcpTestBarrier() end")));
+				session.receive(QMudGmcp::frame(R"(Test.State {"__gmcp_merge":"recursive"})"));
+				session.receive(QMudGmcp::frame(R"(Test.State.Details {"nested":{"retained":1,"value":1}})"));
+				session.receive(QMudGmcp::frame(R"(Test.State.Details {"nested":{"value":2}})"));
+				const auto        second = session.publication()->current.load();
+				GmcpBrowserDialog browser(&runtime);
+				browser.show();
+				auto *current = browser.findChild<QTreeView *>(QStringLiteral("gmcpCurrentTree"));
+				auto *past    = browser.findChild<QTreeView *>(QStringLiteral("gmcpHistoryTree"));
+				auto *history = browser.findChild<QTableView *>(QStringLiteral("gmcpHistoryVersions"));
+				auto *tabs    = browser.findChild<QTabWidget *>(QStringLiteral("gmcpTabs"));
+				auto *pause   = browser.findChild<QCheckBox *>(QStringLiteral("gmcpPause"));
+				QVERIFY(current && past && history && tabs && pause);
+				const QStringList valuePath{QStringLiteral("Test"), QStringLiteral("State"),
+				                            QStringLiteral("Details"), QStringLiteral("nested"),
+				                            QStringLiteral("value")};
+				QStringList       retainedPath = valuePath;
+				retainedPath.last()            = QStringLiteral("retained");
+				QVERIFY(pause->isChecked());
+				QCOMPARE(treeValue(treeIndex(current, valuePath)), QStringLiteral("2"));
+				QCOMPARE(treeValue(treeIndex(current, retainedPath)), QStringLiteral("1"));
+				tabs->setCurrentIndex(1);
+				QCOMPARE(treeValue(treeIndex(past, retainedPath)), QStringLiteral("1"));
+				session.receive(QMudGmcp::frame(R"(Test.State {"__gmcp_merge":"replace"})"));
+				session.receive(QMudGmcp::frame(R"(Test.State.Details {"nested":{"value":3}})"));
+				gmcpBarrier(runtime);
+				QCOMPARE(runtime.pluginVariableValue(id, QStringLiteral("inheritance_seen")),
+				         QStringLiteral("passed"));
+				tabs->setCurrentIndex(0);
+				QTRY_COMPARE(treeValue(treeIndex(current, valuePath)), QStringLiteral("2"));
+				tabs->setCurrentIndex(1);
+				pause->setChecked(false);
+				QTRY_COMPARE(history->model()->rowCount(), 5);
+				QCOMPARE(history->currentIndex().row(), 2);
+				QCOMPARE(treeValue(treeIndex(past, valuePath)), QStringLiteral("2"));
+				QCOMPARE(treeValue(treeIndex(past, retainedPath)), QStringLiteral("1"));
+				tabs->setCurrentIndex(0);
+				QTRY_COMPARE(treeValue(treeIndex(current, valuePath)), QStringLiteral("3"));
+				QVERIFY(!treeIndex(current, retainedPath).isValid());
+				QCOMPARE(second->messages.value(QStringLiteral("test.state.details"))
+				             ->state.toObject()
+				             .value(QStringLiteral("nested"))
+				             .toObject()
+				             .value(QStringLiteral("retained"))
+				             .toInt(),
+				         1);
+				runtime.setWorldFileModified(false);
 			}
 
 			/**

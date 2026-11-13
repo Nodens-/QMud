@@ -498,6 +498,197 @@ namespace
 				         2);
 			}
 			/**
+			 * @brief Inherits server declarations across dotted paths while preserving child overrides and old versions.
+			 */
+			static void inheritedPolicies()
+			{
+				using QMudGmcp::MergeMode;
+				QMudGmcp::Session session;
+				activate(session);
+				const auto message = [&](const QString &name)
+				{ return session.publication()->current.load()->messages.value(name.toLower()); };
+				session.receive(
+				    250, R"(Test.State.Details {"old":7,"nested":{"retained":1,"value":1},"items":[1,2]})");
+				const auto original = session.publication()->current.load();
+				session.receive(250, R"(Test.State {"__gmcp_merge":"recursive"})");
+				QCOMPARE(message(QStringLiteral("Test.State.Details")),
+				         original->messages.value(QStringLiteral("test.state.details")));
+				session.receive(250, R"(tEsT.StAtE.Details {"nested":{"value":2},"items":[3]})");
+				const auto inherited = session.publication()->current.load();
+				const auto value     = message(QStringLiteral("Test.State.Details"))->state.toObject();
+				QCOMPARE(value.value(QStringLiteral("old")).toInt(), 7);
+				QCOMPARE(value.value(QStringLiteral("nested"))
+				             .toObject()
+				             .value(QStringLiteral("retained"))
+				             .toInt(),
+				         1);
+				QCOMPARE(
+				    value.value(QStringLiteral("nested")).toObject().value(QStringLiteral("value")).toInt(),
+				    2);
+				QCOMPARE(value.value(QStringLiteral("items")).toArray(), QJsonArray{3});
+				QCOMPARE(inherited->serverModes.size(), 1);
+				QCOMPARE(inherited->effectiveMode(QStringLiteral("Test.Statement.Details")),
+				         MergeMode::Replace);
+				QCOMPARE(original->effectiveMode(QStringLiteral("Test.State.Details")), MergeMode::Replace);
+				QCOMPARE(original->messages.value(QStringLiteral("test.state.details"))
+				             ->state.toObject()
+				             .value(QStringLiteral("nested"))
+				             .toObject()
+				             .value(QStringLiteral("value"))
+				             .toInt(),
+				         1);
+				session.receive(250, R"(Test.State.Other {"retained":4})");
+				session.receive(250, R"(Test.State.Other {"__gmcp_merge":17,"added":5})");
+				QCOMPARE(message(QStringLiteral("Test.State.Other"))->state.toObject().size(), 2);
+				QVERIFY(!session.publication()->current.load()->serverModes.contains(
+				    QStringLiteral("test.state.other")));
+				QVERIFY(!message(QStringLiteral("Test.State.Other"))
+				             ->payload.toObject()
+				             .contains(QStringLiteral("__gmcp_merge")));
+				QVERIFY(message(QStringLiteral("Test.State.Other"))->raw.contains("__gmcp_merge"));
+				const auto beforeInvalid = session.publication()->current.load();
+				session.receive(250, R"(Test.State {"__gmcp_merge":"shallow",broken})");
+				QCOMPARE(session.publication()->current.load(), beforeInvalid);
+				session.receive(250, R"(Test.State.Details {"__gmcp_merge":"shallow","nested":{"value":3}})");
+				QCOMPARE(message(QStringLiteral("Test.State.Details"))
+				             ->state.toObject()
+				             .value(QStringLiteral("old"))
+				             .toInt(),
+				         7);
+				QVERIFY(!message(QStringLiteral("Test.State.Details"))
+				             ->state.toObject()
+				             .value(QStringLiteral("nested"))
+				             .toObject()
+				             .contains(QStringLiteral("retained")));
+				session.receive(250, R"(Test.State {"__gmcp_merge":"replace"})");
+				const auto changed = session.publication()->current.load();
+				QCOMPARE(changed->effectiveMode(QStringLiteral("TEST.STATE.DETAILS.More")),
+				         MergeMode::Shallow);
+				QCOMPARE(changed->effectiveMode(QStringLiteral("Test.State.Other")), MergeMode::Replace);
+				QCOMPARE(changed->effectiveMode(QStringLiteral("Test.Statement.Details")),
+				         MergeMode::Replace);
+				QCOMPARE(inherited->effectiveMode(QStringLiteral("Test.State.Other")), MergeMode::Recursive);
+				session.receive(250, R"(Test.State.Details {"__gmcp_merge":"replace","fresh":9})");
+				QCOMPARE(message(QStringLiteral("Test.State.Details"))->state.toObject(),
+				         QJsonObject({
+				             {QStringLiteral("fresh"), 9}
+                }));
+			}
+
+			/**
+			 * @brief Preserves authority tiers before specificity for inherited world, server, and default policies.
+			 */
+			static void inheritedPolicyPrecedence()
+			{
+				using QMudGmcp::MergeMode;
+				QMudGmcp::Session session;
+				activate(session);
+				const QString target = QStringLiteral("Test.State.Details.Leaf");
+				const auto    mode   = [&]
+				{ return session.publication()->current.load()->effectiveMode(target); };
+				QCOMPARE(mode(), MergeMode::Replace);
+				QCOMPARE(
+				    session.publication()->current.load()->effectiveMode(QStringLiteral("CHAR.Status.Child")),
+				    MergeMode::Shallow);
+				QCOMPARE(session.publication()->current.load()->effectiveMode(
+				             QStringLiteral("Char.StatusExtra.Child")),
+				         MergeMode::Replace);
+				QVERIFY(session.setMergePolicy(QStringLiteral("Test.State"), MergeMode::Shallow));
+				QCOMPARE(mode(), MergeMode::Shallow);
+				QVERIFY(session.setMergePolicy(QStringLiteral("Test.State.Details"), MergeMode::Recursive));
+				QCOMPARE(mode(), MergeMode::Recursive);
+				session.receive(250, R"(Test.State {"__gmcp_merge":"replace"})");
+				QCOMPARE(mode(), MergeMode::Replace);
+				session.receive(250, R"(Test.State.Details {"__gmcp_merge":"shallow"})");
+				QCOMPARE(mode(), MergeMode::Shallow);
+				QVERIFY(session.setMergePolicy(QStringLiteral("TEST.State"), MergeMode::Recursive, true));
+				QCOMPARE(mode(), MergeMode::Recursive);
+				QVERIFY(
+				    session.setMergePolicy(QStringLiteral("Test.State.Details"), MergeMode::Shallow, true));
+				QCOMPARE(mode(), MergeMode::Shallow);
+				QVERIFY(session.setMergePolicy(target, MergeMode::Replace));
+				QCOMPARE(mode(), MergeMode::Shallow);
+				QVERIFY(session.setMergePolicy(QStringLiteral("Test.State.Details"), MergeMode::Recursive,
+				                               false));
+				QCOMPARE(mode(), MergeMode::Recursive);
+				QVERIFY(session.setMergePolicy(QStringLiteral("Test.State"), MergeMode::Recursive, false));
+				QCOMPARE(mode(), MergeMode::Shallow);
+				QVERIFY(session.setMergePolicy(QStringLiteral("Other.State"), MergeMode::Replace, true));
+				QCOMPARE(mode(), MergeMode::Shallow);
+				QVERIFY(session.setMergePolicy(QStringLiteral("Char"), MergeMode::Recursive));
+				QCOMPARE(
+				    session.publication()->current.load()->effectiveMode(QStringLiteral("Char.Status.Child")),
+				    MergeMode::Recursive);
+				session.receive(250, R"(Char {"__gmcp_merge":"replace"})");
+				QCOMPARE(
+				    session.publication()->current.load()->effectiveMode(QStringLiteral("Char.Status.Child")),
+				    MergeMode::Replace);
+			}
+
+			/**
+			 * @brief Restores explicit inherited policies through reload and clears only server declarations on reconnect.
+			 */
+			static void inheritedPolicyHandoff()
+			{
+				using QMudGmcp::MergeMode;
+				QMudGmcp::Session session;
+				activate(session);
+				session.receive(250, R"(Test.State {"__gmcp_merge":"recursive"})");
+				session.receive(250, R"(Test.State.Child {"retained":1})");
+				session.receive(250, R"(Test.State.Override {"__gmcp_merge":"shallow"})");
+				QVERIFY(session.setMergePolicy(QStringLiteral("Test.State.Local"), MergeMode::Shallow));
+				QVERIFY(
+				    session.setMergePolicy(QStringLiteral("Test.State.Forced"), MergeMode::Replace, true));
+				session.receive(250, R"(Test.State.Forced.Child {"__gmcp_merge":"shallow"})");
+				const auto        saved = session.save();
+				QMudGmcp::Session restored;
+				QList<QByteArray> writes;
+				restored.write = [&](const QByteArray &bytes) -> qint64
+				{
+					writes.append(bytes);
+					return bytes.size();
+				};
+				QVERIFY(restored.restore(saved, 18, false));
+				const auto pending = restored.publication()->current.load();
+				QVERIFY(pending->restoring);
+				QCOMPARE(pending->effectiveMode(QStringLiteral("Test.State.Child")), MergeMode::Recursive);
+				QCOMPARE(pending->effectiveMode(QStringLiteral("Test.State.Override.Child")),
+				         MergeMode::Shallow);
+				QCOMPARE(pending->effectiveMode(QStringLiteral("Test.State.Local.Child")),
+				         MergeMode::Recursive);
+				QCOMPARE(pending->effectiveMode(QStringLiteral("Test.State.Forced.Child")),
+				         MergeMode::Replace);
+				QCOMPARE(pending->serverModes.size(), 3);
+				QCOMPARE(pending->localModes.size(), 2);
+				restored.activateRestoration(18);
+				QVERIFY(writes.isEmpty());
+				restored.receive(250, R"(Test.State.Child {"added":2})");
+				QCOMPARE(restored.publication()
+				             ->current.load()
+				             ->messages.value(QStringLiteral("test.state.child"))
+				             ->state.toObject()
+				             .size(),
+				         2);
+				QCOMPARE(pending->messages.value(QStringLiteral("test.state.child"))->state.toObject().size(),
+				         1);
+				const auto beforeInvalid = restored.publication()->current.load();
+				QVERIFY(!restored.restore(saved.chopped(1), 19));
+				QCOMPARE(restored.publication()->current.load(), beforeInvalid);
+				restored.close();
+				QVERIFY(restored.publication()->current.load()->serverModes.isEmpty());
+				restored.reset(true, 19);
+				restored.receive(251);
+				const auto reconnected = restored.publication()->current.load();
+				QCOMPARE(reconnected->effectiveMode(QStringLiteral("Test.State.Child")), MergeMode::Replace);
+				QCOMPARE(reconnected->effectiveMode(QStringLiteral("Test.State.Local.Child")),
+				         MergeMode::Shallow);
+				QCOMPARE(reconnected->effectiveMode(QStringLiteral("Test.State.Forced.Child")),
+				         MergeMode::Replace);
+				QVERIFY(reconnected->serverModes.isEmpty());
+				QCOMPARE(pending->effectiveMode(QStringLiteral("Test.State.Child")), MergeMode::Recursive);
+			}
+
+			/**
 			 * @brief Rejects malformed policy changes atomically and keeps original raw data.
 			 */
 			static void metadataAndErrors()

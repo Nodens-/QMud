@@ -1886,10 +1886,10 @@ namespace
 				{
 					const LuaCallbackOutputAnchorState::Presentation anchorPresentation =
 					    context.callbackOutputAnchorState ? context.callbackOutputAnchorState->presentation()
-						                                  : LuaCallbackOutputAnchorState::Presentation{};
+					                                      : LuaCallbackOutputAnchorState::Presentation{};
 					const int resolvedAnchorBufferIndex =
 					    context.callbackOutputAnchorState ? anchorPresentation.bufferIndex
-						                                  : context.callbackOutputAnchorBufferIndexAtDispatch;
+					                                      : context.callbackOutputAnchorBufferIndexAtDispatch;
 					if (resolvedAnchorBufferIndex > 0)
 					{
 						refreshed->hasCallbackOutputAnchor         = true;
@@ -1898,7 +1898,7 @@ namespace
 						    context.callbackOutputAnchorAbsoluteNumberAtDispatch;
 						refreshed->callbackOutputAnchorIsActiveIncoming =
 						    context.callbackOutputAnchorState ? anchorPresentation.activeIncoming
-							                                  : context.callbackOutputAnchorIsActiveIncoming;
+						                                      : context.callbackOutputAnchorIsActiveIncoming;
 						refreshed->callbackOutputAnchorIsHidden = context.callbackOutputAnchorState
 						                                              ? anchorPresentation.hidden
 						                                              : context.callbackOutputAnchorIsHidden;
@@ -2100,7 +2100,7 @@ namespace
 			    wildcardsIt.value(),
 			    namedIt == context->pluginTriggerNamedWildcardsSnapshotById.constEnd()
 			        ? QMap<QString, QMap<QString, QString>>{}
-					: namedIt.value(),
+			        : namedIt.value(),
 			    callbackLabel, wildcardName, value);
 		}
 		if (domain == CallbackWildcardDomain::Alias)
@@ -2119,7 +2119,7 @@ namespace
 			                                namedIt ==
 			                                        context->pluginAliasNamedWildcardsSnapshotById.constEnd()
 			                                    ? QMap<QString, QMap<QString, QString>>{}
-												: namedIt.value(),
+			                                    : namedIt.value(),
 			                                callbackLabel, wildcardName, value);
 		}
 		return false;
@@ -3389,15 +3389,15 @@ namespace
 		    [selectionStart, selectionEnd, replacement](WorldRuntime::CommandUiSnapshot &cached)
 		    {
 			    const int inputLength = cached.commandInputText.size() > std::numeric_limits<int>::max()
-				                            ? std::numeric_limits<int>::max()
-				                            : static_cast<int>(cached.commandInputText.size());
+			                                ? std::numeric_limits<int>::max()
+			                                : static_cast<int>(cached.commandInputText.size());
 			    const int start       = std::clamp(selectionStart, 0, inputLength);
 			    const int end         = std::clamp(selectionEnd, start, inputLength);
 			    cached.commandInputText =
 			        cached.commandInputText.left(start) + replacement + cached.commandInputText.mid(end);
 			    const int insertedLength         = replacement.size() > std::numeric_limits<int>::max()
-				                                       ? std::numeric_limits<int>::max()
-				                                       : static_cast<int>(replacement.size());
+			                                           ? std::numeric_limits<int>::max()
+			                                           : static_cast<int>(replacement.size());
 			    cached.inputSelectionStartColumn = start + insertedLength + 1;
 			    cached.inputSelectionEndColumn   = 0;
 		    });
@@ -3412,8 +3412,8 @@ namespace
 		                              {
 			                              const int inputLength =
 			                                  cached.commandInputText.size() > std::numeric_limits<int>::max()
-										          ? std::numeric_limits<int>::max()
-										          : static_cast<int>(cached.commandInputText.size());
+			                                      ? std::numeric_limits<int>::max()
+			                                      : static_cast<int>(cached.commandInputText.size());
 			                              const int start = std::clamp(selectionStart, 0, inputLength);
 			                              const int end   = std::clamp(selectionEnd, start, inputLength);
 			                              cached.inputSelectionStartColumn = start + 1;
@@ -5030,7 +5030,7 @@ namespace
 			{
 				context->pendingNotepadPresentationMutations.push_back(
 				    {CallbackNotepadPresentationMutation::Kind::Write, runtime, worldId, title, contents,
-					 replace});
+				     replace});
 			}
 		}
 		if (hasPresentation)
@@ -6326,7 +6326,7 @@ namespace
 		return callbackWorldCollectionIsPersisted(
 		           engine, engine ? engine->worldRuntimeForBridgedCall() : nullptr, overrideOption)
 		           ? writeKind
-				   : CallbackCollectionCacheWriteKind::RuntimeMutation;
+		           : CallbackCollectionCacheWriteKind::RuntimeMutation;
 	}
 
 	/**
@@ -8407,7 +8407,7 @@ namespace
 		    engine, window.name, 9,
 		    window.background.isValid()
 		        ? QVariant::fromValue<qlonglong>(callbackMiniWindowColorValue(window.background))
-				: QVariant(0));
+		        : QVariant(0));
 		cacheCallbackMiniWindowApiRect(engine, window);
 		cacheCallbackMiniWindowInfo(engine, window.name, 14, window.lastMousePosition.x());
 		cacheCallbackMiniWindowInfo(engine, window.name, 15, window.lastMousePosition.y());
@@ -8419,7 +8419,7 @@ namespace
 		cacheCallbackMiniWindowInfo(engine, window.name, 21,
 		                            window.installedAt.isValid()
 		                                ? QVariant(callbackMiniWindowToLuaSystemTime(window.installedAt))
-										: QVariant());
+		                                : QVariant());
 		cacheCallbackMiniWindowInfo(engine, window.name, 22, window.zOrder);
 		cacheCallbackMiniWindowInfo(engine, window.name, 23, window.creatingPlugin);
 	}
@@ -9402,7 +9402,7 @@ namespace
 		{
 			const WorldRuntime::RuntimeCountersSnapshot counters =
 			    context.hasRuntimeCountersSnapshotWithStrings ? context.runtimeCountersSnapshotWithStrings
-				                                              : context.runtimeCountersSnapshot;
+			                                                  : context.runtimeCountersSnapshot;
 			snapshot.hasRuntimeCountersSnapshot   = true;
 			snapshot.runtimeCountersSnapshotState = counters;
 		}
@@ -9858,7 +9858,7 @@ namespace
 		{
 			const LuaCallbackOutputAnchorState::Presentation anchorPresentation =
 			    context->callbackOutputAnchorState ? context->callbackOutputAnchorState->presentation()
-				                                   : LuaCallbackOutputAnchorState::Presentation{};
+			                                       : LuaCallbackOutputAnchorState::Presentation{};
 			const int resolvedAnchorBufferIndex = context->callbackOutputAnchorState
 			                                          ? anchorPresentation.bufferIndex
 			                                          : context->callbackOutputAnchorBufferIndexAtDispatch;
@@ -9874,7 +9874,7 @@ namespace
 				    context->callbackOutputAnchorAbsoluteNumberAtDispatch;
 				snapshot->callbackOutputAnchorIsActiveIncoming =
 				    context->callbackOutputAnchorState ? anchorPresentation.activeIncoming
-					                                   : context->callbackOutputAnchorIsActiveIncoming;
+				                                       : context->callbackOutputAnchorIsActiveIncoming;
 				snapshot->callbackOutputAnchorIsHidden = context->callbackOutputAnchorState
 				                                             ? anchorPresentation.hidden
 				                                             : context->callbackOutputAnchorIsHidden;
@@ -10333,7 +10333,7 @@ namespace
 				    snapshot->callbackOutputAnchorAbsoluteNumber;
 				context->callbackOutputAnchorIsActiveIncoming =
 				    anchorState ? anchorPresentation.activeIncoming
-					            : snapshot->callbackOutputAnchorIsActiveIncoming;
+				                : snapshot->callbackOutputAnchorIsActiveIncoming;
 				context->callbackOutputAnchorIsHidden =
 				    anchorState ? anchorPresentation.hidden : snapshot->callbackOutputAnchorIsHidden;
 				if (!sameAnchor || !context->callbackOutputAnchorState)
@@ -11319,32 +11319,32 @@ namespace
 			changesByWindow.swap(context.dirtyMiniWindowCommitChangesById);
 			mutations.push_back(
 			    [runtimeGuard, windows = std::move(windows),
-				 removedWindowNames             = std::move(removedWindowNames),
-				 replacedWindowNames            = std::move(replacedWindowNames),
-				 presentationChangedWindowNames = std::move(presentationChangedWindowNames),
-				 addedHotspots = std::move(addedHotspots), changesByWindow = std::move(changesByWindow),
-				 baseWindowsByName          = std::move(baseWindowsByName),
-				 baseOutcomesByWindow       = std::move(baseOutcomesByWindow),
-				 hotspotMutations           = std::move(hotspotMutations),
-				 mutatedFontIdsByWindow     = std::move(mutatedFontIdsByWindow),
-				 mutatedImageIdsByWindow    = std::move(mutatedImageIdsByWindow),
-				 resizeMutationsByWindow    = std::move(resizeMutationsByWindow),
-				 createMutationsByWindow    = std::move(createMutationsByWindow),
-				 forceDeltaMergeWindowNames = std::move(forceDeltaMergeWindowNames),
-				 outcomes                   = checkpoint.outcomes]() mutable
+			     removedWindowNames             = std::move(removedWindowNames),
+			     replacedWindowNames            = std::move(replacedWindowNames),
+			     presentationChangedWindowNames = std::move(presentationChangedWindowNames),
+			     addedHotspots = std::move(addedHotspots), changesByWindow = std::move(changesByWindow),
+			     baseWindowsByName          = std::move(baseWindowsByName),
+			     baseOutcomesByWindow       = std::move(baseOutcomesByWindow),
+			     hotspotMutations           = std::move(hotspotMutations),
+			     mutatedFontIdsByWindow     = std::move(mutatedFontIdsByWindow),
+			     mutatedImageIdsByWindow    = std::move(mutatedImageIdsByWindow),
+			     resizeMutationsByWindow    = std::move(resizeMutationsByWindow),
+			     createMutationsByWindow    = std::move(createMutationsByWindow),
+			     forceDeltaMergeWindowNames = std::move(forceDeltaMergeWindowNames),
+			     outcomes                   = checkpoint.outcomes]() mutable
 			    {
 				    if (runtimeGuard)
 				    {
 					    for (auto dependency = baseOutcomesByWindow.constBegin();
-						     dependency != baseOutcomesByWindow.constEnd(); ++dependency)
+					         dependency != baseOutcomesByWindow.constEnd(); ++dependency)
 					    {
 						    if (!dependency.value())
 							    continue;
 						    const auto outcome = dependency.value()->constFind(dependency.key());
 						    const auto base    = baseWindowsByName.constFind(dependency.key());
 						    if (outcome == dependency.value()->constEnd() || !outcome->applied ||
-							    !outcome->exists || base == baseWindowsByName.constEnd() || !base.value() ||
-							    base.value()->runtimeId != 0)
+						        !outcome->exists || base == baseWindowsByName.constEnd() || !base.value() ||
+						        base.value()->runtimeId != 0)
 						    {
 							    continue;
 						    }
@@ -11517,7 +11517,7 @@ namespace
 			flushed = runOnRuntimeThread(
 			    targetRuntime,
 			    [targetRuntime, &pendingMutations, hadOpenMiniWindowBatch, requiresCausalOrdering,
-				 windowAddHotspotReentryBlocked, mutationDependencies]() -> bool
+			     windowAddHotspotReentryBlocked, mutationDependencies]() -> bool
 			    {
 				    LuaCallbackRuntimeMutationAccess::beginMutationPlayback(
 				        *targetRuntime, requiresCausalOrdering, windowAddHotspotReentryBlocked,
@@ -12299,7 +12299,7 @@ namespace
 		};
 		const LuaCallbackDeferredLineIdentity currentLineIdentity =
 		    fillsCurrentLine ? context->deferredLineIdentityIndex.value(lineCount)
-			                 : LuaCallbackDeferredLineIdentity{};
+		                     : LuaCallbackDeferredLineIdentity{};
 		if (!expectsAnchorReplacement)
 			context->deferredLineIdentityIndex.removeHead(removedHeadLineCount);
 		target.outputIdentity.producedLine =
@@ -12976,7 +12976,7 @@ namespace
 		const CallbackActionSourceOverride actionSourceOverride = callbackActionSourceOverride(context);
 		const unsigned short               actionSource =
 		    actionSourceOverride.active ? actionSourceOverride.source
-			                            : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+		                                : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
 		bool changed = false;
 		for (const QString &line : lines)
 		{
@@ -14169,8 +14169,8 @@ static bool beginModalStringYield(lua_State *L, const LuaCallbackEngine *engine,
 	const auto *callbackContext = activeCallbackContextConst(engine);
 	const bool  refreshSnapshotAfterFlush =
 	    callbackContext && (!callbackContext->dirtyMiniWindowCommitChangesById.isEmpty() ||
-		                    !callbackContext->removedMiniWindowCommitIds.isEmpty() ||
-		                    !callbackContext->pendingMiniWindowFlushCheckpoints.isEmpty());
+	                        !callbackContext->removedMiniWindowCommitIds.isEmpty() ||
+	                        !callbackContext->pendingMiniWindowFlushCheckpoints.isEmpty());
 	if (engine && !flushDeferredRuntimeMutations(engine, nullptr))
 	{
 		qWarning().noquote() << QStringLiteral(
@@ -14744,7 +14744,7 @@ static void dispatchNotepadAppendBatch(WorldRuntime &runtime, const QString &tit
 		    for (const PendingNotepadAppendResult &result : results)
 		    {
 			    emitPluginAsyncResult(*targetRuntime, result.request, QStringLiteral("AppendToNotepad"), ok,
-				                      ok ? eOK : result.failureCode);
+			                          ok ? eOK : result.failureCode);
 		    }
 	    });
 	if (queued)
@@ -14767,7 +14767,7 @@ namespace
 		context.pendingNotepadAppend             = {};
 		context.deferredRuntimeMutations.push_back(
 		    [runtimeGuard = batch.runtime, title = std::move(batch.title),
-			 contents = std::move(batch.contents), results = std::move(batch.results)]
+		     contents = std::move(batch.contents), results = std::move(batch.results)]
 		    {
 			    if (WorldRuntime *runtime = runtimeGuard.data())
 				    dispatchNotepadAppendBatch(*runtime, title, contents, results);
@@ -14799,7 +14799,7 @@ static bool enqueueCallbackNotepadAppend(const LuaCallbackEngine *engine, WorldR
 		return enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [title, contents,
-			 result = PendingNotepadAppendResult{request, failureCode}](WorldRuntime &targetRuntime)
+		     result = PendingNotepadAppendResult{request, failureCode}](WorldRuntime &targetRuntime)
 		    { dispatchNotepadAppendBatch(targetRuntime, title, contents, {result}); });
 	}
 	if (context->deferredRuntimeTarget && context->deferredRuntimeTarget.data() != runtime)
@@ -15167,9 +15167,9 @@ bool LuaCallbackEngine::callPreparedYieldableCallback(
 		notepadPresentationSnapshot->clear();
 	const auto captureLinePresentationState =
 	    [linePresentationRequiresRefresh, outputScrollPositionRequiresRefresh, outputScrollPositionChanged,
-		 commandUiPresentationRequiresRefresh, globalPresentationRequiresRefresh, commandHistoryChanged,
-		 notepadPresentationChanged, hasNotepadPresentationSnapshot,
-		 notepadPresentationSnapshot](const LuaCallbackExecutionContext &context)
+	     commandUiPresentationRequiresRefresh, globalPresentationRequiresRefresh, commandHistoryChanged,
+	     notepadPresentationChanged, hasNotepadPresentationSnapshot,
+	     notepadPresentationSnapshot](const LuaCallbackExecutionContext &context)
 	{
 		if (linePresentationRequiresRefresh)
 			*linePresentationRequiresRefresh = context.linePresentationRequiresRefresh;
@@ -15416,7 +15416,7 @@ LuaBatchDispatchResult LuaCallbackEngine::resumeSuspendedModalString(
 			suspended->context.callbackOutputAnchorBufferIndexAtDispatch = anchorBufferIndex;
 			suspended->context.callbackOutputAnchorIsActiveIncoming =
 			    anchorState ? anchorPresentation.activeIncoming
-				            : callbackSnapshot->callbackOutputAnchorIsActiveIncoming;
+			                : callbackSnapshot->callbackOutputAnchorIsActiveIncoming;
 			suspended->context.callbackOutputAnchorIsHidden =
 			    anchorState ? anchorPresentation.hidden : callbackSnapshot->callbackOutputAnchorIsHidden;
 			suspended->context.callbackOutputAnchorState = anchorState;
@@ -15773,12 +15773,12 @@ static int luaActivateNotepad(lua_State *L)
 				        if (const MainWindow *mw = resolveMainWindow())
 					        activated = mw->activateNotepad(title, targetRuntimeOnMain);
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("ActivateNotepad"), activated, 0);
+				                              QStringLiteral("ActivateNotepad"), activated, 0);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ActivateNotepad"), false,
-					                      0);
+				                          0);
 			    }
 		    });
 		lua_pushboolean(L, accepted);
@@ -15971,8 +15971,8 @@ static int luaAddSpellCheckWord(lua_State *L)
 	}
 	const int result =
 	    controller->addSpellCheckWord(worldOwner, QByteArray(original, static_cast<int>(originalLen)),
-		                              QByteArray(action, static_cast<int>(actionLen)),
-		                              QByteArray(replacement, static_cast<int>(replacementLen)));
+	                                  QByteArray(action, static_cast<int>(actionLen)),
+	                                  QByteArray(replacement, static_cast<int>(replacementLen)));
 	lua_pushnumber(L, result);
 	return 1;
 }
@@ -16069,9 +16069,9 @@ static int luaAnsiNote(lua_State *L)
 	    {
 		    int       resolvedAnchorBufferIndex = 0;
 		    const int anchorBufferIndex = target.anchorState ? target.anchorState->presentation().bufferIndex
-			                                                 : target.anchorBufferIndex;
+		                                                     : target.anchorBufferIndex;
 		    if (target.anchored && anchorBufferIndex > 0 &&
-			    targetRuntime.writeLuaCallbackAnsiOutputAtLineAnchor(
+		        targetRuntime.writeLuaCallbackAnsiOutputAtLineAnchor(
 		            target.anchorLineNumber, anchorBufferIndex, target.anchorRelativeOffset,
 		            target.outputIdentity.expectsAnchorReplacement, text, flags, target.outputStreamId,
 		            target.anchorState, &resolvedAnchorBufferIndex, target.outputIdentity))
@@ -16152,8 +16152,8 @@ static int luaBookmark(lua_State *L)
 	    pendingBoundaryIdentity && pendingBoundaryRequestLine == lineNumber &&
 	    pendingBoundaryIdentity->deferredLineIdentity.isValid() &&
 	    (!pendingBoundaryIdentity->deferredLineIdentity.state->layoutDiverged() ||
-		 (canonicalBoundaryIdentityResolved &&
-		  pendingBoundaryIdentity->deferredLineIdentity.state->exactIdentitiesRemainReliable()));
+	     (canonicalBoundaryIdentityResolved &&
+	      pendingBoundaryIdentity->deferredLineIdentity.state->exactIdentitiesRemainReliable()));
 	if (exactLineMutationBoundary)
 		context->bookmarkLineLayoutBoundaryCurrent = true;
 	const bool presentationRequiresRefresh = context && context->linePresentationRequiresRefresh;
@@ -16216,7 +16216,7 @@ static int luaBookmark(lua_State *L)
 	    context && context->currentLine && lookupLineNumber == context->materializedLineBufferCount + 1;
 	const LuaCallbackDeferredLineIdentity deferredIdentity =
 	    context ? context->deferredLineIdentityIndex.value(lookupLineNumber)
-		        : LuaCallbackDeferredLineIdentity{};
+	            : LuaCallbackDeferredLineIdentity{};
 	const WorldRuntime::LuaCallbackLineIdentity identity =
 	    exactLineMutationBoundary
 	        ? *pendingBoundaryIdentity
@@ -16854,7 +16854,7 @@ static int luaBroadcastPlugin(lua_State *L)
 #else
 				delivered =
 				    runtime->broadcastPluginToRecipients(message, text, callingPluginId, engine->pluginName(),
-					                                     recipients, callbackSnapshot.snapshot);
+				                                         recipients, callbackSnapshot.snapshot);
 #endif
 			}
 		}
@@ -17177,7 +17177,7 @@ static int luaChatEverybody(lua_State *L)
 		    engine, runtime, 8,
 		    emote
 		        ? QStringLiteral("You emote to everybody: %1%2%3 %4%5").arg(bold, cyan, ourName, message, red)
-				: QStringLiteral("You chat to everybody, '%1%2%3%4'").arg(bold, cyan, message, red));
+		        : QStringLiteral("You chat to everybody, '%1%2%3%4'").arg(bold, cyan, message, red));
 		return results;
 	}
 	lua_pushnumber(L, runOnRuntimeThreadDeferredMutation(
@@ -17317,7 +17317,7 @@ static int luaChatID(lua_State *L)
 			    emote
 			        ? QStringLiteral("You emote to %1: %2%3%4 %5%6")
 			              .arg(remoteUser, bold, cyan, ourName, message, red)
-					: QStringLiteral("You chat to %1, '%2%3%4%5'").arg(remoteUser, bold, cyan, message, red));
+			        : QStringLiteral("You chat to %1, '%2%3%4%5'").arg(remoteUser, bold, cyan, message, red));
 		}
 		return results;
 	}
@@ -17624,8 +17624,8 @@ static int luaChatPersonal(lua_State *L)
 				                                 emote
 				                                     ? QStringLiteral("You emote to %1: %2%3%4 %5%6")
 				                                           .arg(remoteUser, bold, cyan, ourName, message, red)
-													 : QStringLiteral("You chat to %1, '%2%3%4%5'")
-													       .arg(remoteUser, bold, cyan, message, red));
+				                                     : QStringLiteral("You chat to %1, '%2%3%4%5'")
+				                                           .arg(remoteUser, bold, cyan, message, red));
 			}
 			if (matchedNames.size() > 1)
 				appendCallbackChatNoteOutputLine(engine, runtime, 7,
@@ -17742,7 +17742,7 @@ static int luaChatSendFile(lua_State *L)
 			appendCallbackChatNoteOutputLine(
 			    engine, runtime, 14,
 			    sending ? QStringLiteral("Already sending file %1").arg(currentFileName)
-				        : QStringLiteral("Already receiving file %1").arg(currentFileName));
+			            : QStringLiteral("Already receiving file %1").arg(currentFileName));
 			lua_pushnumber(L, eAlreadyTransferringFile);
 			return 1;
 		}
@@ -18440,7 +18440,7 @@ static int luaDeleteVariable(lua_State *L)
 	    [=]() -> int
 	    {
 		    return pluginScoped ? runtime->deletePluginVariable(pluginId, variableName)
-			                    : runtime->deleteVariable(variableName);
+		                        : runtime->deleteVariable(variableName);
 	    },
 	    eWorldClosed);
 	if (result == eOK)
@@ -18792,7 +18792,7 @@ static int runOnRuntimeThreadDeferredMutationCall(const LuaCallbackEngine *engin
 	    [method = MethodType(method), argsTuple = std::move(argsTuple)](WorldRuntime &targetRuntime) mutable
 	    {
 		    return std::apply([&](auto &...boundArgs) -> int
-			                  { return std::invoke(method, &targetRuntime, boundArgs...); }, argsTuple);
+		                      { return std::invoke(method, &targetRuntime, boundArgs...); }, argsTuple);
 	    },
 	    fallbackValue);
 }
@@ -18965,7 +18965,7 @@ static int enqueueRuntimeThreadAsyncStatusResult(lua_State *L, const LuaCallback
 	const bool                        accepted  = enqueueRuntimeThreadDeferredMutationNoResult(
 	    engine, runtime,
 	    [apiName, requestId, funcCopy = std::move(funcCopy),
-		 okCopy = std::move(okCopy)](WorldRuntime &targetRuntime) mutable
+	     okCopy = std::move(okCopy)](WorldRuntime &targetRuntime) mutable
 	    {
 		    const int status = funcCopy(targetRuntime);
 		    emitPluginAsyncResult(targetRuntime, requestId, apiName, okCopy(status), status, QString());
@@ -19007,7 +19007,7 @@ static int enqueueRuntimeThreadAsyncPlaySoundResult(lua_State *L, const LuaCallb
 		    {
 			    if (runtimeGuard)
 				    emitPluginAsyncResult(*runtimeGuard, requestId, apiName, status == eOK, status,
-					                      QString());
+				                          QString());
 		    };
 		    if (QThread::currentThread() == runtimeGuard->thread())
 			    deliver();
@@ -19361,7 +19361,7 @@ static bool resolveCommandUiSnapshotForApi(const LuaCallbackEngine *engine, Worl
 		                     return true;
 	                     },
 	                     false)
-		           : runOnRuntimeThread(
+	               : runOnRuntimeThread(
 	                     runtime,
 	                     [&]() -> bool
 	                     {
@@ -19531,18 +19531,18 @@ static bool resolveStoredWorldAttributeValueForApi(const LuaCallbackEngine *engi
 	                     [&]() -> bool
 	                     {
 		                     const auto &attributes = isMultiline ? runtime->worldMultilineAttributes()
-							                                      : runtime->worldAttributes();
+		                                                          : runtime->worldAttributes();
 		                     present                = attributes.contains(key);
 		                     value                  = attributes.value(key);
 		                     return true;
 	                     },
 	                     false)
-		           : runOnRuntimeThread(
+	               : runOnRuntimeThread(
 	                     runtime,
 	                     [&]() -> bool
 	                     {
 		                     const auto &attributes = isMultiline ? runtime->worldMultilineAttributes()
-							                                      : runtime->worldAttributes();
+		                                                          : runtime->worldAttributes();
 		                     present                = attributes.contains(key);
 		                     value                  = attributes.value(key);
 		                     return true;
@@ -20839,7 +20839,7 @@ static bool resolveNotepadListForApi(const LuaCallbackEngine *engine, WorldRunti
 			    return true;
 
 		    for (const QList<QMdiSubWindow *> windows = mdi->subWindowList(QMdiArea::CreationOrder);
-			     QMdiSubWindow *sub : windows)
+		         QMdiSubWindow *sub : windows)
 		    {
 			    auto *text = qobject_cast<TextChildWindow *>(sub);
 			    if (!text)
@@ -20847,7 +20847,7 @@ static bool resolveNotepadListForApi(const LuaCallbackEngine *engine, WorldRunti
 			    if (!all)
 			    {
 				    if (const auto relatedToken = text->property("worldRuntimeToken").toULongLong();
-					    relatedToken == ownerToken)
+				        relatedToken == ownerToken)
 				    {
 					    // Matched this runtime instance.
 				    }
@@ -20856,7 +20856,7 @@ static bool resolveNotepadListForApi(const LuaCallbackEngine *engine, WorldRunti
 					    if (relatedToken != 0)
 						    continue;
 					    if (const QString related = text->property("worldId").toString();
-						    related.isEmpty() || related.compare(worldId, Qt::CaseInsensitive) != 0)
+					        related.isEmpty() || related.compare(worldId, Qt::CaseInsensitive) != 0)
 						    continue;
 				    }
 			    }
@@ -21535,7 +21535,7 @@ static int addTempTimer(const LuaCallbackEngine *engine, double seconds, const Q
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 
 			    QList<WorldRuntime::Timer> &runtimeTimers = mutableTimerList(&targetRuntime, plugin);
@@ -21661,12 +21661,12 @@ static int luaDoCommand(lua_State *L)
 					        }
 				        }
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId, QStringLiteral("DoCommand"),
-						                      deferredResult == eOK, deferredResult);
+				                              deferredResult == eOK, deferredResult);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("DoCommand"), false,
-					                      eNoSuchCommand);
+				                          eNoSuchCommand);
 			    }
 		    });
 		lua_pushnumber(L, accepted ? eOK : eNoSuchCommand);
@@ -21791,12 +21791,12 @@ static int luaEnableGroup(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, triggerRuntimeLocations, aliasRuntimeLocations,
-				 timerRuntimeLocations, enabled, mutationDependencies](WorldRuntime &targetRuntime)
+			     timerRuntimeLocations, enabled, mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const auto setRuntimeEnabled = [enabled](auto &rule)
 				    { rule.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled)); };
@@ -21805,7 +21805,7 @@ static int luaEnableGroup(lua_State *L)
 				    const auto changedAliasLocations = mutateRulesByRuntimeLocation<WorldRuntime::Alias>(
 				        targetRuntime, aliasRuntimeLocations, mutationDependencies,
 				        [](WorldRuntime &runtime, const quint64 location, const quint64 runtimeId,
-						   const int indexHint, int *resolvedIndex)
+				           const int indexHint, int *resolvedIndex)
 				        {
 					        return LuaCallbackRuntimeMutationAccess::aliasForLocation(
 					            runtime, location, runtimeId, indexHint, resolvedIndex);
@@ -21814,7 +21814,7 @@ static int luaEnableGroup(lua_State *L)
 				    const auto changedTimerLocations = mutateRulesByRuntimeLocation<WorldRuntime::Timer>(
 				        targetRuntime, timerRuntimeLocations, mutationDependencies,
 				        [](WorldRuntime &runtime, const quint64 location, const quint64 runtimeId,
-						   const int indexHint, int *resolvedIndex)
+				           const int indexHint, int *resolvedIndex)
 				        {
 					        return LuaCallbackRuntimeMutationAccess::timerForLocation(
 					            runtime, location, runtimeId, indexHint, resolvedIndex);
@@ -21851,7 +21851,7 @@ static int luaEnableGroup(lua_State *L)
 				    continue;
 			    trigger.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 			    changedTriggerLocations.push_back({trigger.runtimeLocationHandle, trigger.runtimeId, index,
-				                                   luaCallbackAllRuleSnapshotParts()});
+			                                       luaCallbackAllRuleSnapshotParts()});
 		    }
 		    const auto changedAliasLocations =
 		        matchingRuleRuntimeLocations(aliases, luaCallbackAllRuleSnapshotParts(), matchesRuntimeGroup);
@@ -21860,8 +21860,8 @@ static int luaEnableGroup(lua_State *L)
 		    const int       aliasChanged = setEnabled(aliases);
 		    const int       timerChanged = setEnabled(timers);
 		    const qsizetype changedCount = changedTriggerLocations.size() +
-			                               static_cast<qsizetype>(aliasChanged) +
-			                               static_cast<qsizetype>(timerChanged);
+		                                   static_cast<qsizetype>(aliasChanged) +
+		                                   static_cast<qsizetype>(timerChanged);
 
 		    commitTriggerRuleMutations(runtime, plugin, changedTriggerLocations);
 		    commitAliasRuleMutations(runtime, plugin, changedAliasLocations);
@@ -21943,7 +21943,7 @@ static int luaExecute(lua_State *L)
 		    [input, triggerPriority](const WorldRuntime &targetRuntime) -> int
 		    {
 			    return triggerPriority ? targetRuntime.executeCommandWithTriggerPriority(input)
-				                       : targetRuntime.executeCommand(input);
+			                           : targetRuntime.executeCommand(input);
 		    },
 		    [](const int status) { return status == eOK; });
 		return results;
@@ -22207,7 +22207,7 @@ static int luaExportXML(lua_State *L)
 			    for (const auto &tr : runtime->triggers())
 			    {
 				    if (const QString name = tr.attributes.value(QStringLiteral("name")).trimmed().toLower();
-					    name != targetName)
+				        name != targetName)
 					    continue;
 				    out << "<triggers>" << nl;
 				    out << nl << "  <trigger ";
@@ -22225,7 +22225,7 @@ static int luaExportXML(lua_State *L)
 			    for (const auto &al : runtime->aliases())
 			    {
 				    if (const QString name = al.attributes.value(QStringLiteral("name")).trimmed().toLower();
-					    name != targetName)
+				        name != targetName)
 					    continue;
 				    out << "<aliases>" << nl;
 				    out << nl << "  <alias ";
@@ -22243,7 +22243,7 @@ static int luaExportXML(lua_State *L)
 			    for (const auto &tm : runtime->timers())
 			    {
 				    if (const QString name = tm.attributes.value(QStringLiteral("name")).trimmed().toLower();
-					    name != targetName)
+				        name != targetName)
 					    continue;
 				    out << "<timers>" << nl;
 				    out << nl << "  <timer ";
@@ -22261,13 +22261,13 @@ static int luaExportXML(lua_State *L)
 			    for (const auto &[attributes, children] : runtime->macros())
 			    {
 				    if (const QString name = attributes.value(QStringLiteral("name")).trimmed();
-					    name.trimmed().toLower() == targetName)
+				        name.trimmed().toLower() == targetName)
 				    {
 					    QString typeText = attributes.value(QStringLiteral("type")).trimmed();
 					    if (typeText.isEmpty())
 						    typeText = QStringLiteral("replace");
 					    if (typeText != QStringLiteral("replace") && typeText != QStringLiteral("send_now") &&
-						    typeText != QStringLiteral("insert"))
+					        typeText != QStringLiteral("insert"))
 						    typeText = QStringLiteral("unknown");
 					    const QString send = children.value(QStringLiteral("send"));
 					    out << "<macros>" << nl;
@@ -22286,7 +22286,7 @@ static int luaExportXML(lua_State *L)
 		    case 4: // variable
 		    {
 			    if (const auto found = runtime->variables().constFind(targetName);
-				    found != runtime->variables().cend())
+			        found != runtime->variables().cend())
 			    {
 				    out << "<variables>" << nl;
 				    out << "  <variable name=\"" << fixXmlString(found->label) << "\">"
@@ -22301,7 +22301,7 @@ static int luaExportXML(lua_State *L)
 			    for (const auto &[attributes, content] : runtime->keypadEntries())
 			    {
 				    if (const QString name = attributes.value(QStringLiteral("name")).trimmed().toLower();
-					    name != targetName)
+				        name != targetName)
 					    continue;
 				    out << "<keypad>" << nl;
 				    out << nl << "  <key ";
@@ -23060,7 +23060,7 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 			firstLineInPage = lineNumber;
 			lastLineInPage  = static_cast<int>(
 			    qMin(static_cast<qint64>(std::numeric_limits<int>::max()),
-				     static_cast<qint64>(firstLineInPage) + static_cast<qint64>(kLinePageSize) - 1));
+			         static_cast<qint64>(firstLineInPage) + static_cast<qint64>(kLinePageSize) - 1));
 			if (knownLineCount >= 0)
 				lastLineInPage = qMin(knownLineCount, lastLineInPage);
 			break;
@@ -23068,7 +23068,7 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 			firstLineInPage = qMax(1, lineNumber - kPreviousLinesInPage);
 			lastLineInPage  = static_cast<int>(
 			    qMin(static_cast<qint64>(std::numeric_limits<int>::max()),
-				     static_cast<qint64>(firstLineInPage) + static_cast<qint64>(kLinePageSize) - 1));
+			         static_cast<qint64>(firstLineInPage) + static_cast<qint64>(kLinePageSize) - 1));
 			if (knownLineCount >= 0)
 			{
 				lastLineInPage  = qMin(knownLineCount, lastLineInPage);
@@ -23125,7 +23125,7 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 		request.linePageResult = pageResult;
 		request.beforeRuntimeResumeCallback =
 		    [page, firstLineInPage, lastLineInPage, includeRecentLines, refreshOutputScrollPosition,
-			 refreshGeometryConstraint](WorldRuntime & /*resumeRuntime*/, const QString & /*unused*/)
+		     refreshGeometryConstraint](WorldRuntime & /*resumeRuntime*/, const QString & /*unused*/)
 		{
 			WorldRuntime *const dataRuntime = page->runtime.data();
 			if (!dataRuntime)
@@ -23335,7 +23335,7 @@ static int luaGetLineInfo(lua_State *L)
 		pushLuaUtf8String(L, "timestr");
 		const QString timeString =
 		    entry.time.isValid() ? QLocale::system().toString(entry.time.toLocalTime(), QLocale::ShortFormat)
-			                     : QString();
+		                         : QString();
 		const QByteArray timeBytes = timeString.toLocal8Bit();
 		lua_pushlstring(L, timeBytes.constData(), timeBytes.size());
 		lua_rawset(L, -3);
@@ -24388,7 +24388,7 @@ static QString sqliteVersionString()
 			               if (db.open())
 			               {
 				               if (QSqlQuery query(db);
-							       query.exec(QStringLiteral("SELECT sqlite_version()")) && query.next())
+				                   query.exec(QStringLiteral("SELECT sqlite_version()")) && query.next())
 					               cached = query.value(0).toString();
 			               }
 			               db.close();
@@ -24505,7 +24505,7 @@ static bool showHelpTopic(const QString &prefix, const QString &topic)
 		    [](MainWindow *frame) -> bool
 		    {
 			    QMessageBox::information(frame, QStringLiteral("Help"),
-				                         QStringLiteral("Help database (help.db) not found."));
+			                             QStringLiteral("Help database (help.db) not found."));
 			    return true;
 		    },
 		    false);
@@ -24591,7 +24591,7 @@ static bool showHelpTopic(const QString &prefix, const QString &topic)
 		    [](MainWindow *frame) -> bool
 		    {
 			    QMessageBox::warning(frame, QStringLiteral("Help"),
-				                     QStringLiteral("Unable to open help database."));
+			                         QStringLiteral("Unable to open help database."));
 			    return true;
 		    },
 		    false);
@@ -24641,8 +24641,8 @@ static QString chooseHelpFromList(const QString &filter, const bool includeLua,
 			    for (int i = 0; kInternalFunctionMetadataTable[i].functionName[0]; ++i)
 			    {
 				    if (const QString name =
-					        QString::fromUtf8(kInternalFunctionMetadataTable[i].functionName);
-					    matches(name))
+				            QString::fromUtf8(kInternalFunctionMetadataTable[i].functionName);
+				        matches(name))
 					    list.addItem(name);
 			    }
 			    if (includeLua)
@@ -24659,10 +24659,10 @@ static QString chooseHelpFromList(const QString &filter, const bool includeLua,
 		    };
 
 		    QObject::connect(&filterEdit, &QLineEdit::textChanged, &dialog,
-			                 [&](const QString &) { populateList(); });
+		                     [&](const QString &) { populateList(); });
 		    if (luaButton)
 			    QObject::connect(luaButton, &QPushButton::clicked, &dialog,
-				                 [&] { dialog.done(QDialog::Accepted + 1); });
+			                     [&] { dialog.done(QDialog::Accepted + 1); });
 
 		    populateList();
 
@@ -24719,7 +24719,7 @@ static void runLuaHelp(const QString &filter, const QMap<QString, QString> &luaS
 	{
 		includeLua =
 		    scriptsEnabled && (scriptLanguage.isEmpty() ||
-			                   scriptLanguage.compare(QStringLiteral("lua"), Qt::CaseInsensitive) == 0);
+		                       scriptLanguage.compare(QStringLiteral("lua"), Qt::CaseInsensitive) == 0);
 	}
 	const QString selection = chooseHelpFromList(filter, includeLua, luaFunctions);
 	if (selection.isEmpty())
@@ -24890,7 +24890,7 @@ static int luaImportXML(lua_State *L)
 		const bool                        accepted = enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [xml, callbackPluginId, callbackPluginIdentity, requestId,
-			 encodeImportPayload](WorldRuntime &targetRuntime)
+		     encodeImportPayload](WorldRuntime &targetRuntime)
 		    {
 			    XmlImportResult result;
 			    if (!callbackPluginId.isEmpty())
@@ -24907,7 +24907,7 @@ static int luaImportXML(lua_State *L)
 				    result.errorMessage = QStringLiteral("App controller is not available");
 			    }
 			    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ImportXML"), result.ok,
-				                      result.ok ? eOK : -1, encodeImportPayload(result));
+			                          result.ok ? eOK : -1, encodeImportPayload(result));
 		    });
 		lua_pushnumber(L, accepted ? 0 : -1);
 		if (accepted && requestId.isValid())
@@ -25526,10 +25526,10 @@ static int luaNoteHr(lua_State *L)
 		    {
 			    int       resolvedAnchorBufferIndex = 0;
 			    const int anchorBufferIndex         = target.anchorState
-				                                          ? target.anchorState->presentation().bufferIndex
-				                                          : target.anchorBufferIndex;
+			                                              ? target.anchorState->presentation().bufferIndex
+			                                              : target.anchorBufferIndex;
 			    if (anchorBufferIndex > 0 &&
-				    targetRuntime.writeLuaCallbackOutputAtLineAnchor(
+			        targetRuntime.writeLuaCallbackOutputAtLineAnchor(
 			            target.anchorLineNumber, anchorBufferIndex, target.anchorRelativeOffset,
 			            target.outputIdentity.expectsAnchorReplacement, QString(), flags, {}, true,
 			            target.outputStreamId, target.anchorState, &resolvedAnchorBufferIndex,
@@ -25802,7 +25802,7 @@ static int luaNotepadFont(lua_State *L)
 			    if (!fontName.isEmpty())
 				    qmudApplyMonospaceFallback(font, fontName);
 			    if (const QString charsetFamily = qmudFamilyForCharset(font.family(), charset);
-				    !charsetFamily.isEmpty() && charsetFamily != font.family())
+			        !charsetFamily.isEmpty() && charsetFamily != font.family())
 			    {
 				    qmudApplyMonospaceFallback(font, charsetFamily);
 			    }
@@ -25833,7 +25833,7 @@ static int luaNotepadFont(lua_State *L)
 		    if (!fontName.isEmpty())
 			    qmudApplyMonospaceFallback(font, fontName);
 		    if (const QString charsetFamily = qmudFamilyForCharset(font.family(), charset);
-			    !charsetFamily.isEmpty() && charsetFamily != font.family())
+		        !charsetFamily.isEmpty() && charsetFamily != font.family())
 		    {
 			    qmudApplyMonospaceFallback(font, charsetFamily);
 		    }
@@ -26016,7 +26016,7 @@ static int luaOpen(lua_State *L)
 				        const bool opened =
 				            AppController::instance() && AppController::instance()->openDocumentFile(path);
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId, QStringLiteral("Open"), opened,
-						                      opened ? eOK : -1, path);
+				                              opened ? eOK : -1, path);
 			        });
 			    if (!queued)
 			    {
@@ -26070,7 +26070,7 @@ static int luaOpenBrowser(lua_State *L)
 				               return;
 			               const bool ok = QDesktopServices::openUrl(QUrl(urlText));
 			               emitPluginAsyncResult(*targetRuntime, requestId, QStringLiteral("OpenBrowser"), ok,
-						                         ok ? eOK : eCouldNotOpenFile);
+			                                     ok ? eOK : eCouldNotOpenFile);
 		               },
 		               Qt::QueuedConnection);
 		lua_pushnumber(L, queued ? eOK : eCouldNotOpenFile);
@@ -26406,7 +26406,7 @@ static int luaAudioInvoke(lua_State *L)
 			const auto result = QMudNativePluginRegistry::callLuaAudio(
 			    runtime, name, arguments,
 			    runtime ? luaAudioCallContext(engine, runtime)
-				        : QMudNativePluginRegistry::LuaAudioCallContext{});
+			            : QMudNativePluginRegistry::LuaAudioCallContext{});
 			if (result.errorCode != eOK)
 			{
 				pushLuaUtf8String(L, result.errorText);
@@ -26510,7 +26510,7 @@ static QMudNativePluginRegistry::NativeCallResult queueNativeCallPluginRuntimeTh
 		        const QMudNativePluginRegistry::NativeCallContext runtimeContext =
 		            targetRuntime.nativePluginCallContext(shimId);
 		        static_cast<void>(QMudNativePluginRegistry::callRoutine(&targetRuntime, shimId, routine,
-				                                                        arguments, runtimeContext));
+		                                                                arguments, runtimeContext));
 	        }))
 	{
 		validationResult.errorCode = eErrorCallingPluginRoutine;
@@ -26806,7 +26806,7 @@ static int luaRemoveBacktracks(lua_State *L)
 	}
 	const QHash<QString, AppController::MapDirection> directionSnapshot =
 	    AppController::instance() ? AppController::instance()->mapDirectionSnapshot()
-		                          : QHash<QString, AppController::MapDirection>{};
+	                              : QHash<QString, AppController::MapDirection>{};
 	const auto directionMapping =
 	    [&directionSnapshot](const QString &direction) -> AppController::MapDirection
 	{ return directionSnapshot.value(direction.trimmed().toLower()); };
@@ -27055,7 +27055,7 @@ static int luaReverseSpeedwalk(lua_State *L)
 	}
 	const QHash<QString, AppController::MapDirection> directionSnapshot =
 	    AppController::instance() ? AppController::instance()->mapDirectionSnapshot()
-		                          : QHash<QString, AppController::MapDirection>{};
+	                              : QHash<QString, AppController::MapDirection>{};
 	const auto directionMapping =
 	    [&directionSnapshot](const QString &direction) -> AppController::MapDirection
 	{ return directionSnapshot.value(direction.trimmed().toLower()); };
@@ -27193,7 +27193,7 @@ static int luaSave(lua_State *L)
 				        {
 					        if (runtimeGuard)
 						        emitPluginAsyncResult(*runtimeGuard, asyncRequestId, QStringLiteral("Save"),
-								                      saved, 0, saved ? QString() : saveError);
+						                              saved, 0, saved ? QString() : saveError);
 				        });
 			    });
 			ok = accepted;
@@ -27300,7 +27300,7 @@ static int luaSaveNotepad(lua_State *L)
 		const bool                        accepted         = enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [title, worldId, resolvedFileName, replace, callbackPluginId,
-			 requestId](WorldRuntime &targetRuntime)
+		     requestId](WorldRuntime &targetRuntime)
 		    {
 			    const QPointer<WorldRuntime> runtimeGuard(&targetRuntime);
 			    const bool                   queued = enqueueOnMainThread(
@@ -27312,12 +27312,12 @@ static int luaSaveNotepad(lua_State *L)
 				        bool    ok = false;
 				        QString error;
 				        if (TextChildWindow *text = findNotepadWindow(title, targetRuntimeOnMain, worldId);
-						    text && text->editor())
+				            text && text->editor())
 				        {
 					        ok = text->saveToFile(resolvedFileName, &error, replace);
 				        }
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId, QStringLiteral("SaveNotepad"),
-						                      ok, ok ? 0 : -1, error);
+				                              ok, ok ? 0 : -1, error);
 			        });
 			    if (!queued)
 			    {
@@ -27502,8 +27502,8 @@ static int luaSetBackgroundImage(lua_State *L)
 		}
 		const QString storedName =
 		    imageFileName.isEmpty() ? QString()
-			                        : QMudPluginPathUtils::qmudHomeRelativePath(qmudHomeForLuaFileApi(engine),
-			                                                                    imageFileName, false);
+		                            : QMudPluginPathUtils::qmudHomeRelativePath(qmudHomeForLuaFileApi(engine),
+		                                                                        imageFileName, false);
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			return enqueueRuntimeThreadAsyncStatusResult(
@@ -27576,7 +27576,7 @@ static int luaTransparency(lua_State *L)
 			               MainWindow *window = resolveMainWindow();
 			               const bool  ok     = window && applyTransparency(window);
 			               emitPluginAsyncResult(*targetRuntime, requestId, QStringLiteral("Transparency"),
-						                         ok, ok ? eOK : eBadParameter);
+			                                     ok, ok ? eOK : eBadParameter);
 		               },
 		               Qt::QueuedConnection);
 		lua_pushboolean(L, queued);
@@ -27687,7 +27687,7 @@ static int luaSetEntity(lua_State *L)
 		    [name, contents, expectedSlot = capturedSlot.value_or(0)](WorldRuntime &targetRuntime)
 		    {
 			    LuaCallbackRuntimeMutationAccess::applyEntityValue(targetRuntime, name, contents,
-				                                                   expectedSlot);
+			                                                       expectedSlot);
 		    });
 		return 0;
 	}
@@ -27732,8 +27732,8 @@ static int luaSetForegroundImage(lua_State *L)
 		}
 		const QString storedName =
 		    imageFileName.isEmpty() ? QString()
-			                        : QMudPluginPathUtils::qmudHomeRelativePath(qmudHomeForLuaFileApi(engine),
-			                                                                    imageFileName, false);
+		                            : QMudPluginPathUtils::qmudHomeRelativePath(qmudHomeForLuaFileApi(engine),
+		                                                                        imageFileName, false);
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			return enqueueRuntimeThreadAsyncStatusResult(
@@ -27945,12 +27945,12 @@ static int luaSetToolBarPosition(lua_State *L)
 					                  const ToolBarDockState &sb = s_toolbarStates.value(b);
 					                  const int               primaryA =
 					                      area == Qt::LeftToolBarArea || area == Qt::RightToolBarArea
-									          ? sa.pos.y()
-									          : sa.pos.x();
+					                          ? sa.pos.y()
+					                          : sa.pos.x();
 					                  const int primaryB =
 					                      area == Qt::LeftToolBarArea || area == Qt::RightToolBarArea
-									          ? sb.pos.y()
-									          : sb.pos.x();
+					                          ? sb.pos.y()
+					                          : sb.pos.x();
 					                  return primaryA < primaryB;
 				                  });
 				for (QToolBar *candidate : areaToolbars)
@@ -27979,7 +27979,7 @@ static int luaSetToolBarPosition(lua_State *L)
 			               MainWindow *frame  = resolveMainWindow();
 			               const int   result = frame ? applyToolBarPosition(frame) : eBadParameter;
 			               emitPluginAsyncResult(*targetRuntime, requestId,
-						                         QStringLiteral("SetToolBarPosition"), result == eOK, result);
+			                                     QStringLiteral("SetToolBarPosition"), result == eOK, result);
 		               },
 		               Qt::QueuedConnection);
 		invalidateGlobalCachedCommandUiSnapshot(engine);
@@ -28599,13 +28599,13 @@ static int luaSpellCheckCommandContinuation(lua_State *L, int status, lua_KConte
 	const bool                        accepted  = enqueueRuntimeThreadDeferredMutationNoResult(
 	    engine, runtime,
 	    [expectedInput, replacementStart, replacementEnd, replacement, restoreSelectionStart,
-		 restoreSelectionEnd, requestId](WorldRuntime &targetRuntime)
+	     restoreSelectionEnd, requestId](WorldRuntime &targetRuntime)
 	    {
 		    const bool applied = applySpellCheckCommandReplacement(
 		        targetRuntime, expectedInput, replacementStart, replacementEnd, replacement,
 		        restoreSelectionStart, restoreSelectionEnd);
 		    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("SpellCheckCommand"), applied,
-			                      applied ? 0 : -1, applied ? QStringLiteral("1") : QString());
+		                          applied ? 0 : -1, applied ? QStringLiteral("1") : QString());
 	    });
 	if (!accepted)
 	{
@@ -28787,13 +28787,13 @@ static int luaSpellCheckCommand(lua_State *L)
 		const bool                        accepted  = enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [expectedInput, replacementStart, replacementEnd, replacement, restoreSelectionStart,
-			 restoreSelectionEnd, requestId](WorldRuntime &targetRuntime)
+		     restoreSelectionEnd, requestId](WorldRuntime &targetRuntime)
 		    {
 			    const bool applied = applySpellCheckCommandReplacement(
 			        targetRuntime, expectedInput, replacementStart, replacementEnd, replacement,
 			        restoreSelectionStart, restoreSelectionEnd);
 			    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("SpellCheckCommand"), applied,
-				                      applied ? 0 : -1, applied ? QStringLiteral("1") : QString());
+			                          applied ? 0 : -1, applied ? QStringLiteral("1") : QString());
 		    });
 		if (!accepted)
 		{
@@ -29238,7 +29238,7 @@ static int luaAppendToNotepad(lua_State *L)
 	}
 	const bool ok =
 	    runOnMainWindowThread([title, contents, runtime](MainWindow *mw) -> bool
-		                      { return mw->appendToNotepad(title, contents, false, runtime); }, false);
+	                          { return mw->appendToNotepad(title, contents, false, runtime); }, false);
 	if (ok)
 	{
 		cacheCallbackNotepadDocumentTextAfterWrite(engine, runtime, title, worldId, contents, false);
@@ -29287,12 +29287,12 @@ static int luaReplaceNotepad(lua_State *L)
 				        if (MainWindow *mw = resolveMainWindow())
 					        ok = mw->appendToNotepad(title, contents, true, targetRuntimeOnMain);
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("ReplaceNotepad"), ok, 0);
+				                              QStringLiteral("ReplaceNotepad"), ok, 0);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ReplaceNotepad"), false,
-					                      0);
+				                          0);
 			    }
 		    });
 		if (accepted)
@@ -29307,7 +29307,7 @@ static int luaReplaceNotepad(lua_State *L)
 	}
 	const bool ok =
 	    runOnMainWindowThread([title, contents, runtime](MainWindow *mw) -> bool
-		                      { return mw->appendToNotepad(title, contents, true, runtime); }, false);
+	                          { return mw->appendToNotepad(title, contents, true, runtime); }, false);
 	if (ok)
 	{
 		cacheCallbackNotepadDocumentTextAfterWrite(engine, runtime, title, worldId, contents, true);
@@ -29355,12 +29355,12 @@ static int luaSendToNotepad(lua_State *L)
 				        if (MainWindow *mw = resolveMainWindow())
 					        ok = mw->sendToNotepad(title, contents, targetRuntimeOnMain);
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("SendToNotepad"), ok, 0);
+				                              QStringLiteral("SendToNotepad"), ok, 0);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("SendToNotepad"), false,
-					                      0);
+				                          0);
 			    }
 		    });
 		if (accepted)
@@ -29592,7 +29592,7 @@ static int yieldCallbackOutputPresentation(lua_State *L, LuaCallbackEngine *engi
 	const bool commandUiSnapshotRequiresRefresh =
 	    commandUiSnapshotRequested && context &&
 	    ((context->commandUiSnapshotDirty && (!context->hasCommandUiSnapshot || requireFrameData)) ||
-		 frameDataRequiresRefresh || selectedWordRequiresRefresh);
+	     frameDataRequiresRefresh || selectedWordRequiresRefresh);
 	const bool presentationRequiresRefresh =
 	    commandUiSnapshotRequiresRefresh || commandHistoryRequiresRefresh;
 	if (!context ||
@@ -29615,8 +29615,8 @@ static int yieldCallbackOutputPresentation(lua_State *L, LuaCallbackEngine *engi
 	LuaPendingModalStringRequest request;
 	request.beforeRuntimeResumeCallback =
 	    [result, refreshOutputScrollPosition, refreshGeometryConstraint, captureCommandUiSnapshot,
-		 captureFrameData, allowSelectedWordHitTest,
-		 commandHistoryRequiresRefresh](WorldRuntime & /*resumeRuntime*/, const QString & /*unused*/)
+	     captureFrameData, allowSelectedWordHitTest,
+	     commandHistoryRequiresRefresh](WorldRuntime & /*resumeRuntime*/, const QString & /*unused*/)
 	{
 		WorldRuntime *const targetRuntime = result->runtime.data();
 		WorldView *const    view          = targetRuntime ? targetRuntime->view() : nullptr;
@@ -32158,7 +32158,7 @@ static int luaUtilsMsgBoxInternal(lua_State *L)
 	}
 	const auto result =
 	    runOnMainWindowThreadModalDialogSync([&](MainWindow *frame) -> QMessageBox::StandardButton
-		                                     { return showMessageBox(frame); }, QMessageBox::NoButton);
+	                                         { return showMessageBox(frame); }, QMessageBox::NoButton);
 	const char *out = buttonName(result);
 
 	pushLuaUtf8String(L, out);
@@ -32533,7 +32533,7 @@ static int luaUtilsSendToFront(lua_State *L)
 					        break;
 				        }
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId, QStringLiteral("SendToFront"),
-						                      found, found ? eOK : -1);
+				                              found, found ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
@@ -32552,8 +32552,8 @@ static int luaUtilsSendToFront(lua_State *L)
 	    [titlePrefix](MainWindow *) -> bool
 	    {
 		    return std::ranges::any_of(QApplication::topLevelWidgets(),
-			                           [&titlePrefix](QWidget *widget)
-			                           {
+		                               [&titlePrefix](QWidget *widget)
+		                               {
 			                               if (!widget || !widget->windowTitle().startsWith(titlePrefix))
 				                               return false;
 			                               widget->raise();
@@ -32788,7 +32788,7 @@ static int luaUtilsShellExecute(lua_State *L)
 				    if (!queued)
 				    {
 					    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ShellExecute"), false,
-						                      eCouldNotOpenFile, QStringLiteral("Failed to open target."));
+					                          eCouldNotOpenFile, QStringLiteral("Failed to open target."));
 				    }
 			    });
 			lua_pushboolean(L, accepted ? 1 : 0);
@@ -32835,7 +32835,7 @@ static int luaUtilsShowDebugStatus(lua_State *L)
 			    if (!queued)
 			    {
 				    qWarning().noquote() << QStringLiteral("[QMud][LuaBridge] failed to enqueue debug-status "
-					                                       "update on main thread");
+				                                           "update on main thread");
 			    }
 		    });
 		return 0;
@@ -33927,13 +33927,13 @@ static int luaUtilsActivateNotepad(lua_State *L)
 				        if (const MainWindow *mw = resolveMainWindow())
 					        activated = mw->activateNotepad(title, targetRuntimeOnMain);
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("ActivateNotepad"), activated,
-						                      activated ? eOK : -1);
+				                              QStringLiteral("ActivateNotepad"), activated,
+				                              activated ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ActivateNotepad"), false,
-					                      -1);
+				                          -1);
 			    }
 		    });
 		lua_pushboolean(L, accepted);
@@ -33992,12 +33992,12 @@ static int luaUtilsAppendToNotepad(lua_State *L)
 				                  if (MainWindow *frame = resolveMainWindow())
 					                  ok = frame->appendToNotepad(title, contents, true, targetRuntimeOnMain);
 				                  emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-								                        QStringLiteral("AppendToNotepad"), ok, ok ? eOK : -1);
+				                                        QStringLiteral("AppendToNotepad"), ok, ok ? eOK : -1);
 			                  });
 			              if (!queued)
 			              {
 				              emitPluginAsyncResult(targetRuntime, requestId,
-							                        QStringLiteral("AppendToNotepad"), false, -1);
+				                                    QStringLiteral("AppendToNotepad"), false, -1);
 			              }
 		              })
 		        : enqueueCallbackNotepadAppend(engine, runtime, worldId, title, contents, requestId, -1);
@@ -34013,7 +34013,7 @@ static int luaUtilsAppendToNotepad(lua_State *L)
 	}
 	const bool ok =
 	    runOnMainWindowThread([title, contents, replace, runtime](MainWindow *mw) -> bool
-		                      { return mw->appendToNotepad(title, contents, replace, runtime); }, false);
+	                          { return mw->appendToNotepad(title, contents, replace, runtime); }, false);
 	if (ok)
 	{
 		cacheCallbackNotepadDocumentTextAfterWrite(engine, runtime, title, worldId, contents, replace);
@@ -34308,7 +34308,7 @@ static void registerUtilsBindings(lua_State *L, LuaCallbackEngine *engine)
 	    {"infotypes",           luaUtilsInfoTypes                   },
 	    {"inputbox",            luaUtilsInputBox                    },
 	    {"listbox",             luaUtilsListBox                     },
-	    {"md5",                 luaUtilsMd5                         },
+	    {"md5",	             luaUtilsMd5                         },
 	    {"menufontsize",        luaUtilsMenuFontSize                },
 	    {"metaphone",           QMudLuaSupport::luaUtilsMetaphone   },
 	    {"msgbox",              luaUtilsMsgBox                      },
@@ -34489,7 +34489,7 @@ static int luaRexFlags(lua_State *L)
 	    {"NEWLINE_CRLF",    kPCRE_NEWLINE_CRLF   },
 	    {"NEWLINE_ANY",     kPCRE_NEWLINE_ANY    },
 	    {"NEWLINE_ANYCRLF", kPCRE_NEWLINE_ANYCRLF},
-	    {nullptr,           0                    }
+	    {nullptr,           0	                }
     };
 	lua_newtable(L);
 	for (const RexFlagPair *p = kPcreFlags; p->key != nullptr; ++p)
@@ -34933,7 +34933,7 @@ static void registerFlagTables(lua_State *L)
 	    {"LowercaseWildcard", eLowercaseWildcard       },
 	    {"Temporary",         eTemporary               },
 	    {"OneShot",           eTriggerOneShot          },
-	    {nullptr,             0                        }
+	    {nullptr,             0	                    }
     };
 
 	static const LuaNamedInt kAliasFlags[] = {
@@ -34949,7 +34949,7 @@ static void registerFlagTables(lua_State *L)
 	    {"AliasMenu",         eAliasMenu             },
 	    {"Temporary",         eTemporary             },
 	    {"OneShot",           eAliasOneShot          },
-	    {nullptr,             0                      }
+	    {nullptr,             0	                  }
     };
 
 	static const LuaNamedInt kTimerFlags[] = {
@@ -35010,7 +35010,7 @@ static void registerSendToTable(lua_State *L)
 	    {"script",          eSendToScript         },
 	    {"immediate",       eSendImmediate        },
 	    {"scriptafteromit", eSendToScriptAfterOmit},
-	    {nullptr,           0                     }
+	    {nullptr,           0	                 }
     };
 	registerNamedIntTable(L, "sendto", kSendTo);
 }
@@ -35022,44 +35022,44 @@ static void registerMiniwinConstants(lua_State *L)
 	    {"pos_stretch_to_view_with_aspect",                1              },
 	    {"pos_stretch_to_owner",                           2              },
 	    {"pos_stretch_to_owner_with_aspect",               3              },
-	    {"pos_top_left",                                   4              },
-	    {"pos_top_center",                                 5              },
-	    {"pos_top_right",                                  6              },
-	    {"pos_center_right",                               7              },
-	    {"pos_bottom_right",                               8              },
-	    {"pos_bottom_center",                              9              },
-	    {"pos_bottom_left",                                10             },
-	    {"pos_center_left",                                11             },
-	    {"pos_center_all",                                 12             },
-	    {"pos_tile",                                       13             },
+	    {"pos_top_left",	                               4              },
+	    {"pos_top_center",	                             5              },
+	    {"pos_top_right",	                              6              },
+	    {"pos_center_right",	                           7              },
+	    {"pos_bottom_right",	                           8              },
+	    {"pos_bottom_center",	                          9              },
+	    {"pos_bottom_left",	                            10             },
+	    {"pos_center_left",	                            11             },
+	    {"pos_center_all",	                             12             },
+	    {"pos_tile",	                                   13             },
 
-	    {"create_underneath",                              0x01           },
+	    {"create_underneath",	                          0x01           },
 	    {"create_absolute_location",                       0x02           },
 	    {"create_transparent",                             0x04           },
 	    {"create_ignore_mouse",                            0x08           },
 	    {"create_keep_hotspots",                           0x10           },
 
-	    {"pen_solid",                                      0              },
-	    {"pen_dash",                                       1              },
-	    {"pen_dot",                                        2              },
-	    {"pen_dash_dot",                                   3              },
-	    {"pen_dash_dot_dot",                               4              },
-	    {"pen_null",                                       5              },
-	    {"pen_inside_frame",                               6              },
-	    {"pen_endcap_round",                               0x00000000     },
-	    {"pen_endcap_square",                              0x00000100     },
-	    {"pen_endcap_flat",                                0x00000200     },
-	    {"pen_join_round",                                 0x00000000     },
-	    {"pen_join_bevel",                                 0x00001000     },
-	    {"pen_join_miter",                                 0x00002000     },
+	    {"pen_solid",	                                  0              },
+	    {"pen_dash",	                                   1              },
+	    {"pen_dot",	                                    2              },
+	    {"pen_dash_dot",	                               3              },
+	    {"pen_dash_dot_dot",	                           4              },
+	    {"pen_null",	                                   5              },
+	    {"pen_inside_frame",	                           6              },
+	    {"pen_endcap_round",	                           0x00000000     },
+	    {"pen_endcap_square",	                          0x00000100     },
+	    {"pen_endcap_flat",	                            0x00000200     },
+	    {"pen_join_round",	                             0x00000000     },
+	    {"pen_join_bevel",	                             0x00001000     },
+	    {"pen_join_miter",	                             0x00002000     },
 
-	    {"brush_solid",                                    0              },
-	    {"brush_null",                                     1              },
+	    {"brush_solid",	                                0              },
+	    {"brush_null",	                                 1              },
 	    {"brush_hatch_horizontal",                         2              },
 	    {"brush_hatch_vertical",                           3              },
 	    {"brush_hatch_forwards_diagonal",                  4              },
 	    {"brush_hatch_backwards_diagonal",                 5              },
-	    {"brush_hatch_cross",                              6              },
+	    {"brush_hatch_cross",	                          6              },
 	    {"brush_hatch_cross_diagonal",                     7              },
 	    {"brush_fine_pattern",                             8              },
 	    {"brush_medium_pattern",                           9              },
@@ -35067,24 +35067,24 @@ static void registerMiniwinConstants(lua_State *L)
 	    {"brush_waves_horizontal",                         11             },
 	    {"brush_waves_vertical",                           12             },
 
-	    {"rect_frame",                                     1              },
-	    {"rect_fill",                                      2              },
-	    {"rect_invert",                                    3              },
-	    {"rect_3d_rect",                                   4              },
-	    {"rect_draw_edge",                                 5              },
+	    {"rect_frame",	                                 1              },
+	    {"rect_fill",	                                  2              },
+	    {"rect_invert",	                                3              },
+	    {"rect_3d_rect",	                               4              },
+	    {"rect_draw_edge",	                             5              },
 	    {"rect_flood_fill_border",                         6              },
 	    {"rect_flood_fill_surface",                        7              },
 
-	    {"rect_edge_raised",                               5              },
-	    {"rect_edge_etched",                               6              },
-	    {"rect_edge_bump",                                 9              },
-	    {"rect_edge_sunken",                               10             },
+	    {"rect_edge_raised",	                           5              },
+	    {"rect_edge_etched",	                           6              },
+	    {"rect_edge_bump",	                             9              },
+	    {"rect_edge_sunken",	                           10             },
 
 	    {"rect_edge_at_top_left",                          0x0003         },
 	    {"rect_edge_at_top_right",                         0x0006         },
 	    {"rect_edge_at_bottom_left",                       0x0009         },
 	    {"rect_edge_at_bottom_right",                      0x000C         },
-	    {"rect_edge_at_all",                               0x000F         },
+	    {"rect_edge_at_all",	                           0x000F         },
 
 	    {"rect_diagonal_end_top_left",                     0x0013         },
 	    {"rect_diagonal_end_top_right",                    0x0016         },
@@ -35096,110 +35096,110 @@ static void registerMiniwinConstants(lua_State *L)
 	    {"rect_option_flat_borders",                       0x4000         },
 	    {"rect_option_monochrom_borders",                  0x8000         },
 
-	    {"circle_ellipse",                                 1              },
-	    {"circle_rectangle",                               2              },
+	    {"circle_ellipse",	                             1              },
+	    {"circle_rectangle",	                           2              },
 	    {"circle_round_rectangle",                         3              },
-	    {"circle_chord",                                   4              },
-	    {"circle_pie",                                     5              },
+	    {"circle_chord",	                               4              },
+	    {"circle_pie",	                                 5              },
 
 	    {"gradient_horizontal",                            1              },
-	    {"gradient_vertical",                              2              },
-	    {"gradient_texture",                               3              },
+	    {"gradient_vertical",	                          2              },
+	    {"gradient_texture",	                           3              },
 
-	    {"font_charset_ansi",                              0              },
+	    {"font_charset_ansi",	                          0              },
 	    {"font_charset_default",                           DEFAULT_CHARSET},
 	    {"font_charset_symbol",                            2              },
 
-	    {"font_family_any",                                0x00           },
-	    {"font_family_roman",                              0x10           },
-	    {"font_family_swiss",                              0x20           },
+	    {"font_family_any",	                            0x00           },
+	    {"font_family_roman",	                          0x10           },
+	    {"font_family_swiss",	                          0x20           },
 	    {"font_family_modern",                             0x30           },
 	    {"font_family_script",                             0x40           },
 	    {"font_family_decorative",                         0x50           },
 
 	    {"font_pitch_default",                             0              },
-	    {"font_pitch_fixed",                               1              },
+	    {"font_pitch_fixed",	                           1              },
 	    {"font_pitch_variable",                            2              },
 	    {"font_pitch_monospaced",                          10             },
-	    {"font_truetype",                                  0x04           },
+	    {"font_truetype",	                              0x04           },
 
-	    {"image_copy",                                     1              },
-	    {"image_stretch",                                  2              },
+	    {"image_copy",	                                 1              },
+	    {"image_stretch",	                              2              },
 	    {"image_transparent_copy",                         3              },
 
 	    {"image_fill_ellipse",                             1              },
 	    {"image_fill_rectangle",                           2              },
 	    {"image_fill_round_fill_rectangle",                3              },
 
-	    {"filter_noise",                                   1              },
+	    {"filter_noise",	                               1              },
 	    {"filter_monochrome_noise",                        2              },
-	    {"filter_blur",                                    3              },
-	    {"filter_sharpen",                                 4              },
-	    {"filter_find_edges",                              5              },
-	    {"filter_emboss",                                  6              },
-	    {"filter_brightness",                              7              },
-	    {"filter_contrast",                                8              },
-	    {"filter_gamma",                                   9              },
+	    {"filter_blur",	                                3              },
+	    {"filter_sharpen",	                             4              },
+	    {"filter_find_edges",	                          5              },
+	    {"filter_emboss",	                              6              },
+	    {"filter_brightness",	                          7              },
+	    {"filter_contrast",	                            8              },
+	    {"filter_gamma",	                               9              },
 	    {"filter_red_brightness",                          10             },
 	    {"filter_red_contrast",                            11             },
-	    {"filter_red_gamma",                               12             },
+	    {"filter_red_gamma",	                           12             },
 	    {"filter_green_brightness",                        13             },
 	    {"filter_green_contrast",                          14             },
 	    {"filter_green_gamma",                             15             },
 	    {"filter_blue_brightness",                         16             },
 	    {"filter_blue_contrast",                           17             },
-	    {"filter_blue_gamma",                              18             },
-	    {"filter_grayscale",                               19             },
+	    {"filter_blue_gamma",	                          18             },
+	    {"filter_grayscale",	                           19             },
 	    {"filter_normal_grayscale",                        20             },
 	    {"filter_brightness_multiply",                     21             },
 	    {"filter_red_brightness_multiply",                 22             },
 	    {"filter_green_brightness_multiply",               23             },
 	    {"filter_blue_brightness_multiply",                24             },
 	    {"filter_lesser_blur",                             25             },
-	    {"filter_minor_blur",                              26             },
-	    {"filter_average",                                 27             },
+	    {"filter_minor_blur",	                          26             },
+	    {"filter_average",	                             27             },
 
-	    {"blend_normal",                                   1              },
-	    {"blend_average",                                  2              },
-	    {"blend_interpolate",                              3              },
-	    {"blend_dissolve",                                 4              },
-	    {"blend_darken",                                   5              },
-	    {"blend_multiply",                                 6              },
-	    {"blend_colour_burn",                              7              },
-	    {"blend_linear_burn",                              8              },
+	    {"blend_normal",	                               1              },
+	    {"blend_average",	                              2              },
+	    {"blend_interpolate",	                          3              },
+	    {"blend_dissolve",	                             4              },
+	    {"blend_darken",	                               5              },
+	    {"blend_multiply",	                             6              },
+	    {"blend_colour_burn",	                          7              },
+	    {"blend_linear_burn",	                          8              },
 	    {"blend_inverse_colour_burn",                      9              },
-	    {"blend_subtract",                                 10             },
-	    {"blend_lighten",                                  11             },
-	    {"blend_screen",                                   12             },
+	    {"blend_subtract",	                             10             },
+	    {"blend_lighten",	                              11             },
+	    {"blend_screen",	                               12             },
 	    {"blend_colour_dodge",                             13             },
 	    {"blend_linear_dodge",                             14             },
 	    {"blend_inverse_colour_dodge",                     15             },
-	    {"blend_add",                                      16             },
-	    {"blend_overlay",                                  17             },
-	    {"blend_soft_light",                               18             },
-	    {"blend_hard_light",                               19             },
-	    {"blend_vivid_light",                              20             },
+	    {"blend_add",	                                  16             },
+	    {"blend_overlay",	                              17             },
+	    {"blend_soft_light",	                           18             },
+	    {"blend_hard_light",	                           19             },
+	    {"blend_vivid_light",	                          20             },
 	    {"blend_linear_light",                             21             },
-	    {"blend_pin_light",                                22             },
-	    {"blend_hard_mix",                                 23             },
-	    {"blend_difference",                               24             },
-	    {"blend_exclusion",                                25             },
-	    {"blend_reflect",                                  26             },
-	    {"blend_glow",                                     27             },
-	    {"blend_freeze",                                   28             },
-	    {"blend_heat",                                     29             },
-	    {"blend_negation",                                 30             },
-	    {"blend_phoenix",                                  31             },
-	    {"blend_stamp",                                    32             },
-	    {"blend_xor",                                      33             },
-	    {"blend_and",                                      34             },
-	    {"blend_or",                                       35             },
-	    {"blend_red",                                      36             },
-	    {"blend_green",                                    37             },
-	    {"blend_blue",                                     38             },
-	    {"blend_yellow",                                   39             },
-	    {"blend_cyan",                                     40             },
-	    {"blend_magenta",                                  41             },
+	    {"blend_pin_light",	                            22             },
+	    {"blend_hard_mix",	                             23             },
+	    {"blend_difference",	                           24             },
+	    {"blend_exclusion",	                            25             },
+	    {"blend_reflect",	                              26             },
+	    {"blend_glow",	                                 27             },
+	    {"blend_freeze",	                               28             },
+	    {"blend_heat",	                                 29             },
+	    {"blend_negation",	                             30             },
+	    {"blend_phoenix",	                              31             },
+	    {"blend_stamp",	                                32             },
+	    {"blend_xor",	                                  33             },
+	    {"blend_and",	                                  34             },
+	    {"blend_or",	                                   35             },
+	    {"blend_red",	                                  36             },
+	    {"blend_green",	                                37             },
+	    {"blend_blue",	                                 38             },
+	    {"blend_yellow",	                               39             },
+	    {"blend_cyan",	                                 40             },
+	    {"blend_magenta",	                              41             },
 	    {"blend_green_limited_by_red",                     42             },
 	    {"blend_green_limited_by_blue",                    43             },
 	    {"blend_green_limited_by_average_of_red_and_blue", 44             },
@@ -35209,60 +35209,60 @@ static void registerMiniwinConstants(lua_State *L)
 	    {"blend_red_limited_by_green",                     48             },
 	    {"blend_red_limited_by_blue",                      49             },
 	    {"blend_red_limited_by_average_of_green_and_blue", 50             },
-	    {"blend_red_only",                                 51             },
-	    {"blend_green_only",                               52             },
-	    {"blend_blue_only",                                53             },
-	    {"blend_discard_red",                              54             },
+	    {"blend_red_only",	                             51             },
+	    {"blend_green_only",	                           52             },
+	    {"blend_blue_only",	                            53             },
+	    {"blend_discard_red",	                          54             },
 	    {"blend_discard_green",                            55             },
 	    {"blend_discard_blue",                             56             },
-	    {"blend_all_red",                                  57             },
-	    {"blend_all_green",                                58             },
-	    {"blend_all_blue",                                 59             },
-	    {"blend_hue_mode",                                 60             },
+	    {"blend_all_red",	                              57             },
+	    {"blend_all_green",	                            58             },
+	    {"blend_all_blue",	                             59             },
+	    {"blend_hue_mode",	                             60             },
 	    {"blend_saturation_mode",                          61             },
-	    {"blend_colour_mode",                              62             },
+	    {"blend_colour_mode",	                          62             },
 	    {"blend_luminance_mode",                           63             },
-	    {"blend_hsl",                                      64             },
+	    {"blend_hsl",	                                  64             },
 
-	    {"cursor_none",                                    -1             },
-	    {"cursor_arrow",                                   0              },
-	    {"cursor_hand",                                    1              },
-	    {"cursor_ibeam",                                   2              },
-	    {"cursor_plus",                                    3              },
-	    {"cursor_wait",                                    4              },
-	    {"cursor_up",                                      5              },
+	    {"cursor_none",	                                -1             },
+	    {"cursor_arrow",	                               0              },
+	    {"cursor_hand",	                                1              },
+	    {"cursor_ibeam",	                               2              },
+	    {"cursor_plus",	                                3              },
+	    {"cursor_wait",	                                4              },
+	    {"cursor_up",	                                  5              },
 	    {"cursor_nw_se_arrow",                             6              },
 	    {"cursor_ne_sw_arrow",                             7              },
-	    {"cursor_ew_arrow",                                8              },
-	    {"cursor_ns_arrow",                                9              },
-	    {"cursor_both_arrow",                              10             },
-	    {"cursor_x",                                       11             },
-	    {"cursor_help",                                    12             },
+	    {"cursor_ew_arrow",	                            8              },
+	    {"cursor_ns_arrow",	                            9              },
+	    {"cursor_both_arrow",	                          10             },
+	    {"cursor_x",	                                   11             },
+	    {"cursor_help",	                                12             },
 
 	    {"hotspot_report_all_mouseovers",                  0x01           },
 
-	    {"hotspot_got_shift",                              0x01           },
+	    {"hotspot_got_shift",	                          0x01           },
 	    {"hotspot_got_control",                            0x02           },
-	    {"hotspot_got_alt",                                0x04           },
+	    {"hotspot_got_alt",	                            0x04           },
 	    {"hotspot_got_lh_mouse",                           0x10           },
 	    {"hotspot_got_rh_mouse",                           0x20           },
 	    {"hotspot_got_dbl_click",                          0x40           },
 	    {"hotspot_got_not_first",                          0x80           },
 	    {"hotspot_got_middle_mouse",                       0x200          },
 
-	    {"merge_straight",                                 0              },
-	    {"merge_transparent",                              1              },
+	    {"merge_straight",	                             0              },
+	    {"merge_transparent",	                          1              },
 
-	    {"drag_got_shift",                                 0x01           },
-	    {"drag_got_control",                               0x02           },
-	    {"drag_got_alt",                                   0x04           },
+	    {"drag_got_shift",	                             0x01           },
+	    {"drag_got_control",	                           0x02           },
+	    {"drag_got_alt",	                               0x04           },
 
-	    {"wheel_got_shift",                                0x01           },
-	    {"wheel_got_control",                              0x02           },
-	    {"wheel_got_alt",                                  0x04           },
-	    {"wheel_scroll_back",                              0x100          },
+	    {"wheel_got_shift",	                            0x01           },
+	    {"wheel_got_control",	                          0x02           },
+	    {"wheel_got_alt",	                              0x04           },
+	    {"wheel_scroll_back",	                          0x100          },
 
-	    {nullptr,                                          0              }
+	    {nullptr,	                                      0              }
     };
 
 	registerNamedIntTable(L, "miniwin", kMiniwin);
@@ -35513,12 +35513,12 @@ static int luaProgressGc(lua_State *L)
 						        return;
 					        const bool closed = closeDialog(nullptr);
 					        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-							                      QStringLiteral("ProgressClose"), closed, closed ? eOK : -1);
+					                              QStringLiteral("ProgressClose"), closed, closed ? eOK : -1);
 				        });
 				    if (!queued)
 				    {
 					    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ProgressClose"),
-						                      false, -1);
+					                          false, -1);
 				    }
 			    });
 			if (!accepted)
@@ -35583,8 +35583,8 @@ static int luaProgressNew(lua_State *L)
 					        newDialog->setAutoClose(false);
 					        newDialog->setAutoReset(false);
 					        QObject::connect(newDialog, &QProgressDialog::canceled, newDialog,
-							                 [handle]()
-							                 {
+					                         [handle]()
+					                         {
 						                         const std::lock_guard<std::mutex> lock(handle->mutex);
 						                         handle->lastKnownCanceled    = true;
 						                         handle->hasLastKnownCanceled = true;
@@ -35614,7 +35614,7 @@ static int luaProgressNew(lua_State *L)
 
 				        const bool ok = dialog != nullptr;
 				        emitPluginAsyncResult(*targetRuntimeOnMain, asyncRequestId,
-						                      QStringLiteral("ProgressNew"), ok, ok ? eOK : -1);
+				                              QStringLiteral("ProgressNew"), ok, ok ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
@@ -35623,7 +35623,7 @@ static int luaProgressNew(lua_State *L)
 					    handle->createPending = false;
 				    }
 				    emitPluginAsyncResult(targetRuntime, asyncRequestId, QStringLiteral("ProgressNew"), false,
-					                      -1);
+				                          -1);
 			    }
 		    });
 		if (!accepted)
@@ -35647,8 +35647,8 @@ static int luaProgressNew(lua_State *L)
 			    newDialog->setAutoClose(false);
 			    newDialog->setAutoReset(false);
 			    QObject::connect(newDialog, &QProgressDialog::canceled, newDialog,
-				                 [handle]()
-				                 {
+			                     [handle]()
+			                     {
 				                     const std::lock_guard<std::mutex> lock(handle->mutex);
 				                     handle->lastKnownCanceled    = true;
 				                     handle->hasLastKnownCanceled = true;
@@ -35728,12 +35728,12 @@ static int luaProgressSetStatus(lua_State *L)
 					        dialog->setLabelText(status);
 				        const bool ok = applied || pendingCreate;
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("ProgressSetStatus"), ok, ok ? eOK : -1);
+				                              QStringLiteral("ProgressSetStatus"), ok, ok ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ProgressSetStatus"),
-					                      false, -1);
+				                          false, -1);
 			    }
 		    });
 		if (!accepted)
@@ -35806,12 +35806,12 @@ static int luaProgressSetRange(lua_State *L)
 					        dialog->setRange(start, end);
 				        const bool ok = applied || pendingCreate;
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("ProgressSetRange"), ok, ok ? eOK : -1);
+				                              QStringLiteral("ProgressSetRange"), ok, ok ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ProgressSetRange"), false,
-					                      -1);
+				                          -1);
 			    }
 		    });
 		if (!accepted)
@@ -35875,12 +35875,12 @@ static int luaProgressSetPosition(lua_State *L)
 					        dialog->setValue(pos);
 				        const bool ok = applied || pendingCreate;
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId,
-						                      QStringLiteral("ProgressSetPosition"), ok, ok ? eOK : -1);
+				                              QStringLiteral("ProgressSetPosition"), ok, ok ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ProgressSetPosition"),
-					                      false, -1);
+				                          false, -1);
 			    }
 		    });
 		if (!accepted)
@@ -35961,12 +35961,12 @@ static int luaProgressStep(lua_State *L)
 					        dialog->setValue(dialog->value() + step);
 				        const bool ok = applied || pendingCreate;
 				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId, QStringLiteral("ProgressStep"),
-						                      ok, ok ? eOK : -1);
+				                              ok, ok ? eOK : -1);
 			        });
 			    if (!queued)
 			    {
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ProgressStep"), false,
-					                      -1);
+				                          -1);
 			    }
 		    });
 		if (!accepted)
@@ -36115,8 +36115,8 @@ static void pushVariant(lua_State *L, const QVariant &value)
 	case QMetaType::QDate:
 		lua_pushnumber(
 		    L, static_cast<lua_Number>(QDateTime(value.toDate(), QTime(0, 0), QTimeZone::systemTimeZone())
-			                               .toLocalTime()
-			                               .toSecsSinceEpoch()));
+		                                   .toLocalTime()
+		                                   .toSecsSinceEpoch()));
 		return;
 	case QMetaType::QTime:
 	{
@@ -36518,7 +36518,7 @@ static int pushDispatchSendCommandResult(lua_State *L, const LuaCallbackEngine *
 		const int                    results = enqueueRuntimeThreadAsyncOkStatusResult(
 		    L, engine, runtime, apiName, eWorldClosed,
 		    [runtimeGuard, text, echo, queue, log, history, immediate, actionSourceOverride,
-			 directTriggerPrioritySend](WorldRuntime &) -> int
+		     directTriggerPrioritySend](WorldRuntime &) -> int
 		    {
 			    if (!runtimeGuard)
 				    return eWorldClosed;
@@ -36534,7 +36534,7 @@ static int pushDispatchSendCommandResult(lua_State *L, const LuaCallbackEngine *
 				        });
 				    return directTriggerPrioritySend
 				               ? runtimeGuard->sendCommandWithTriggerPriority(text, echo, queue, log, history)
-							   : runtimeGuard->sendCommand(text, echo, queue, log, history, immediate);
+				               : runtimeGuard->sendCommand(text, echo, queue, log, history, immediate);
 			    }
 			    if (directTriggerPrioritySend)
 				    return runtimeGuard->sendCommandWithTriggerPriority(text, echo, queue, log, history);
@@ -36783,7 +36783,7 @@ static int luaDisconnect(lua_State *L)
 	    [](WorldRuntime &targetRuntime) -> int
 	    {
 		    if (const int phase = targetRuntime.connectPhase();
-			    phase == WorldRuntime::eConnectNotConnected || phase == WorldRuntime::eConnectDisconnecting)
+		        phase == WorldRuntime::eConnectNotConnected || phase == WorldRuntime::eConnectDisconnecting)
 		    {
 			    return eWorldClosed;
 		    }
@@ -37055,7 +37055,7 @@ static int pushAcceleratorRegistrationResult(lua_State *L, const LuaCallbackEngi
 			{
 				const bool keyExists =
 				    std::ranges::any_of(snapshot, [mapKey](const WorldRuntime::AcceleratorSnapshot &row)
-					                    { return row.key == mapKey; });
+				                        { return row.key == mapKey; });
 				if (!keyExists && snapshot.size() >= WorldRuntime::kAcceleratorCount)
 				{
 					lua_pushnumber(L, eBadParameter);
@@ -37069,12 +37069,12 @@ static int pushAcceleratorRegistrationResult(lua_State *L, const LuaCallbackEngi
 		const int     results                   = enqueueRuntimeThreadAsyncOkStatusResult(
 		    L, engine, runtime, apiName, eWorldClosed,
 		    [mapKey, sendTextValue, sendTo, pluginId,
-			 originatingPluginIdentity](WorldRuntime &targetRuntime) -> int
+		     originatingPluginIdentity](WorldRuntime &targetRuntime) -> int
 		    {
 			    if (!deferredPluginOwnerIsCurrent(targetRuntime, pluginId, originatingPluginIdentity))
 				    return eNoSuchPlugin;
 			    return applyAcceleratorRegistrationForApi(targetRuntime, mapKey, sendTextValue, sendTo,
-				                                          pluginId);
+			                                              pluginId);
 		    });
 		if (lua_tointeger(L, -results) == eOK)
 		{
@@ -37331,7 +37331,7 @@ static int luaGetLinesInBufferCount(lua_State *L)
 		                     return true;
 	                     },
 	                     false)
-		           : runOnRuntimeThread(
+	               : runOnRuntimeThread(
 	                     runtime,
 	                     [&]() -> bool
 	                     {
@@ -39553,7 +39553,7 @@ static int validateScriptCallbackName(const LuaCallbackEngine *engine, WorldRunt
 	if (pluginId.isEmpty())
 		return engine && const_cast<LuaCallbackEngine *>(engine)->hasFunction(trimmed)
 		           ? eOK
-				   : eScriptNameNotLocated;
+		           : eScriptNameNotLocated;
 	if (engine && pluginId == engine->pluginId() &&
 	    const_cast<LuaCallbackEngine *>(engine)->hasFunction(trimmed))
 	{
@@ -39561,7 +39561,7 @@ static int validateScriptCallbackName(const LuaCallbackEngine *engine, WorldRunt
 	}
 	return queryPluginSupportsForCallback(engine, runtime, pluginId, trimmed, eScriptNameNotLocated) == eOK
 	           ? eOK
-			   : eScriptNameNotLocated;
+	           : eScriptNameNotLocated;
 }
 
 static int validateTriggerAliasPattern(const QString &matchText, const bool isRegexp, const bool ignoreCase,
@@ -39691,12 +39691,12 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, name, trigger, replacedRuntimeId, replacedLocationHandle,
-			 existingIndex, mutationDependencies](WorldRuntime &targetRuntime)
+		     existingIndex, mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 
 			    QList<WorldRuntime::Trigger> &runtimeTriggers   = mutableTriggerList(&targetRuntime, plugin);
@@ -39712,7 +39712,7 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 				            &runtimeIndex))
 					    return;
 				    LuaCallbackRuntimeMutationAccess::invalidateLocation(targetRuntime,
-					                                                     resolvedReplacedLocation);
+				                                                         resolvedReplacedLocation);
 				    runtimeTriggers[runtimeIndex] = trigger;
 				    firstChangedIndex             = runtimeIndex;
 				    insertedIndex                 = runtimeIndex;
@@ -39720,7 +39720,7 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 			    else
 			    {
 				    if (const int collisionIndex = findTriggerIndex(runtimeTriggers, name);
-					    collisionIndex >= 0)
+				        collisionIndex >= 0)
 				    {
 					    LuaCallbackRuntimeMutationAccess::invalidateLocation(
 					        targetRuntime, runtimeTriggers.at(collisionIndex).runtimeLocationHandle);
@@ -39782,12 +39782,12 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 		    trigger.attributes.insert(QStringLiteral("expand_variables"), attrFlag(flags & eExpandVariables));
 		    trigger.attributes.insert(QStringLiteral("temporary"), attrFlag(flags & eTemporary));
 		    trigger.attributes.insert(QStringLiteral("lowercase_wildcard"),
-			                          attrFlag(flags & eLowercaseWildcard));
+		                              attrFlag(flags & eLowercaseWildcard));
 		    trigger.attributes.insert(QStringLiteral("one_shot"), attrFlag(flags & eTriggerOneShot));
 		    trigger.attributes.insert(QStringLiteral("clipboard_arg"),
-			                          QString::number(wildcard >= 0 && wildcard <= 10 ? wildcard : 0));
+		                              QString::number(wildcard >= 0 && wildcard <= 10 ? wildcard : 0));
 		    trigger.attributes.insert(QStringLiteral("custom_colour"),
-			                          QString::number(customFromTriggerColour(colour)));
+		                              QString::number(customFromTriggerColour(colour)));
 		    trigger.attributes.insert(QStringLiteral("variable"), name);
 		    applyTriggerDefaults(trigger);
 		    runtime->ensureRuleRuntimeId(trigger);
@@ -39880,12 +39880,12 @@ static int addAliasInternal(const LuaCallbackEngine *engine, const QString &rawN
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, name, alias, replacedRuntimeId, replacedLocationHandle,
-			 existingIndex, mutationDependencies](WorldRuntime &targetRuntime)
+		     existingIndex, mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 
 			    QList<WorldRuntime::Alias> &runtimeAliases = mutableAliasList(&targetRuntime, plugin);
@@ -39899,7 +39899,7 @@ static int addAliasInternal(const LuaCallbackEngine *engine, const QString &rawN
 				            &runtimeIndex))
 					    return;
 				    LuaCallbackRuntimeMutationAccess::invalidateLocation(targetRuntime,
-					                                                     resolvedReplacedLocation);
+				                                                         resolvedReplacedLocation);
 				    runtimeAliases[runtimeIndex] = alias;
 				    commitAliasStructureMutation(&targetRuntime, plugin, runtimeIndex);
 				    if (mutationDependencies)
@@ -39968,7 +39968,7 @@ static int addAliasInternal(const LuaCallbackEngine *engine, const QString &rawN
 		    alias.attributes.insert(QStringLiteral("omit_from_log"), attrFlag(flags & eOmitFromLogFile));
 		    alias.attributes.insert(QStringLiteral("regexp"), attrFlag(flags & eAliasRegularExpression));
 		    alias.attributes.insert(QStringLiteral("omit_from_output"),
-			                        attrFlag(flags & eAliasOmitFromOutput));
+		                            attrFlag(flags & eAliasOmitFromOutput));
 		    alias.attributes.insert(QStringLiteral("expand_variables"), attrFlag(flags & eExpandVariables));
 		    alias.attributes.insert(QStringLiteral("menu"), attrFlag(flags & eAliasMenu));
 		    alias.attributes.insert(QStringLiteral("temporary"), attrFlag(flags & eTemporary));
@@ -40065,12 +40065,12 @@ static int addTimerInternal(const LuaCallbackEngine *engine, const QString &rawN
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, name, timer, replacedRuntimeId, replacedLocationHandle,
-			 existingIndex, mutationDependencies](WorldRuntime &targetRuntime)
+		     existingIndex, mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 
 			    QList<WorldRuntime::Timer> &runtimeTimers = mutableTimerList(&targetRuntime, plugin);
@@ -40084,7 +40084,7 @@ static int addTimerInternal(const LuaCallbackEngine *engine, const QString &rawN
 				            &runtimeIndex))
 					    return;
 				    LuaCallbackRuntimeMutationAccess::invalidateLocation(targetRuntime,
-					                                                     resolvedReplacedLocation);
+				                                                         resolvedReplacedLocation);
 				    runtimeTimers[runtimeIndex] = timer;
 				    commitTimerStructureMutation(&targetRuntime, plugin, runtimeIndex);
 				    if (mutationDependencies)
@@ -40270,19 +40270,19 @@ static int luaDeleteTrigger(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    QList<WorldRuntime::Trigger> &runtimeTriggers = mutableTriggerList(&targetRuntime, plugin);
 			    int                           runtimeIndex    = -1;
 			    const quint64                 resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
 			    if (!LuaCallbackRuntimeMutationAccess::triggerForLocation(targetRuntime, resolvedLocation,
-				                                                          runtimeId, index, &runtimeIndex))
+			                                                              runtimeId, index, &runtimeIndex))
 				    return;
 			    LuaCallbackRuntimeMutationAccess::invalidateLocation(targetRuntime, resolvedLocation);
 			    runtimeTriggers.removeAt(runtimeIndex);
@@ -40303,7 +40303,7 @@ static int luaDeleteTrigger(lua_State *L)
 		    if (index < 0)
 			    return eTriggerNotFound;
 		    LuaCallbackRuntimeMutationAccess::invalidateLocation(*runtime,
-			                                                     triggers.at(index).runtimeLocationHandle);
+		                                                         triggers.at(index).runtimeLocationHandle);
 		    triggers.removeAt(index);
 		    commitTriggerListMutation(runtime, plugin, true, index);
 		    return eOK;
@@ -40351,19 +40351,19 @@ static int luaDeleteAlias(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    QList<WorldRuntime::Alias> &runtimeAliases = mutableAliasList(&targetRuntime, plugin);
 			    int                         runtimeIndex   = -1;
 			    const quint64               resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
 			    if (!LuaCallbackRuntimeMutationAccess::aliasForLocation(targetRuntime, resolvedLocation,
-				                                                        runtimeId, index, &runtimeIndex))
+			                                                            runtimeId, index, &runtimeIndex))
 				    return;
 			    LuaCallbackRuntimeMutationAccess::invalidateLocation(targetRuntime, resolvedLocation);
 			    runtimeAliases.removeAt(runtimeIndex);
@@ -40384,7 +40384,7 @@ static int luaDeleteAlias(lua_State *L)
 		    if (index < 0)
 			    return eAliasNotFound;
 		    LuaCallbackRuntimeMutationAccess::invalidateLocation(*runtime,
-			                                                     aliases.at(index).runtimeLocationHandle);
+		                                                         aliases.at(index).runtimeLocationHandle);
 		    aliases.removeAt(index);
 		    commitAliasStructureMutation(runtime, plugin, index);
 		    return eOK;
@@ -40432,19 +40432,19 @@ static int luaDeleteTimer(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    QList<WorldRuntime::Timer> &runtimeTimers = mutableTimerList(&targetRuntime, plugin);
 			    int                         runtimeIndex  = -1;
 			    const quint64               resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
 			    if (!LuaCallbackRuntimeMutationAccess::timerForLocation(targetRuntime, resolvedLocation,
-				                                                        runtimeId, index, &runtimeIndex))
+			                                                            runtimeId, index, &runtimeIndex))
 				    return;
 			    LuaCallbackRuntimeMutationAccess::invalidateLocation(targetRuntime, resolvedLocation);
 			    runtimeTimers.removeAt(runtimeIndex);
@@ -40465,7 +40465,7 @@ static int luaDeleteTimer(lua_State *L)
 		    if (index < 0)
 			    return eTimerNotFound;
 		    LuaCallbackRuntimeMutationAccess::invalidateLocation(*runtime,
-			                                                     timers.at(index).runtimeLocationHandle);
+		                                                         timers.at(index).runtimeLocationHandle);
 		    timers.removeAt(index);
 		    commitTimerStructureMutation(runtime, plugin, index);
 		    return eOK;
@@ -40519,7 +40519,7 @@ static int luaDeleteTemporaryTriggers(lua_State *L)
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Trigger> &runtimeTriggers =
 				        mutableTriggerList(&targetRuntime, plugin);
@@ -40596,7 +40596,7 @@ static int luaDeleteTemporaryAliases(lua_State *L)
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Alias>    &runtimeAliases = mutableAliasList(&targetRuntime, plugin);
 				    const LocatedRuleRemovalResult result =
@@ -40672,7 +40672,7 @@ static int luaDeleteTemporaryTimers(lua_State *L)
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Timer>    &runtimeTimers = mutableTimerList(&targetRuntime, plugin);
 				    const LocatedRuleRemovalResult result =
@@ -40754,7 +40754,7 @@ static int luaDeleteTriggerGroup(lua_State *L)
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Trigger> &runtimeTriggers =
 				        mutableTriggerList(&targetRuntime, plugin);
@@ -40837,7 +40837,7 @@ static int luaDeleteAliasGroup(lua_State *L)
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Alias>    &runtimeAliases = mutableAliasList(&targetRuntime, plugin);
 				    const LocatedRuleRemovalResult result =
@@ -40919,7 +40919,7 @@ static int luaDeleteTimerGroup(lua_State *L)
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Timer>    &runtimeTimers = mutableTimerList(&targetRuntime, plugin);
 				    const LocatedRuleRemovalResult result =
@@ -41027,12 +41027,12 @@ static int luaDeleteGroup(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, triggerRuntimeIds, aliasRuntimeIds,
-				 timerRuntimeIds](WorldRuntime &targetRuntime)
+			     timerRuntimeIds](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Trigger> &runtimeTriggers =
 				        mutableTriggerList(&targetRuntime, plugin);
@@ -41046,7 +41046,7 @@ static int luaDeleteGroup(lua_State *L)
 				        removeLocatedRulesByRuntimeId(targetRuntime, runtimeTimers, timerRuntimeIds);
 				    if (triggerResult.removed > 0)
 					    commitTriggerListMutation(&targetRuntime, plugin, true,
-						                          triggerResult.firstChangedIndex);
+					                              triggerResult.firstChangedIndex);
 				    if (aliasResult.removed > 0)
 					    commitAliasStructureMutation(&targetRuntime, plugin, aliasResult.firstChangedIndex);
 				    if (timerResult.removed > 0)
@@ -41128,12 +41128,12 @@ static int luaEnableTrigger(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, enabled,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    const quint64 resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
@@ -41144,7 +41144,7 @@ static int luaEnableTrigger(lua_State *L)
 				    return;
 			    runtimeTrigger->attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 			    commitTriggerListMutation(&targetRuntime, plugin, false, -1, resolvedLocation, runtimeId,
-				                          runtimeIndex);
+			                              runtimeIndex);
 		    });
 		lua_pushnumber(L, eOK);
 		return 1;
@@ -41162,7 +41162,7 @@ static int luaEnableTrigger(lua_State *L)
 			    return eTriggerNotFound;
 		    triggers[index].attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 		    commitTriggerListMutation(runtime, plugin, false, -1, triggers.at(index).runtimeLocationHandle,
-			                          triggers.at(index).runtimeId, index);
+		                              triggers.at(index).runtimeId, index);
 		    return eOK;
 	    },
 	    eWorldClosed);
@@ -41208,12 +41208,12 @@ static int luaEnableAlias(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, enabled,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    const quint64 resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
@@ -41248,7 +41248,7 @@ static int luaEnableAlias(lua_State *L)
 		        runtime, plugin,
 		        {
 		            {aliases.at(index).runtimeLocationHandle, aliases.at(index).runtimeId, index,
-					 luaCallbackAllRuleSnapshotParts()}
+		             luaCallbackAllRuleSnapshotParts()}
             });
 		    return eOK;
 	    },
@@ -41295,12 +41295,12 @@ static int luaEnableTimer(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, enabled,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    const quint64 resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
@@ -41332,9 +41332,9 @@ static int luaEnableTimer(lua_State *L)
 			    return eTimerNotFound;
 		    timers[index].attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 		    commitTimerRuleMutations(runtime, plugin,
-			                         {
+		                             {
 		                                 {timers.at(index).runtimeLocationHandle, timers.at(index).runtimeId,
-										  index, luaCallbackAllRuleSnapshotParts()}
+		                                  index, luaCallbackAllRuleSnapshotParts()}
             });
 		    return eOK;
 	    },
@@ -41391,12 +41391,12 @@ static int luaEnableTriggerGroup(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeLocations, enabled,
-				 mutationDependencies](WorldRuntime &targetRuntime)
+			     mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const auto changedLocations = mutateTriggersByRuntimeLocation(
 				        targetRuntime, runtimeLocations, mutationDependencies,
@@ -41425,7 +41425,7 @@ static int luaEnableTriggerGroup(lua_State *L)
 			    {
 				    trigger.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 				    changedLocations.push_back({trigger.runtimeLocationHandle, trigger.runtimeId, index,
-					                            luaCallbackAllRuleSnapshotParts()});
+				                                luaCallbackAllRuleSnapshotParts()});
 			    }
 		    }
 		    commitTriggerRuleMutations(runtime, plugin, changedLocations);
@@ -41484,17 +41484,17 @@ static int luaEnableAliasGroup(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeLocations, enabled,
-				 mutationDependencies](WorldRuntime &targetRuntime)
+			     mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const auto changedLocations = mutateRulesByRuntimeLocation<WorldRuntime::Alias>(
 				        targetRuntime, runtimeLocations, mutationDependencies,
 				        [](WorldRuntime &runtime, const quint64 location, const quint64 runtimeId,
-						   const int indexHint, int *resolvedIndex)
+				           const int indexHint, int *resolvedIndex)
 				        {
 					        return LuaCallbackRuntimeMutationAccess::aliasForLocation(
 					            runtime, location, runtimeId, indexHint, resolvedIndex);
@@ -41583,17 +41583,17 @@ static int luaEnableTimerGroup(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeLocations, enabled,
-				 mutationDependencies](WorldRuntime &targetRuntime)
+			     mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const auto changedLocations = mutateRulesByRuntimeLocation<WorldRuntime::Timer>(
 				        targetRuntime, runtimeLocations, mutationDependencies,
 				        [](WorldRuntime &runtime, const quint64 location, const quint64 runtimeId,
-						   const int indexHint, int *resolvedIndex)
+				           const int indexHint, int *resolvedIndex)
 				        {
 					        return LuaCallbackRuntimeMutationAccess::timerForLocation(
 					            runtime, location, runtimeId, indexHint, resolvedIndex);
@@ -42493,25 +42493,25 @@ static int luaSetTriggerOption(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, mutate,
-				 mutationDependencies](WorldRuntime &targetRuntime)
+			     mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const quint64 resolvedLocation =
 				        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
 				    int                    runtimeIndex = -1;
 				    WorldRuntime::Trigger *runtimeTrigger =
 				        LuaCallbackRuntimeMutationAccess::triggerForLocation(targetRuntime, resolvedLocation,
-						                                                     runtimeId, index, &runtimeIndex);
+				                                                             runtimeId, index, &runtimeIndex);
 				    if (!runtimeTrigger)
 					    return;
 				    if (mutate(*runtimeTrigger) != eOK)
 					    return;
 				    commitTriggerListMutation(&targetRuntime, plugin, false, -1, resolvedLocation, runtimeId,
-					                          runtimeIndex);
+				                              runtimeIndex);
 			    });
 			return eOK;
 		}
@@ -42530,8 +42530,8 @@ static int luaSetTriggerOption(lua_State *L)
 			    if (result != eOK)
 				    return result;
 			    commitTriggerListMutation(runtime, plugin, false, -1,
-				                          triggers.at(index).runtimeLocationHandle,
-				                          triggers.at(index).runtimeId, index);
+			                              triggers.at(index).runtimeLocationHandle,
+			                              triggers.at(index).runtimeId, index);
 			    return eOK;
 		    },
 		    eWorldClosed);
@@ -42604,25 +42604,25 @@ static int luaSetTriggerOption(lua_State *L)
 					    return eOptionOutOfRange;
 				    const int match = static_cast<int>(number);
 				    trigger.attributes.insert(QStringLiteral("text_colour"),
-					                          QString::number(match >> 4 & 0x0F));
+				                              QString::number(match >> 4 & 0x0F));
 				    trigger.attributes.insert(QStringLiteral("back_colour"),
-					                          QString::number(match >> 8 & 0x0F));
+				                              QString::number(match >> 8 & 0x0F));
 				    trigger.attributes.insert(QStringLiteral("bold"), attrFlag(match & kStyleHilite));
 				    trigger.attributes.insert(QStringLiteral("italic"), attrFlag(match & kStyleBlink));
 				    trigger.attributes.insert(QStringLiteral("underline"), attrFlag(match & kStyleUnderline));
 				    trigger.attributes.insert(QStringLiteral("inverse"), attrFlag(match & kStyleInverse));
 				    trigger.attributes.insert(QStringLiteral("match_text_colour"),
-					                          attrFlag(match & kTriggerMatchText));
+				                              attrFlag(match & kTriggerMatchText));
 				    trigger.attributes.insert(QStringLiteral("match_back_colour"),
-					                          attrFlag(match & kTriggerMatchBack));
+				                              attrFlag(match & kTriggerMatchBack));
 				    trigger.attributes.insert(QStringLiteral("match_bold"),
-					                          attrFlag(match & kTriggerMatchHilite));
+				                              attrFlag(match & kTriggerMatchHilite));
 				    trigger.attributes.insert(QStringLiteral("match_italic"),
-					                          attrFlag(match & kTriggerMatchBlink));
+				                              attrFlag(match & kTriggerMatchBlink));
 				    trigger.attributes.insert(QStringLiteral("match_inverse"),
-					                          attrFlag(match & kTriggerMatchInverse));
+				                              attrFlag(match & kTriggerMatchInverse));
 				    trigger.attributes.insert(QStringLiteral("match_underline"),
-					                          attrFlag(match & kTriggerMatchUnderline));
+				                              attrFlag(match & kTriggerMatchUnderline));
 			    }
 			    else
 			    {
@@ -42632,7 +42632,7 @@ static int luaSetTriggerOption(lua_State *L)
 				    trigger.attributes.insert(QStringLiteral("make_bold"), attrFlag(style & kStyleHilite));
 				    trigger.attributes.insert(QStringLiteral("make_italic"), attrFlag(style & kStyleBlink));
 				    trigger.attributes.insert(QStringLiteral("make_underline"),
-					                          attrFlag(style & kStyleUnderline));
+				                              attrFlag(style & kStyleUnderline));
 			    }
 			    applyTriggerDefaults(trigger);
 			    return eOK;
@@ -42718,7 +42718,7 @@ static int luaSetTriggerOption(lua_State *L)
 			    trigger.attributes.insert(optName, QString::number(static_cast<int>(number)));
 		    }
 		    else if (optName == QStringLiteral("other_text_colour") ||
-			         optName == QStringLiteral("other_back_colour"))
+		             optName == QStringLiteral("other_back_colour"))
 		    {
 			    if (number < 0 || number > 0xFFFFFF)
 				    return eOptionOutOfRange;
@@ -42848,12 +42848,12 @@ static int luaSetAliasOption(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, mutate,
-				 mutationDependencies](WorldRuntime &targetRuntime)
+			     mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const quint64 resolvedLocation =
 				        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
@@ -42890,7 +42890,7 @@ static int luaSetAliasOption(lua_State *L)
 			        runtime, plugin,
 			        {
 			            {aliases.at(index).runtimeLocationHandle, aliases.at(index).runtimeId, index,
-						 luaCallbackAllRuleSnapshotParts()}
+			             luaCallbackAllRuleSnapshotParts()}
                 });
 			    return eOK;
 		    },
@@ -43132,12 +43132,12 @@ static int luaSetTimerOption(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, applyMutation,
-				 mutationDependencies](WorldRuntime &targetRuntime)
+			     mutationDependencies](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const quint64 resolvedLocation =
 				        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
@@ -43174,7 +43174,7 @@ static int luaSetTimerOption(lua_State *L)
 			        runtime, plugin,
 			        {
 			            {timers.at(index).runtimeLocationHandle, timers.at(index).runtimeId, index,
-						 luaCallbackAllRuleSnapshotParts()}
+			             luaCallbackAllRuleSnapshotParts()}
                 });
 			    return eOK;
 		    },
@@ -43449,12 +43449,12 @@ static int luaResetTimer(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
 		    [pluginId, originatingPluginIdentity, runtimeId, runtimeLocationHandle, index, scheduleReset,
-			 mutationDependencies](WorldRuntime &targetRuntime)
+		     mutationDependencies](WorldRuntime &targetRuntime)
 		    {
 			    WorldRuntime::Plugin *plugin = nullptr;
 			    int                   errorCode{eOK};
 			    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-				                                      plugin, errorCode))
+			                                          plugin, errorCode))
 				    return;
 			    const quint64 resolvedLocation =
 			        resolvedDeferredRuleLocation(runtimeLocationHandle, runtimeId, mutationDependencies);
@@ -43485,7 +43485,7 @@ static int luaResetTimer(lua_State *L)
 			    return eTimerNotFound;
 		    if (resetTimerFields(timers[index], scheduleReset))
 			    commitTimerScheduleMutation(runtime, plugin, timers[index].runtimeLocationHandle,
-				                            timers[index].runtimeId, index);
+			                                timers[index].runtimeId, index);
 		    return eOK;
 	    },
 	    eWorldClosed);
@@ -43510,7 +43510,7 @@ static int luaResetTimers(lua_State *L)
 		{
 			const auto runtimeLocations =
 			    matchingRuleRuntimeLocations(timers, LuaCallbackRuleSnapshotPart::DetailState,
-				                             [](const WorldRuntime::Timer &) { return true; });
+			                                 [](const WorldRuntime::Timer &) { return true; });
 			const auto mutationDependencies = callbackMutationDependencies(engine, false);
 			for (auto &timer : timers)
 				static_cast<void>(resetTimerFields(timer, scheduleReset));
@@ -43520,17 +43520,17 @@ static int luaResetTimers(lua_State *L)
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, originatingPluginIdentity, runtimeLocations, mutationDependencies,
-				 scheduleReset](WorldRuntime &targetRuntime)
+			     scheduleReset](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
 				    if (!resolveDeferredPluginContextById(&targetRuntime, pluginId, originatingPluginIdentity,
-					                                      plugin, errorCode))
+				                                          plugin, errorCode))
 					    return;
 				    const auto changedLocations = mutateRulesByRuntimeLocation<WorldRuntime::Timer>(
 				        targetRuntime, runtimeLocations, mutationDependencies,
 				        [](WorldRuntime &runtime, const quint64 location, const quint64 runtimeId,
-						   const int indexHint, int *resolvedIndex)
+				           const int indexHint, int *resolvedIndex)
 				        {
 					        return LuaCallbackRuntimeMutationAccess::timerForLocation(
 					            runtime, location, runtimeId, indexHint, resolvedIndex);
@@ -43564,7 +43564,7 @@ static int luaResetTimers(lua_State *L)
 			    if (resetTimerFields(timer, scheduleReset))
 			    {
 				    changedLocations.push_back({timer.runtimeLocationHandle, timer.runtimeId, index,
-					                            LuaCallbackRuleSnapshotPart::DetailState});
+				                                LuaCallbackRuleSnapshotPart::DetailState});
 			    }
 		    }
 		    targetRuntime.markTimerRuntimeStatesChanged(
@@ -43585,7 +43585,7 @@ static int luaStopEvaluatingTriggers(lua_State *L)
 	                                             {
 		                                             targetRuntime.setStopTriggerEvaluation(
 		                                                 allPlugins ? WorldRuntime::StopAllSequences
-														            : WorldRuntime::StopCurrentSequence);
+		                                                            : WorldRuntime::StopCurrentSequence);
 	                                             });
 	return 0;
 }
@@ -45021,11 +45021,11 @@ static int enqueueDatabaseAsyncStatusResult(lua_State *L, const LuaCallbackEngin
 	const bool accepted                         = enqueueRuntimeThreadDeferredMutationNoResult(
 	    engine, runtime,
 	    [apiName, requestId, funcCopy = std::move(funcCopy), okCopy = std::move(okCopy),
-		 payloadCopy = std::move(payloadCopy)](WorldRuntime &targetRuntime) mutable
+	     payloadCopy = std::move(payloadCopy)](WorldRuntime &targetRuntime) mutable
 	    {
 		    const int status = funcCopy(targetRuntime);
 		    emitPluginAsyncResult(targetRuntime, requestId, apiName, okCopy(status), status,
-			                      payloadCopy(status));
+		                          payloadCopy(status));
 	    });
 	lua_pushnumber(L, accepted ? acceptedCode : enqueueFailureCode);
 	if (accepted && requestId.isValid())
@@ -45459,7 +45459,7 @@ static bool resolveDatabaseColumnValueForApi(const LuaCallbackEngine *engine, Wo
 	    inCallback ? runOnRuntimeThreadNoDeferredFlush(
 	                     runtime, [&]() -> bool
 	                     { return runtime->databaseColumnValue(name, column, resolvedColumnValue); }, false)
-		           : runOnRuntimeThread(
+	               : runOnRuntimeThread(
 	                     runtime, [&]() -> bool
 	                     { return runtime->databaseColumnValue(name, column, resolvedColumnValue); }, false);
 	cacheCallbackDatabaseColumnValue(engine, name, column, found, resolvedColumnValue);
@@ -46374,7 +46374,7 @@ static int luaDatabaseGetField(lua_State *L)
 				    }
 			    }
 			    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("DatabaseGetField"), ok,
-				                      status, payload);
+			                          status, payload);
 		    });
 		lua_pushnil(L);
 		if (accepted && requestId.isValid())
@@ -46729,7 +46729,7 @@ static int luaLoadPlugin(lua_State *L)
 					    return eOK;
 				    return error.contains(QStringLiteral("not found"), Qt::CaseInsensitive)
 				               ? ePluginFileNotFound
-							   : eProblemsLoadingPlugin;
+				               : eProblemsLoadingPlugin;
 			    },
 			    [](const int status) { return status == eOK; });
 		}
@@ -46742,7 +46742,7 @@ static int luaLoadPlugin(lua_State *L)
 				    return eOK;
 			    return error.contains(QStringLiteral("not found"), Qt::CaseInsensitive)
 			               ? ePluginFileNotFound
-						   : eProblemsLoadingPlugin;
+			               : eProblemsLoadingPlugin;
 		    },
 		    eProblemsLoadingPlugin);
 		lua_pushnumber(L, callbackResult);
@@ -46756,7 +46756,7 @@ static int luaLoadPlugin(lua_State *L)
 		    if (targetRuntime.loadPluginFile(fileName, &error, false))
 			    return eOK;
 		    return error.contains(QStringLiteral("not found"), Qt::CaseInsensitive) ? ePluginFileNotFound
-			                                                                        : eProblemsLoadingPlugin;
+		                                                                            : eProblemsLoadingPlugin;
 	    },
 	    eProblemsLoadingPlugin);
 	lua_pushnumber(L, result);
@@ -47014,7 +47014,7 @@ namespace
 			lua_pushnumber(L, eErrorCallingPluginRoutine);
 			pushLuaUtf8String(
 			    L, QStringLiteral("Cannot handle return value #%1 (%2 type) from function '%3' in "
-				                  "plugin '%4' (%5)")
+			                      "plugin '%4' (%5)")
 			           .arg(marshalling.index)
 			           .arg(QString::fromLatin1(marshalling.typeName))
 			           .arg(invocation.routine, invocation.targetPluginName, invocation.targetPluginId));
@@ -47177,7 +47177,7 @@ static int luaCallPlugin(lua_State *L)
 			pushLuaUtf8String(
 			    L, reason.isEmpty()
 			           ? QStringLiteral("Failed to flush deferred runtime mutations before CallPlugin")
-					   : reason);
+			           : reason);
 			return 2;
 		}
 		const auto pushCodeAndMessage = [L](const int code, const QString &message)
@@ -47188,7 +47188,7 @@ static int luaCallPlugin(lua_State *L)
 		};
 		const auto pushNativeCallResult =
 		    [L, &pushCodeAndMessage](const QString                                    &routine,
-			                         const QMudNativePluginRegistry::NativeCallResult &result) -> int
+		                             const QMudNativePluginRegistry::NativeCallResult &result) -> int
 		{
 			if (result.errorCode != eOK)
 				return pushCodeAndMessage(result.errorCode, result.errorText);
@@ -47250,7 +47250,7 @@ static int luaCallPlugin(lua_State *L)
 				}
 				const QMudNativePluginRegistry::NativeCallResult result =
 				    queueNativeCallPluginRuntimeThreadSideEffect(engine, runtime, shimId, routine, arguments,
-					                                             context);
+				                                                 context);
 				return pushNativeCallResult(routine, result);
 			}
 			if (shimId == QMudNativePluginRegistry::luaAudioPluginId())
@@ -47907,7 +47907,7 @@ static int luaWindowCreate(lua_State *L)
 	    [=]() -> int
 	    {
 		    return runtime->windowCreate(name, left, top, width, height, position, flags, background,
-			                             pluginId);
+		                                 pluginId);
 	    },
 	    eNoSuchWindow);
 	if (result == eOK)
@@ -48023,7 +48023,7 @@ static int luaWindowDelete(lua_State *L)
 		        [requestId](WorldRuntime &targetRuntime)
 		        {
 			        emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("WindowDelete"), true, eOK,
-					                      QString());
+			                              QString());
 		        },
 		        CallbackMiniWindowCommitClass::Semantic))
 		{
@@ -48300,7 +48300,7 @@ static int luaWindowCircleOp(lua_State *L)
 		}
 		const int callbackResult =
 		    MiniWindowUtils::circleOp(*shadow, action, left, top, right, bottom, penColour, penStyle,
-			                          penWidth, brushColour, brushStyle, extra1, extra2, extra3, extra4);
+		                              penWidth, brushColour, brushStyle, extra1, extra2, extra3, extra4);
 		if (callbackResult != eOK)
 		{
 			lua_pushnumber(L, callbackResult);
@@ -48319,8 +48319,8 @@ static int luaWindowCircleOp(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowCircleOp(name, action, left, top, right, bottom,
-							                                 penColour, penStyle, penWidth, brushColour,
-							                                 brushStyle, extra1, extra2, extra3, extra4);
+		                                                     penColour, penStyle, penWidth, brushColour,
+		                                                     brushStyle, extra1, extra2, extra3, extra4);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -48433,7 +48433,7 @@ static int luaWindowArc(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowArc(name, left, top, right, bottom, x1, y1, x2, y2,
-							                            penColour, penStyle, penWidth);
+		                                                penColour, penStyle, penWidth);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -48538,7 +48538,7 @@ static int luaWindowPolygon(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowPolygon(name, points, penColour, penStyle, penWidth,
-							                                brushColour, brushStyle, closePolygon, winding);
+		                                                    brushColour, brushStyle, closePolygon, winding);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -48646,7 +48646,7 @@ static int luaWindowFont(lua_State *L)
 	    [=]() -> int
 	    {
 		    return runtime->windowFont(name, fontId, fontName, size, bold, italic, underline, strikeout,
-			                           charset, pitch);
+		                               charset, pitch);
 	    },
 	    eNoSuchWindow);
 	if (result == eOK)
@@ -48995,7 +48995,7 @@ static int luaWindowOutputText(lua_State *L)
 					snapshotChanges |= LuaCallbackMiniWindowSnapshotChange::WindowInfo;
 				const CallbackMiniWindowCommitClass commitClass =
 				    renderResult.hotspotStateChanged ? CallbackMiniWindowCommitClass::Semantic
-					                                 : CallbackMiniWindowCommitClass::PresentationOnly;
+				                                     : CallbackMiniWindowCommitClass::PresentationOnly;
 				asyncRequestId = nextPluginAsyncResultRequest(engine);
 				const bool commitPrepared =
 				    commitClass == CallbackMiniWindowCommitClass::Semantic
@@ -49013,7 +49013,7 @@ static int luaWindowOutputText(lua_State *L)
 					            targetRuntime, asyncRequestId, QStringLiteral("WindowOutputText"),
 					            renderResult.succeeded, renderResult.legacyValue,
 					            renderResult.succeeded ? encodeWindowOutputMetricsPayload(metrics)
-								                       : QString());
+					                                   : QString());
 				        },
 				        commitClass);
 				if (accepted)
@@ -49045,7 +49045,7 @@ static int luaWindowOutputText(lua_State *L)
 		    [&]() -> WorldRuntime::WindowOutputTextRenderResult
 		    {
 			    return runtime->windowOutputTextResult(name, fontId, text, left, top, right, bottom, colour,
-				                                       mouseUp, hotspotPrefix, pluginId, &metrics);
+			                                           mouseUp, hotspotPrefix, pluginId, &metrics);
 		    },
 		    WorldRuntime::WindowOutputTextRenderResult::failure(eNoSuchWindow));
 	}
@@ -49383,7 +49383,7 @@ static int luaWindowImageInfo(lua_State *L)
 	    inCallback ? runOnRuntimeThreadNoDeferredFlush(
 	                     runtime, [&]() -> QVariant
 	                     { return runtime->windowImageInfo(name, imageId, infoType); }, QVariant())
-		           : runOnRuntimeThreadFlushingDeferred(
+	               : runOnRuntimeThreadFlushingDeferred(
 	                     L, runtime, [&]() -> QVariant
 	                     { return runtime->windowImageInfo(name, imageId, infoType); }, QVariant());
 	pushVariant(L, value);
@@ -49487,7 +49487,7 @@ static int luaWindowDrawImage(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowDrawImage(name, imageId, left, top, right, bottom, mode,
-							                                  srcLeft, srcTop, srcRight, srcBottom);
+		                                                      srcLeft, srcTop, srcRight, srcBottom);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -49544,7 +49544,7 @@ static int luaWindowDrawImageAlpha(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowDrawImageAlpha(name, imageId, left, top, right, bottom,
-							                                       opacity, srcLeft, srcTop);
+		                                                           opacity, srcLeft, srcTop);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -49587,7 +49587,7 @@ static int luaWindowImageOp(lua_State *L)
 		}
 		const int callbackResult =
 		    MiniWindowUtils::imageOp(*shadow, action, left, top, right, bottom, penColour, penStyle, penWidth,
-			                         brushColour, imageId, ellipseWidth, ellipseHeight);
+		                             brushColour, imageId, ellipseWidth, ellipseHeight);
 		if (callbackResult != eOK)
 		{
 			lua_pushnumber(L, callbackResult);
@@ -49606,8 +49606,8 @@ static int luaWindowImageOp(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowImageOp(name, action, left, top, right, bottom, penColour,
-							                                penStyle, penWidth, brushColour, imageId,
-							                                ellipseWidth, ellipseHeight);
+		                                                    penStyle, penWidth, brushColour, imageId,
+		                                                    ellipseWidth, ellipseHeight);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -49650,7 +49650,7 @@ static int luaWindowMergeImageAlpha(lua_State *L)
 		}
 		const int callbackResult =
 		    MiniWindowUtils::mergeImageAlpha(*shadow, imageId, maskId, left, top, right, bottom, mode,
-			                                 opacity, srcLeft, srcTop, srcRight, srcBottom);
+		                                     opacity, srcLeft, srcTop, srcRight, srcBottom);
 		if (callbackResult != eOK)
 		{
 			lua_pushnumber(L, callbackResult);
@@ -49669,8 +49669,8 @@ static int luaWindowMergeImageAlpha(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowMergeImageAlpha(name, imageId, maskId, left, top, right,
-							                                        bottom, mode, opacity, srcLeft, srcTop,
-							                                        srcRight, srcBottom);
+		                                                            bottom, mode, opacity, srcLeft, srcTop,
+		                                                            srcRight, srcBottom);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -49726,7 +49726,7 @@ static int luaWindowGetImageAlpha(lua_State *L)
 	                      [&]() -> int
 	                      {
 		                      return runtime->windowGetImageAlpha(name, imageId, left, top, right, bottom,
-							                                      srcLeft, srcTop);
+		                                                          srcLeft, srcTop);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -49788,7 +49788,7 @@ static int luaWindowBlendImage(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowBlendImage(name, imageId, left, top, right, bottom, mode,
-							                                   opacity, srcLeft, srcTop, srcRight, srcBottom);
+		                                                       opacity, srcLeft, srcTop, srcRight, srcBottom);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -49827,7 +49827,7 @@ static int luaWindowFilter(lua_State *L)
 		const quint32 randomSeed = QRandomGenerator::global()->generate();
 		const int     callbackResult =
 		    MiniWindowUtils::filter(*shadow, left, top, right, bottom, operation, options,
-			                        callbackMiniWindowSeededRandomUnit(randomSeed));
+		                            callbackMiniWindowSeededRandomUnit(randomSeed));
 		if (callbackResult != eOK)
 		{
 			lua_pushnumber(L, callbackResult);
@@ -49949,7 +49949,7 @@ static int luaWindowWrite(lua_State *L)
 		{
 			lua_pushnumber(L, MiniWindowUtils::saveWindowImage24Bit(*shadow, resolvedFileName)
 			                      ? eOK
-								  : eCouldNotOpenFile);
+			                      : eCouldNotOpenFile);
 			return 1;
 		}
 		if (callbackScopeSyncBridgeForbidden())
@@ -49961,7 +49961,7 @@ static int luaWindowWrite(lua_State *L)
 			    {
 				    const int status = targetRuntime.windowWrite(name, trimmedFileName);
 				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("WindowWrite"),
-					                      status == eOK, status, QString());
+				                          status == eOK, status, QString());
 			    });
 			lua_pushnumber(L, accepted ? eOK : eBadParameter);
 			if (accepted && requestId.isValid())
@@ -49986,7 +49986,7 @@ static int luaWindowWrite(lua_State *L)
 		snapshotWindow.setBackingSurface(snapshot);
 		lua_pushnumber(L, MiniWindowUtils::saveWindowImage24Bit(snapshotWindow, resolvedFileName)
 		                      ? eOK
-							  : eCouldNotOpenFile);
+		                      : eCouldNotOpenFile);
 		return 1;
 	}
 	lua_pushnumber(L, runOnRuntimeThreadDeferredMutation(
@@ -50262,7 +50262,7 @@ static int luaWindowAddHotspot(lua_State *L)
 		}
 		const LuaCallbackMiniWindowSnapshotChanges changes =
 		    hotspotExisted ? LuaCallbackMiniWindowSnapshotChanges{}
-			               : LuaCallbackMiniWindowSnapshotChange::HotspotMembership;
+		                   : LuaCallbackMiniWindowSnapshotChange::HotspotMembership;
 		if (!prepareCallbackMiniWindowSemanticCommit(engine, runtime, name, changes))
 		{
 			lua_pushnumber(L, eNoSuchWindow);
@@ -50363,7 +50363,7 @@ static int luaWindowDeleteAllHotspots(lua_State *L)
 		deleteAllCallbackMiniWindowShadowHotspots(engine, name);
 		const LuaCallbackMiniWindowSnapshotChanges changes =
 		    hotspotMembershipChanges ? LuaCallbackMiniWindowSnapshotChange::HotspotMembership
-			                         : LuaCallbackMiniWindowSnapshotChanges{};
+		                             : LuaCallbackMiniWindowSnapshotChanges{};
 		if (!prepareCallbackMiniWindowSemanticCommit(engine, runtime, name, changes))
 		{
 			lua_pushnumber(L, eNoSuchWindow);
@@ -50448,7 +50448,7 @@ static int luaWindowHotspotInfo(lua_State *L)
 	    inCallback ? runOnRuntimeThreadNoDeferredFlush(
 	                     runtime, [&]() -> QVariant
 	                     { return runtime->windowHotspotInfo(name, hotspotId, infoType); }, QVariant())
-		           : runOnRuntimeThreadFlushingDeferred(
+	               : runOnRuntimeThreadFlushingDeferred(
 	                     L, runtime, [&]() -> QVariant
 	                     { return runtime->windowHotspotInfo(name, hotspotId, infoType); }, QVariant());
 	pushVariant(L, value);
@@ -50607,7 +50607,7 @@ static int luaWindowDragHandler(lua_State *L)
 	                      [=]() -> int
 	                      {
 		                      return runtime->windowDragHandler(name, hotspotId, moveCallback,
-							                                    releaseCallback, flags, pluginId);
+		                                                        releaseCallback, flags, pluginId);
 	                      },
 	                      eNoSuchWindow));
 	return 1;
@@ -51768,15 +51768,14 @@ namespace
 		return 1;
 	}
 	/**
-	 * @brief Queries current negotiation.
+	 * @brief Reports native GMCP negotiation, returning false when native handling is unavailable.
 	 * @param L Lua state.
-	 * @return Negotiated boolean.
+	 * @return One Lua boolean result.
 	 */
 	int luaGmcpIsEnabled(lua_State *L)
 	{
-		requireGmcpAvailable(L);
 		const auto state = luaGmcpSnapshot(luaGmcpEngine(L));
-		lua_pushboolean(L, state && state->native && state->negotiated && !state->closed);
+		lua_pushboolean(L, state && state->nativeAvailable() && state->negotiated);
 		return 1;
 	}
 	/**
@@ -52547,7 +52546,7 @@ void LuaCallbackEngine::registerWorldBindings()
 			int         value;
 	};
 	static const ErrorCodeEntry kErrorCodes[] = {
-	    {"eOK",                         eOK                        },
+	    {"eOK",	                     eOK	                    },
 	    {"eWorldOpen",                  eWorldOpen                 },
 	    {"eWorldClosed",                eWorldClosed               },
 	    {"eNoNameSpecified",            eNoNameSpecified           },
@@ -52622,7 +52621,7 @@ void LuaCallbackEngine::registerWorldBindings()
 	    {"eHotspotNotInstalled",        eHotspotNotInstalled       },
 	    {"eNoSuchWindow",               eNoSuchWindow              },
 	    {"eBrushStyleNotValid",         eBrushStyleNotValid        },
-	    {nullptr,                       0                          }
+	    {nullptr,	                   0	                      }
     };
 
 	lua_newtable(m_state);

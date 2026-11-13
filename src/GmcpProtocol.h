@@ -103,7 +103,7 @@ namespace QMudGmcp
 				return connectionSelected && native && !closed;
 			}
 			/**
-			 * @brief Resolves the current policy for a message.
+			 * @brief Resolves the nearest inherited policy within each authority tier for a message.
 			 * @param name Message name.
 			 * @return Effective merge policy for its next update.
 			 */
@@ -226,7 +226,7 @@ namespace QMudGmcp
 			                                         const std::function<void(const Range &)> &aboutToRemove,
 			                                         const std::function<void()>              &removed);
 			/**
-			 * @brief Finds expired ranges in one page traversal, protecting the latest five records.
+			 * @brief Finds expired ranges in one-page traversal, protecting the latest five records.
 			 * @param cutoff Records strictly older than this timestamp may be removed.
 			 * @return Disjoint ranges in ascending arrival order, including out-of-order timestamps.
 			 */
@@ -331,8 +331,8 @@ namespace QMudGmcp
 			 */
 			void observeSent(const QByteArray &payload);
 			/**
-			 * @brief Configures the world-wide local merge policy for future messages.
-			 * @param name Exact GMCP message name, matched without case.
+			 * @brief Configures an inheritable world-wide merge policy for future messages.
+			 * @param name Package or message path, matched without case and inherited by descendants.
 			 * @param mode Application mode.
 			 * @param force Whether to override server declarations.
 			 * @return Whether the name is valid.

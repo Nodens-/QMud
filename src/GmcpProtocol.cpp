@@ -19,6 +19,7 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <algorithm>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -786,13 +787,40 @@ namespace QMudGmcp
 {
 	MergeMode Snapshot::effectiveMode(const QString &name) const
 	{
-		const auto key = name.toLower();
-		if (forcedModes.contains(key))
-			return localModes.value(key);
-		if (serverModes.contains(key))
-			return serverModes.value(key);
-		return localModes.value(key, key == QLatin1String("char.status") ? MergeMode::Shallow
-		                                                                 : MergeMode::Replace);
+		QString                  path = name.toLower();
+		std::optional<MergeMode> serverMode, localMode;
+		MergeMode                defaultMode       = MergeMode::Replace;
+		const bool               hasForcedPolicies = !forcedModes.isEmpty();
+		for (;;)
+		{
+			if (hasForcedPolicies && forcedModes.contains(path))
+				return localModes.value(path);
+			if (!serverMode)
+			{
+				if (const auto policy = serverModes.constFind(path); policy != serverModes.cend())
+				{
+					if (!hasForcedPolicies)
+						return policy.value();
+					serverMode = policy.value();
+				}
+			}
+			if (!serverMode && !localMode)
+			{
+				if (const auto policy = localModes.constFind(path); policy != localModes.cend())
+				{
+					if (!hasForcedPolicies && serverModes.isEmpty())
+						return policy.value();
+					localMode = policy.value();
+				}
+			}
+			if (path == QLatin1String("char.status"))
+				defaultMode = MergeMode::Shallow;
+			const auto dot = path.lastIndexOf(QLatin1Char('.'));
+			if (dot < 0)
+				break;
+			path.truncate(dot);
+		}
+		return serverMode.value_or(localMode.value_or(defaultMode));
 	}
 } // namespace QMudGmcp
 

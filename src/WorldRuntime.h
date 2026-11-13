@@ -316,8 +316,8 @@ class WorldRuntime : public QObject
 		 */
 		bool                                   sendGmcp(const QByteArray &raw, quint64 generation);
 		/**
-		 * @brief Sets world-wide merge policy.
-		 * @param name Message name.
+		 * @brief Sets an inheritable world-wide merge policy.
+		 * @param name Package or message path whose descendants inherit this policy.
 		 * @param mode Application mode.
 		 * @param force Override server policy.
 		 * @return Whether accepted.
