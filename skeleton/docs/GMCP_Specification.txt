@@ -269,7 +269,15 @@ An unknown mode or a declaration whose value is not a string produces a diagnost
 in effect and the remaining valid application payload is still processed.
 Invalid JSON changes neither the policy nor application state.
 
-4.6 QMud local policy and defaults
+4.6 Changing the policy
+
+QMud can change the policy at any time, but it will be overriden if the server sends a policy. It can also force a
+policy in order to override what the server requested and ignore further policy changes from the server for a
+particular package or subpackage, as a potential workaround to a server bug.
+
+This is done via the GMCP Browser dialog, by using the right click context menu on a package.
+
+4.7 QMud local policy and defaults
 
 QMud chooses a message's storage mode in this order:
 

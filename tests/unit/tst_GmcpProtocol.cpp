@@ -687,6 +687,44 @@ namespace
 				QVERIFY(reconnected->serverModes.isEmpty());
 				QCOMPARE(pending->effectiveMode(QStringLiteral("Test.State.Child")), MergeMode::Recursive);
 			}
+			/**
+			 * @brief Preserves historical policy authority while local overrides are installed and removed.
+			 */
+			static void capturedMergePolicies()
+			{
+				QMudGmcp::Session session;
+				activate(session);
+				QList<QMudGmcp::Record> history;
+				session.observed = [&](const auto &record, const auto &) { history.append(record); };
+				session.receive(250, R"(Test.State {"__gmcp_merge":"recursive"})");
+				session.setMergePolicies({
+				    {QStringLiteral("test.state.child"), {QMudGmcp::MergeMode::Shallow, true}}
+                });
+				session.receive(250, R"(Test.State.Child {"retained":1})");
+				const auto forced = history.last();
+				session.receive(250, R"(Test.State {"__gmcp_merge":"recursive"})");
+				QVERIFY(forced.policies.serverModes.isSharedWith(history.last().policies.serverModes));
+				const auto resolution = forced.policies.resolve(QStringLiteral("TEST.State.Child.More"));
+				QCOMPARE(resolution.mode, QMudGmcp::MergeMode::Shallow);
+				QVERIFY(resolution.force);
+				QCOMPARE(resolution.path, QStringLiteral("test.state.child"));
+				QCOMPARE(resolution.source, QStringLiteral("World"));
+				QVERIFY(session.clearMergePolicy(QStringLiteral("TEST.State.Child")));
+				session.receive(250, R"(Test.State.Child {"added":2})");
+				const auto inherited = history.last();
+				QCOMPARE(inherited.policies.effectiveMode(QStringLiteral("Test.State.Child")),
+				         QMudGmcp::MergeMode::Recursive);
+				QVERIFY(!inherited.policies.resolve(QStringLiteral("Test.State.Child")).force);
+				QCOMPARE(
+				    inherited.messages.value(QStringLiteral("test.state.child"))->state.toObject().size(), 2);
+				session.receive(250, R"(Test.State {"__gmcp_merge":"replace"})");
+				QCOMPARE(forced.policies.resolve(QStringLiteral("Test.State.Child")).mode,
+				         QMudGmcp::MergeMode::Shallow);
+				QVERIFY(forced.policies.resolve(QStringLiteral("Test.State.Child")).force);
+				QCOMPARE(inherited.policies.effectiveMode(QStringLiteral("Test.State.Child")),
+				         QMudGmcp::MergeMode::Recursive);
+				QVERIFY(session.clearMergePolicy(QStringLiteral("Test.State.Child")));
+			}
 
 			/**
 			 * @brief Rejects malformed policy changes atomically and keeps original raw data.

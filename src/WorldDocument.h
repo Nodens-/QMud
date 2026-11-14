@@ -10,6 +10,7 @@
 #ifndef QMUD_WORLDDOCUMENT_H
 #define QMUD_WORLDDOCUMENT_H
 
+#include "GmcpProtocol.h"
 #include <QDateTime>
 #include <QList>
 #include <QMap>
@@ -73,33 +74,39 @@ class WorldDocument : public QObject
 		 * @brief Returns last load/parse error text.
 		 * @return Error string.
 		 */
-		[[nodiscard]] QString                       errorString() const;
+		[[nodiscard]] QString                         errorString() const;
 
 		/**
 		 * @brief Returns parsed world-file version.
 		 * @return Parsed world-file version.
 		 */
-		[[nodiscard]] int                           worldFileVersion() const;
+		[[nodiscard]] int                             worldFileVersion() const;
 		/**
 		 * @brief Returns parsed QMud version string.
 		 * @return Parsed QMud version string.
 		 */
-		[[nodiscard]] QString                       qmudVersion() const;
+		[[nodiscard]] QString                         qmudVersion() const;
 		/**
 		 * @brief Returns world save timestamp from XML.
 		 * @return Parsed save timestamp.
 		 */
-		[[nodiscard]] QDateTime                     dateSaved() const;
+		[[nodiscard]] QDateTime                       dateSaved() const;
 		/**
 		 * @brief Returns single-line world attribute map.
 		 * @return Immutable world attribute map.
 		 */
-		[[nodiscard]] const QMap<QString, QString> &worldAttributes() const;
+		[[nodiscard]] const QMap<QString, QString>   &worldAttributes() const;
 		/**
 		 * @brief Returns multiline world attribute map.
 		 * @return Immutable multiline world attribute map.
 		 */
-		[[nodiscard]] const QMap<QString, QString> &worldMultilineAttributes() const;
+		[[nodiscard]] const QMap<QString, QString>   &worldMultilineAttributes() const;
+		/**
+		 * @brief Returns GMCP merge overrides defined in this document.
+		 * @return Canonical package paths mapped to mode and force, excluding includes.
+		 */
+		[[nodiscard]] const QMudGmcp::MergeOverrides &gmcpMergeOverrides() const;
+
 		/**
 		 * @brief Parsed trigger node from world XML.
 		 */
@@ -393,23 +400,24 @@ class WorldDocument : public QObject
 		int           m_worldFileVersion{0};
 		QString       m_qmudVersion;
 		QDateTime     m_dateSaved;
-		QMap<QString, QString> m_worldAttributes;
-		QMap<QString, QString> m_worldMultilineAttributes;
-		QList<Trigger>         m_triggers;
-		QList<Alias>           m_aliases;
-		QList<Timer>           m_timers;
-		QList<Macro>           m_macros;
-		QList<Variable>        m_variables;
-		QList<Colour>          m_colours;
-		QList<Keypad>          m_keypadEntries;
-		QList<PrintingStyle>   m_printingStyles;
-		QString                m_comments;
-		QList<Plugin>          m_plugins;
-		QMap<QString, QString> m_loadedPluginIds;
-		QList<Include>         m_includes;
-		QStringList            m_pluginScriptFragments;
-		QStringList            m_currentIncludeStack;
-		QStringList            m_includeFileList;
+		QMap<QString, QString>   m_worldAttributes;
+		QMap<QString, QString>   m_worldMultilineAttributes;
+		QMudGmcp::MergeOverrides m_gmcpMergeOverrides;
+		QList<Trigger>           m_triggers;
+		QList<Alias>             m_aliases;
+		QList<Timer>             m_timers;
+		QList<Macro>             m_macros;
+		QList<Variable>          m_variables;
+		QList<Colour>            m_colours;
+		QList<Keypad>            m_keypadEntries;
+		QList<PrintingStyle>     m_printingStyles;
+		QString                  m_comments;
+		QList<Plugin>            m_plugins;
+		QMap<QString, QString>   m_loadedPluginIds;
+		QList<Include>           m_includes;
+		QStringList              m_pluginScriptFragments;
+		QStringList              m_currentIncludeStack;
+		QStringList              m_includeFileList;
 };
 
 #endif // QMUD_WORLDDOCUMENT_H

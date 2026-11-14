@@ -18,6 +18,7 @@
 #include <QSet>
 #include <functional>
 #include <memory>
+#include <utility>
 
 namespace QMudGmcp
 {
@@ -40,6 +41,41 @@ namespace QMudGmcp
 		Replace,
 		Shallow,
 		Recursive
+	};
+	/**
+	 * @brief Explicit world overrides, containing a mode and its force flag for each canonical path.
+	 */
+	using MergeOverrides = QMap<QString, std::pair<MergeMode, bool>>;
+	/**
+	 * @brief One resolved policy and the declaration responsible for it.
+	 */
+	struct MergeResolution
+	{
+			MergeMode mode{MergeMode::Replace};
+			bool      force{false};
+			QString   source;
+			QString   path;
+	};
+	/**
+	 * @brief Immutable declaration maps shared by live publications and historical versions.
+	 */
+	struct MergePolicies
+	{
+			QMap<QString, MergeMode>      serverModes;
+			QMap<QString, MergeMode>      localModes;
+			QSet<QString>                 forcedModes;
+			/**
+			 * @brief Resolves the nearest declaration within each authority tier.
+			 * @param name Package or message path.
+			 * @return Effective policy and its origin.
+			 */
+			[[nodiscard]] MergeResolution resolve(const QString &name) const;
+			/**
+			 * @brief Resolves the merge mode for a future update.
+			 * @param name Package or message path.
+			 * @return Effective mode.
+			 */
+			[[nodiscard]] MergeMode       effectiveMode(const QString &name) const;
 	};
 	/**
 	 * @brief One immutable application value and its original wire message.
@@ -77,7 +113,7 @@ namespace QMudGmcp
 	/**
 	 * @brief Immutable native-session view shared with Lua and browser readers.
 	 */
-	struct Snapshot
+	struct Snapshot : MergePolicies
 	{
 			bool                                    native{false};
 			bool                                    negotiated{false};
@@ -91,9 +127,6 @@ namespace QMudGmcp
 			LuaCallbackPersistentStringMap<Message> messages;
 			PackageIndex                            packages;
 			QSet<QString>                           namespaces;
-			QMap<QString, MergeMode>                serverModes;
-			QMap<QString, MergeMode>                localModes;
-			QSet<QString>                           forcedModes;
 			/**
 			 * @brief Checks whether a live or restored connection has selected native handling.
 			 * @return Whether native GMCP APIs are available independently of preferences.
@@ -102,12 +135,6 @@ namespace QMudGmcp
 			{
 				return connectionSelected && native && !closed;
 			}
-			/**
-			 * @brief Resolves the nearest inherited policy within each authority tier for a message.
-			 * @param name Message name.
-			 * @return Effective merge policy for its next update.
-			 */
-			[[nodiscard]] MergeMode effectiveMode(const QString &name) const;
 	};
 	/**
 	 * @brief Lifetime-independent publication endpoint; its writer is the transport thread.
@@ -130,6 +157,7 @@ namespace QMudGmcp
 			LuaCallbackPersistentStringMap<Message> messages;
 			PackageIndex                            packages;
 			quint64                                 revision{0};
+			MergePolicies                           policies{};
 	};
 	/**
 	 * @brief Indexed arrival-order history whose copies retain immutable versions without copying records.
@@ -338,6 +366,17 @@ namespace QMudGmcp
 			 * @return Whether the name is valid.
 			 */
 			bool setMergePolicy(const QString &name, MergeMode mode, bool force = false);
+			/**
+			 * @brief Removes an explicit world override and restores inherited authority.
+			 * @param name Package or message path.
+			 * @return Whether the name is valid.
+			 */
+			bool clearMergePolicy(const QString &name);
+			/**
+			 * @brief Installs the complete world override set during world loading.
+			 * @param policies Canonical override paths and settings.
+			 */
+			void setMergePolicies(const MergeOverrides &policies);
 			/**
 			 * @brief Sends a validated native GMCP message.
 			 * @param raw Message without Telnet framing.

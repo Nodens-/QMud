@@ -528,7 +528,7 @@ ReloadMccpDisableDecision resolveReloadMccpDisableStatus(const ReloadMccpDisable
 		decision.statusLabel  = "failed";
 		decision.failureNote =
 		    QStringLiteral("MCCP shutdown encountered a fatal compression error during reload "
-		                   "preparation; the socket was preserved for startup reattach validation.");
+			               "preparation; the socket was preserved for startup reattach validation.");
 		break;
 	}
 	return decision;
@@ -667,7 +667,7 @@ ReloadMccpProbeTimeoutAction resolveReloadMccpProbeTimeoutAction(const QByteArra
 		return ReloadMccpProbeTimeoutAction::WaitSecondPass;
 	return shouldReconnectOnReloadMccpProbeTimeout(bufferedProbePayload)
 	           ? ReloadMccpProbeTimeoutAction::Reconnect
-	           : ReloadMccpProbeTimeoutAction::KeepReattach;
+			   : ReloadMccpProbeTimeoutAction::KeepReattach;
 }
 
 QByteArray extractReloadMccpProbeDecisionPayload(const QByteArray &probeBuffer, const bool lookProbeSent,

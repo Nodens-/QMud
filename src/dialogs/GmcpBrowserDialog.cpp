@@ -11,6 +11,8 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QAbstractItemModel>
 #include <QAbstractListModel>
+#include <QAction>
+#include <QActionGroup>
 #include <QCheckBox>
 #include <QFutureWatcher>
 #include <QHeaderView>
@@ -20,6 +22,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QPromise>
 #include <QScopeGuard>
@@ -267,17 +270,28 @@ namespace
 			 * @brief Binds an existing version for initial display, explicit resume, or history selection.
 			 * @param messages Published message map.
 			 * @param packages Published namespace index.
+			 * @param policies Captured policy declarations.
 			 */
 			void setVersion(const LuaCallbackPersistentStringMap<QMudGmcp::Message> &messages,
-			                const QMudGmcp::PackageIndex                            &packages)
+			                const QMudGmcp::PackageIndex                            &packages,
+			                const QMudGmcp::MergePolicies                           &policies = {})
 			{
 				beginResetModel();
+				m_policies            = policies;
 				auto previousMessages = std::exchange(m_messages, messages);
 				auto previousPackages = std::exchange(m_packages, packages);
 				m_jsonLocations.clear();
 				m_packageLocations.clear();
 				endResetModel();
 				retireBrowserData(std::move(previousMessages), std::move(previousPackages));
+			}
+			/**
+			 * @brief Binds immutable policy maps for subsequent cell reads.
+			 * @param policies Captured declarations.
+			 */
+			void setPolicies(const QMudGmcp::MergePolicies &policies)
+			{
+				m_policies = policies;
 			}
 			/**
 			 * @brief Replaces only a received package's bound JSON object, without inspecting its fields.
@@ -331,7 +345,7 @@ namespace
 				m_hiddenPackage.reset();
 				if (newCount > 0)
 					endInsertRows();
-				emit dataChanged(package, package.siblingAtColumn(2));
+				emit dataChanged(package, package.siblingAtColumn(3));
 			}
 			/**
 			 * @brief Returns the semantic address of an existing Qt index.
@@ -400,7 +414,7 @@ namespace
 			 */
 			QModelIndex index(int row, int column, const QModelIndex &parent) const override
 			{
-				if (row < 0 || column < 0 || column >= 3 || (parent.isValid() && parent.column() != 0))
+				if (row < 0 || column < 0 || column >= 4 || (parent.isValid() && parent.column() != 0))
 					return {};
 				if (!parent.isValid())
 					return row < m_packages.roots.size() ? packageIndex(m_packages.roots.at(row), column)
@@ -467,20 +481,20 @@ namespace
 				       count(jsonValue(location));
 			}
 			/**
-			 * @brief Returns the name, value, and type columns.
+			 * @brief Returns the name, value, type, and merge-policy columns.
 			 * @param parent Unused parent index.
-			 * @return Three columns.
+			 * @return Four columns.
 			 */
 			int columnCount(const QModelIndex &parent) const override
 			{
 				Q_UNUSED(parent);
-				return 3;
+				return 4;
 			}
 			/**
 			 * @brief Reads one requested cell or dotted filter path.
 			 * @param index Requested index.
 			 * @param role Qt data role.
-			 * @return Existing value, label, or type marker.
+			 * @return Existing value, label, type marker, or merge policy.
 			 */
 			QVariant data(const QModelIndex &index, int role) const override
 			{
@@ -496,7 +510,24 @@ namespace
 						                                : field.mid(2));
 					return path;
 				}
+				if (index.column() == 3 && location.fields.isEmpty())
+				{
+					const auto policy = m_policies.resolve(location.package);
+					if (role == Qt::ToolTipRole)
+						return policy.source +
+						       (policy.path.isEmpty() ? QString{}
+						                              : QStringLiteral(" policy at ") + policy.path) +
+						       (policy.path != location.package && !policy.path.isEmpty()
+						            ? QStringLiteral(" (inherited)")
+						            : QString{});
+					if (role == Qt::DisplayRole)
+						return QMudGmcp::modeName(policy.mode) +
+						       (policy.force ? QStringLiteral(" (forced)") : QString{});
+					return {};
+				}
 				if (role != Qt::DisplayRole)
+					return {};
+				if (index.column() == 3)
 					return {};
 				if (index.column() == 0)
 				{
@@ -515,7 +546,7 @@ namespace
 				return index.column() == 2 ? QVariant(typeMarker(value)) : displayValue(value);
 			}
 			/**
-			 * @brief Supplies the three column labels.
+			 * @brief Supplies the browser column labels.
 			 * @param section Header column.
 			 * @param orientation Header axis.
 			 * @param role Qt data role.
@@ -533,6 +564,8 @@ namespace
 					return QStringLiteral("Value");
 				case 2:
 					return QStringLiteral("Type");
+				case 3:
+					return QStringLiteral("Merge mode");
 				default:
 					return {};
 				}
@@ -613,6 +646,7 @@ namespace
 				}
 				return value;
 			}
+			QMudGmcp::MergePolicies                              m_policies;
 			LuaCallbackPersistentStringMap<QMudGmcp::Message>    m_messages;
 			QMudGmcp::PackageIndex                               m_packages;
 			std::optional<QString>                               m_hiddenPackage;
@@ -941,8 +975,10 @@ class GmcpBrowserDataView final : public QWidget
 		 * @brief Builds the tree/raw pane over existing JSON objects.
 		 * @param name Object-name prefix.
 		 * @param parent Widget owner.
+		 * @param runtime World whose persistent overrides can be edited.
 		 */
-		explicit GmcpBrowserDataView(const QString &name, QWidget *parent) : QWidget(parent)
+		explicit GmcpBrowserDataView(const QString &name, QWidget *parent, WorldRuntime *runtime)
+		    : QWidget(parent), m_runtime(runtime)
 		{
 			auto *layout = new QVBoxLayout(this);
 			layout->setContentsMargins(0, 0, 0, 0);
@@ -960,6 +996,76 @@ class GmcpBrowserDataView final : public QWidget
 			m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
 			m_tree->header()->resizeSection(0, 300);
 			m_tree->header()->resizeSection(2, 100);
+			m_tree->header()->resizeSection(3, 150);
+			m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+			connect(m_tree, &QTreeView::customContextMenuRequested, this,
+			        [this](const QPoint &position)
+			        {
+				        const auto clicked = m_tree->indexAt(position);
+				        if (!m_runtime || m_runtime->runtimeDestructionStarted() ||
+				            m_runtime->worldSessionCloseStarted() || !clicked.isValid())
+					        return;
+				        const auto address = GmcpTreeModel::address(m_filter->mapToSource(clicked));
+				        if (!address.fields.isEmpty())
+					        return;
+				        m_tree->setCurrentIndex(clicked);
+				        const auto                   path  = address.package;
+				        const QPointer<WorldRuntime> world = m_runtime;
+				        const auto                   local = world->gmcpMergeOverrides().constFind(path);
+				        const bool explicitPolicy          = local != world->gmcpMergeOverrides().cend();
+				        auto      *menu                    = new QMenu(m_tree);
+				        menu->setObjectName(QStringLiteral("gmcpMergeMenu"));
+				        connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
+				        menu->addSection(QStringLiteral("World merge policy"));
+				        auto *group = new QActionGroup(menu);
+				        auto *force = new QAction(QStringLiteral("Force"), menu);
+				        force->setObjectName(QStringLiteral("gmcpMergeForce"));
+				        force->setCheckable(true);
+				        force->setChecked(explicitPolicy && local->second);
+				        for (const auto mode : {QMudGmcp::MergeMode::Replace, QMudGmcp::MergeMode::Shallow,
+				                                QMudGmcp::MergeMode::Recursive})
+				        {
+					        auto *action = menu->addAction(QMudGmcp::modeName(mode));
+					        action->setObjectName(QStringLiteral("gmcpMerge_") + QMudGmcp::modeName(mode));
+					        action->setCheckable(true);
+					        action->setChecked(explicitPolicy && local->first == mode);
+					        group->addAction(action);
+					        connect(action, &QAction::triggered, menu,
+					                [world, path, mode, force]
+					                {
+						                if (world && !world->runtimeDestructionStarted() &&
+						                    !world->worldSessionCloseStarted())
+							                world->setGmcpMergePolicy(path, mode, force->isChecked());
+					                });
+				        }
+				        menu->addAction(force);
+				        connect(force, &QAction::triggered, menu,
+				                [world, path](bool checked)
+				                {
+					                if (!world || world->runtimeDestructionStarted() ||
+					                    world->worldSessionCloseStarted())
+						                return;
+					                const auto publication = world->gmcpPublication();
+					                const auto snapshot = publication ? publication->current.load() : nullptr;
+					                const auto own      = world->gmcpMergeOverrides().constFind(path);
+					                const auto mode = own != world->gmcpMergeOverrides().cend() ? own->first
+					                                  : snapshot ? snapshot->effectiveMode(path)
+					                                             : QMudGmcp::MergeMode::Replace;
+					                world->setGmcpMergePolicy(path, mode, checked);
+				                });
+				        menu->addSeparator();
+				        auto *remove = menu->addAction(QStringLiteral("Remove local override"));
+				        remove->setObjectName(QStringLiteral("gmcpMergeRemove"));
+				        remove->setEnabled(explicitPolicy);
+				        connect(remove, &QAction::triggered, menu,
+				                [world, path]
+				                {
+					                if (world && !world->runtimeDestructionStarted() &&
+					                    !world->worldSessionCloseStarted())
+						                world->clearGmcpMergePolicy(path);
+				                });
+				        menu->popup(m_tree->viewport()->mapToGlobal(position));
+			        });
 			m_stack->addWidget(m_tree);
 			m_raw = new QPlainTextEdit(m_stack);
 			m_raw->setObjectName(name + QStringLiteral("Raw"));
@@ -1027,10 +1133,15 @@ class GmcpBrowserDataView final : public QWidget
 		 * @param messages Existing message objects.
 		 * @param packages Existing namespace index.
 		 * @param wire Optional historical wire message.
+		 * @param policies Captured policy declarations.
+		 * @param revision Revision containing the declarations.
 		 */
 		void setMessages(const LuaCallbackPersistentStringMap<QMudGmcp::Message> &messages,
-		                 const QMudGmcp::PackageIndex &packages, const std::optional<QByteArray> &wire = {})
+		                 const QMudGmcp::PackageIndex &packages, const std::optional<QByteArray> &wire = {},
+		                 const QMudGmcp::MergePolicies &policies = {}, quint64 revision = 0)
 		{
+			m_policies            = policies;
+			m_policyRevision      = revision;
 			auto previousMessages = std::exchange(m_messages, messages);
 			auto previousPackages = std::exchange(m_packages, packages);
 			auto previousWire     = std::exchange(m_wire, wire);
@@ -1050,6 +1161,7 @@ class GmcpBrowserDataView final : public QWidget
 		 */
 		void receive(const QMudGmcp::Record &record, const QMudGmcp::Message &message)
 		{
+			setPolicies(record.policies, record.revision);
 			m_messages = record.messages;
 			m_packages = record.packages;
 			if (!m_rawNeedsFull)
@@ -1068,6 +1180,21 @@ class GmcpBrowserDataView final : public QWidget
 				m_treeStale = true;
 			refreshRaw();
 		}
+		/**
+		 * @brief Refreshes visible policy cells without rebuilding package or JSON rows.
+		 * @param policies Immutable declaration maps.
+		 * @param revision Revision of those declarations.
+		 */
+		void setPolicies(const QMudGmcp::MergePolicies &policies, quint64 revision)
+		{
+			if (revision < m_policyRevision)
+				return;
+			m_policyRevision = revision;
+			m_policies       = policies;
+			m_model->setPolicies(policies);
+			m_tree->viewport()->update();
+		}
+
 		/**
 		 * @brief Applies dotted filtering while retaining semantic selection and expansion choices.
 		 * @param text Literal package/field search text.
@@ -1147,7 +1274,7 @@ class GmcpBrowserDataView final : public QWidget
 				    [&]
 				    {
 					    m_tree->setBindingDetached(false);
-					    m_model->setVersion(m_messages, m_packages);
+					    m_model->setVersion(m_messages, m_packages, m_policies);
 					    m_treeStale = false;
 					    m_treeBound = true;
 					    restoreNavigation();
@@ -1466,6 +1593,9 @@ class GmcpBrowserDataView final : public QWidget
 		QPlainTextEdit                                   *m_raw{nullptr};
 		QStackedWidget                                   *m_stack{nullptr};
 		QCheckBox                                        *m_toggle{nullptr};
+		QPointer<WorldRuntime>                            m_runtime;
+		QMudGmcp::MergePolicies                           m_policies;
+		quint64                                           m_policyRevision{0};
 		LuaCallbackPersistentStringMap<QMudGmcp::Message> m_messages;
 		QMudGmcp::PackageIndex                            m_packages;
 		std::optional<QByteArray>                         m_wire;
@@ -1533,7 +1663,7 @@ GmcpBrowserDialog::GmcpBrowserDialog(WorldRuntime *runtime, QWidget *parent)
 	layout->addLayout(controls);
 	auto *tabs = new QTabWidget(this);
 	tabs->setObjectName(QStringLiteral("gmcpTabs"));
-	m_current = new GmcpBrowserDataView(QStringLiteral("gmcpCurrent"), tabs);
+	m_current = new GmcpBrowserDataView(QStringLiteral("gmcpCurrent"), tabs, runtime);
 	tabs->addTab(m_current, QStringLiteral("Current"));
 	auto *history = new QSplitter(tabs);
 	m_history     = new GmcpBrowserView<QTableView>(history);
@@ -1564,7 +1694,7 @@ GmcpBrowserDialog::GmcpBrowserDialog(WorldRuntime *runtime, QWidget *parent)
 	m_history->setModel(historyModel);
 	m_history->setObjectName(QStringLiteral("gmcpHistoryVersions"));
 	m_history->setMinimumWidth(210);
-	m_past = new GmcpBrowserDataView(QStringLiteral("gmcpHistory"), history);
+	m_past = new GmcpBrowserDataView(QStringLiteral("gmcpHistory"), history, runtime);
 	history->setStretchFactor(0, 0);
 	history->setStretchFactor(1, 1);
 	history->setSizes({230, 700});
@@ -1574,6 +1704,16 @@ GmcpBrowserDialog::GmcpBrowserDialog(WorldRuntime *runtime, QWidget *parent)
 	if (runtime)
 	{
 		connect(runtime, &WorldRuntime::gmcpChanged, this, &GmcpBrowserDialog::scheduleRefresh);
+		connect(runtime, &WorldRuntime::gmcpMergePoliciesChanged, this,
+		        [this]
+		        {
+			        if (m_pause->isChecked())
+				        return;
+			        const auto publication = m_runtime->gmcpPublication();
+			        const auto snapshot    = publication ? publication->current.load() : nullptr;
+			        if (snapshot)
+				        m_current->setPolicies(*snapshot, snapshot->revision);
+		        });
 		connect(runtime, &WorldRuntime::nativeGmcpAvailabilityChanged, this,
 		        &GmcpBrowserDialog::scheduleRefresh);
 		connect(
@@ -1707,9 +1847,11 @@ void GmcpBrowserDialog::bindCurrent()
 	                      .arg(!snapshot || !snapshot->nativeAvailable() ? QStringLiteral("unavailable")
 	                           : snapshot->negotiated                    ? QStringLiteral("negotiated")
 	                                                                     : QStringLiteral("negotiating")));
-	m_current->setMessages(snapshot ? snapshot->messages
-	                                : LuaCallbackPersistentStringMap<QMudGmcp::Message>{},
-	                       snapshot ? snapshot->packages : QMudGmcp::PackageIndex{});
+	m_current->setMessages(
+	    snapshot ? snapshot->messages : LuaCallbackPersistentStringMap<QMudGmcp::Message>{},
+	    snapshot ? snapshot->packages : QMudGmcp::PackageIndex{}, {},
+	    snapshot ? static_cast<const QMudGmcp::MergePolicies &>(*snapshot) : QMudGmcp::MergePolicies{},
+	    snapshot ? snapshot->revision : 0);
 }
 
 void GmcpBrowserDialog::showHistory()
@@ -1724,7 +1866,8 @@ void GmcpBrowserDialog::showHistory()
 		return;
 	m_historyIdentity = key;
 	if (record)
-		m_past->setMessages(record->messages, record->packages, record->raw);
+		m_past->setMessages(record->messages, record->packages, record->raw, record->policies,
+		                    record->revision);
 	else
 		m_past->setMessages({}, {});
 }

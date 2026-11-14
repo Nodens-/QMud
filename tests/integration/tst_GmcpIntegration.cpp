@@ -12,6 +12,7 @@
 #include "MainFrame.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
+#include "WorldDocument.h"
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
 #include "WorldSocket.h"
@@ -523,7 +524,7 @@ namespace
 			return false;
 		const auto data =
 		    QStringLiteral("<qmud><plugin name=\"Synthetic_%1\" id=\"%2\" language=\"Lua\" "
-		                   "save_state=\"n\" sequence=\"%4\"><script><![CDATA[%3]]></script></plugin></qmud>")
+			               "save_state=\"n\" sequence=\"%4\"><script><![CDATA[%3]]></script></plugin></qmud>")
 		        .arg(name, id, script, QString::number(sequence))
 		        .toUtf8();
 		return file.write(data) == data.size();
@@ -1012,8 +1013,8 @@ namespace
 				QList<QByteArray> captures;
 				const auto        accountingConnection =
 				    connect(socket, &WorldSocketService::rawDataReceived, this,
-				            [&](const QByteArray &, const WorldSocketInputMetadata &metadata)
-				            {
+					        [&](const QByteArray &, const WorldSocketInputMetadata &metadata)
+					        {
 					            if (metadata.receivedBytes == 0)
 						            return;
 					            counted += metadata.receivedBytes;
@@ -1197,11 +1198,11 @@ namespace
 					        if (connected == 1)
 					        {
 						        reconnected = socket.connectToHost(QStringLiteral("127.0.0.1"),
-						                                           secondServer.serverPort()) &&
-						                      QTest::qWaitFor([&] { return connected == 2; });
+								                                   secondServer.serverPort()) &&
+								              QTest::qWaitFor([&] { return connected == 2; });
 					        }
 					        else if (connected == 2 && (secondServer.hasPendingConnections() ||
-					                                    secondServer.waitForNewConnection(5000)))
+							                            secondServer.waitForNewConnection(5000)))
 					        {
 						        peer       = secondServer.nextPendingConnection();
 						        negotiated = queueNativeBatch(socket, *peer, QByteArrayLiteral("new"));
@@ -1505,8 +1506,8 @@ end
 				qint64                                             capturedBytes = 0;
 				const auto                                         connection =
 				    connect(socket, &WorldSocketService::rawDataReceived, this,
-				            [&](const QByteArray &bytes, const WorldSocketInputMetadata &metadata)
-				            {
+					        [&](const QByteArray &bytes, const WorldSocketInputMetadata &metadata)
+					        {
 					            batches.push_back({bytes, metadata});
 					            received += bytes;
 					            capturedBytes += metadata.receivedBytes;
@@ -1623,8 +1624,8 @@ end
 				QByteArray                                         received;
 				const auto                                         connection =
 				    connect(socket, &WorldSocketService::rawDataReceived, this,
-				            [&](const QByteArray &bytes, const WorldSocketInputMetadata &metadata)
-				            {
+					        [&](const QByteArray &bytes, const WorldSocketInputMetadata &metadata)
+					        {
 					            received += bytes;
 					            batches.push_back({bytes, metadata});
 				            });
@@ -2029,8 +2030,8 @@ end
 				    QDir(QStringLiteral(QMUD_TEST_BUILD_DIR)).relativeFilePath(worldPath);
 				world.write(
 				    QStringLiteral("<qmud><world id=\"090909090909090909090909\" name=\"Synthetic Recovery\" "
-				                   "native_gmcp=\"%1\"/><include name=\"fragment.xml\"/>"
-				                   "<include name=\"recovered.xml\" plugin=\"y\"/></qmud>")
+					               "native_gmcp=\"%1\"/><include name=\"fragment.xml\"/>"
+					               "<include name=\"recovered.xml\" plugin=\"y\"/></qmud>")
 				        .arg(native ? 0 : 1)
 				        .toUtf8());
 				world.close();
@@ -2219,9 +2220,9 @@ assert(gmcp==nativeGmcp and not gmcpIsEnabled())
 				runtime.closeSocketForReloadReconnect();
 				QVERIFY2(
 				    run(runtime,
-				        QStringLiteral("assertGmcpUnavailable(); replacementGmcp={}; replacementNull={}; "
-				                       "gmcp=replacementGmcp; gmcpNull=replacementNull"),
-				        &error),
+					    QStringLiteral("assertGmcpUnavailable(); replacementGmcp={}; replacementNull={}; "
+					                   "gmcp=replacementGmcp; gmcpNull=replacementNull"),
+					    &error),
 				    qPrintable(error));
 				QTcpServer refused;
 				QVERIFY(refused.listen(QHostAddress::LocalHost, 0));
@@ -2231,9 +2232,9 @@ assert(gmcp==nativeGmcp and not gmcpIsEnabled())
 				QTRY_VERIFY(!runtime.isConnected() && !runtime.isConnecting());
 				QVERIFY2(
 				    run(runtime,
-				        QStringLiteral("assert(gmcp==replacementGmcp and gmcpNull==replacementNull); "
-				                       "assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)"),
-				        &error),
+					    QStringLiteral("assert(gmcp==replacementGmcp and gmcpNull==replacementNull); "
+					                   "assert(gmcpIsEnabled()==false and world.gmcpIsEnabled()==false)"),
+					    &error),
 				    qPrintable(error));
 				runtime.setWorldFileModified(false);
 			}
@@ -2834,6 +2835,302 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 			}
 
 			/**
+			 * @brief Restores native overrides from session state and legacy overrides from the world file.
+			 */
+			static void mergePolicyWorldReload()
+			{
+				WorldDocument document;
+				QVERIFY(document.loadFromXml(QStringLiteral(R"(<qmud><world><gmcp_merge_policies>
+<policy name="Test.State" mode="replace" force="0" />
+</gmcp_merge_policies></world></qmud>)")));
+				WorldRuntime legacy;
+				legacy.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+				QVERIFY(legacy.prepareNativeGmcpRestore({}));
+				legacy.applyFromDocument(document);
+				QCOMPARE(legacy.gmcpMergeOverrides(), document.gmcpMergeOverrides());
+				QVERIFY(!legacy.worldFileModified());
+				QMudGmcp::Session original;
+				original.reset(true, 1);
+				QVERIFY(original.setMergePolicy(QStringLiteral("Test.State"), QMudGmcp::MergeMode::Recursive,
+				                                true));
+				WorldRuntime native;
+				native.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+				QVERIFY(native.prepareNativeGmcpRestore(original.save()));
+				native.applyFromDocument(document);
+				const auto policy = native.gmcpMergeOverrides().value(QStringLiteral("test.state"));
+				QCOMPARE(policy.first, QMudGmcp::MergeMode::Recursive);
+				QVERIFY(policy.second);
+				QVERIFY(native.worldFileModified());
+				QVERIFY(!document.loadFromXml(QStringLiteral(R"(<qmud><world><gmcp_merge_policies>
+<policy name="Test.State" mode="invalid" force="1" />
+</gmcp_merge_policies></world></qmud>)")));
+				native.setWorldFileModified(false);
+			}
+
+			/**
+			 * @brief Covers ordinary, nested, plugin, and deferred includes with and without General settings.
+			 */
+			static void mergePoliciesIgnoredInIncludes_data()
+			{
+				QTest::addColumn<bool>("nested");
+				QTest::addColumn<bool>("plugin");
+				QTest::addColumn<bool>("after");
+				QTest::addColumn<bool>("general");
+				for (const bool nested : {false, true})
+					for (const bool plugin : {false, true})
+						for (const bool after : {false, true})
+							for (const bool general : {false, true})
+								QTest::newRow(
+								    qPrintable(QStringLiteral("nested-%1-plugin-%2-after-%3-general-%4")
+									               .arg(nested)
+									               .arg(plugin)
+									               .arg(after)
+									               .arg(general)))
+								    << nested << plugin << after << general;
+			}
+			/**
+			 * @brief Loads ordinary included content without accepting included GMCP policies or saving them into the world.
+			 */
+			static void mergePoliciesIgnoredInIncludes()
+			{
+				QFETCH(bool, nested);
+				QFETCH(bool, plugin);
+				QFETCH(bool, after);
+				QFETCH(bool, general);
+				const QString home = QStringLiteral(QMUD_TEST_BUILD_DIR);
+				QTemporaryDir directory(QDir(home).filePath(QStringLiteral("worlds/gmcp-includes-XXXXXX")));
+				QVERIFY(directory.isValid());
+				const QDir files(directory.path());
+				const auto write = [&files](const QString &name, const QByteArray &xml)
+				{
+					QFile file(files.filePath(name));
+					return file.open(QIODevice::WriteOnly) && file.write(xml) == xml.size();
+				};
+				const QByteArray policies = R"(<world><gmcp_merge_policies>
+<policy name="Test.State" mode="recursive" force="1" />
+<policy name="Test.IncludeOnly" mode="shallow" force="1" />
+</gmcp_merge_policies></world>)";
+				const QByteArray variables =
+				    R"(<variables><variable name="synthetic_included">kept</variable></variables>)";
+				const QByteArray pluginInfo =
+				    plugin ? QByteArray("<plugin name=\"Synthetic\" id=\"1234567890abcdef12345678\" "
+					                    "language=\"Lua\" />")
+					       : QByteArray{};
+				QVERIFY(write(QStringLiteral("leaf.xml"), "<qmud>" + policies + variables + "</qmud>"));
+				QVERIFY(
+				    write(QStringLiteral("child.xml"),
+					      "<qmud>" + pluginInfo +
+					          (nested ? QByteArray("<include name=\"leaf.xml\" />") : policies + variables) +
+					          "</qmud>"));
+				const auto root = QStringLiteral(R"xml(<qmud><world name="Synthetic"><gmcp_merge_policies>
+<policy name="Test.State" mode="replace" force="0" />
+</gmcp_merge_policies></world><include name="child.xml" plugin="%1" after="%2" /></qmud>)xml")
+				                      .arg(plugin ? QStringLiteral("y") : QStringLiteral("n"),
+				                           after ? QStringLiteral("y") : QStringLiteral("n"))
+				                      .toUtf8();
+				QVERIFY(write(QStringLiteral("main.qdl"), root));
+				const auto    path = files.filePath(QStringLiteral("main.qdl"));
+				WorldDocument document;
+				if (!general)
+					document.setLoadMask(WorldDocument::kDefaultLoadMask & ~WorldDocument::XML_GENERAL);
+				QVERIFY2(document.loadFromFile(path), qPrintable(document.errorString()));
+				const auto expected = document.gmcpMergeOverrides();
+				QCOMPARE(expected.size(), general ? 1 : 0);
+				QVERIFY2(document.expandIncludes(path, directory.path(), home, {}),
+				         qPrintable(document.errorString()));
+				QCOMPARE(document.gmcpMergeOverrides(), expected);
+				const auto &includedVariables =
+				    plugin ? document.plugins().front().variables : document.variables();
+				QVERIFY(std::ranges::any_of(includedVariables,
+				                            [](const auto &variable)
+				                            {
+					                            return variable.attributes.value(QStringLiteral("name")) ==
+												           QStringLiteral("synthetic_included") &&
+												       variable.content == QStringLiteral("kept");
+				                            }));
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(home);
+				runtime.setPluginInstallDeferred(true);
+				runtime.applyFromDocument(document);
+				QCOMPARE(runtime.gmcpMergeOverrides(), expected);
+				QString error;
+				QVERIFY2(runtime.saveWorldFile(path, &error), qPrintable(error));
+				QVERIFY2(document.loadFromFile(path), qPrintable(document.errorString()));
+				QCOMPARE(document.gmcpMergeOverrides(), expected);
+				QVERIFY2(document.expandIncludes(path, directory.path(), home, {}),
+				         qPrintable(document.errorString()));
+				QCOMPARE(document.gmcpMergeOverrides(), expected);
+			}
+
+			/**
+			 * @brief Imports General merge policies, preserves unrelated policies, and rejects other-category duplicates atomically.
+			 */
+			static void mergePolicyGeneralImport()
+			{
+				AppController controller;
+				WorldRuntime  runtime;
+				MainWindow    window;
+				controller.setMainWindow(&window);
+				runtime.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+				auto *child = new WorldChildWindow(QStringLiteral("Synthetic world"));
+				child->setRuntime(&runtime);
+				window.addMdiSubWindow(child, true);
+				const auto detach = qScopeGuard([&] { child->setRuntime(nullptr); });
+				QVERIFY(
+				    runtime.setGmcpMergePolicy(QStringLiteral("Test.State"), QMudGmcp::MergeMode::Replace));
+				QVERIFY(runtime.setGmcpMergePolicy(QStringLiteral("Test.Unrelated"),
+				                                   QMudGmcp::MergeMode::Shallow));
+				const QString xml = QStringLiteral(R"(<qmud><world><gmcp_merge_policies>
+<policy name="TEST.State" mode="recursive" force="1" />
+</gmcp_merge_policies></world><aliases><alias name="synthetic_alias" match="^test$"><send>test</send></alias></aliases></qmud>)");
+				auto result       = controller.importXmlFromText(&runtime, xml, WorldDocument::XML_ALIASES);
+				QVERIFY2(result.ok, qPrintable(result.errorMessage));
+				QCOMPARE(runtime.gmcpMergeOverrides().value(QStringLiteral("test.state")).first,
+				         QMudGmcp::MergeMode::Replace);
+				runtime.setWorldFileModified(false);
+				result = controller.importXmlFromText(
+				    &runtime, xml, WorldDocument::XML_GENERAL | WorldDocument::XML_ALIASES);
+				QVERIFY(!result.ok);
+				QCOMPARE(runtime.gmcpMergeOverrides().value(QStringLiteral("test.state")).first,
+				         QMudGmcp::MergeMode::Replace);
+				QVERIFY(!runtime.worldFileModified());
+				result = controller.importXmlFromText(&runtime, xml, WorldDocument::XML_GENERAL);
+				QVERIFY2(result.ok, qPrintable(result.errorMessage));
+				QCOMPARE(runtime.gmcpMergeOverrides().size(), 2);
+				const auto policy = runtime.gmcpMergeOverrides().value(QStringLiteral("test.state"));
+				QCOMPARE(policy.first, QMudGmcp::MergeMode::Recursive);
+				QVERIFY(policy.second);
+				QVERIFY(runtime.gmcpPublication()
+				            ->current.load()
+				            ->resolve(QStringLiteral("Test.State.Child"))
+				            .force);
+				QVERIFY(runtime.worldFileModified());
+				runtime.setWorldFileModified(false);
+			}
+
+			/**
+			 * @brief Edits merge policies through both browser tabs and persists only explicit world overrides.
+			 */
+			static void browserMergePolicies()
+			{
+				QTemporaryDir directory(QDir(QStringLiteral(QMUD_TEST_BUILD_DIR))
+				                            .filePath(QStringLiteral("worlds/gmcp-policies-XXXXXX")));
+				QVERIFY(directory.isValid());
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+				runtime.setWorldAttribute(QStringLiteral("native_gmcp"), QStringLiteral("1"));
+				QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_VERIFY(server.hasPendingConnections());
+				auto *peer = server.nextPendingConnection();
+				peer->write(QByteArray::fromHex("fffbc9") +
+				            QMudGmcp::frame(R"(Test.State {"__gmcp_merge":"recursive"})") +
+				            QMudGmcp::frame(R"(Test.State.Child {"retained":1,"value":1})"));
+				peer->flush();
+				QTRY_VERIFY(runtime.gmcpPublication()->current.load()->messages.contains(
+				    QStringLiteral("test.state.child")));
+				GmcpBrowserDialog browser(&runtime);
+				browser.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&browser));
+				auto *current = browser.findChild<QTreeView *>(QStringLiteral("gmcpCurrentTree"));
+				auto *past    = browser.findChild<QTreeView *>(QStringLiteral("gmcpHistoryTree"));
+				auto *tabs    = browser.findChild<QTabWidget *>(QStringLiteral("gmcpTabs"));
+				auto *pause   = browser.findChild<QCheckBox *>(QStringLiteral("gmcpPause"));
+				QVERIFY(current && past && tabs && pause);
+				pause->setChecked(false);
+				const QStringList path{QStringLiteral("Test"), QStringLiteral("State"),
+				                       QStringLiteral("Child")};
+				const auto        mode = [&](const QTreeView *tree)
+				{ return treeIndex(tree, path).siblingAtColumn(3).data().toString(); };
+				const auto openMenu = [&](QTreeView *tree) -> QMenu *
+				{
+					tree->expandAll();
+					const auto index = treeIndex(tree, path);
+					tree->scrollTo(index);
+					QMetaObject::invokeMethod(tree, "customContextMenuRequested", Qt::DirectConnection,
+					                          Q_ARG(QPoint, tree->visualRect(index).center()));
+					return tree->findChild<QMenu *>(QStringLiteral("gmcpMergeMenu"));
+				};
+				QCOMPARE(current->model()->columnCount(), 4);
+				QCOMPARE(mode(current), QStringLiteral("recursive"));
+				auto *menu = openMenu(current);
+				QVERIFY(menu);
+				auto *shallow = menu->findChild<QAction *>(QStringLiteral("gmcpMerge_shallow"));
+				QVERIFY(shallow);
+				shallow->trigger();
+				menu->close();
+				QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+				QCOMPARE(mode(current), QStringLiteral("recursive"));
+				QVERIFY(!runtime.gmcpMergeOverrides().value(QStringLiteral("test.state.child")).second);
+				menu = openMenu(current);
+				QVERIFY(menu);
+				auto *force = menu->findChild<QAction *>(QStringLiteral("gmcpMergeForce"));
+				QVERIFY(force);
+				force->trigger();
+				menu->close();
+				QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+				QCOMPARE(mode(current), QStringLiteral("shallow (forced)"));
+				QVERIFY(runtime.worldFileModified());
+				peer->write(QMudGmcp::frame(R"(Test.State.Child {"value":2})"));
+				peer->flush();
+				QTRY_COMPARE(runtime.gmcpPublication()
+				                 ->current.load()
+				                 ->messages.value(QStringLiteral("test.state.child"))
+				                 ->state.toObject()
+				                 .value(QStringLiteral("value"))
+				                 .toInt(),
+				             2);
+				QTRY_COMPARE(treeValue(treeIndex(current, path + QStringList{QStringLiteral("value")})),
+				             QStringLiteral("2"));
+				tabs->setCurrentIndex(1);
+				QCOMPARE(mode(past), QStringLiteral("shallow (forced)"));
+				menu = openMenu(past);
+				QVERIFY(menu);
+				auto *remove = menu->findChild<QAction *>(QStringLiteral("gmcpMergeRemove"));
+				QVERIFY(remove && remove->isEnabled());
+				remove->trigger();
+				menu->close();
+				QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+				QVERIFY(runtime.gmcpMergeOverrides().isEmpty());
+				QCOMPARE(mode(past), QStringLiteral("shallow (forced)"));
+				tabs->setCurrentIndex(0);
+				QTRY_COMPARE(mode(current), QStringLiteral("recursive"));
+				QVERIFY(runtime.setGmcpMergePolicy(QStringLiteral("Test.State.Child"),
+				                                   QMudGmcp::MergeMode::Replace, true));
+				const auto file = QDir(directory.path()).filePath(QStringLiteral("policies.qdl"));
+				QString    error;
+				QVERIFY2(runtime.saveWorldFile(file, &error), qPrintable(error));
+				WorldDocument doc;
+				QVERIFY2(doc.loadFromFile(file), qPrintable(doc.errorString()));
+				QCOMPARE(doc.gmcpMergeOverrides(), runtime.gmcpMergeOverrides());
+				WorldRuntime reopened;
+				reopened.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+				reopened.applyFromDocument(doc);
+				QCOMPARE(reopened.gmcpMergeOverrides(), runtime.gmcpMergeOverrides());
+				QVERIFY(reopened.gmcpPublication()
+				            ->current.load()
+				            ->resolve(QStringLiteral("Test.State.Child.More"))
+				            .force);
+				QVERIFY(reopened.clearGmcpMergePolicy(QStringLiteral("TEST.State.Child")));
+				QVERIFY2(reopened.saveWorldFile(file, &error), qPrintable(error));
+				QVERIFY2(doc.loadFromFile(file), qPrintable(doc.errorString()));
+				QVERIFY(doc.gmcpMergeOverrides().isEmpty());
+				runtime.setWorldFileModified(false);
+				reopened.setWorldFileModified(false);
+				menu = openMenu(current);
+				QVERIFY(menu);
+				auto *pendingAction = menu->findChild<QAction *>(QStringLiteral("gmcpMerge_recursive"));
+				QVERIFY(pendingAction);
+				runtime.beginWorldSessionClose();
+				pendingAction->trigger();
+				menu->close();
+				QCOMPARE(runtime.gmcpMergeOverrides().value(QStringLiteral("test.state.child")).first,
+				         QMudGmcp::MergeMode::Replace);
+				QVERIFY(!runtime.worldFileModified());
+			}
+
+			/**
 			 * @brief Opens paused, inspects complete versions, and preserves history selection through
 			 * reception and eviction.
 			 */
@@ -3014,8 +3311,8 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 					for (const bool first : {false, true})
 						QTest::newRow(
 						    qPrintable(QStringLiteral("children-%1-%2")
-						                   .arg(count)
-						                   .arg(first ? QStringLiteral("first") : QStringLiteral("last"))))
+							               .arg(count)
+							               .arg(first ? QStringLiteral("first") : QStringLiteral("last"))))
 						    << count << first;
 			}
 
@@ -3072,9 +3369,9 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 				{
 					const QJsonArray payload{
 					    QJsonObject{{QStringLiteral("nested"),
-					                 QJsonArray{QJsonObject{{QStringLiteral("leaf"), value}}}}},
+						             QJsonArray{QJsonObject{{QStringLiteral("leaf"), value}}}}},
 					    QJsonObject{{QStringLiteral("nested"),
-					                 QJsonArray{QJsonObject{{QStringLiteral("leaf"), value + 1}}}}},
+						             QJsonArray{QJsonObject{{QStringLiteral("leaf"), value + 1}}}}},
 					    QJsonArray{QJsonObject{{QStringLiteral("leaf"), value + 2}}}, value + 3};
 					session.receive(QMudGmcp::frame("Test.List " +
 					                                QJsonDocument(payload).toJson(QJsonDocument::Compact)));
@@ -3883,7 +4180,7 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 					message.session    = 1;
 					snapshot->messages = snapshot->messages.withUpdates({
 					    {QStringLiteral("test.state"),
-					     QSharedPointer<const QMudGmcp::Message>::create(message)}
+						 QSharedPointer<const QMudGmcp::Message>::create(message)}
                     });
 					publication->current.store(snapshot);
 					for (quint64 sequence = 2; sequence <= 6; ++sequence)
@@ -4365,7 +4662,7 @@ end
 				session.receive(QMudGmcp::frame(R"(Test.Keys {"a\u0000b":9})"));
 				QVERIFY(
 				    run(runtime, QStringLiteral("local k='a'..string.char(0)..'b'; assert(savedKeys[k]==1 "
-				                                "and gmcpGet('Test.Keys')[k]==9)")));
+					                            "and gmcpGet('Test.Keys')[k]==9)")));
 				session.closeConnection();
 				QVERIFY(run(runtime,
 				            QStringLiteral("assert(savedKeys['a'..string.char(0)..'b']==1 and gmcp==nil); "
@@ -4387,14 +4684,14 @@ end
 				QVERIFY(run(runtime, QStringLiteral("assert(gmcpRegisterModule('Test.Feature',2)==0)")));
 				QVERIFY(
 				    run(runtime,
-				        QStringLiteral(
+					    QStringLiteral(
 				            "assert(gmcpRegisterModule('Test.Feature'..string.char(0)..'suffix',1)~=0)")));
 				QCOMPARE(
 				    WorldRuntimeTestAccess::gmcpModuleVersion(runtime, {}, QStringLiteral("Test.Feature")),
 				    2);
 				QVERIFY(
 				    run(runtime,
-				        QStringLiteral(
+					    QStringLiteral(
 				            "assert(gmcpUnregisterModule('Test.Feature'..string.char(0)..'suffix')~=0)")));
 				QCOMPARE(
 				    WorldRuntimeTestAccess::gmcpModuleVersion(runtime, {}, QStringLiteral("Test.Feature")),
@@ -4631,13 +4928,13 @@ assert(savedNamespace.Branch.Value==1)
                 });
 				values.insert(QStringLiteral("array"), QJsonArray{QJsonObject{
 				                                                      { QStringLiteral("value"),
-					                                                    QStringLiteral("first") }},
+																	    QStringLiteral("first") }},
 				                                                  QJsonValue::Null, false, 3});
 				const QJsonObject dotted{
 				    { QString(),
-                     QJsonObject {
+					 QJsonObject {
 						  { QStringLiteral("1"),
-							QStringLiteral("numeric-key") }
+						    QStringLiteral("numeric-key") }
 					  } }
                 };
 				values.insert(QStringLiteral("a.b"), dotted);
@@ -4646,7 +4943,7 @@ assert(savedNamespace.Branch.Value==1)
 				              QJsonObject{
 				                  {QStringLiteral("a") + QChar(0) + QStringLiteral("b"), 9},
 				                  {QStringLiteral("end"),
-                                   QStringLiteral("reserved-key")                         }
+								   QStringLiteral("reserved-key")                         }
                 });
 				values.insert(QStringLiteral("integer"), qint64{9007199254740993});
 				values.insert(QStringLiteral("fraction"), 0.125);

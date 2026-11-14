@@ -336,10 +336,20 @@ namespace QMudGmcp
 			            const std::shared_ptr<const Message> &message = {})
 			{
 				if (owner->observed)
-					owner->observed(Record{QDateTime::currentDateTimeUtc(), state.generation, ++sequence,
-					                       outgoing, raw, error, state.messages, state.packages,
-					                       state.revision},
-					                message);
+					owner->observed(
+					    Record{
+					        QDateTime::currentDateTimeUtc(),
+					        state.generation,
+					        ++sequence,
+					        outgoing,
+					        raw,
+					        error,
+					        state.messages,
+					        state.packages,
+					        state.revision,
+					        {state.serverModes, state.localModes, state.forcedModes}
+                    },
+					    message);
 			}
 			/**
 			 * @brief Writes protocol bytes without involving the runtime.
@@ -415,7 +425,11 @@ namespace QMudGmcp
 						MergeMode mode;
 						if (object.value(metadata).isString() &&
 						    parseMode(object.value(metadata).toString(), mode))
-							state.serverModes.insert(key, mode);
+						{
+							const auto previous = state.serverModes.constFind(key);
+							if (previous == state.serverModes.cend() || previous.value() != mode)
+								state.serverModes.insert(key, mode);
+						}
 						else
 							error = QStringLiteral("Invalid __gmcp_merge declaration");
 						object.remove(metadata);
@@ -578,6 +592,34 @@ namespace QMudGmcp
 		data.publish();
 
 		return true;
+	}
+	bool Session::clearMergePolicy(const QString &name)
+	{
+		if (!validName(name))
+			return false;
+		auto      &data = impl();
+		const auto key  = name.toLower();
+		if (!data.local.remove(key))
+			return true;
+		data.state.localModes.remove(key);
+		data.state.forcedModes.remove(key);
+		data.publish();
+		return true;
+	}
+	void Session::setMergePolicies(const MergeOverrides &policies)
+	{
+		auto &data = impl();
+		data.local.clear();
+		data.state.localModes.clear();
+		data.state.forcedModes.clear();
+		for (auto it = policies.cbegin(); it != policies.cend(); ++it)
+		{
+			data.local.insert(it.key(), {it->first, it->second});
+			data.state.localModes.insert(it.key(), it->first);
+			if (it->second)
+				data.state.forcedModes.insert(it.key());
+		}
+		data.publish();
 	}
 	bool Session::send(const QByteArray &raw, quint64 generation)
 	{
@@ -785,42 +827,46 @@ namespace QMudGmcp
 
 namespace QMudGmcp
 {
-	MergeMode Snapshot::effectiveMode(const QString &name) const
+	MergeMode MergePolicies::effectiveMode(const QString &name) const
 	{
-		QString                  path = name.toLower();
-		std::optional<MergeMode> serverMode, localMode;
-		MergeMode                defaultMode       = MergeMode::Replace;
-		const bool               hasForcedPolicies = !forcedModes.isEmpty();
+		return resolve(name).mode;
+	}
+	MergeResolution MergePolicies::resolve(const QString &name) const
+	{
+		QString                        path = name.toLower();
+		std::optional<MergeResolution> serverMode, localMode;
+		MergeResolution                fallback;
+		fallback.source              = QStringLiteral("Default");
+		const bool hasForcedPolicies = !forcedModes.isEmpty();
 		for (;;)
 		{
 			if (hasForcedPolicies && forcedModes.contains(path))
-				return localModes.value(path);
+				return {localModes.value(path), true, QStringLiteral("World"), path};
 			if (!serverMode)
-			{
 				if (const auto policy = serverModes.constFind(path); policy != serverModes.cend())
 				{
+					MergeResolution resolved{policy.value(), false, QStringLiteral("Server"), policy.key()};
 					if (!hasForcedPolicies)
-						return policy.value();
-					serverMode = policy.value();
+						return resolved;
+					serverMode = std::move(resolved);
 				}
-			}
 			if (!serverMode && !localMode)
-			{
 				if (const auto policy = localModes.constFind(path); policy != localModes.cend())
 				{
+					MergeResolution resolved{policy.value(), false, QStringLiteral("World"), policy.key()};
 					if (!hasForcedPolicies && serverModes.isEmpty())
-						return policy.value();
-					localMode = policy.value();
+						return resolved;
+					localMode = std::move(resolved);
 				}
-			}
 			if (path == QLatin1String("char.status"))
-				defaultMode = MergeMode::Shallow;
+				fallback = {MergeMode::Shallow, false, QStringLiteral("Default"),
+				            QStringLiteral("char.status")};
 			const auto dot = path.lastIndexOf(QLatin1Char('.'));
 			if (dot < 0)
 				break;
 			path.truncate(dot);
 		}
-		return serverMode.value_or(localMode.value_or(defaultMode));
+		return serverMode ? *serverMode : localMode ? *localMode : fallback;
 	}
 } // namespace QMudGmcp
 

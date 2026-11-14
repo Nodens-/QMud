@@ -694,7 +694,7 @@ jobs:
           echo "QMUD_CI_CONTAINER_NAME=$CONTAINER_NAME" >> "$GITHUB_ENV"
           cmake -S . -B cmake-build-release -G Ninja \
             -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT" -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_BUILD_NATIVE=OFF \
             -DQMUD_ENABLE_TESTING=OFF -DQMUD_CI_BUILD=ON \
             -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
             -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \

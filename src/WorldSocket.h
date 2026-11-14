@@ -268,6 +268,18 @@ class WorldSocketTransport : public WorldSocketService
 		 */
 		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force) override;
 		/**
+		 * @brief Removes one world override.
+		 * @param name Canonical package path.
+		 * @return Whether accepted.
+		 */
+		bool clearGmcpMergePolicy(const QString &name) override;
+		/**
+		 * @brief Installs world overrides during loading.
+		 * @param policies Complete override set.
+		 */
+		void setGmcpMergePolicies(const QMudGmcp::MergeOverrides &policies) override;
+
+		/**
 		 * @brief Updates automatic GMCP Core scheduling on the transport thread.
 		 * @param options Persistent world settings.
 		 */
@@ -524,6 +536,18 @@ class WorldSocket : public WorldSocketService
 		 * @return Whether valid.
 		 */
 		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force) override;
+		/**
+		 * @brief Removes one world override.
+		 * @param name Canonical package path.
+		 * @return Whether accepted.
+		 */
+		bool clearGmcpMergePolicy(const QString &name) override;
+		/**
+		 * @brief Installs world overrides during loading.
+		 * @param policies Complete override set.
+		 */
+		void setGmcpMergePolicies(const QMudGmcp::MergeOverrides &policies) override;
+
 		/**
 		 * @brief Updates automatic GMCP Core scheduling on the transport thread.
 		 * @param options Persistent world settings.

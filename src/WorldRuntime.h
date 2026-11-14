@@ -322,7 +322,18 @@ class WorldRuntime : public QObject
 		 * @param force Override server policy.
 		 * @return Whether accepted.
 		 */
-		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force = false) const;
+		bool setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force = false);
+		/**
+		 * @brief Removes a persistent world override.
+		 * @param name Package or message path.
+		 * @return Whether accepted.
+		 */
+		bool clearGmcpMergePolicy(const QString &name);
+		/**
+		 * @brief Returns explicit persistent world overrides.
+		 * @return Canonical paths mapped to mode and force.
+		 */
+		[[nodiscard]] const QMudGmcp::MergeOverrides &gmcpMergeOverrides() const;
 		/**
 		 * @brief Sets an owner's module registration, ignoring the native-owned merge capability.
 		 * @param owner Script/plugin identity.
@@ -330,13 +341,13 @@ class WorldRuntime : public QObject
 		 * @param version Positive version, or zero to remove.
 		 * @param engineInstance Immutable owning engine identity.
 		 */
-		void registerGmcpModule(const QString &owner, const QString &module, int version,
-		                        quint64 engineInstance = 0);
+		void                  registerGmcpModule(const QString &owner, const QString &module, int version,
+		                                         quint64 engineInstance = 0);
 		/**
 		 * @brief Releases stale module owners and advertises enabled owners' support while retaining disabled
 		 * owners' registrations.
 		 */
-		void refreshGmcpModules();
+		void                  refreshGmcpModules();
 		/**
 		 * @brief Reads automatic Core preferences without changing the active handler mode.
 		 * @return Validated Core settings with intervals in minutes.
@@ -1762,8 +1773,8 @@ class WorldRuntime : public QObject
 		 */
 		XmlImportResult
 		     importPluginXml(const QString &xml, const QString &pluginId,
-		                     const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
-		                     unsigned long                                           mask);
+			                 const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
+			                 unsigned long                                           mask);
 		/**
 		 * @brief Unloads installed plugin.
 		 * @param pluginId Plugin id to unload.
@@ -5484,7 +5495,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginCommandContinuable(const QString                        &text,
-		                                  LuaCallbackResultContinuationFactory &continuationFactory);
+			                              LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin command-changed callback chain.
 		 */
@@ -5503,7 +5514,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginSendContinuable(const QString                        &text,
-		                               LuaCallbackResultContinuationFactory &continuationFactory);
+			                           LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin command-entered transform callback.
 		 * @param text Command text, possibly modified in place.
@@ -5517,7 +5528,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginCommandEnteredContinuable(const QString                        &text,
-		                                         LuaCallbackResultContinuationFactory &continuationFactory);
+			                                     LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin tab-complete transform callback.
 		 * @param text Completion text, possibly modified in place.
@@ -5531,7 +5542,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginLineReceivedContinuable(const QString                        &text,
-		                                       LuaCallbackResultContinuationFactory &continuationFactory);
+			                                   LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin play-sound callback chain.
 		 * @param sound Sound identifier or path.
@@ -5573,7 +5584,7 @@ class WorldRuntime : public QObject
 		 */
 		LuaCallbackContinuationDispatchResult
 		     firePluginSentContinuable(const LuaBatchDispatchRequest        &request,
-		                               LuaCallbackResultContinuationFactory &continuationFactory);
+			                           LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin partial-line callback.
 		 * @param text Partial line text.
@@ -5858,6 +5869,10 @@ class WorldRuntime : public QObject
 		 * @param milliseconds Latest measured round-trip duration.
 		 */
 		void gmcpRoundTripChanged(qint64 milliseconds);
+		/**
+		 * @brief Announces a change to persistent world merge overrides.
+		 */
+		void gmcpMergePoliciesChanged();
 		/**
 		 * @brief Reports a received package and its exact immutable publication version.
 		 * @param record Published version observed with the message.
@@ -6978,7 +6993,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] LuaBatchDispatchRequest
 		                          currentPluginCallbackDispatchRequest(PluginCallbackDispatchCommand &command,
-		                                                               int                            firstRecipientIndex = 0);
+								                                       int                            firstRecipientIndex = 0);
 		/**
 		 * @brief Checks whether plugin should receive async result callback for API name.
 		 * @param plugin Plugin state entry.
@@ -7257,7 +7272,7 @@ class WorldRuntime : public QObject
 			return (domainMask &
 			        luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::Plugins)) != 0U
 			           ? domainMask | luaCallbackPluginIndexedStableSnapshotDomainsMask()
-			           : domainMask;
+					   : domainMask;
 		}
 		/**
 		 * @brief Invalidates the cached stable callback-dispatch snapshot.
@@ -7583,7 +7598,7 @@ class WorldRuntime : public QObject
 					return storedIndex +
 					       (deferredHiddenPhysicalIndex >= 0 && storedIndex >= deferredHiddenPhysicalIndex
 					            ? 1
-					            : 0);
+								: 0);
 				}
 				/**
 				 * @brief Maps stored logical indexing to a one-based Lua buffer index.
@@ -7600,7 +7615,7 @@ class WorldRuntime : public QObject
 					return physicalIndex + 1 -
 					       (deferredHiddenPhysicalIndex >= 0 && physicalIndex > deferredHiddenPhysicalIndex
 					            ? 1
-					            : 0);
+								: 0);
 				}
 		};
 		/**
@@ -7654,7 +7669,7 @@ class WorldRuntime : public QObject
 		 * @return Stored line pointer, or `nullptr` for an invalid index or an unbuffered pending line.
 		 */
 		[[nodiscard]] const LineEntry      *
-        luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
+		luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
 		                                            const LuaContextBufferPresentation &presentation) const;
 		/**
 		 * @brief Resolves a callback matched line from its maintained or captured position.
@@ -8149,9 +8164,9 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool
 		     buildActiveStateNoArgCallbackCommand(const QVector<QSharedPointer<LuaCallbackEngine>> &engines,
-		                                          const QString &functionName, LuaCallbackEvent callbackEvent,
-		                                          bool                           revalidateObservedRecipients,
-		                                          PluginCallbackDispatchCommand &command);
+			                                      const QString &functionName, LuaCallbackEvent callbackEvent,
+			                                      bool                           revalidateObservedRecipients,
+			                                      PluginCallbackDispatchCommand &command);
 		/**
 		 * @brief Drains queued plugin callback commands.
 		 * @param completionCommandId Optional command-id barrier; `0` drains all currently queued commands.
@@ -8397,7 +8412,7 @@ class WorldRuntime : public QObject
 		 * @return Matching active slot, or `nullptr` for a stale handle.
 		 */
 		[[nodiscard]] const CausalOutboundScopeSlot      *
-        causalOutboundScopeSlot(const CausalOutboundScopeHandle &scope) const;
+		causalOutboundScopeSlot(const CausalOutboundScopeHandle &scope) const;
 		void runWithCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group,
 		                                const std::function<void()>               &work);
 		[[nodiscard]] QSharedPointer<CausalOutboundGroup> currentCausalOutboundGroup() const;
@@ -8821,7 +8836,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] std::optional<int>
 		     preparePluginStateSave(const QString &pluginId, bool scripted, QString &resolvedPluginId,
-		                            QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
+			                        QSharedPointer<LuaCallbackEngine> &callbackEngine, quint64 &revision);
 		/**
 		 * @brief Captures and queues state belonging to the original save callback owner.
 		 * @param resolvedPluginId Canonical plugin identifier.
@@ -8910,6 +8925,7 @@ class WorldRuntime : public QObject
 				QString                           pluginsDirectory;
 				QMap<QString, QString>            worldAttributes;
 				QMap<QString, QString>            worldMultilineAttributes;
+				QMudGmcp::MergeOverrides          gmcpMergeOverrides;
 				QList<Include>                    includes;
 				QList<Trigger>                    triggers;
 				QList<Alias>                      aliases;
@@ -9011,6 +9027,7 @@ class WorldRuntime : public QObject
 		[[nodiscard]] const ResolvedOutputColourCache &resolvedOutputColourCache() const;
 
 		QMap<QString, QString>                         m_worldAttributes;
+		QMudGmcp::MergeOverrides                       m_gmcpMergeOverrides;
 		QMap<QString, QString>                         m_worldMultilineAttributes;
 		const quint64                                  m_openSequence;
 		std::atomic<qint64>                            m_scriptTimeNanos{0};
@@ -9489,8 +9506,8 @@ class WorldRuntime : public QObject
 			private:
 				std::shared_ptr<PluginCallbackLaneQueueHandle>
 				            insert(PluginCallbackLaneQueueStorage::const_iterator position,
-				                   PluginCallbackLaneCommand command, bool blocksInputCriticalInsertion,
-				                   bool prependNonBlockingIndex);
+							       PluginCallbackLaneCommand command, bool blocksInputCriticalInsertion,
+							       bool prependNonBlockingIndex);
 				void        unlinkNonBlocking(PluginCallbackLaneQueueNode &node);
 				/**
 				 * @brief Detaches a queue node's externally held removal handle.

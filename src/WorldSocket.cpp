@@ -596,6 +596,14 @@ bool WorldSocket::setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mo
 {
 	return m_worker->call([&] { return m_worker->transport->setGmcpMergePolicy(name, mode, force); });
 }
+bool WorldSocket::clearGmcpMergePolicy(const QString &name)
+{
+	return m_worker->call([&] { return m_worker->transport->clearGmcpMergePolicy(name); });
+}
+void WorldSocket::setGmcpMergePolicies(const QMudGmcp::MergeOverrides &policies)
+{
+	m_worker->call([&] { m_worker->transport->setGmcpMergePolicies(policies); });
+}
 void WorldSocket::setGmcpCoreOptions(const QMudGmcp::CoreOptions &options)
 {
 	m_worker->call([&] { m_worker->transport->setGmcpCoreOptions(options); });
@@ -1228,6 +1236,14 @@ bool WorldSocketTransport::sendGmcp(const QByteArray &raw, quint64 generation)
 bool WorldSocketTransport::setGmcpMergePolicy(const QString &name, QMudGmcp::MergeMode mode, bool force)
 {
 	return m_gmcp.setMergePolicy(name, mode, force);
+}
+bool WorldSocketTransport::clearGmcpMergePolicy(const QString &name)
+{
+	return m_gmcp.clearMergePolicy(name);
+}
+void WorldSocketTransport::setGmcpMergePolicies(const QMudGmcp::MergeOverrides &policies)
+{
+	m_gmcp.setMergePolicies(policies);
 }
 void WorldSocketTransport::setGmcpCoreOptions(const QMudGmcp::CoreOptions &options)
 {

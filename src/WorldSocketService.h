@@ -269,6 +269,25 @@ class WorldSocketService : public QObject
 			return false;
 		}
 		/**
+		 * @brief Removes one world override.
+		 * @param name Canonical package path.
+		 * @return Whether accepted.
+		 */
+		virtual bool clearGmcpMergePolicy(const QString &name)
+		{
+			Q_UNUSED(name);
+			return false;
+		}
+		/**
+		 * @brief Installs world overrides during loading.
+		 * @param policies Complete override set.
+		 */
+		virtual void setGmcpMergePolicies(const QMudGmcp::MergeOverrides &policies)
+		{
+			Q_UNUSED(policies);
+		}
+
+		/**
 		 * @brief Updates advertised modules.
 		 * @param modules Effective support list.
 		 */

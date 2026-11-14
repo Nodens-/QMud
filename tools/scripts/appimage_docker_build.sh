@@ -15,25 +15,25 @@ unset CCACHE_DIR CCACHE_TEMPDIR
 export PATH="$QMUD_APPIMAGE_DOCKER_QT_PREFIX/bin:$PATH"
 
 LUA_BIN=""
-if command -v lua5.4 >/dev/null 2>&1; then
-  LUA_BIN="lua5.4"
-elif command -v lua >/dev/null 2>&1; then
-  LUA_BIN="lua"
+for candidate in lua5.4 lua54 lua-5.4 lua; do
+  if command -v "$candidate" >/dev/null 2>&1 &&
+     "$candidate" -e 'assert(_VERSION == "Lua 5.4")' >/dev/null 2>&1; then
+    LUA_BIN="$(command -v "$candidate")"
+    break
+  fi
+done
+if [ -z "$LUA_BIN" ]; then
+  echo "A Lua 5.4 interpreter is required for the AppImage build." >&2
+  exit 1
 fi
 
 lua_find_module() {
   module="$1"
-  if [ -z "$LUA_BIN" ]; then
-    return 0
-  fi
   "$LUA_BIN" -e "local p = package.searchpath('${module}', package.cpath); if p then io.write(p) end" 2>/dev/null || true
 }
 
 lua_find_lua_file() {
   module="$1"
-  if [ -z "$LUA_BIN" ]; then
-    return 0
-  fi
   "$LUA_BIN" -e "local p = package.searchpath('${module}', package.path); if p then io.write(p) end" 2>/dev/null || true
 }
 
@@ -62,31 +62,31 @@ LTN12_LUA_FILE="$(lua_find_lua_file 'ltn12')"
 SSL_LUA_FILE="$(lua_find_lua_file 'ssl')"
 
 if [ -z "$LPEG_SO" ]; then
-  LPEG_SO="$(find_first '*/lua/*/lpeg.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+  LPEG_SO="$(find_first '*/lua/5.4/lpeg.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
 fi
 if [ -z "$SOCKET_CORE_SO" ]; then
-  SOCKET_CORE_SO="$(find_first '*/lua/*/socket/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+  SOCKET_CORE_SO="$(find_first '*/lua/5.4/socket/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
 fi
 if [ -z "$MIME_CORE_SO" ]; then
-  MIME_CORE_SO="$(find_first '*/lua/*/mime/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+  MIME_CORE_SO="$(find_first '*/lua/5.4/mime/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
 fi
 if [ -z "$SSL_CORE_SO" ]; then
-  SSL_CORE_SO="$(find_first '*/lua/*/ssl/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+  SSL_CORE_SO="$(find_first '*/lua/5.4/ssl/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
 fi
 if [ -z "$SSL_CORE_SO" ]; then
-  SSL_CORE_SO="$(find_first '*/lua/*/ssl.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+  SSL_CORE_SO="$(find_first '*/lua/5.4/ssl.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
 fi
 if [ -z "$SOCKET_LUA_FILE" ]; then
-  SOCKET_LUA_FILE="$(find_first '*/lua/*/socket.lua' /usr/share /usr/local/share || true)"
+  SOCKET_LUA_FILE="$(find_first '*/lua/5.4/socket.lua' /usr/share /usr/local/share || true)"
 fi
 if [ -z "$MIME_LUA_FILE" ]; then
-  MIME_LUA_FILE="$(find_first '*/lua/*/mime.lua' /usr/share /usr/local/share || true)"
+  MIME_LUA_FILE="$(find_first '*/lua/5.4/mime.lua' /usr/share /usr/local/share || true)"
 fi
 if [ -z "$LTN12_LUA_FILE" ]; then
-  LTN12_LUA_FILE="$(find_first '*/lua/*/ltn12.lua' /usr/share /usr/local/share || true)"
+  LTN12_LUA_FILE="$(find_first '*/lua/5.4/ltn12.lua' /usr/share /usr/local/share || true)"
 fi
 if [ -z "$SSL_LUA_FILE" ]; then
-  SSL_LUA_FILE="$(find_first '*/lua/*/ssl.lua' /usr/share /usr/local/share || true)"
+  SSL_LUA_FILE="$(find_first '*/lua/5.4/ssl.lua' /usr/share /usr/local/share || true)"
 fi
 
 SOCKET_CMODULE_DIR=""
@@ -102,7 +102,7 @@ if [ -n "$SOCKET_LUA_FILE" ]; then
   fi
 fi
 if [ -z "$SOCKET_LUA_DIR" ]; then
-  SOCKET_LUA_DIR="$(find_first '*/lua/*/socket/headers.lua' /usr/share /usr/local/share | sed -E 's#/headers\.lua$##' || true)"
+  SOCKET_LUA_DIR="$(find_first '*/lua/5.4/socket/headers.lua' /usr/share /usr/local/share | sed -E 's#/headers\.lua$##' || true)"
 fi
 
 SSL_LUA_DIR=""
@@ -113,7 +113,7 @@ if [ -n "$SSL_LUA_FILE" ]; then
   fi
 fi
 if [ -z "$SSL_LUA_DIR" ]; then
-  SSL_LUA_DIR="$(find_first '*/lua/*/ssl/https.lua' /usr/share /usr/local/share | sed -E 's#/https\.lua$##' || true)"
+  SSL_LUA_DIR="$(find_first '*/lua/5.4/ssl/https.lua' /usr/share /usr/local/share | sed -E 's#/https\.lua$##' || true)"
 fi
 
 if [ -z "$LPEG_SO" ] || [ -z "$SOCKET_CORE_SO" ] || [ -z "$MIME_CORE_SO" ] || [ -z "$SSL_CORE_SO" ]; then
@@ -171,6 +171,7 @@ chmod 0755 "$LINUXDEPLOY_PLUGIN_APPIMAGE"
 
 "$CMAKE_EXE" -S "$PROJECT_DIR" -G Ninja -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE="$QMUD_APPIMAGE_DOCKER_BUILD_TYPE" \
+  -DLUA_EXECUTABLE="$LUA_BIN" \
   -DCMAKE_PREFIX_PATH="$QMUD_APPIMAGE_DOCKER_QT_PREFIX" \
   -DQt6_DIR="$QMUD_APPIMAGE_DOCKER_QT_PREFIX/lib/cmake/Qt6" \
   -DQt6Multimedia_DIR="$QMUD_APPIMAGE_DOCKER_QT_PREFIX/lib/cmake/Qt6Multimedia" \
