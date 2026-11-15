@@ -1,35 +1,64 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE muclient>
+<!DOCTYPE qmud>
 
-<muclient>
-<plugin
-   name="GMCP_message_receiver_test"
-   author="Nick Gammon"
-   id="b35ff32bccfac9d02023ad3b"
-   language="Lua"
-   purpose="Test OnPluginBroadcast for GMCP"
-   date_written="2015-05-06 08:00:31"
-   requires="4.90"
-   version="1.0"
-   >
+<qmud>
+    <plugin
+            name="GMCP_message_receiver_test"
+            author="Nick Gammon, Nodens"
+            id="b35ff32bccfac9d02023ad3b"
+            language="Lua"
+            purpose="Test native GMCP message callbacks"
+            date_written="2015-05-06 08:00:31"
+            date_modified="2026-11-15"
+            requires="15.00"
+            version="2.0"
+    >
 
-</plugin>
+    </plugin>
 
-<!--  Script  -->
+    <!--  Script  -->
 
-<script>
-<![CDATA[
+    <script>
+        <![CDATA[
 
 require "tprint"
-require "json"
   
+--- @brief Registers this plugin's modules.
+local function register_gmcp_modules ()
+  if gmcp then
+    gmcpRegisterModule ("Char", 1)
+    gmcpRegisterModule ("Room", 1)
+  end
+end
+
+--- @brief Registers required modules when installed.
+function OnPluginInstall ()
+  register_gmcp_modules ()
+end
+
+--- @brief Registers required modules when enabled.
+function OnPluginEnable ()
+  register_gmcp_modules ()
+end
+
+--- @brief Registers required modules for the new connection.
+function OnPluginConnect ()
+  register_gmcp_modules ()
+end
+
+--- @brief Registers required modules after GMCP negotiation.
+--- @param enabled Whether GMCP is negotiated.
+function OnPluginGmcpStateChanged (enabled)
+  if enabled then
+    register_gmcp_modules ()
+  end
+end
+
+--- @brief Returns a value through the GMCP string API.
+--- @param what Message name or path.
+--- @return String value or serialized Lua table.
 function getStats (what)
-  result, value = CallPlugin("3e7dedbe37e44942dd46d264", "gmcpval", what)
-  if result ~= 0 then
-    ColourNote ("orange", "", "Warning: Could not get stats for " .. what)
-    return nil
-  end -- if
-  return value
+  return gmcpGetString (what)
 end -- getStats
 
 function gotCharacterVitals (vitals)
@@ -116,43 +145,27 @@ handlers = {
   
   } -- end of handlers
   
-function OnPluginBroadcast (msg, id, name, text)
- if id == "74f8c420df7d59ad5aa66246" then  -- GMCP_handler_NJG
-  
-   -- pull out GMCP message, plus the data belonging to it
-   message, params = string.match (text, "([%a.]+)%s+(.*)")
-  
-   -- no match? oops!
-   if not message then
-      return
-   end -- if
-           
-   -- ensure we have an array or object
-   if not string.match (params, "^[%[{]") then
-      params =  "[" .. params .. "]"  -- JSON hack, make msg first element of an array.
-   end -- if 
-   
-   -- decode it
-   result = assert (json.decode (params))
-   
-   -- debugging
-   ColourNote ("yellow", "", "GMCP: " .. message)
-   
-   -- find a handler for this message type
-   local handler = handlers [message:lower ()]
-   
-   -- warn if not found
-   if not handler then
-     ColourNote ("red", "", "Warning: No handler for: " .. message)
-     return
-   end -- no handler
-   
-   -- call the handler, pass in whatever we got
-   handler (result)
-  end -- if GMCP message
-end -- OnPluginBroadcast
+--- @brief Processes the received GMCP event.
+--- @param message Received message name.
+--- @param payload Parsed payload for this event.
+--- @param state Accumulated value for this event.
+--- @param raw Original unframed message.
+function onPluginGmcpMessage (message, payload, state, raw)
+  if payload == nil then
+    return
+  end
+
+  ColourNote ("yellow", "", "GMCP: " .. message)
+  local handler = handlers [message:lower ()]
+  if not handler then
+    ColourNote ("red", "", "Warning: No handler for: " .. message)
+    return
+  end
+
+  handler (gmcpToTable (payload, true))
+end -- onPluginGmcpMessage
 
 ]]>
-</script>
+    </script>
 
-</muclient>
+</qmud>

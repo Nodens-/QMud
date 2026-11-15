@@ -5030,6 +5030,96 @@ assert(gmcpGet('Test.Utilities','nested.value')==8)
 			}
 
 			/**
+			 * @brief Resolves combined string paths without changing exact names or explicit-path lookups.
+			 */
+			static void luaCombinedStringPaths()
+			{
+				GmcpWireFixture session;
+				session.write = [](const QByteArray &bytes) -> qint64 { return bytes.size(); };
+				session.reset(true, 1, false);
+				session.receive(QByteArray::fromHex("fffbc9"));
+				session.receive(QMudGmcp::frame(
+				    R"(Test.Paths {"branch":{"leaf":7,"parentOnly":8},"array":[{"value":"first"},null,false],"zero":0,"empty":"","null":null,"CaseKey":9,"":{"value":10},"a.b":11})"));
+				WorldRuntime runtime;
+				WorldRuntimeTestAccess::setGmcpPublication(runtime, session.publication());
+				QString error;
+				QVERIFY2(run(runtime, QStringLiteral(R"lua(
+assert(gmcpGetString('tEsT.pAtHs.branch.leaf')=='7')
+assert(world.gmcpGetString('Test.Paths.branch.leaf')=='7')
+assert(gmcpGetString('Test.Paths.branch.leaf',nil,'fallback')=='7')
+assert(gmcpGetString('Test.Paths.array.1.value')=='first')
+assert(gmcpGetString('Test.Paths.array.2',nil,'fallback')=='fallback')
+assert(gmcpGetString('Test.Paths.array.3')=='false')
+assert(gmcpGetString('Test.Paths.zero')=='0' and gmcpGetString('Test.Paths.empty')=='')
+assert(gmcpGetString('Test.Paths.null',nil,'fallback')=='fallback')
+assert(gmcpGetString('Test.Paths.CaseKey')=='9' and gmcpGetString('Test.Paths.casekey')=='')
+assert(gmcpGetString('Test.Paths..value')=='10')
+assert(gmcpGetString('Test.Paths.array.0')=='' and gmcpGetString('Test.Paths.array.4')=='')
+assert(gmcpGetString('Test.Paths.branch.leaf.child',nil,'fallback')=='fallback')
+assert(gmcpGetString('Missing.Paths.value',nil,'fallback')=='fallback')
+assert(gmcpGetString('Test',nil,'fallback')=='fallback')
+local decoded=assert(loadstring('return '..gmcpGetString('Test.Paths.branch')))()
+assert(decoded.leaf==7 and decoded.parentOnly==8)
+local array=assert(loadstring('return '..gmcpGetString('Test.Paths.array')))()
+assert(array[1].value=='first' and array[2]==gmcpNull and array[3]==false)
+assert(gmcpGetString('Test.Paths','branch.leaf')=='7')
+assert(gmcpGetString('Test.Paths',{'a.b'})=='11')
+assert(gmcpGetString('Test.Paths.branch','leaf','fallback')=='fallback')
+assert(gmcpGetString('Test.Paths.branch','', 'fallback')=='fallback')
+assert(gmcpGetString('Test.Paths.branch',{}, 'fallback')=='fallback')
+assert(gmcpGet('Test.Paths.branch.leaf')==nil and gmcpGetRaw('Test.Paths.branch.leaf')==nil)
+retainedPaths=gmcpGet('Test.Paths')
+assert(gmcpGetString(retainedPaths,'branch.leaf')=='7')
+)lua"),
+				             &error),
+				         qPrintable(error));
+				session.receive(QMudGmcp::frame(R"(Test.Paths.branch {"leaf":20})"));
+				QVERIFY2(run(runtime, QStringLiteral(R"lua(
+assert(gmcpGetString('Test.Paths.branch.leaf')=='20')
+assert(gmcpGetString('Test.Paths.branch.parentOnly',nil,'fallback')=='fallback')
+assert(gmcpGetString('Test.Paths','branch.leaf')=='7')
+assert(gmcpGetString(retainedPaths,'branch.leaf')=='7')
+)lua"),
+				             &error),
+				         qPrintable(error));
+				session.receive(QMudGmcp::frame("Test.Paths.branch.leaf 30"));
+				QVERIFY2(run(runtime, QStringLiteral(R"lua(
+assert(gmcpGetString('test.paths.branch.LEAF')=='30')
+assert(gmcpGetString('Test.Paths.branch','leaf')=='20')
+assert(gmcpGet('Test.Paths.branch.leaf')==30)
+)lua"),
+				             &error),
+				         qPrintable(error));
+				session.receive(QMudGmcp::frame("Test.Paths.branch.leaf null"));
+				QVERIFY2(
+				    run(runtime,
+					    QStringLiteral(
+				            "assert(gmcpGetString('Test.Paths.branch.leaf',nil,'fallback')=='fallback')"),
+					    &error),
+				    qPrintable(error));
+				session.receive(QMudGmcp::frame("Test.Paths.branch.leaf"));
+				QVERIFY2(
+				    run(runtime,
+					    QStringLiteral(
+				            "assert(gmcpGetString('Test.Paths.branch.leaf',nil,'fallback')=='fallback')"),
+					    &error),
+				    qPrintable(error));
+				session.receive(QMudGmcp::frame("Test.Paths.branch false"));
+				QVERIFY2(run(runtime, QStringLiteral(R"lua(
+assert(gmcpGetString('Test.Paths.branch')=='false')
+assert(gmcpGetString('Test.Paths.branch.parentOnly',nil,'fallback')=='fallback')
+)lua"),
+				             &error),
+				         qPrintable(error));
+				session.closeConnection();
+				QVERIFY2(run(runtime, QStringLiteral(R"lua(
+local ok,reason=pcall(gmcpGetString,'Test.Paths.branch.leaf')
+assert(not ok and reason:find('GMCP is not available',1,true))
+)lua"),
+				             &error),
+				         qPrintable(error));
+			}
+			/**
 			 * @brief Resolves target-world names while keeping supplied values and globals owned by the caller.
 			 */
 			static void luaNativeUtilitiesAcrossWorlds()
@@ -5076,6 +5166,7 @@ local own=gmcpGet('Test.State')
 assert(other:gmcpGet('Test.State','value')==2 and gmcpGet('Test.State','value')==1)
 assert(other:gmcpGet(own,'value')==1)
 assert(other:gmcpGetString('Test.State','value')=='2')
+assert(other:gmcpGetString('Test.State.value')=='2' and gmcpGetString('Test.State.value')=='1')
 local value=other:gmcpGet('Test.State')
 local copied=other:gmcpToTable(value)
 assert(type(copied)=='table' and copied.value==2 and copied.array[1]==gmcpNull)

@@ -51467,18 +51467,36 @@ namespace
 	/**
 	 * @brief Reads one immutable root and traverses only the validated requested path.
 	 * @param L Lua state containing validated lookup arguments.
+	 * @param allowCombinedPath Whether an absent exact message may resolve a combined message and field path.
 	 * @return Selected value, preserving explicit JSON null and distinguishing missing fields.
 	 */
-	QJsonValue resolveLuaGmcpLookup(lua_State *L)
+	QJsonValue resolveLuaGmcpLookup(lua_State *L, bool allowCombinedPath = false)
 	{
 		QJsonValue result(QJsonValue::Undefined);
 		if (lua_type(L, 1) == LUA_TSTRING)
 		{
 			const auto snapshot = luaGmcpSnapshot(luaGmcpEngine(L));
-			if (const auto message =
-			        snapshot ? snapshot->messages.value(luaGmcpString(L, 1).toLower()) : nullptr;
-			    message)
+			const auto source   = luaGmcpString(L, 1);
+			if (const auto message = snapshot ? snapshot->messages.value(source.toLower()) : nullptr; message)
 				result = message->state;
+			else if (allowCombinedPath && snapshot)
+			{
+				for (auto boundary = source.lastIndexOf(QLatin1Char('.')); boundary > 0;
+				     boundary      = source.lastIndexOf(QLatin1Char('.'), boundary - 1))
+				{
+					const auto parent = snapshot->messages.value(source.first(boundary).toLower());
+					if (!parent)
+						continue;
+					result = parent->state;
+					for (const auto &component : source.sliced(boundary + 1).split(QLatin1Char('.')))
+					{
+						result = luaGmcpChild(result, component);
+						if (result.isUndefined())
+							break;
+					}
+					break;
+				}
+			}
 		}
 		else if (const auto *view = static_cast<LuaGmcpView *>(luaL_testudata(L, 1, "QMud.GMCP.view")))
 			result = view->value;
@@ -51622,9 +51640,10 @@ namespace
 	int luaGmcpGetString(lua_State *L)
 	{
 		requireGmcpAvailable(L);
+		const bool allowCombinedPath = lua_type(L, 1) == LUA_TSTRING && lua_isnoneornil(L, 2);
 		validateLuaGmcpLookup(L);
 		static_cast<void>(luaL_optlstring(L, 3, "", nullptr));
-		const auto value = resolveLuaGmcpLookup(L);
+		const auto value = resolveLuaGmcpLookup(L, allowCombinedPath);
 		if (value.isUndefined() || value.isNull())
 		{
 			if (lua_isnoneornil(L, 3))

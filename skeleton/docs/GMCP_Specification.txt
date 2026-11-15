@@ -390,8 +390,22 @@ Malformed paths, including component lists with holes or nonpositive integer com
 
 6.4 gmcpGetString(source [, path [, default]]) -> string
 
-source and path have the same meaning as for gmcpGet. default is an optional string that is returned when a value
-is missing or is an explicit JSON null. It defaults to """.
+Except for the combined form below, source and path have the same meaning as for gmcpGet. default is an optional
+string that is returned when a value is missing or is an explicit JSON null. It defaults to """.
+
+When source is a string and path is omitted or nil, source can combine the message name and a dotted field path.
+
+  gmcpGetString("Char.Vitals.hp")
+  gmcpGetString("Char.Vitals", "hp")
+  gmcpGetString("Char.Vitals.hp", nil, "unknown")
+
+An exact received message name takes priority, even when that message has no payload or contains JSON null.
+Otherwise, QMud selects the longest received message name at a dot boundary and reads the remaining field path
+from that message's current merged state. If the field is missing, QMud returns default without trying a shorter
+message name. Message-name matching ignores case. JSON field names remain case-sensitive, and decimal path
+components select one-based array positions when the parent is an array.
+
+Supplying an explicit path, including an empty string or component list, keeps the existing separate-path behavior.
 
 Strings are returned unchanged. Numbers and booleans become text. Objects and arrays become serialized Lua table
 literals. Object keys, nested scalar types, and one-based array order are preserved.
