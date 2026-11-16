@@ -1111,7 +1111,7 @@ struct WorldCommandProcessor::CommandEvaluationSequence final
 		QStringList                     commands;
 		qsizetype                       nextIndex{0};
 		CommandCompletion               completion;
-		bool                            autoSayEvaluation{false};
+		CommandEvaluator                evaluator{&WorldCommandProcessor::evaluatePreparedCommand};
 		CallerContextRunner             callerContext;
 		bool                            advancing{false};
 		bool                            advanceRequested{false};
@@ -1165,9 +1165,9 @@ struct WorldCommandProcessor::CommandEvaluationSequence final
 				const auto      evaluate      = [self, this]
 				{
 					if (processor)
-						static_cast<void>(processor->evaluateCommand(commands.at(nextIndex), false,
-						                                             [self](const bool completed)
-						                                             { self->commandCompleted(completed); }));
+						static_cast<void>((processor.data()->*evaluator)(
+						    commands.at(nextIndex),
+						    [self](const bool completed) { self->commandCompleted(completed); }));
 				};
 				if (callerContext)
 					callerContext.run(evaluate);
@@ -4876,13 +4876,15 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input, const bool all
 			return true;
 		}
 
-		const QStringList commands = line.split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+		const QStringList commands = QMudCommandText::splitCommandLines(line);
 		if (reEvaluateAutoSay)
 		{
 			QStringList prefixedCommands;
 			prefixedCommands.reserve(commands.size());
+			QString prefix = autoSayString;
+			prefix.remove(QLatin1Char('\r'));
 			for (const QString &command : commands)
-				prefixedCommands.push_back(autoSayString + command);
+				prefixedCommands.append(QMudCommandText::splitCommandLines(prefix + command));
 			completionDeferred = true;
 			evaluateCommandSequence(std::move(prefixedCommands), std::move(completion), true);
 			return false;
@@ -4909,53 +4911,83 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input, const bool all
 	    allowCommandStacking && enableCommandStack &&
 	    QMudCommandStack::isValidSeparator(commandStackSeparator))
 	{
-		const QStringList commands = QMudCommandStack::expand(line, commandStackSeparator);
-		if (commands.size() > 1)
-		{
-			completionDeferred = true;
-			evaluateCommandSequence(commands, std::move(completion));
-			return false;
-		}
-		line = commands.constFirst();
+		line = QMudCommandStack::expand(line, commandStackSeparator);
 	}
 
-	// ------------------------- PLUGIN COMMAND CALLBACK -------------------
-	// Legacy Execute() calls OnPluginCommand per stacked command before normal
-	// command evaluation; false return omits this command.
-	if (m_runtime)
+	// ------------------------- COMMAND LINES -----------------------------
+	QStringList commands = QMudCommandText::splitCommandLines(line);
+	if (commands.size() > 1)
 	{
-		auto continuationFactory = makeLuaCallbackResultContinuationFactory(
-		    [processor = QPointer<WorldCommandProcessor>(this), line, echoInput, &completion]() mutable
+		completionDeferred = true;
+		evaluateCommandSequence(std::move(commands), std::move(completion));
+		return false;
+	}
+
+	return evaluatePreparedCommand(line);
+}
+
+bool WorldCommandProcessor::evaluatePreparedCommand(const QString &line, CommandCompletion completion)
+{
+	if (!m_runtime)
+	{
+		if (completion)
+			completion(false);
+		return false;
+	}
+	bool       result   = false;
+	const auto evaluate = [this, &line, &result]
+	{
+		m_runtime->setLastUserInput(QDateTime::currentDateTime());
+		const bool echoInput =
+		    isEnabledValue(m_runtime->worldAttributes().value(QStringLiteral("display_my_input")));
+		const LogicalOperationCompletionPtr operation = m_activeOperationCompletion;
+		// A suspended decision retains the current logical operation until its continuation finishes.
+		auto                                continuationFactory = makeLuaCallbackResultContinuationFactory(
+		    [processor = QPointer<WorldCommandProcessor>(this), line, echoInput, operation]
 		    {
+			    if (operation)
+				    operation->retain();
 			    PendingPluginCommandEvaluation state;
 			    state.processor  = processor;
 			    state.line       = line;
 			    state.echoInput  = echoInput;
-			    state.completion = std::move(completion);
+			    state.completion = [operation](const bool completed)
+			    {
+				    if (operation)
+					    operation->release(completed);
+			    };
 			    return state;
 		    });
 		LuaCallbackContinuationDispatchResult callback =
 		    m_runtime->firePluginCommandContinuable(line, continuationFactory);
 		if (callback.suspended())
-		{
-			completionDeferred = true;
-			return false;
-		}
+			return;
 		if (callback.result.boolResultValid && !callback.result.boolResult)
-			return false;
-	}
+			return;
 
-	return continueEvaluateCommandAfterPluginCommand(line, echoInput);
+		result = continueEvaluateCommandAfterPluginCommand(line, echoInput);
+	};
+	if (completion)
+		runOrderedRuleAction(evaluate, std::move(completion));
+	else
+		evaluate();
+	return result;
+}
+
+bool WorldCommandProcessor::evaluateUnstackedCommand(const QString &input, CommandCompletion completion)
+{
+	return evaluateCommand(input, false, std::move(completion));
 }
 
 void WorldCommandProcessor::evaluateCommandSequence(QStringList commands, CommandCompletion completion,
-                                                    const bool autoSayEvaluation)
+                                                    const bool             autoSayEvaluation,
+                                                    const CommandEvaluator evaluator)
 {
 	auto sequence                   = std::make_shared<CommandEvaluationSequence>();
 	sequence->processor             = this;
 	sequence->commands              = std::move(commands);
 	sequence->completion            = std::move(completion);
-	sequence->autoSayEvaluation     = autoSayEvaluation;
+	sequence->evaluator             = evaluator;
 	CommandExecutionContext context = captureCommandExecutionContext();
 	context.processingAutoSay       = autoSayEvaluation;
 	const QPointer<WorldCommandProcessor> processor(this);
@@ -6304,7 +6336,8 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 					static_cast<void>(executeCommandWithTriggerPriority(command));
 			}
 			else
-				evaluateCommandSequence(commands, {});
+				evaluateCommandSequence(commands, {}, false,
+				                        &WorldCommandProcessor::evaluateUnstackedCommand);
 		}
 		m_suppressInputLog = saved;
 	}

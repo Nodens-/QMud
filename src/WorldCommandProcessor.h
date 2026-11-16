@@ -316,15 +316,32 @@ class WorldCommandProcessor : public QObject
 				LogicalOperationCompletionPtr operationCompletion;
 		};
 		/**
-		 * @brief Parses and executes one command line.
+		 * @brief Parses command text and executes its physical lines in order.
 		 * @param input Command input text.
-		 * @param allowCommandStacking Apply command stacking when `true`; stacked children pass `false` so escaped
-		 * separators remain literal during their normal command processing.
+		 * @param allowCommandStacking Expand configured separators when `true`; Send to Execute passes `false`.
 		 * @param completion Callback invoked when this command has fully completed, including suspended callbacks.
 		 * @return `true` when command was processed successfully.
 		 */
 		bool evaluateCommand(const QString &input, bool allowCommandStacking = true,
 		                     CommandCompletion completion = {});
+		/**
+		 * @brief Executes a prepared command through callbacks, aliases, and sending without whole-input preparation.
+		 * @param line Prepared command line with no physical line endings.
+		 * @param completion Callback invoked after this command and its asynchronous descendants complete.
+		 * @return Whether normal alias and send evaluation was reached.
+		 */
+		bool evaluatePreparedCommand(const QString &line, CommandCompletion completion = {});
+		/**
+		 * @brief Prepares one Send to Execute command without expanding command-stack separators.
+		 * @param input Command text to prepare.
+		 * @param completion Callback invoked after the command finishes.
+		 * @return Whether normal command evaluation was reached.
+		 */
+		bool evaluateUnstackedCommand(const QString &input, CommandCompletion completion);
+		/**
+		 * @brief Command entry point used by the shared ordered sequence.
+		 */
+		using CommandEvaluator = bool (WorldCommandProcessor::*)(const QString &, CommandCompletion);
 		/**
 		 * @brief Starts one logical command and retains its nesting depth through suspension.
 		 * @param text Command text.
@@ -384,13 +401,16 @@ class WorldCommandProcessor : public QObject
 		 */
 		bool    continueEvaluateCommandAfterPluginCommand(const QString &line, bool echoInput);
 		/**
-		 * @brief Starts ordered evaluation of an expanded command stack.
-		 * @param commands Expanded commands in execution order.
+		 * @brief Starts ordered evaluation of prepared command lines.
+		 * @param commands Prepared command lines in execution order.
 		 * @param completion Callback invoked after the final command completes.
 		 * @param autoSayEvaluation Continue through the auto-say fallback when `true`.
+		 * @param evaluator Command entry point, defaulting to execution of already-prepared lines.
 		 */
-		void    evaluateCommandSequence(QStringList commands, CommandCompletion completion,
-		                                bool autoSayEvaluation = false);
+		void
+		evaluateCommandSequence(QStringList commands, CommandCompletion completion,
+		                        bool             autoSayEvaluation = false,
+		                        CommandEvaluator evaluator = &WorldCommandProcessor::evaluatePreparedCommand);
 		/**
 		 * @brief Runs one rule action under a child logical-completion group.
 		 * @param action Action to start in the captured command context.

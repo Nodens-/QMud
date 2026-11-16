@@ -60,47 +60,37 @@ namespace QMudCommandStack
 		return std::ranges::all_of(separator, [](const QChar ch) { return ch.isPrint() && !ch.isSpace(); });
 	}
 
-	QStringList expand(const QString &command, const QString &separator)
+	QString expand(const QString &command, const QString &separator)
 	{
 		if (!isValidSeparator(separator))
-			return {command};
+			return command;
 
 		if (command.startsWith(separator))
-			return {command.sliced(separator.size())};
+			return command.sliced(separator.size());
 
 		const QString doubledSeparator = separator + separator;
-		QStringList   commands;
-		QString       current;
-		current.reserve(command.size());
+		QString       expanded;
+		expanded.reserve(command.size());
 		for (qsizetype offset = 0; offset < command.size();)
 		{
 			const QStringView remaining(command.constData() + offset, command.size() - offset);
 			if (remaining.startsWith(doubledSeparator))
 			{
-				current += separator;
+				expanded += separator;
 				offset += doubledSeparator.size();
 				continue;
 			}
 			if (remaining.startsWith(separator))
 			{
-				commands.push_back(std::move(current));
-				current.clear();
+				expanded += QLatin1Char('\n');
 				offset += separator.size();
 				continue;
 			}
-			if (command.at(offset) == QLatin1Char('\n'))
-			{
-				commands.push_back(std::move(current));
-				current.clear();
-				++offset;
-				continue;
-			}
 
-			current += command.at(offset);
+			expanded += command.at(offset);
 			++offset;
 		}
-		commands.push_back(std::move(current));
-		return commands;
+		return expanded;
 	}
 } // namespace QMudCommandStack
 
@@ -248,6 +238,11 @@ namespace QMudCommandQueue
 
 namespace QMudCommandText
 {
+	QStringList splitCommandLines(const QString &source)
+	{
+		return source.split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+	}
+
 	QString normalizeActionCommandTextNewlines(const QString &source)
 	{
 		QString normalized;
