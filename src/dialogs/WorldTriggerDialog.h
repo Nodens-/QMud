@@ -10,6 +10,7 @@
 #define QMUD_WORLDTRIGGERDIALOG_H
 
 #include "WorldRuntime.h"
+#include "dialogs/WorldPreferencesDialog.h"
 #include <QDialog>
 
 class QCheckBox;
@@ -44,11 +45,10 @@ class WorldTriggerDialog : public QDialog
 		 */
 		[[nodiscard]] WorldRuntime::Trigger trigger() const;
 
-	protected:
 		/**
 		 * @brief Validates fields and commits edited trigger.
 		 */
-		void accept() override;
+		void                                accept() override;
 
 	private slots:
 		/**
@@ -87,28 +87,53 @@ class WorldTriggerDialog : public QDialog
 
 	private:
 		/**
+		 * @brief Asynchronously validates fields and commits edited trigger.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> acceptAsync();
+		/**
+		 * @brief Asynchronously opens expression editor for match pattern.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> onEditMatchAsync();
+		/**
+		 * @brief Asynchronously opens expression editor for send text.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> onEditSendAsync();
+		/**
+		 * @brief Asynchronously opens file chooser for trigger sound.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> onBrowseSoundAsync();
+		/**
+		 * @brief Asynchronously plays configured trigger sound for testing.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> onTestSoundAsync();
+		/**
 		 * @brief Builds dialog controls.
 		 */
-		void               buildUi();
+		void                             buildUi();
 		/**
 		 * @brief Loads trigger values into controls.
 		 */
-		void               loadTrigger() const;
+		void                             loadTrigger() const;
 		/**
 		 * @brief Performs semantic trigger validation.
-		 * @return `true` when trigger settings are valid.
+		 * @return Operation yielding `true` when trigger settings are valid.
 		 */
-		bool               validateTrigger();
+		QMudPreferences::Operation<bool> validateTrigger();
 		/**
 		 * @brief Reports whether trigger comes from included source.
 		 * @return `true` when trigger is from an included file.
 		 */
-		[[nodiscard]] bool isIncluded() const;
+		[[nodiscard]] bool               isIncluded() const;
 		/**
 		 * @brief Returns selected send-target enum value.
 		 * @return Selected send-target enum value.
 		 */
-		[[nodiscard]] int  sendToValue() const;
+		[[nodiscard]] int                sendToValue() const;
 		/**
 		 * @brief Applies tri-state match attribute into trigger map values.
 		 * @param box Source tri-state checkbox.

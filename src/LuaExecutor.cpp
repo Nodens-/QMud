@@ -419,6 +419,45 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 				return result;
 		}
 		return result;
+	case LuaBatchDispatchKind::GmcpMessage:
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
+		{
+			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
+			if (!engine)
+				continue;
+			if (request.gmcpMessageArg && callbackSnapshot && callbackSnapshot->gmcpPublication)
+			{
+				const auto current =
+				    callbackSnapshot->gmcpPublication->current.load(std::memory_order_acquire);
+				if (!current || !current->negotiated || current->session != request.gmcpMessageArg->session)
+					continue;
+			}
+			prepareEngine(engine);
+			if (callbackSnapshot)
+				engine->pushDispatchSnapshot(callbackSnapshot);
+			const auto popSnapshot = qScopeGuard(
+			    [engine, hasSnapshot = static_cast<bool>(callbackSnapshot)]
+			    {
+				    if (hasSnapshot)
+					    engine->popDispatchSnapshot();
+			    });
+			Q_UNUSED(popSnapshot);
+			bool                         suspended = false;
+			quint64                      resumeId  = 0;
+			LuaPendingModalStringRequest modalRequest;
+			static_cast<void>(engine->callGmcpMessage(request.functionName, request.gmcpMessageArg,
+			                                          request.numberArg1 != 0, &suspended, &resumeId,
+			                                          &modalRequest));
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
+			if (suspended)
+			{
+				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
+				return result;
+			}
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
+				return result;
+		}
+		return result;
 	case LuaBatchDispatchKind::BytesInOut:
 		result.bytesResult = request.bytesArg;
 		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
@@ -1016,6 +1055,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 				}
 #endif
 				initRequest.engine->setWorldRuntime(initRequest.runtime);
+				initRequest.engine->setGmcpPublication(initRequest.gmcpPublication);
 				initRequest.engine->setScriptText(initRequest.scriptText);
 				if (!initRequest.pluginId.isEmpty() || !initRequest.pluginName.isEmpty() ||
 				    !initRequest.pluginDirectory.isEmpty())

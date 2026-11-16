@@ -51,6 +51,11 @@ enum class LuaPreparedCallbackResultMode
 #endif
 
 struct LuaCallbackSnapshot;
+namespace QMudGmcp
+{
+	struct Message;
+	struct Publication;
+} // namespace QMudGmcp
 class WorldRuntime;
 
 /**
@@ -62,6 +67,37 @@ class WorldRuntime;
 class LuaCallbackEngine
 {
 	public:
+		/**
+		 * @brief Binds the default world's live endpoint on the Lua lane.
+		 * @param publication Lifetime-safe publication endpoint.
+		 */
+		void setGmcpPublication(const std::shared_ptr<QMudGmcp::Publication> &publication);
+		/**
+		 * @brief Tracks registration ownership on the Lua lane.
+		 * @param module Module name.
+		 * @param registered Whether this engine still owns the registration.
+		 */
+		void noteGmcpModuleRegistration(const QString &module, bool registered);
+		/**
+		 * @brief Returns the default endpoint outside a dispatch context.
+		 * @return Shared publication endpoint.
+		 */
+		std::shared_ptr<QMudGmcp::Publication> gmcpPublication() const;
+
+		/**
+		 * @brief Executes a native GMCP notification on the owning Lua lane.
+		 * @param functionName Callback entry point.
+		 * @param message Immutable payload event, or empty for negotiation notification.
+		 * @param enabled Negotiation state for a state notification.
+		 * @param suspended Output suspension flag.
+		 * @param resumeId Output continuation identity.
+		 * @param modal Output pending modal request.
+		 * @return Whether execution succeeded.
+		 */
+		bool callGmcpMessage(const QString                                  &functionName,
+		                     const std::shared_ptr<const QMudGmcp::Message> &message, bool enabled,
+		                     bool *suspended, quint64 *resumeId, LuaPendingModalStringRequest *modal);
+
 		using CallbackCatalogObserver =
 		    std::function<void(const QString &, const QSet<QString> &, const QSet<QString> &)>;
 
@@ -707,6 +743,11 @@ class LuaCallbackEngine
 
 	private:
 		/**
+		 * @brief Journals release of this engine's module registrations on its bound runtime.
+		 */
+		void                                               releaseGmcpModuleRegistrations();
+
+		/**
 		 * @brief Ensures Lua state exists and is initialized.
 		 * @return `true` when Lua state is ready.
 		 */
@@ -716,6 +757,11 @@ class LuaCallbackEngine
 		 */
 		void                                               registerWorldBindings();
 		/**
+		 * @brief Synchronizes native GMCP globals with the owning world's selected transport mode on the Lua
+		 * lane.
+		 */
+		void                                               synchronizeGmcpGlobals();
+		/**
 		 * @brief Publishes the current callback catalog when its observer payload changed.
 		 */
 		void                                               publishLuaCallbackCatalogIfChanged();
@@ -723,8 +769,11 @@ class LuaCallbackEngine
 		QString                                            m_script;
 		bool                                               m_scriptLoaded{false};
 		bool                                               m_worldBindingsReady{false};
+		bool                                               m_gmcpGlobalsAvailable{false};
 		bool                                               m_allowPackage{true};
 		class WorldRuntime                                *m_worldRuntime{nullptr};
+		std::shared_ptr<QMudGmcp::Publication>             m_gmcpPublication;
+		QSet<QString>                                      m_gmcpRegisteredModules;
 		const quint64                                      m_instanceId;
 		QString                                            m_pluginId;
 		QString                                            m_pluginName;

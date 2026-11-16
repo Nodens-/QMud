@@ -1,0 +1,579 @@
+/*
+ * QMud Project
+ * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
+ *
+ * File: GMCP_Specification.txt
+ * Role: GMCP specification, QMud merge extension, native Core behavior, and Lua reference.
+ */
+
+GMCP Specification and QMud Reference
+====================================
+
+1. Scope
+--------
+
+GMCP means Generic MUD Communication Protocol. It exchanges structured data between a MUD server and a client over
+Telnet. Its messages are out of band. They carry protocol data independently of the text coming from the MUD.
+Both kinds of traffic use the same connection.
+
+This document describes the GMCP transport and Core package, followed by QMud's merge extension, native behavior,
+and Lua interface. References for the base protocol appear at the end. The merge extension is defined here.
+
+GMCP has no single protocol version negotiated on the connection. Individual packages and extensions advertise their
+own versions through Core.Supports.
+
+Client.GMCPMerge 1 identifies version 1 of QMud's merge extension (see section 4) to the specification that is aimed
+to standardize what I identify as a problem in the GMCP specification. That is the inability for a client to
+programmatically determine if a GMCP message is meant to be replaced or is minimal update that is meant to be merged
+as well as how it's meant to be merged.
+
+MUD servers define the messages they exchange outside Core. Names such as Char.Vitals and Room.Info are common, but
+the server's package documentation determines their fields, meaning, and update rules.
+
+
+2. GMCP transport and messages
+-----------------------------
+
+2.1 Telnet negotiation
+
+GMCP uses Telnet option 201, hexadecimal C9. The Telnet command bytes used below are:
+
+  IAC     255     FF     Introduces a Telnet command
+  WILL    251     FB     Offers to enable an option
+  WONT    252     FC     Announces that an option is disabled
+  DO      253     FD     Accepts an option
+  DONT    254     FE     Refuses or disables an option
+  SB      250     FA     Starts subnegotiation
+  SE      240     F0     Ends subnegotiation
+
+The server normally offers GMCP after the connection opens:
+
+  Server -> client    IAC WILL GMCP
+  Client -> server    IAC DO GMCP
+
+A client that does not accept GMCP answers IAC DONT GMCP. Once the server's offer has been accepted, either side can
+send GMCP messages using subnegotiation. Negotiating the option in this direction permits messages in both directions.
+
+2.2 Message framing
+
+Every message has this form on the connection:
+
+  IAC SB GMCP message-name [SP json-value] IAC SE
+
+SP is one ASCII space separating the name from an optional JSON value. The square brackets describe optional data.
+They are not transmitted. A message without a value omits both the space and the value.
+
+For example, the unframed message:
+
+  Core.Ping
+
+has these bytes on the connection:
+
+  FF FA C9 43 6F 72 65 2E 50 69 6E 67 FF F0
+
+There is no trailing newline, carriage return, or zero byte. A literal IAC byte inside a Telnet subnegotiation must be
+doubled as per the Telnet Protocol specitication. Valid UTF-8 JSON does not normally contain that byte.
+
+A socket read is not a message boundary. One read can contain part of a message, several messages, text, or other
+Telnet commands. The receiver identifies complete messages from Telnet framing and retains incomplete data until
+more bytes arrive.
+
+All later examples show unframed messages. The surrounding IAC SB GMCP and IAC SE bytes are implied.
+
+2.3 Names and payloads
+
+A message name identifies a package and an operation or data item. Dots separate the levels, as in Char.Items.List.
+Module and message names are case-insensitive. JSON object keys and string values retain their case. For example,
+Char.Vitals and char.vitals identify the same message, while the fields hp and HP are different fields.
+
+The payload is UTF-8 JSON. It can be an object, an array, a string, a number, a boolean, or null. A message can also
+have no payload. These are distinct messages:
+
+  Test.Event
+  Test.Event null
+  Test.Event false
+  Test.Event 0
+  Test.Event ""
+  Test.Event []
+  Test.Event {}
+
+Strings use JSON quoting and escaping. An actual line break inside a string is encoded as \n. Object members have
+string keys. Array elements retain their order. JSON true, false, and null use lower case.
+
+  Test.State {"name":"Example","resources":{"energy":30},"effects":["rested"]}
+
+A package's version describes that package's contract. It does not change Telnet framing or JSON syntax.
+
+2.4 Stored state
+
+The GMCP transport does not specify a universal rule for accumulating successive payloads. A package can define full
+replacements, partial updates, or operations on a larger data set. Clients must follow the package's documented
+meaning. QMud's native storage defaults and its explicit merge extension are described below.
+
+
+3. The Core package
+-------------------
+
+Core supplies identification, capability advertisement, connection maintenance, and disconnect messages. Its
+messages use the same framing and JSON rules as every other package. Core package should be supported by every
+client implementing GMCP.
+
+3.1 Core.Hello
+
+Direction: client to server.
+Payload: an object containing the strings client and version.
+
+This is the client's first GMCP message. It identifies the client software and its version.
+
+  Core.Hello {"client":"QMud","version":"14.00"}
+
+3.2 Core.Supports.Set
+
+Direction: client to server.
+Payload: an array of strings in the form "module version".
+
+This supplies the complete set of advertised modules and replaces any previous set. Versions are positive integers.
+
+  Core.Supports.Set ["Char 1","Comm 1","Room 1"]
+
+3.3 Core.Supports.Add
+
+Direction: client to server.
+Payload: an array using the same format as Core.Supports.Set.
+
+This adds or updates advertised modules. An entry replaces the version previously advertised for the same module,
+even if the new version is lower. If no set has been supplied, Add starts the advertised set.
+
+  Core.Supports.Add ["Char.Items 1"]
+
+3.4 Core.Supports.Remove
+
+Direction: client to server.
+Payload: an array of module names.
+
+This withdraws the named modules. Version numbers are not needed.
+
+  Core.Supports.Remove ["Char.Items"]
+
+3.5 Core.Ping
+
+Direction: both
+Client payload: an optional number giving the last measured round-trip time in milliseconds.
+Server reply: no payload.
+
+The client records when it sends a request and measures the elapsed time when the reply arrives. The first request
+has no previous measurement to report. A later request can include the last result.
+
+  Client -> server    Core.Ping
+  Server -> client    Core.Ping
+  Client -> server    Core.Ping 42
+  Server -> client    Core.Ping
+
+Core.Ping can also be initiated by the server. QMud's response behavior is described in section 5.3.
+
+3.6 Core.KeepAlive
+
+Direction: client to server.
+Payload: none.
+
+This asks the server to reset its idle timeout for the logged-in character.
+
+  Core.KeepAlive
+
+3.7 Core.Goodbye
+
+Direction: server to client.
+Payload: a string for the user.
+
+The server sends this before closing the connection. The text can explain the disconnect.
+
+  Core.Goodbye "The connection is closing."
+
+
+4. QMud merge extension
+-----------------------
+
+4.1 Capability and declaration
+
+The extension is advertised as Client.GMCPMerge 1 in Core.Supports. Version 1 supports all three modes defined here.
+It is a client capability. Plugin module registrations do not enable it, disable it, or select its version.
+
+A server should use the extension only after the client advertises support. The server declares the desired storage
+mode with the reserved top-level object property __gmcp_merge:
+
+  Test.State {"__gmcp_merge":"recursive","resources":{"energy":30}}
+
+The property name and mode strings are case-sensitive. The accepted strings are replace, shallow, and recursive.
+The declaration applies to this message immediately and remains in effect for later messages with the same name and
+all subpackages of that message unless there is a more specific override. For the example above the recursive policy
+would apply to Test.State.Details as well even if it arrived as a separate message without policy unless that separate
+message defined its own policy. Message-name matching is case-insensitive.
+
+The client removes the top-level __gmcp_merge property before exposing application payloads or applying their data.
+A property with that name inside a nested object remains ordinary application data. Raw messages retain the original
+property and value.
+
+4.2 Replace
+
+replace stores the incoming application value as the complete new value. Omitted fields from the previous value
+are discarded.
+
+Starting state:
+
+  {"name":"Example","resources":{"energy":30,"maximum":50}}
+
+Incoming message:
+
+  Test.State {"__gmcp_merge":"replace","resources":{"energy":25}}
+
+Result:
+
+  {"resources":{"energy":25}}
+
+4.3 Shallow merge
+
+shallow merges the top-level members when both the previous and incoming values are objects. Supplied members
+replace members with the same key. Omitted members remain. Nested objects are replaced as complete values.
+
+Using the same starting state as section 4.2:
+
+  Test.State {"__gmcp_merge":"shallow","resources":{"energy":25}}
+
+Result:
+
+  {"name":"Example","resources":{"energy":25}}
+
+4.4 Recursive merge
+
+recursive merges supplied members at every level where both values are objects. Omitted members remain at each
+such level.
+
+Using the same starting state as section 4.2:
+
+  Test.State {"__gmcp_merge":"recursive","resources":{"energy":25}}
+
+Result:
+
+  {"name":"Example","resources":{"energy":25,"maximum":50}}
+
+Arrays are replaced as complete values in every mode. Array elements are not merged by index. Scalars, nulls, and
+changes between object and non-object types also replace the value at that position. A null is a stored value,
+not a request to delete a member. Version 1 defines no deletion operation, when deletions are required replace
+mode is what should be used.
+
+A message without a payload has no stored application value. It is not treated as an empty object to merge.
+
+4.5 Invalid declarations and session lifetime
+
+An unknown mode or a declaration whose value is not a string produces a diagnostic. The previous policy remains
+in effect and the remaining valid application payload is still processed.
+Invalid JSON changes neither the policy nor application state.
+
+4.6 Changing the policy
+
+QMud can change the policy at any time, but it will be overriden if the server sends a policy. It can also force a
+policy in order to override what the server requested and ignore further policy changes from the server for a
+particular package or subpackage, as a potential workaround to a server bug.
+
+This is done via the GMCP Browser dialog, by using the right click context menu on a package.
+
+4.7 QMud local policy and defaults
+
+QMud chooses a message's storage mode in this order:
+
+  1. A forced world policy
+  2. The server's declaration
+  3. A world policy without force
+  4. The built-in default
+
+The server is authoritative unless the user explicitly forces a local policy. Char.Status uses shallow merge by
+default. Other messages use replace. These are QMud storage defaults, not rules imposed by the base GMCP transport.
+A policy change affects subsequent updates and does not rebuild state from earlier messages.
+
+
+5. Native GMCP in QMud
+----------------------
+
+5.1 Protocol ownership
+
+World Preferences -> Protocol Options -> GMCP contains the persistent settings. Native GMCP is enabled for New
+World and Quick Connect. A loaded world without the native_gmcp setting keeps it off so existing plugin handlers
+can work properly.
+
+Native GMCP toggle only applies for the NEXT new connection. A QMud reload that keeps the existing socket restores
+its saved negotiation state. It is not a new connection.
+
+With native handling selected, QMud processes GMCP negotiation and messages on the transport worker. GMCP is
+consumed before any packet and Telnet plugin callbacks. Plugins receive the native callbacks in section 7 so
+old GMCP handler plugins will NOT work.
+
+5.2 Identification and capabilities
+
+After accepting the server's WILL GMCP, QMud sends Core.Hello and then Core.Supports.Set. Hello uses client "QMud"
+and the running version string. CI builds include the -ci suffix.
+
+The initial support set contains:
+
+  Client.GMCPMerge 1
+  Char 1
+  Comm 1
+  Room 1
+
+Plugin and world-script module registrations contribute to the support set. For each module, QMud advertises the
+highest version requested by active owners or supplied by the built-in set. Changing the effective registrations
+sends a replacement Core.Supports.Set. QMud does not need Add or Remove for its automatic registration management.
+
+Client.GMCPMerge 1 is advertised independently of those registrations. Its version identifies this extension's
+contract, including all three merge modes. The Lua registration functions reject that reserved capability name.
+
+
+6. Lua data and APIs
+--------------------
+
+6.1 Availability and values
+
+The ten functions below are available as normal Lua bindings, including through world objects. The native gmcp
+and gmcpNull globals are installed when that world's live or restored connection has selected native handling.
+
+Every gmcp-prefixed function raises the Lua error "GMCP is not available" when native handling is unavailable.
+Except gmcpIsEnabled. The saved Native GMCP preference alone does not make these APIs available.
+While the selected native connection is negotiating, reads are empty, gmcpIsEnabled returns false, and module
+registration is permitted. Register a plugin's initial modules in OnPluginConnect.
+
+JSON strings, numbers, and booleans become their corresponding Lua values. JSON null becomes the gmcpNull sentinel.
+An absent message, absent member, or message without a payload normally produces nil. gmcpNull is a real value
+and is truthy in Lua. Test it explicitly when null matters.
+
+JSON objects and arrays are immutable userdata. Object members are indexed by their exact string keys. Arrays
+use Lua indexes starting at 1. Both support pairs() and #. For an object, # returns its member count.
+Use gmcpToTable to obtain a mutable copy. Native values are not ordinary Lua tables.
+
+The live gmcp namespace offers dotted access:
+
+  local energy = gmcp.Char.Vitals.energy
+
+Message-name matching ignores case. After a message payload has been selected, its JSON field keys remain
+case-sensitive. If a message name overlaps a namespace, use gmcpGet with the complete message name to select it
+directly.
+
+A retained native payload stays at the version obtained. Reading it again does not silently change its contents.
+Reacquire the message to see current state. Namespace iteration retains a consistent version for that iteration.
+
+6.2 gmcpIsEnabled() -> boolean
+
+Returns true when native GMCP is negotiated. Returns false while an available native connection has not completed
+negotiation or when native GMCP is off.
+
+6.3 gmcpGet(source [, path [, default]]) -> value
+
+source selects the root. A string is a complete message name and reads that message's current merged application
+state. A native object or array reads that retained value instead, including a callback's payload or state argument.
+Nil, gmcpNull, and boolean roots are also accepted for safe lookups. Strings always mean message names.
+Ordinary Lua tables and live namespace views cannot be used as source payloads.
+
+path optionally selects a value below the root. It accepts a dotted string or a dense Lua array of components.
+Omitting it, passing nil, passing an empty string, or passing an empty array selects the whole root.
+
+  gmcpGet("Char.Vitals", "resources.energy")
+  gmcpGet(payload, {"resources", "energy"})
+  gmcpGet(payload, {"a.b", "", 1})
+
+A component list can address object keys containing dots or empty keys. Its string components are exact keys.
+Positive integer components select array elements. Decimal string components also select array elements when the
+parent is an array. An integer component does not select a numeric-looking object key.
+
+Missing names, missing members, out-of-range array positions, and traversal through a scalar return default.
+The default is nil when omitted. Explicit JSON null returns gmcpNull. False and zero retain their values.
+Malformed paths, including component lists with holes or nonpositive integer components, raise Lua argument errors.
+
+  local energy = gmcpGet("Char.Vitals", "resources.energy", 0)
+
+6.4 gmcpGetString(source [, path [, default]]) -> string
+
+Except for the combined form below, source and path have the same meaning as for gmcpGet. default is an optional
+string that is returned when a value is missing or is an explicit JSON null. It defaults to """.
+
+When source is a string and path is omitted or nil, source can combine the message name and a dotted field path.
+
+  gmcpGetString("Char.Vitals.hp")
+  gmcpGetString("Char.Vitals", "hp")
+  gmcpGetString("Char.Vitals.hp", nil, "unknown")
+
+An exact received message name takes priority, even when that message has no payload or contains JSON null.
+Otherwise, QMud selects the longest received message name at a dot boundary and reads the remaining field path
+from that message's current merged state. If the field is missing, QMud returns default without trying a shorter
+message name. Message-name matching ignores case. JSON field names remain case-sensitive, and decimal path
+components select one-based array positions when the parent is an array.
+
+Supplying an explicit path, including an empty string or component list, keeps the existing separate-path behavior.
+
+Strings are returned unchanged. Numbers and booleans become text. Objects and arrays become serialized Lua table
+literals. Object keys, nested scalar types, and one-based array order are preserved.
+
+For example, an object containing {"energy":30,"ready":false} produces a string containing a Lua expression such as:
+
+  {["energy"]=30,["ready"]=false}
+
+This is Lua source. Nested nulls are written as gmcpNull, so evaluating that expression requires gmcpNull in the
+Lua environment which is provided automatically but if you manually override the environment with load() you need to
+include it. Quoting preserves string contents, including UTF-8 and escaped control characters. The returned string is
+generated only when the API is called.
+
+6.5 gmcpToTable(value [, wrapScalars]) -> value
+
+value is a native JSON object or array, a Lua scalar, nil, or gmcpNull. Native containers are copied recursively
+into independent mutable Lua tables. Nested scalar types and gmcpNull are preserved. A live namespace or an
+ordinary Lua table is not an accepted input.
+
+wrapScalars is an optional boolean and defaults to false. With false, a scalar is returned unchanged. With true,
+a top-level string, number, boolean, or gmcpNull is placed in a one-element array. Nil stays nil. Objects and arrays
+are copied normally in either mode. Nested scalars are never wrapped.
+
+  local mutable = gmcpToTable(gmcpGet("Char.Vitals"))
+  local wrapped = gmcpToTable(false, true)
+
+Here wrapped is {false}. Copying does not change native state. Empty JSON objects and arrays both become empty Lua
+tables. Use gmcpType on the native value before copying when that distinction matters.
+
+6.6 gmcpType(value) -> string
+
+value is any Lua value. Native objects return "object", arrays return "array", gmcpNull returns "null", and a live
+namespace returns "namespace". Other values use ordinary Lua type names such as "nil", "string", "number",
+"boolean", "table", "function", "thread", or "userdata".
+
+  gmcpType(gmcpGet("Char.Vitals"))
+  gmcpType(gmcpNull)
+  gmcpType(gmcp)
+
+6.7 gmcpGetRaw(message) -> string or nil
+
+message is a complete message name, matched without regard to case. Returns the exact unframed bytes of its most
+recent valid incoming message. This includes its name, JSON text, original formatting, and the __gmcp_merge property,
+if present. Returns nil if no such current message exists. The raw value describes the latest update, not the
+accumulated merged state. Messages rejected for invalid encoding, names, or JSON remain inspectable in history without
+replacing this value.
+
+6.8 gmcpGetMessages() -> table
+
+Returns a one-based Lua array of the complete message names currently stored. Their spelling follows the received
+messages. Treat the result as a set of names rather than relying on its iteration order.
+
+6.9 gmcpSend(message [, jsonPayload]) -> status
+
+message is a message name, or a complete unframed message when jsonPayload is omitted. jsonPayload is an optional
+string containing an already encoded JSON value. Passing nil omits it. A Lua table is not encoded automatically.
+
+  gmcpSend("Test.Request")
+  gmcpSend("Test.Request", '{"section":"status"}')
+  gmcpSend('Test.Request {"section":"status"}')
+  gmcpSend("Test.Text", '"Example text"')
+
+The third example may look inconsistent, but it's provided so an already formed message can be sent without splitting.
+
+QMud validates the message and JSON, adds Telnet framing and escaping, and schedules send through its normal
+outbound ordering. Do not add IAC bytes or a trailing line ending yourself.
+
+The return value is eOK when send is accepted, eBadParameter for an invalid name, encoding, or JSON value,
+or eWorldClosed when the available native session is not ready to send. Argument type errors are Lua errors.
+
+eOK reports acceptance, not delivery to the server. A connection or session change can cancel a deferred send.
+
+6.10 gmcpRegisterModule(module [, version]) -> status
+
+module is the package or subpackage name to advertise. version is an optional positive integer, defaults to 1.
+Registering the same module again updates this owner's requested version. Module names are matched without regard
+to case.
+
+  gmcpRegisterModule("Test.State", 1)
+
+Each plugin or world-script engine owns its own registrations. QMud combines active owners with its built-in
+modules as described in section 5.2. Registration can occur while the selected native connection is negotiating.
+Once negotiated, an effective change updates Core.Supports.Set automatically.
+
+Disabling a plugin temporarily removes its contribution while retaining its registrations. Re-enabling restores
+that contribution. Script-state reset, plugin unload, or engine teardown releases that owner's registrations.
+The registration belongs to the calling script's world. Registering through another world object is rejected.
+
+Returns eOK for an accepted registration, eBadParameter for an invalid module, version, reserved capability, or
+cross-world registration, or eWorldClosed if no target runtime is available. Invalid Lua argument types raise
+Lua errors.
+
+Client.GMCPMerge is reserved in every casing. Registering it returns eBadParameter. It is client capability
+and can not be registered by a plugin.
+
+6.11 gmcpUnregisterModule(module) -> status
+
+module is the complete module name to release, matched without regard to case. This removes only the calling
+owner's registration. Other owners and built-in support remain. Removing an absent registration is harmless.
+
+  gmcpUnregisterModule("Test.State")
+
+Returns eOK for an accepted removal. Invalid names, Client.GMCPMerge, and cross-world registration changes return
+eBadParameter. An unavailable target runtime returns eWorldClosed.
+
+
+7. Plugin callbacks
+-------------------
+
+These functions are optional plugin callbacks. Only enabled plugins defining the corresponding function receive it.
+
+7.1 onPluginGmcpMessage(message, payload, state, raw)
+
+Called for each valid incoming native GMCP message.
+
+  message    The complete received message name, retaining its original spelling
+  payload    This message's parsed application payload
+  state      The application value after applying this message's storage policy
+  raw        The exact original unframed message bytes, including GMCPMerge policy.
+
+payload and state use the native Lua types described in section 6.1. For a message without a payload, both are nil.
+With replace mode, state has the same application content as payload. With a merge mode, state can also contain
+members retained from earlier messages. Payload, state, and raw describe the specific message that caused that
+callback. Receiving another message does not change those arguments, even if the callback runs later.
+
+  function onPluginGmcpMessage(message, payload, state, raw)
+    if message:lower() == "test.state" then
+      local energy = gmcpGet(state, "resources.energy", 0)
+      Note("Energy: " .. energy)
+    end
+  end
+
+Callbacks run on the normal Lua execution lane. Reception and native state updates continue independently as, unlike
+all other clients, the implementation is truely out of band. As such, the live gmcp namespace or a message-name getter
+may already contain a later update when a queued callback runs.
+Use payload and state when processing the specific event delivered to the callback unless you need/want the latest
+data no matter what (such as character vitals), in which case parsing gmcp namespace or using API calls, will give you
+the latest data.
+
+The return value is ignored. The callback does not accept or reject native protocol ownership. Malformed messages
+are recorded with a diagnostic and do not update application data or invoke this callback. An invalid merge
+declaration in otherwise valid JSON still delivers the application payload under the previous policy.
+
+7.2 OnPluginGmcpStateChanged(enabled)
+
+Called when native GMCP becomes negotiated or ceases to be negotiated. enabled is a boolean. True announces
+activation and false announces deactivation. The return value is ignored.
+
+  function OnPluginGmcpStateChanged(enabled)
+    Note(enabled and "GMCP enabled" or "GMCP disabled")
+  end
+
+This reports session state, not edits to the Native GMCP world preference. At deactivation, native APIs may already
+be unavailable.
+
+
+8. References
+-------------
+
+Base GMCP transport and message format:
+  https://tintin.mudhalla.net/protocols/gmcp/
+  https://www.gammon.com.au/gmcp
+
+Core messages, package naming, and package versions:
+  https://www.achaea.com/local/Achaea_GMCP_Spec_20140311.pdf
+  https://mudstandards.org/gmcp/core/
+
+JSON syntax and UTF-8 interchange:
+  https://www.rfc-editor.org/rfc/rfc8259
+
+The GMCP merge extension and QMud API contracts in this document describe QMud's native implementation.

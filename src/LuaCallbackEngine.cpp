@@ -13250,12 +13250,14 @@ void LuaCallbackEngine::resetState()
 		m_callbackCatalogPresentCallbacksDirty = true;
 	}
 	m_worldBindingsReady         = false;
+	m_gmcpGlobalsAvailable       = false;
 	m_scriptLoaded               = false;
 	m_packageRestrictionsApplied = false;
 	m_callingPluginIdStack.clear();
 	m_dispatchSnapshotStack.clear();
 	publishLuaCallbackCatalogIfChanged();
 #endif
+	releaseGmcpModuleRegistrations();
 }
 
 QVector<LuaDeferredRuntimeMutationBatch> LuaCallbackEngine::teardown()
@@ -13279,6 +13281,11 @@ void LuaCallbackEngine::setWorldRuntime(WorldRuntime *runtime)
 		QMudNativePluginRegistry::luaAudioStopRuntimeOwner(m_worldRuntime, this);
 	if (m_worldRuntime != runtime)
 		clearCachedLinePage();
+	if (m_worldRuntime != runtime)
+	{
+		releaseGmcpModuleRegistrations();
+		m_gmcpPublication.reset();
+	}
 	m_worldRuntime                  = runtime;
 	m_worldBindingsReady            = false;
 	m_reportedRuntimeThreadMismatch = false;
@@ -14777,7 +14784,7 @@ namespace
  * @param contents Text fragment to append.
  * @param request Asynchronous result identity for this API call.
  * @param failureCode Error code reported if the GUI append cannot be queued or applied.
- * @return `true` when the append was accepted for ordered delivery.
+ * @return `true` when append was accepted for ordered delivery.
  */
 static bool enqueueCallbackNotepadAppend(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                          const QString &worldId, const QString &title,
@@ -15439,6 +15446,7 @@ LuaBatchDispatchResult LuaCallbackEngine::resumeSuspendedModalString(
 		invalidateCallbackRuntimeSnapshots(this, true);
 		seedCallbackSnapshot(this, callbackSnapshot);
 	}
+	synchronizeGmcpGlobals();
 	if (suspended->beforeResumeCallback)
 		suspended->beforeResumeCallback(result);
 	const QByteArray resultBytes = result.toUtf8();
@@ -20187,16 +20195,10 @@ static std::optional<bool> resolvePluginCallbackPresenceForApi(const LuaCallback
 		present = runtime->hasPluginCallbackRecipient(functionName);
 		return true;
 	};
-	bool resolved = false;
 	if (callbackNoFlushRuntimeReadBridgeForbidden(engine, inCallback))
-	{
-		resolved = false;
-	}
-	else
-	{
-		resolved = inCallback ? runOnRuntimeThreadNoDeferredFlush(runtime, resolvePresence, false)
-		                      : runOnRuntimeThread(runtime, resolvePresence, false);
-	}
+		return std::nullopt;
+	const bool resolved = inCallback ? runOnRuntimeThreadNoDeferredFlush(runtime, resolvePresence, false)
+	                                 : runOnRuntimeThread(runtime, resolvePresence, false);
 	if (!resolved)
 		return std::nullopt;
 	cacheCallbackPluginCallbackPresence(engine, functionName, present);
@@ -23077,7 +23079,7 @@ static int yieldCallbackLinePage(lua_State *L, LuaCallbackEngine *engine, WorldR
 	}
 
 	const auto continuationContext = static_cast<lua_KContext>(lua_gettop(L));
-	bool       yieldPrepared       = false;
+	bool       yieldPrepared;
 	{
 		struct LinePage
 		{
@@ -24515,7 +24517,7 @@ static bool showHelpTopic(const QString &prefix, const QString &topic)
 	bool          handled = false;
 	QString       title;
 	QString       html;
-	bool          opened = false;
+	bool          opened;
 	{
 		QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
 		db.setDatabaseName(dbPath);
@@ -27173,7 +27175,7 @@ static int luaSave(lua_State *L)
 	}
 
 	QString                     error;
-	bool                        ok             = false;
+	bool                        ok;
 	LuaPluginAsyncResultRequest asyncRequestId = {};
 	if (activeCallbackContextConst(engine))
 	{
@@ -27399,7 +27401,7 @@ static int luaSendPkt(lua_State *L)
 	size_t      packetLength = 0;
 	const char *packetData   = luaL_checklstring(L, 1, &packetLength);
 	QByteArray  payload(packetData, static_cast<int>(packetLength));
-	bool        connected = false;
+	bool        connected;
 	if (activeCallbackContextConst(engine))
 	{
 		WorldRuntime::RuntimeCountersSnapshot snapshot;
@@ -27867,7 +27869,7 @@ static int luaSetToolBarPosition(lua_State *L)
 		if (!toolBar)
 			return eBadParameter;
 
-		Qt::ToolBarArea area = Qt::TopToolBarArea;
+		Qt::ToolBarArea area;
 		switch (side)
 		{
 		case 1:
@@ -32549,17 +32551,15 @@ static int luaUtilsSendToFront(lua_State *L)
 	const bool found = runOnMainWindowThread(
 	    [titlePrefix](MainWindow *) -> bool
 	    {
-		    for (QWidget *widget : QApplication::topLevelWidgets())
-		    {
-			    if (!widget)
-				    continue;
-			    if (const QString title = widget->windowTitle(); !title.startsWith(titlePrefix))
-				    continue;
-			    widget->raise();
-			    widget->activateWindow();
-			    return true;
-		    }
-		    return false;
+		    return std::ranges::any_of(QApplication::topLevelWidgets(),
+		                               [&titlePrefix](QWidget *widget)
+		                               {
+			                               if (!widget || !widget->windowTitle().startsWith(titlePrefix))
+				                               return false;
+			                               widget->raise();
+			                               widget->activateWindow();
+			                               return true;
+		                               });
 	    },
 	    false);
 	lua_pushboolean(L, found ? 1 : 0);
@@ -32740,7 +32740,7 @@ static int luaUtilsShellExecute(lua_State *L)
 	const QString operation = QString::fromUtf8(luaL_optstring(L, 4, "open")).toLower();
 	Q_UNUSED(luaL_optnumber(L, 5, 1));
 
-	bool    ok = false;
+	bool    ok;
 	QString error;
 
 	if (!params.isEmpty() && !QUrl::fromUserInput(filename).isValid())
@@ -35354,7 +35354,7 @@ static void registerSqliteLibrary(lua_State *L)
 		lua_pop(L, 1);
 	}
 
-	// Fallback to bundled sqlite binding; luaopen_lsqlite3 installs sqlite3/lsqlite3 globals.
+	// Fallback to bundled SQLite binding; luaopen_lsqlite3 installs sqlite3/lsqlite3 globals.
 	lua_pushcfunction(L, luaopen_lsqlite3);
 	(void)QMudLuaSupport::callLuaProtected(L, 0, 1, 0);
 	lua_pop(L, 1);
@@ -35687,7 +35687,7 @@ static int luaProgressSetStatus(lua_State *L)
 		const QString                     callbackPluginId = engine->pluginId();
 		const LuaPluginAsyncResultRequest requestId        = nextPluginAsyncResultRequest(engine);
 		QString                           previousPendingStatus;
-		bool                              hadPendingStatus = false;
+		bool                              hadPendingStatus;
 		{
 			const std::lock_guard<std::mutex> lock(handle->mutex);
 			previousPendingStatus    = handle->pendingStatus;
@@ -35707,7 +35707,7 @@ static int luaProgressSetStatus(lua_State *L)
 				        if (!targetRuntimeOnMain)
 					        return;
 				        QPointer<QProgressDialog> dialog;
-				        bool                      pendingCreate = false;
+				        bool                      pendingCreate;
 				        {
 					        const std::lock_guard<std::mutex> lock(handle->mutex);
 					        dialog        = handle->dialog;
@@ -35795,7 +35795,7 @@ static int luaProgressSetRange(lua_State *L)
 				        if (!targetRuntimeOnMain)
 					        return;
 				        QPointer<QProgressDialog> dialog;
-				        bool                      pendingCreate = false;
+				        bool                      pendingCreate;
 				        {
 					        const std::lock_guard<std::mutex> lock(handle->mutex);
 					        dialog        = handle->dialog;
@@ -35864,7 +35864,7 @@ static int luaProgressSetPosition(lua_State *L)
 				        if (!targetRuntimeOnMain)
 					        return;
 				        QPointer<QProgressDialog> dialog;
-				        bool                      pendingCreate = false;
+				        bool                      pendingCreate;
 				        {
 					        const std::lock_guard<std::mutex> lock(handle->mutex);
 					        dialog        = handle->dialog;
@@ -35927,7 +35927,7 @@ static int luaProgressStep(lua_State *L)
 	const LuaProgressDialogHandle handle = progressCheck(L);
 	if (!handle)
 		return 0;
-	int step = 1;
+	int step;
 	{
 		const std::lock_guard<std::mutex> lock(handle->mutex);
 		step = handle->step;
@@ -35950,7 +35950,7 @@ static int luaProgressStep(lua_State *L)
 				        if (!targetRuntimeOnMain)
 					        return;
 				        QPointer<QProgressDialog> dialog;
-				        bool                      pendingCreate = false;
+				        bool                      pendingCreate;
 				        {
 					        const std::lock_guard<std::mutex> lock(handle->mutex);
 					        dialog        = handle->dialog;
@@ -36007,7 +36007,7 @@ static int luaProgressCheckCancel(lua_State *L)
 	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
 	if (engine && runtime && activeCallbackContextConst(engine) && callbackScopeSyncBridgeForbidden())
 	{
-		bool canceled = false;
+		bool canceled;
 		{
 			const std::lock_guard<std::mutex> lock(handle->mutex);
 			canceled = handle->hasLastKnownCanceled ? handle->lastKnownCanceled : false;
@@ -36021,7 +36021,7 @@ static int luaProgressCheckCancel(lua_State *L)
 		const std::lock_guard<std::mutex> lock(handle->mutex);
 		dialog = handle->dialog;
 	}
-	bool canceled = false;
+	bool canceled;
 	if (dialog)
 	{
 		canceled = runOnMainWindowThread(
@@ -37999,7 +37999,7 @@ static int executeLuaWorldProxyCall(lua_State *L, LuaCallbackEngine *engine)
 	}
 
 	WorldRuntime *previous = engine->swapWorldRuntime(target);
-	int           status   = 0;
+	int           status;
 	{
 		const ScopedLuaCallbackExecutionContext callbackContextGuard(
 		    engine, CallbackWildcardDomain::None, QString(), QStringList(), QMap<QString, QString>());
@@ -38634,7 +38634,7 @@ static bool fetchTriggerSnapshotForContext(const LuaCallbackEngine *engine, Worl
 
 	auto resolveOnRuntimeThread = [&]() -> bool
 	{
-		const QList<WorldRuntime::Trigger> *triggers = nullptr;
+		const QList<WorldRuntime::Trigger> *triggers;
 		if (pluginId.isEmpty())
 		{
 			triggers = &runtime->triggers();
@@ -38718,7 +38718,7 @@ static bool fetchAliasSnapshotForContext(const LuaCallbackEngine *engine, WorldR
 
 	auto resolveOnRuntimeThread = [&]() -> bool
 	{
-		const QList<WorldRuntime::Alias> *aliases = nullptr;
+		const QList<WorldRuntime::Alias> *aliases;
 		if (pluginId.isEmpty())
 		{
 			aliases = &runtime->aliases();
@@ -38802,7 +38802,7 @@ static bool fetchTimerSnapshotForContext(const LuaCallbackEngine *engine, WorldR
 
 	auto resolveOnRuntimeThread = [&]() -> bool
 	{
-		const QList<WorldRuntime::Timer> *timers = nullptr;
+		const QList<WorldRuntime::Timer> *timers;
 		if (pluginId.isEmpty())
 		{
 			timers = &runtime->timers();
@@ -39701,7 +39701,7 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 
 			    QList<WorldRuntime::Trigger> &runtimeTriggers   = mutableTriggerList(&targetRuntime, plugin);
 			    int                           firstChangedIndex = -1;
-			    int                           insertedIndex     = -1;
+			    int                           insertedIndex;
 			    if (replacedRuntimeId != 0)
 			    {
 				    int           runtimeIndex             = -1;
@@ -47078,7 +47078,7 @@ namespace
 		if (invocation->targetResult.suspended)
 		{
 			lua_settop(L, invocation->callerTopBefore);
-			bool yieldPrepared = false;
+			bool yieldPrepared;
 			{
 				LuaPendingModalStringRequest request;
 				auto                         sharedInvocation = invocation->self.lock();
@@ -47441,13 +47441,8 @@ static int luaSetOption(lua_State *L)
 		lua_pushnumber(L, ePluginCannotSetOption);
 		return 1;
 	}
-	double numeric = 0.0;
-	if (lua_isboolean(L, 2))
-		numeric = lua_toboolean(L, 2) ? 1.0 : 0.0;
-	else if (lua_isnil(L, 2))
-		numeric = 0.0;
-	else
-		numeric = luaL_checknumber(L, 2);
+	const double numeric = lua_isboolean(L, 2) ? (lua_toboolean(L, 2) ? 1.0 : 0.0)
+	                                           : (lua_isnil(L, 2) ? 0.0 : luaL_checknumber(L, 2));
 	if (!QMudWorldOptions::numericOptionValueInRange(*option, numeric))
 	{
 		lua_pushnumber(L, eOptionOutOfRange);
@@ -49177,7 +49172,6 @@ static int luaWindowLoadImage(lua_State *L)
 	const QString name     = QString::fromUtf8(luaL_checkstring(L, 1));
 	const QString imageId  = QString::fromUtf8(luaL_checkstring(L, 2));
 	const QString filename = QString::fromUtf8(luaL_checkstring(L, 3));
-	int           result   = eNoSuchWindow;
 	if (activeCallbackContextConst(engine))
 	{
 		if (!resolveMiniWindowExistsForApi(engine, runtime, name))
@@ -49246,7 +49240,7 @@ static int luaWindowLoadImage(lua_State *L)
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
-	result = runOnRuntimeThreadDeferredMutation(
+	const int result = runOnRuntimeThreadDeferredMutation(
 	    engine, runtime, [=]() -> int { return runtime->windowLoadImage(name, imageId, filename); },
 	    eNoSuchWindow);
 	if (result == eOK)
@@ -49281,7 +49275,6 @@ static int luaWindowLoadImageMemory(lua_State *L)
 	const char      *buffer    = luaL_checklstring(L, 3, &length);
 	const bool       swapAlpha = optBool(L, 4, false);
 	const QByteArray bytes(buffer, static_cast<int>(length));
-	int              result = eNoSuchWindow;
 	if (activeCallbackContextConst(engine))
 	{
 		if (!resolveMiniWindowExistsForApi(engine, runtime, name))
@@ -49307,7 +49300,7 @@ static int luaWindowLoadImageMemory(lua_State *L)
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
-	result = runOnRuntimeThreadDeferredMutation(
+	const int result = runOnRuntimeThreadDeferredMutation(
 	    engine, runtime, [=]() -> int
 	    { return runtime->windowLoadImageMemory(name, imageId, bytes, swapAlpha); }, eNoSuchWindow);
 	if (result == eOK)
@@ -50888,6 +50881,7 @@ bool LuaCallbackEngine::ensureState()
 		registerWorldBindings();
 		installLuaFilePathCompat(m_state, this);
 	}
+	synchronizeGmcpGlobals();
 
 	if (!m_packageRestrictionsApplied || m_packageRestrictionsAppliedValue != m_allowPackage)
 	{
@@ -51106,6 +51100,963 @@ static void extendLuaPackagePath(lua_State *L, const QString &appDir)
 }
 #endif
 
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+namespace
+{
+	/**
+	 * @brief Reads a complete UTF-8 Lua string.
+	 * @param L Lua state.
+	 * @param index Stack index.
+	 * @return Decoded string including embedded NUL characters.
+	 */
+	QString luaGmcpString(lua_State *L, int index)
+	{
+		size_t      size  = 0;
+		const char *bytes = luaL_checklstring(L, index, &size);
+		return QString::fromUtf8(bytes, static_cast<qsizetype>(size));
+	}
+	/**
+	 * @brief Holds either a live namespace or one immutable JSON value.
+	 */
+	struct LuaGmcpView
+	{
+			LuaCallbackEngine                        *engine{nullptr};
+			QString                                   path;
+			QJsonValue                                value;
+			bool                                      live{false};
+			std::shared_ptr<const QMudGmcp::Snapshot> frozen;
+	};
+	/**
+	 * @brief Resolves the active world's callback snapshot without a runtime bridge.
+	 * @param engine Owning Lua engine.
+	 * @return Snapshot for the selected world, or null outside dispatch.
+	 */
+	const LuaCallbackSnapshot *luaGmcpContext(const LuaCallbackEngine *engine)
+	{
+		const auto *context = activeCallbackContextConst(engine);
+		if (context && context->callbackSnapshotBase)
+			return context->callbackSnapshotBase.data();
+		return engine ? engine->currentDispatchSnapshot() : nullptr;
+	}
+	/**
+	 * @brief Resolves the active world's publication without a runtime bridge.
+	 * @param engine Owning Lua engine.
+	 * @return Current published native state.
+	 */
+	std::shared_ptr<const QMudGmcp::Snapshot> luaGmcpSnapshot(const LuaCallbackEngine *engine)
+	{
+		const auto *snapshot = luaGmcpContext(engine);
+		const auto  endpoint =
+		    snapshot ? snapshot->gmcpPublication : (engine ? engine->gmcpPublication() : nullptr);
+		return endpoint ? endpoint->current.load(std::memory_order_acquire) : nullptr;
+	}
+	/**
+	 * @brief Checks availability exclusively from the selected connection's native state.
+	 * @param engine Owning Lua engine.
+	 * @param snapshot Selected world's callback snapshot.
+	 * @return Whether native handling is selected for a live or restored connection.
+	 */
+	bool luaGmcpAvailable(const LuaCallbackEngine *engine, const LuaCallbackSnapshot *snapshot)
+	{
+		const auto endpoint =
+		    snapshot ? snapshot->gmcpPublication : (engine ? engine->gmcpPublication() : nullptr);
+		const auto state = endpoint ? endpoint->current.load(std::memory_order_acquire) : nullptr;
+		return state && state->nativeAvailable();
+	}
+	/**
+	 * @brief Returns a binding's owning engine.
+	 * @param L Lua state.
+	 * @return Engine stored in the closure.
+	 */
+	LuaCallbackEngine *luaGmcpEngine(lua_State *L)
+	{
+		return static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	}
+	/**
+	 * @brief Rejects native API calls when the selected world uses legacy handling.
+	 * @param L Lua state.
+	 */
+	void requireGmcpAvailable(lua_State *L)
+	{
+		auto *engine = luaGmcpEngine(L);
+		if (!luaGmcpAvailable(engine, luaGmcpContext(engine)))
+			luaL_error(L, "GMCP is not available");
+	}
+	/**
+	 * @brief Pushes an immutable JSON representation.
+	 * @param L Lua state.
+	 * @param value JSON value.
+	 */
+	void pushGmcpValue(lua_State *L, const QJsonValue &value)
+	{
+		if (value.isUndefined())
+		{
+			lua_pushnil(L);
+			return;
+		}
+		if (value.isNull())
+		{
+			lua_getfield(L, LUA_REGISTRYINDEX, "QMud.GMCP.null");
+			return;
+		}
+		if (value.isBool())
+		{
+			lua_pushboolean(L, value.toBool());
+			return;
+		}
+		if (value.isString())
+		{
+			const auto bytes = value.toString().toUtf8();
+			lua_pushlstring(L, bytes.constData(), bytes.size());
+			return;
+		}
+		if (value.isDouble())
+		{
+			const QVariant variant = value.toVariant();
+			if (variant.metaType().id() == QMetaType::LongLong)
+				lua_pushinteger(L, variant.toLongLong());
+			else
+				lua_pushnumber(L, value.toDouble());
+			return;
+		}
+		new (lua_newuserdata(L, sizeof(LuaGmcpView))) LuaGmcpView{nullptr, {}, value, false, {}};
+		luaL_getmetatable(L, "QMud.GMCP.view");
+		lua_setmetatable(L, -2);
+	}
+	/**
+	 * @brief Pushes a namespace view.
+	 * @param L Lua state.
+	 * @param engine Owning engine.
+	 * @param path Namespace path.
+	 * @param frozen Optional version retained by an iterator.
+	 */
+	void pushGmcpNamespace(lua_State *L, LuaCallbackEngine *engine, const QString &path,
+	                       std::shared_ptr<const QMudGmcp::Snapshot> frozen = {})
+	{
+		new (lua_newuserdata(L, sizeof(LuaGmcpView))) LuaGmcpView{engine, path, {}, true, std::move(frozen)};
+		luaL_getmetatable(L, "QMud.GMCP.view");
+		lua_setmetatable(L, -2);
+	}
+	/**
+	 * @brief Releases an immutable view.
+	 * @param L Lua state.
+	 * @return No results.
+	 */
+	int luaGmcpGc(lua_State *L)
+	{
+		static_cast<LuaGmcpView *>(luaL_checkudata(L, 1, "QMud.GMCP.view"))->~LuaGmcpView();
+		return 0;
+	}
+	/**
+	 * @brief Rejects writes to native values.
+	 * @param L Lua state.
+	 * @return Raises a Lua error.
+	 */
+	int luaGmcpReadOnly(lua_State *L)
+	{
+		return luaL_error(L, "GMCP values are read-only");
+	}
+	/**
+	 * @brief Indexes a live namespace or immutable payload.
+	 * @param L Lua state.
+	 * @return One value.
+	 */
+	int luaGmcpIndex(lua_State *L)
+	{
+		const auto *view = static_cast<LuaGmcpView *>(luaL_checkudata(L, 1, "QMud.GMCP.view"));
+		if (view->live)
+		{
+			if (lua_type(L, 2) != LUA_TSTRING)
+			{
+				lua_pushnil(L);
+				return 1;
+			}
+			const QString key   = luaGmcpString(L, 2);
+			const QString path  = view->path.isEmpty() ? key : view->path + QLatin1Char('.') + key;
+			const auto    state = view->frozen ? view->frozen : luaGmcpSnapshot(view->engine);
+			if (state && state->native && !state->closed)
+			{
+				if (const auto message = state->messages.value(path.toLower()))
+				{
+					pushGmcpValue(L, message->state);
+					return 1;
+				}
+				if (state->namespaces.contains(path.toLower()))
+				{
+					pushGmcpNamespace(L, view->engine, path, view->frozen);
+					return 1;
+				}
+			}
+			lua_pushnil(L);
+			return 1;
+		}
+		if (view->value.isArray())
+		{
+			const lua_Integer index = luaL_checkinteger(L, 2);
+			const auto        array = view->value.toArray();
+			pushGmcpValue(L, index > 0 && index <= array.size() ? array.at(index - 1)
+			                                                    : QJsonValue(QJsonValue::Undefined));
+		}
+		else if (lua_type(L, 2) == LUA_TSTRING)
+			pushGmcpValue(L, view->value.toObject().value(luaGmcpString(L, 2)));
+		else
+			lua_pushnil(L);
+		return 1;
+	}
+	/**
+	 * @brief Returns a JSON container's length.
+	 * @param L Lua state.
+	 * @return Container size.
+	 */
+	int luaGmcpLength(lua_State *L)
+	{
+		const auto *view = static_cast<LuaGmcpView *>(luaL_checkudata(L, 1, "QMud.GMCP.view"));
+		lua_pushinteger(L, view->value.isArray()    ? view->value.toArray().size()
+		                   : view->value.isObject() ? view->value.toObject().size()
+		                                            : 0);
+		return 1;
+	}
+	/**
+	 * @brief Iterates a frozen shallow Lua projection.
+	 * @param L Lua state.
+	 * @return Next key and value, or none.
+	 */
+	int luaGmcpNext(lua_State *L)
+	{
+		lua_pushvalue(L, lua_upvalueindex(1));
+		lua_pushvalue(L, 2);
+		if (lua_next(L, -2))
+			return 2;
+		return 0;
+	}
+	/**
+	 * @brief Creates an iterator retaining one immutable version.
+	 * @param L Lua state.
+	 * @return Iterator, state and initial key.
+	 */
+	int luaGmcpPairs(lua_State *L)
+	{
+		const auto *view = static_cast<LuaGmcpView *>(luaL_checkudata(L, 1, "QMud.GMCP.view"));
+		lua_newtable(L);
+		if (view->live)
+		{
+			const auto state = view->frozen ? view->frozen : luaGmcpSnapshot(view->engine);
+			if (state)
+			{
+				const auto appendChildren = [&](const QStringList &children)
+				{
+					for (const auto &child : children)
+					{
+						const auto direct = state->messages.value(child);
+						const auto label  = direct ? direct->name.section(QLatin1Char('.'), -1)
+						                           : state->packages.branches.value(child)->label;
+						const auto utf8   = label.toUtf8();
+						lua_pushlstring(L, utf8.constData(), utf8.size());
+						if (direct)
+							pushGmcpValue(L, direct->state);
+						else
+							pushGmcpNamespace(L, view->engine, child, state);
+						lua_rawset(L, -3);
+					}
+				};
+				if (view->path.isEmpty())
+					appendChildren(state->packages.roots);
+				else if (const auto branch = state->packages.branches.value(view->path.toLower()))
+					appendChildren(branch->children);
+			}
+		}
+		else if (view->value.isArray())
+		{
+			const auto array = view->value.toArray();
+			for (qsizetype i = 0; i < array.size(); ++i)
+			{
+				pushGmcpValue(L, array.at(i));
+				lua_rawseti(L, -2, i + 1);
+			}
+		}
+		else
+		{
+			const auto object = view->value.toObject();
+			for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+			{
+				const auto key = it.key().toUtf8();
+				lua_pushlstring(L, key.constData(), key.size());
+				pushGmcpValue(L, it.value());
+				lua_rawset(L, -3);
+			}
+		}
+		lua_pushcclosure(L, luaGmcpNext, 1);
+		lua_pushnil(L);
+		lua_pushnil(L);
+		return 3;
+	}
+	/**
+	 * @brief Identifies the engine's JSON null sentinel without invoking Lua metamethods.
+	 * @param L Lua state.
+	 * @param index Stack index to inspect.
+	 * @return Whether the value is the native JSON null sentinel.
+	 */
+	bool luaGmcpIsNull(lua_State *L, int index)
+	{
+		if (lua_type(L, index) != LUA_TUSERDATA)
+			return false;
+		index = lua_absindex(L, index);
+		lua_getfield(L, LUA_REGISTRYINDEX, "QMud.GMCP.null");
+		const bool result = lua_rawequal(L, index, -1);
+		lua_pop(L, 1);
+		return result;
+	}
+	/**
+	 * @brief Validates lookup arguments before acquiring any C++ snapshot or JSON ownership.
+	 * @param L Lua state containing source, optional path, and optional default.
+	 */
+	void validateLuaGmcpLookup(lua_State *L)
+	{
+		luaL_checkany(L, 1);
+		if (lua_isstring(L, 1))
+			static_cast<void>(luaL_checklstring(L, 1, nullptr));
+		else if (!lua_isnil(L, 1) && !lua_isboolean(L, 1) && !luaGmcpIsNull(L, 1))
+		{
+			const auto *view = static_cast<LuaGmcpView *>(luaL_testudata(L, 1, "QMud.GMCP.view"));
+			if (!view || view->live)
+				luaL_argerror(L, 1, "message name or native GMCP payload expected");
+		}
+		if (lua_isnoneornil(L, 2) || lua_type(L, 2) == LUA_TSTRING)
+			return;
+		luaL_checktype(L, 2, LUA_TTABLE);
+		const auto length = lua_rawlen(L, 2);
+		size_t     count  = 0;
+		lua_pushnil(L);
+		while (lua_next(L, 2))
+		{
+			if (!lua_isinteger(L, -2) || lua_tointeger(L, -2) < 1 ||
+			    static_cast<lua_Unsigned>(lua_tointeger(L, -2)) > length)
+				luaL_argerror(L, 2, "path must be a dense list of string keys or positive integer indexes");
+			if (lua_type(L, -1) != LUA_TSTRING && (!lua_isinteger(L, -1) || lua_tointeger(L, -1) < 1))
+				luaL_argerror(L, 2, "path components must be string keys or positive integer indexes");
+			++count;
+			lua_pop(L, 1);
+		}
+		if (count != length)
+			luaL_argerror(L, 2, "path must not contain holes");
+	}
+	/**
+	 * @brief Resolves a string component against one existing JSON object or array.
+	 * @param value Parent value.
+	 * @param component Exact object key or one-based decimal array index.
+	 * @return Child value, or undefined when the path does not exist.
+	 */
+	QJsonValue luaGmcpChild(const QJsonValue &value, const QString &component)
+	{
+		if (value.isObject())
+			return value.toObject().value(component);
+		if (value.isArray())
+		{
+			if (component.isEmpty() ||
+			    !std::ranges::all_of(component,
+			                         [](QChar c) { return c >= QLatin1Char('0') && c <= QLatin1Char('9'); }))
+				return QJsonValue::Undefined;
+			bool       valid = false;
+			const auto index = component.toLongLong(&valid);
+			const auto array = value.toArray();
+			if (valid && index > 0 && index <= array.size())
+				return array.at(index - 1);
+		}
+		return QJsonValue::Undefined;
+	}
+	/**
+	 * @brief Reads one immutable root and traverses only the validated requested path.
+	 * @param L Lua state containing validated lookup arguments.
+	 * @param allowCombinedPath Whether an absent exact message may resolve a combined message and field path.
+	 * @return Selected value, preserving explicit JSON null and distinguishing missing fields.
+	 */
+	QJsonValue resolveLuaGmcpLookup(lua_State *L, bool allowCombinedPath = false)
+	{
+		QJsonValue result(QJsonValue::Undefined);
+		if (lua_type(L, 1) == LUA_TSTRING)
+		{
+			const auto snapshot = luaGmcpSnapshot(luaGmcpEngine(L));
+			const auto source   = luaGmcpString(L, 1);
+			if (const auto message = snapshot ? snapshot->messages.value(source.toLower()) : nullptr; message)
+				result = message->state;
+			else if (allowCombinedPath && snapshot)
+			{
+				for (auto boundary = source.lastIndexOf(QLatin1Char('.')); boundary > 0;
+				     boundary      = source.lastIndexOf(QLatin1Char('.'), boundary - 1))
+				{
+					const auto parent = snapshot->messages.value(source.first(boundary).toLower());
+					if (!parent)
+						continue;
+					result = parent->state;
+					for (const auto &component : source.sliced(boundary + 1).split(QLatin1Char('.')))
+					{
+						result = luaGmcpChild(result, component);
+						if (result.isUndefined())
+							break;
+					}
+					break;
+				}
+			}
+		}
+		else if (const auto *view = static_cast<LuaGmcpView *>(luaL_testudata(L, 1, "QMud.GMCP.view")))
+			result = view->value;
+		else if (luaGmcpIsNull(L, 1))
+			result = QJsonValue::Null;
+		else if (lua_isboolean(L, 1))
+			result = static_cast<bool>(lua_toboolean(L, 1));
+		if (lua_type(L, 2) == LUA_TSTRING)
+		{
+			const auto path = luaGmcpString(L, 2);
+			if (!path.isEmpty())
+				for (const auto &component : path.split(QLatin1Char('.')))
+				{
+					result = luaGmcpChild(result, component);
+					if (result.isUndefined())
+						break;
+				}
+		}
+		else if (lua_istable(L, 2))
+		{
+			const auto length = lua_rawlen(L, 2);
+			for (size_t i = 1; i <= length; ++i)
+			{
+				lua_rawgeti(L, 2, static_cast<lua_Integer>(i));
+				if (lua_type(L, -1) == LUA_TSTRING)
+					result = luaGmcpChild(result, luaGmcpString(L, -1));
+				else
+				{
+					const auto index = lua_tointeger(L, -1);
+					const auto array = result.toArray();
+					result = result.isArray() && index <= array.size() ? array.at(index - 1)
+					                                                   : QJsonValue(QJsonValue::Undefined);
+				}
+				lua_pop(L, 1);
+				if (result.isUndefined())
+					break;
+			}
+		}
+		return result;
+	}
+	/**
+	 * @brief Queries an exact message or retained payload, optionally selecting a nested value.
+	 * @param L Lua state containing source, optional path, and optional default.
+	 * @return Selected immutable value, or the supplied default when absent.
+	 */
+	int luaGmcpGet(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		validateLuaGmcpLookup(L);
+		const auto value = resolveLuaGmcpLookup(L);
+		if (value.isUndefined())
+		{
+			if (lua_gettop(L) >= 3)
+				lua_pushvalue(L, 3);
+			else
+				lua_pushnil(L);
+		}
+		else
+			pushGmcpValue(L, value);
+		return 1;
+	}
+	/**
+	 * @brief Appends a quoted Lua string literal while preserving UTF-8 and embedded control bytes.
+	 * @param output Destination Lua source.
+	 * @param value String to quote.
+	 */
+	void appendLuaGmcpString(QByteArray &output, const QString &value)
+	{
+		output += '"';
+		for (const auto byte : value.toUtf8())
+		{
+			const auto c = static_cast<unsigned char>(byte);
+			if (c == '"' || c == '\\')
+			{
+				output += '\\';
+				output += byte;
+			}
+			else if (c < 32 || c == 127)
+			{
+				output += '\\';
+				output += static_cast<char>('0' + c / 100);
+				output += static_cast<char>('0' + (c / 10) % 10);
+				output += static_cast<char>('0' + c % 10);
+			}
+			else
+				output += byte;
+		}
+		output += '"';
+	}
+	/**
+	 * @brief Serializes JSON values as Lua expressions, retaining object keys and array indexes.
+	 * @param output Destination Lua source.
+	 * @param value Value to serialize.
+	 */
+	void appendLuaGmcpValue(QByteArray &output, const QJsonValue &value)
+	{
+		if (value.isObject())
+		{
+			output += '{';
+			const auto object = value.toObject();
+			for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+			{
+				if (it != object.constBegin())
+					output += ',';
+				output += '[';
+				appendLuaGmcpString(output, it.key());
+				output += "]=";
+				appendLuaGmcpValue(output, it.value());
+			}
+			output += '}';
+		}
+		else if (value.isArray())
+		{
+			output += '{';
+			const auto array = value.toArray();
+			for (qsizetype i = 0; i < array.size(); ++i)
+			{
+				if (i != 0)
+					output += ',';
+				appendLuaGmcpValue(output, array.at(i));
+			}
+			output += '}';
+		}
+		else if (value.isString())
+			appendLuaGmcpString(output, value.toString());
+		else if (value.isBool())
+			output += value.toBool() ? "true" : "false";
+		else if (value.isDouble())
+		{
+			const auto wrapped = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
+			output += QByteArrayView(wrapped).sliced(1, wrapped.size() - 2);
+		}
+		else
+			output += "gmcpNull";
+	}
+	/**
+	 * @brief Returns a selected value as text or a serialized Lua table literal.
+	 * @param L Lua state containing source, optional path, and optional string default.
+	 * @return String representation, or the default for absent or null values.
+	 */
+	int luaGmcpGetString(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		const bool allowCombinedPath = lua_type(L, 1) == LUA_TSTRING && lua_isnoneornil(L, 2);
+		validateLuaGmcpLookup(L);
+		static_cast<void>(luaL_optlstring(L, 3, "", nullptr));
+		const auto value = resolveLuaGmcpLookup(L, allowCombinedPath);
+		if (value.isUndefined() || value.isNull())
+		{
+			if (lua_isnoneornil(L, 3))
+				lua_pushliteral(L, "");
+			else
+				lua_pushvalue(L, 3);
+		}
+		else
+		{
+			QByteArray text;
+			if (value.isString())
+				text = value.toString().toUtf8();
+			else
+				appendLuaGmcpValue(text, value);
+			lua_pushlstring(L, text.constData(), text.size());
+		}
+		return 1;
+	}
+	/**
+	 * @brief Copies JSON containers into ordinary Lua tables without altering immutable native data.
+	 * @param L Lua state receiving the copy.
+	 * @param value JSON value to copy.
+	 * @return Whether Lua stack capacity was sufficient for the complete copy.
+	 */
+	bool pushLuaGmcpTable(lua_State *L, const QJsonValue &value)
+	{
+		if (!lua_checkstack(L, 4))
+			return false;
+		if (value.isObject())
+		{
+			const auto object = value.toObject();
+			lua_createtable(L, 0, static_cast<int>(object.size()));
+			for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+			{
+				const auto key = it.key().toUtf8();
+				lua_pushlstring(L, key.constData(), key.size());
+				if (!pushLuaGmcpTable(L, it.value()))
+					return false;
+				lua_rawset(L, -3);
+			}
+		}
+		else if (value.isArray())
+		{
+			const auto array = value.toArray();
+			lua_createtable(L, static_cast<int>(array.size()), 0);
+			for (qsizetype i = 0; i < array.size(); ++i)
+			{
+				if (!pushLuaGmcpTable(L, array.at(i)))
+					return false;
+				lua_rawseti(L, -2, i + 1);
+			}
+		}
+		else
+			pushGmcpValue(L, value);
+		return true;
+	}
+	/**
+	 * @brief Copies a native payload into Lua tables, optionally wrapping a top-level scalar in an array.
+	 * @param L Lua state containing a value and optional scalar-wrapping flag.
+	 * @return Independent Lua representation with JSON null sentinels preserved.
+	 */
+	int luaGmcpToTable(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		luaL_checkany(L, 1);
+		if (!lua_isnoneornil(L, 2))
+			luaL_checktype(L, 2, LUA_TBOOLEAN);
+		const auto *view = static_cast<LuaGmcpView *>(luaL_testudata(L, 1, "QMud.GMCP.view"));
+		if (view && !view->live)
+		{
+			if (!pushLuaGmcpTable(L, view->value))
+				return luaL_error(L, "GMCP value exceeds Lua stack capacity");
+			return 1;
+		}
+		const int kind = lua_type(L, 1);
+		if (kind != LUA_TNIL && kind != LUA_TSTRING && kind != LUA_TNUMBER && kind != LUA_TBOOLEAN &&
+		    !luaGmcpIsNull(L, 1))
+			return luaL_argerror(L, 1, "native GMCP payload or scalar expected");
+		if (lua_toboolean(L, 2) && !lua_isnil(L, 1))
+		{
+			lua_createtable(L, 1, 0);
+			lua_pushvalue(L, 1);
+			lua_rawseti(L, -2, 1);
+		}
+		else
+			lua_pushvalue(L, 1);
+		return 1;
+	}
+	/**
+	 * @brief Distinguishes native JSON containers, null, and namespaces while retaining ordinary Lua types.
+	 * @param L Lua state containing the inspected value.
+	 * @return Native JSON type name, namespace, or the ordinary Lua type name.
+	 */
+	int luaGmcpType(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		luaL_checkany(L, 1);
+		if (const auto *view = static_cast<LuaGmcpView *>(luaL_testudata(L, 1, "QMud.GMCP.view")))
+			lua_pushstring(L, view->live ? "namespace" : view->value.isArray() ? "array" : "object");
+		else if (luaGmcpIsNull(L, 1))
+			lua_pushliteral(L, "null");
+		else
+			lua_pushstring(L, lua_typename(L, lua_type(L, 1)));
+		return 1;
+	}
+	/**
+	 * @brief Queries one exact raw message.
+	 * @param L Lua state.
+	 * @return Raw bytes or nil.
+	 */
+	int luaGmcpGetRaw(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		const auto name  = luaGmcpString(L, 1).toLower();
+		const auto state = luaGmcpSnapshot(luaGmcpEngine(L));
+		if (const auto message = state ? state->messages.value(name) : nullptr)
+			lua_pushlstring(L, message->raw.constData(), message->raw.size());
+		else
+			lua_pushnil(L);
+		return 1;
+	}
+	/**
+	 * @brief Lists current message names.
+	 * @param L Lua state.
+	 * @return Array of names.
+	 */
+	int luaGmcpGetMessages(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		lua_newtable(L);
+		const auto state = luaGmcpSnapshot(luaGmcpEngine(L));
+		int        index = 0;
+		if (state)
+			state->messages.forEach(
+			    [&](const QString &, const auto &message)
+			    {
+				    const auto name = message->name.toUtf8();
+				    lua_pushlstring(L, name.constData(), name.size());
+				    lua_rawseti(L, -2, ++index);
+			    });
+		return 1;
+	}
+	/**
+	 * @brief Reports native GMCP negotiation, returning false when native handling is unavailable.
+	 * @param L Lua state.
+	 * @return One Lua boolean result.
+	 */
+	int luaGmcpIsEnabled(lua_State *L)
+	{
+		const auto state = luaGmcpSnapshot(luaGmcpEngine(L));
+		lua_pushboolean(L, state && state->nativeAvailable() && state->negotiated);
+		return 1;
+	}
+	/**
+	 * @brief Journals one native send.
+	 * @param L Lua state.
+	 * @return Existing QMud status code.
+	 */
+	int luaGmcpSend(lua_State *L)
+	{
+		requireGmcpAvailable(L);
+		auto       *engine = luaGmcpEngine(L);
+		size_t      length = 0, size = 0;
+		const char *data    = luaL_checklstring(L, 1, &length);
+		const bool  hasBody = !lua_isnoneornil(L, 2);
+		const char *body    = hasBody ? luaL_checklstring(L, 2, &size) : nullptr;
+		const auto  state   = luaGmcpSnapshot(engine);
+		QByteArray  raw(data, static_cast<qsizetype>(length));
+		if (hasBody)
+		{
+			raw += ' ';
+			raw += QByteArray(body, static_cast<qsizetype>(size));
+		}
+		QMudGmcp::Message message;
+		QString           error;
+		if (!QMudGmcp::decode(raw, message, error))
+		{
+			lua_pushinteger(L, eBadParameter);
+			return 1;
+		}
+		if (!state || !state->negotiated || state->closed || state->restoring)
+		{
+			lua_pushinteger(L, eWorldClosed);
+			return 1;
+		}
+		auto *runtime = engine->worldRuntimeForBridgedCall();
+		enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
+		                                             [raw, generation = state->session](WorldRuntime &target)
+		                                             { target.sendGmcp(raw, generation); });
+		incrementCallbackOutboundPacketSnapshot(engine, runtime, raw.size() + 5, 0);
+		lua_pushinteger(L, eOK);
+		return 1;
+	}
+	/**
+	 * @brief Journals a module registration change while rejecting the native-owned merge capability.
+	 * @param L Lua state.
+	 * @param remove Whether to unregister.
+	 * @return Existing QMud status code.
+	 */
+	int luaGmcpModule(lua_State *L, bool remove)
+	{
+		requireGmcpAvailable(L);
+		auto             *engine  = luaGmcpEngine(L);
+		size_t            length  = 0;
+		const char       *data    = luaL_checklstring(L, 1, &length);
+		const lua_Integer version = remove ? 0 : luaL_optinteger(L, 2, 1);
+		const auto        name    = QString::fromUtf8(data, static_cast<qsizetype>(length));
+		QMudGmcp::Message message;
+		QString           error;
+		if (QMudGmcp::isMergeCapability(name) ||
+		    (!QMudGmcp::decode(name.toUtf8(), message, error) || message.name != name) ||
+		    (!remove && (version <= 0 || version > std::numeric_limits<int>::max())))
+		{
+			lua_pushinteger(L, eBadParameter);
+			return 1;
+		}
+		const QString owner    = engine->pluginId();
+		const quint64 instance = engine->instanceId();
+		auto         *runtime  = engine->worldRuntimeForBridgedCall();
+		if (!runtime)
+		{
+			lua_pushinteger(L, eWorldClosed);
+			return 1;
+		}
+		if (runtime != engine->callbackDispatchRuntime())
+		{
+			lua_pushinteger(L, eBadParameter);
+			return 1;
+		}
+		enqueueRuntimeThreadDeferredMutationNoResult(
+		    engine, runtime, [owner, name, version, instance](WorldRuntime &target)
+		    { target.registerGmcpModule(owner, name, static_cast<int>(version), instance); });
+		engine->noteGmcpModuleRegistration(name, !remove);
+		lua_pushinteger(L, eOK);
+		return 1;
+	}
+	/**
+	 * @brief Registers a module.
+	 * @param L Lua state.
+	 * @return Status code.
+	 */
+	int luaGmcpRegisterModule(lua_State *L)
+	{
+		return luaGmcpModule(L, false);
+	}
+	/**
+	 * @brief Unregisters a module.
+	 * @param L Lua state.
+	 * @return Status code.
+	 */
+	int luaGmcpUnregisterModule(lua_State *L)
+	{
+		return luaGmcpModule(L, true);
+	}
+	/**
+	 * @brief Installs native read-only value types.
+	 * @param L Lua state.
+	 * @param engine Owning Lua engine.
+	 */
+	void registerGmcpTypes(lua_State *L, LuaCallbackEngine *engine)
+	{
+		if (luaL_newmetatable(L, "QMud.GMCP.view"))
+		{
+			lua_pushcfunction(L, luaGmcpGc);
+			lua_setfield(L, -2, "__gc");
+			lua_pushcfunction(L, luaGmcpIndex);
+			lua_setfield(L, -2, "__index");
+			lua_pushcfunction(L, luaGmcpReadOnly);
+			lua_setfield(L, -2, "__newindex");
+			lua_pushcfunction(L, luaGmcpPairs);
+			lua_setfield(L, -2, "__pairs");
+			lua_pushcfunction(L, luaGmcpLength);
+			lua_setfield(L, -2, "__len");
+			lua_pushliteral(L, "GMCP read-only value");
+			lua_setfield(L, -2, "__metatable");
+		}
+		lua_pop(L, 1);
+		lua_getfield(L, LUA_REGISTRYINDEX, "QMud.GMCP.null");
+		if (lua_isnil(L, -1))
+		{
+			lua_pop(L, 1);
+			lua_newuserdata(L, 1);
+			lua_newtable(L);
+			lua_pushliteral(L, "GMCP null");
+			lua_setfield(L, -2, "__metatable");
+			lua_setmetatable(L, -2);
+			lua_pushvalue(L, -1);
+			lua_setfield(L, LUA_REGISTRYINDEX, "QMud.GMCP.null");
+		}
+		lua_pop(L, 1);
+		lua_getfield(L, LUA_REGISTRYINDEX, "QMud.GMCP.namespace");
+		if (lua_isnil(L, -1))
+		{
+			lua_pop(L, 1);
+			pushGmcpNamespace(L, engine, {});
+			lua_setfield(L, LUA_REGISTRYINDEX, "QMud.GMCP.namespace");
+		}
+		else
+			lua_pop(L, 1);
+	}
+	/**
+	 * @brief Installs or releases one native global while preserving script-owned values.
+	 * @param L Lua state.
+	 * @param name Global name.
+	 * @param nativeKey Registry identity of the native value.
+	 * @param previousKey Registry slot retaining its displaced value.
+	 * @param available Whether native handling is available.
+	 */
+	void synchronizeGmcpGlobal(lua_State *L, const char *name, const char *nativeKey, const char *previousKey,
+	                           bool available)
+	{
+		lua_pushglobaltable(L);
+		const int globals = lua_gettop(L);
+		lua_pushstring(L, name);
+		lua_rawget(L, globals);
+		lua_getfield(L, LUA_REGISTRYINDEX, nativeKey);
+		if (available)
+		{
+			lua_pushvalue(L, -2);
+			lua_setfield(L, LUA_REGISTRYINDEX, previousKey);
+			lua_pushstring(L, name);
+			lua_pushvalue(L, -2);
+			lua_rawset(L, globals);
+		}
+		else
+		{
+			if (lua_rawequal(L, -1, -2))
+			{
+				lua_pushstring(L, name);
+				lua_getfield(L, LUA_REGISTRYINDEX, previousKey);
+				lua_rawset(L, globals);
+			}
+			lua_pushnil(L);
+			lua_setfield(L, LUA_REGISTRYINDEX, previousKey);
+		}
+		lua_pop(L, 3);
+	}
+} // namespace
+
+void LuaCallbackEngine::synchronizeGmcpGlobals()
+{
+	if (!m_state)
+		return;
+	const auto *context = activeCallbackContextConst(this);
+	while (context && !context->runtimeOverrideFrames.isEmpty())
+		context = context->runtimeOverrideFrames.constLast().previousContext.get();
+	// Reading binding availability must not consume the script-load mutation snapshot that the
+	// callback entry still needs. Cross-world proxy calls retain the owning world's globals.
+	const auto *snapshot  = context && context->callbackSnapshotBase ? context->callbackSnapshotBase.data()
+	                        : m_scriptLoadMutationSnapshotPending && m_completedCallbackMutationSnapshot
+	                            ? m_completedCallbackMutationSnapshot.data()
+	                        : !m_dispatchSnapshotStack.isEmpty() ? m_dispatchSnapshotStack.constLast().data()
+	                                                             : nullptr;
+	const bool  available = luaGmcpAvailable(this, snapshot);
+	if (available == m_gmcpGlobalsAvailable)
+		return;
+	synchronizeGmcpGlobal(m_state, "gmcp", "QMud.GMCP.namespace", "QMud.GMCP.previousNamespace", available);
+	synchronizeGmcpGlobal(m_state, "gmcpNull", "QMud.GMCP.null", "QMud.GMCP.previousNull", available);
+	m_gmcpGlobalsAvailable = available;
+}
+
+bool LuaCallbackEngine::callGmcpMessage(const QString                                  &functionName,
+                                        const std::shared_ptr<const QMudGmcp::Message> &message, bool enabled,
+                                        bool *suspended, quint64 *resumeId,
+                                        LuaPendingModalStringRequest *modal)
+{
+	if (suspended)
+		*suspended = false;
+	if (resumeId)
+		*resumeId = 0;
+	if (modal)
+		*modal = {};
+	if (!ensureState() || !pushLuaFunctionByName(m_state, functionName))
+		return true;
+	LuaCallbackExecutionContext context;
+	pushActiveCallbackContext(this, std::move(context));
+	if (const auto *snapshot = currentDispatchSnapshot())
+		seedCallbackSnapshot(this, snapshot);
+	if (message)
+	{
+		pushLuaUtf8String(m_state, message->name);
+		pushGmcpValue(m_state, message->payload);
+		pushGmcpValue(m_state, message->state);
+		lua_pushlstring(m_state, message->raw.constData(), message->raw.size());
+	}
+	else
+		lua_pushboolean(m_state, enabled);
+	return callPreparedYieldableCallback(functionName, message ? 4 : 1, 0, true, suspended, resumeId, modal,
+	                                     LuaPreparedCallbackResultMode::NoResult);
+}
+#else
+void LuaCallbackEngine::synchronizeGmcpGlobals()
+{
+}
+
+bool LuaCallbackEngine::callGmcpMessage(const QString                                  &functionName,
+                                        const std::shared_ptr<const QMudGmcp::Message> &message, bool enabled,
+                                        bool *suspended, quint64 *resumeId,
+                                        LuaPendingModalStringRequest *modal)
+{
+	Q_UNUSED(functionName);
+	Q_UNUSED(message);
+	Q_UNUSED(enabled);
+	if (suspended)
+		*suspended = false;
+	if (resumeId)
+		*resumeId = 0;
+	if (modal)
+		*modal = {};
+	return true;
+}
+#endif
+
 void LuaCallbackEngine::registerWorldBindings()
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -51113,6 +52064,7 @@ void LuaCallbackEngine::registerWorldBindings()
 		return;
 
 	registerErrorDescriptions(m_state);
+	registerGmcpTypes(m_state, this);
 	registerColourNames(m_state);
 	registerExtendedColours(m_state);
 	registerFlagTables(m_state);
@@ -51141,6 +52093,17 @@ void LuaCallbackEngine::registerWorldBindings()
 		registered.insert(QString::fromLatin1(name));
 	};
 	static const LuaBindingEntry kWorldBindings[] = {
+	    {"gmcpSend",                  luaGmcpSend                 },
+	    {"gmcpGet",                   luaGmcpGet                  },
+	    {"gmcpGetString",             luaGmcpGetString            },
+	    {"gmcpToTable",               luaGmcpToTable              },
+	    {"gmcpType",                  luaGmcpType                 },
+	    {"gmcpGetRaw",                luaGmcpGetRaw               },
+	    {"gmcpGetMessages",           luaGmcpGetMessages          },
+	    {"gmcpIsEnabled",             luaGmcpIsEnabled            },
+	    {"gmcpRegisterModule",        luaGmcpRegisterModule       },
+	    {"gmcpUnregisterModule",      luaGmcpUnregisterModule     },
+
 	    {"Accelerator",               luaAccelerator              },
 	    {"AcceleratorList",           luaAcceleratorList          },
 	    {"AcceleratorTo",             luaAcceleratorTo            },
@@ -52789,4 +53752,39 @@ bool LuaCallbackEngine::executeScript(
 	Q_UNUSED(pendingModalStringRequest);
 	return false;
 #endif
+}
+
+void LuaCallbackEngine::setGmcpPublication(const std::shared_ptr<QMudGmcp::Publication> &publication)
+{
+	bindOrAssertExecutionThread("LuaCallbackEngine::setGmcpPublication");
+	m_gmcpPublication = publication;
+}
+std::shared_ptr<QMudGmcp::Publication> LuaCallbackEngine::gmcpPublication() const
+{
+	bindOrAssertExecutionThread("LuaCallbackEngine::gmcpPublication");
+	return m_gmcpPublication;
+}
+
+void LuaCallbackEngine::releaseGmcpModuleRegistrations()
+{
+	if (m_gmcpRegisteredModules.isEmpty())
+		return;
+	m_gmcpRegisteredModules.clear();
+	if (!m_worldRuntime)
+		return;
+	const QPointer<WorldRuntime> runtime = m_worldRuntime;
+	appendDeferredRuntimeMutationBatch(runtime, {[runtime, instance = m_instanceId]
+	                                             {
+		                                             if (runtime)
+			                                             runtime->releaseGmcpModules(instance);
+	                                             }});
+}
+
+void LuaCallbackEngine::noteGmcpModuleRegistration(const QString &module, bool registered)
+{
+	bindOrAssertExecutionThread("LuaCallbackEngine::noteGmcpModuleRegistration");
+	if (registered)
+		m_gmcpRegisteredModules.insert(module.toLower());
+	else
+		m_gmcpRegisteredModules.remove(module.toLower());
 }

@@ -97,6 +97,6 @@ namespace
 	};
 } // namespace
 
-QTEST_MAIN(tst_MspProtocol)
+QTEST_GUILESS_MAIN(tst_MspProtocol)
 
 #include "tst_MspProtocol.moc"

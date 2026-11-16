@@ -12,6 +12,7 @@
 #include "SpeedwalkParser.h"
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
+#include "dialogs/WorldPreferencesDialog.h"
 
 #include <QComboBox>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -19,7 +20,6 @@
 #include <QFile>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QVBoxLayout>
 #include <memory>
@@ -183,8 +183,7 @@ QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 	QString         strResult;
 	QString         str;
 	QString         strAction;
-	int             count = 0;
-	const auto     *app   = AppController::instance();
+	const auto     *app = AppController::instance();
 	qsizetype       offset{0};
 	const qsizetype size = speedWalkString.size();
 
@@ -230,7 +229,7 @@ QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 		} // end of comment
 
 		// get counter, if any
-		count = 0;
+		int count = 0;
 		while (offset < size && isAsciiDigit(speedWalkString.at(offset)))
 		{
 			count = count * 10 + speedWalkString.at(offset).unicode() - '0';
@@ -375,14 +374,18 @@ int WorldEditUtils::findInvalidChar(const QString &text, const QList<ushort> &in
 	return -1;
 }
 
-bool WorldEditUtils::checkRegularExpression(QWidget *parent, const QString &pattern,
-                                            const QRegularExpression::PatternOptions options)
+/**
+ * @brief Presents a regular-expression diagnostic without blocking other windows.
+ * @param parent Editor owning the diagnostic.
+ * @param pattern Invalid pattern copied into the suspended operation.
+ * @param options Pattern compilation options.
+ * @return Diagnostic completion.
+ */
+static QMudPreferences::Operation<void>
+showRegularExpressionProblem(QWidget *parent, QString pattern, QRegularExpression::PatternOptions options)
 {
 	const QRegularExpression regex(pattern, options);
-	if (regex.isValid())
-		return true;
-
-	QDialog dlg(parent);
+	QDialog                  dlg(parent);
 	dlg.setWindowTitle(QStringLiteral("Regular expression problem"));
 
 	auto  layout    = std::make_unique<QVBoxLayout>();
@@ -408,7 +411,15 @@ bool WorldEditUtils::checkRegularExpression(QWidget *parent, const QString &patt
 	QObject::connect(buttons.get(), &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
 	layoutPtr->addWidget(buttons.release());
 
-	(void)dlg.exec();
+	co_await QMudPreferences::wait(dlg);
+}
+
+bool WorldEditUtils::checkRegularExpression(QWidget *parent, const QString &pattern,
+                                            const QRegularExpression::PatternOptions options)
+{
+	if (QRegularExpression(pattern, options).isValid())
+		return true;
+	showRegularExpressionProblem(parent, pattern, options);
 	return false;
 }
 
@@ -419,7 +430,7 @@ bool WorldEditUtils::showMultipleAsterisksWarning(QWidget *parent)
 	if (file.open(QIODevice::ReadOnly | QIODevice::Text))
 		message = QString::fromUtf8(file.readAll()).trimmed();
 
-	QMessageBox::information(parent, QStringLiteral("Warning"), message);
+	QMudPreferences::information(parent, QStringLiteral("Warning"), message);
 	return true;
 }
 

@@ -13,6 +13,8 @@
 #include "WorldOptions.h"
 #include "WorldPreferencesRoutingUtils.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
+#include "dialogs/GmcpBrowserDialog.h"
 #include "dialogs/WorldPreferencesDialog.h"
 #include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
@@ -30,6 +32,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
 #include <QFontMetrics>
@@ -42,6 +45,9 @@
 #include <QLineEdit>
 #include <QMargins>
 #include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSettings>
@@ -56,6 +62,7 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QtTest/QTest>
+#include <algorithm>
 
 /**
  * @brief Narrow test access to new-world runtime initialization.
@@ -72,10 +79,62 @@ class AppControllerTestAccess final
 		{
 			controller.initializeWorldRuntime(runtime);
 		}
+		/**
+		 * @brief Uses the project build directory for the controller's path context.
+		 * @param controller Controller under test.
+		 * @param buildDirectory Project build directory.
+		 */
+		static void setHome(AppController &controller, const QString &buildDirectory)
+		{
+			controller.m_workingDir = QDir::cleanPath(buildDirectory) + QLatin1Char('/');
+		}
 };
 
 namespace
 {
+	/**
+	 * @brief Finds the visible child dialog while Preferences interactions remain modeless.
+	 * @return Deepest visible dialog, or the active modal dialog for unchanged external flows.
+	 */
+	QWidget *activePreferencesChild()
+	{
+		if (auto *modal = QApplication::activeModalWidget())
+			return modal;
+		QWidget *result = nullptr;
+		int      depth  = -1;
+		for (QWidget *window : QApplication::topLevelWidgets())
+		{
+			if (!qobject_cast<QDialog *>(window) || !window->isVisible() ||
+			    qobject_cast<WorldPreferencesDialog *>(window))
+				continue;
+			int candidateDepth = 0;
+			for (QWidget *owner = window->parentWidget(); owner; owner = owner->parentWidget())
+				++candidateDepth;
+			if (candidateDepth > depth)
+			{
+				result = window;
+				depth  = candidateDepth;
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * @brief Waits until child completion has restored its Preferences editing controls.
+	 * @param control Control identifying the owning Preferences editor.
+	 */
+	void waitForPreferencesOperation(QWidget *control)
+	{
+		auto *owner = control;
+		while (owner && !qobject_cast<WorldPreferencesDialog *>(owner))
+			owner = owner->parentWidget();
+		QVERIFY(owner);
+		auto *pages = owner->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+		QVERIFY(pages);
+		QTRY_VERIFY(pages->isEnabled() ||
+		            qobject_cast<WorldPreferencesDialog *>(owner)->result() == QDialog::Accepted);
+	}
+
 	/**
 	 * @brief Counts top-level resize events emitted during one application-font update.
 	 */
@@ -508,6 +567,344 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			/**
+			 * @brief Covers picker cancellation and owning-editor invalidation.
+			 */
+			void defaultOverrideSavePickerCancellation_data()
+			{
+				QTest::addColumn<bool>("cancelOwner");
+				QTest::newRow("cancel-picker") << false;
+				QTest::newRow("cancel-owner") << true;
+			}
+			/**
+			 * @brief Keeps Save World modeless and cancels before callbacks or persistence begin.
+			 */
+			void defaultOverrideSavePickerCancellation()
+			{
+				QFETCH(bool, cancelOwner);
+				const QString buildDirectory =
+				    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral(".."));
+				AppController controller;
+				AppControllerTestAccess::setHome(controller, buildDirectory);
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(buildDirectory);
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Synthetic override save"));
+				WorldPreferencesDialog owner(&runtime, nullptr);
+				owner.show();
+				QString error;
+				auto    operation = controller.saveWorldBeforeDefaultOverride(&runtime, &owner, &error);
+				const QPointer<QFileDialog> picker(owner.findChild<QFileDialog *>());
+				QVERIFY(picker && picker->isVisible());
+				QVERIFY(!picker->isModal() && !QApplication::activeModalWidget());
+				QCOMPARE(picker->acceptMode(), QFileDialog::AcceptSave);
+				QVERIFY(
+				    picker->selectedFiles().first().endsWith(QStringLiteral("Synthetic override save.qdl")));
+				if (cancelOwner)
+				{
+					owner.invalidate();
+					QVERIFY(operation.await_ready());
+					QVERIFY_THROWS_EXCEPTION(QMudPreferences::Canceled, operation.await_resume());
+				}
+				else
+				{
+					picker->reject();
+					QTRY_VERIFY(operation.await_ready());
+					QVERIFY(!operation.await_resume());
+				}
+				QVERIFY(!picker);
+				QVERIFY(error.isEmpty());
+				QVERIFY(runtime.worldFilePath().isEmpty());
+				QVERIFY(runtime.worldFileModified());
+			}
+
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			/**
+			 * @brief Covers normal callback completion and cancellation while callback delivery is queued.
+			 */
+			void defaultOverrideSaveCallbackCompletion_data()
+			{
+				QTest::addColumn<bool>("cancelOwner");
+				QTest::newRow("complete-save") << false;
+				QTest::newRow("cancel-pending-save") << true;
+			}
+			/**
+			 * @brief Runs save callbacks once before capture and prevents a canceled request from writing later.
+			 */
+			void defaultOverrideSaveCallbackCompletion()
+			{
+				QFETCH(bool, cancelOwner);
+				const QString buildDirectory =
+				    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral(".."));
+				QTemporaryDir directory(QCoreApplication::applicationDirPath() +
+				                        QStringLiteral("/override-save-XXXXXX"));
+				QVERIFY(directory.isValid());
+				const QString filePath = directory.filePath(QStringLiteral("world.qdl"));
+				AppController controller;
+				AppControllerTestAccess::setHome(controller, buildDirectory);
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(buildDirectory);
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldFilePath(QDir(buildDirectory).relativeFilePath(filePath));
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
+function before_override_save()
+  SetVariable("override_save_count", tostring(tonumber(GetVariable("override_save_count") or "0") + 1))
+end
+)lua"));
+				runtime.setWorldAttribute(QStringLiteral("on_world_save"),
+				                          QStringLiteral("before_override_save"));
+				auto *owner = new WorldPreferencesDialog(&runtime, nullptr);
+				owner->setAttribute(Qt::WA_DeleteOnClose);
+				const QPointer<WorldPreferencesDialog> ownerGuard(owner);
+				owner->show();
+				QString error;
+				auto    operation = controller.saveWorldBeforeDefaultOverride(&runtime, owner, &error);
+				QVERIFY(!operation.await_ready());
+				if (cancelOwner)
+				{
+					owner->invalidate();
+					QVERIFY(operation.await_ready());
+					QVERIFY_THROWS_EXCEPTION(QMudPreferences::Canceled, operation.await_resume());
+					QTRY_VERIFY(!ownerGuard);
+				}
+				else
+				{
+					QTRY_VERIFY(operation.await_ready());
+					QVERIFY2(operation.await_resume(), qPrintable(error));
+					owner->reject();
+					QTRY_VERIFY(!ownerGuard);
+				}
+				if (cancelOwner)
+				{
+					const auto callbacksCompleted = QSharedPointer<bool>::create(false);
+					runtime.fireWorldSaveHandlersContinuable([callbacksCompleted](bool)
+					                                         { *callbacksCompleted = true; });
+					QTRY_VERIFY(*callbacksCompleted);
+				}
+				QCOMPARE(runtime.variables().value(QStringLiteral("override_save_count")).content,
+				         cancelOwner ? QStringLiteral("2") : QStringLiteral("1"));
+				QCOMPARE(QFileInfo::exists(filePath), !cancelOwner);
+				if (!cancelOwner)
+				{
+					WorldDocument saved;
+					QVERIFY(saved.loadFromFile(filePath));
+					const auto value =
+					    std::ranges::find_if(saved.variables(),
+					                         [](const auto &variable)
+					                         {
+						                         return variable.attributes.value(QStringLiteral("name")) ==
+						                                QStringLiteral("override_save_count");
+					                         });
+					QVERIFY(value != saved.variables().end());
+					QCOMPARE(value->content, QStringLiteral("1"));
+				}
+				QVERIFY(error.isEmpty());
+			}
+#endif
+
+			/**
+			 * @brief Cancels modeless child frames before Preferences or its runtime releases staged data.
+			 */
+			static void modelessChildrenCancelWithTheirOwner()
+			{
+				auto runtime = std::make_unique<WorldRuntime>();
+				runtime->applyDefaultWorldOptions();
+				runtime->setWorldAttribute(QStringLiteral("name"), QStringLiteral("Child lifetime world"));
+				runtime->setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime->setWorldAttribute(QStringLiteral("port"), QStringLiteral("4100"));
+				auto dialog = std::make_unique<WorldPreferencesDialog>(runtime.get(), nullptr);
+				dialog->setInitialPage(WorldPreferencesDialog::PageVariables);
+				dialog->show();
+				auto *pages = dialog->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				QPushButton *add = nullptr;
+				for (auto *button : pages->currentWidget()->findChildren<QPushButton *>())
+					if (button->text() == QStringLiteral("&Add..."))
+						add = button;
+				QVERIFY(add);
+				add->click();
+				auto *child = qobject_cast<QDialog *>(activePreferencesChild());
+				QVERIFY(child && child->windowTitle() == QStringLiteral("Variable"));
+				QVERIFY(!child->isModal());
+				QVERIFY(!QApplication::activeModalWidget());
+				const QPointer<QDialog> childGuard(child);
+				dialog->requestPage(WorldPreferencesDialog::PageTimers);
+				QCOMPARE(pages->currentIndex(), static_cast<int>(WorldPreferencesDialog::PageVariables));
+				child->reject();
+				QTRY_VERIFY(!childGuard);
+				QTRY_COMPARE(pages->currentIndex(), static_cast<int>(WorldPreferencesDialog::PageTimers));
+				dialog->setInitialPage(WorldPreferencesDialog::PageVariables);
+				add->click();
+				const QPointer<QWidget> canceled(activePreferencesChild());
+				QVERIFY(canceled);
+				dialog.reset();
+				QVERIFY(!canceled);
+				QVERIFY(runtime->variables().isEmpty());
+				dialog = std::make_unique<WorldPreferencesDialog>(runtime.get(), nullptr);
+				dialog->setInitialPage(WorldPreferencesDialog::PageVariables);
+				dialog->show();
+				pages = dialog->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				for (auto *button : pages->currentWidget()->findChildren<QPushButton *>())
+					if (button->text() == QStringLiteral("&Add..."))
+						add = button;
+				add->click();
+				const QPointer<QWidget> runtimeChild(activePreferencesChild());
+				QVERIFY(runtimeChild);
+				runtime.reset();
+				QVERIFY(!runtimeChild);
+				QVERIFY(!dialog->isVisible());
+			}
+
+			/**
+			 * @brief Keeps variable editing protected through invalid names and nested owner cancellation.
+			 */
+			static void variableValidationRetainsOwnerAndCancelsQueuedCompletion()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setVariables(QList<WorldRuntime::Variable>{
+				    WorldRuntime::Variable({{QStringLiteral("name"), QStringLiteral("Original")}},
+				                           QStringLiteral("old"))
+                });
+				auto editor = std::make_unique<WorldPreferencesDialog>(&runtime, nullptr);
+				editor->setInitialPage(WorldPreferencesDialog::PageVariables);
+				editor->show();
+				auto *pages = editor->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				QPushButton *edit = nullptr;
+				for (auto *button : pages->currentWidget()->findChildren<QPushButton *>())
+					if (button->text() == QStringLiteral("&Edit..."))
+						edit = button;
+				QVERIFY(edit);
+				for (auto *table : pages->currentWidget()->findChildren<QTableWidget *>())
+					if (table->rowCount() == 1)
+						table->selectRow(0);
+				QVERIFY(edit->isEnabled());
+				edit->click();
+				auto *variable = qobject_cast<QDialog *>(activePreferencesChild());
+				QVERIFY(variable && variable->windowTitle() == QStringLiteral("Variable"));
+				const QPointer<QDialog> variableGuard(variable);
+				auto                   *name    = variable->findChild<QLineEdit *>();
+				auto                   *buttons = variable->findChild<QDialogButtonBox *>();
+				QVERIFY(name && buttons);
+				name->clear();
+				buttons->button(QDialogButtonBox::Ok)->click();
+				auto *warning = variable->findChild<QMessageBox *>();
+				QVERIFY(warning && warning->isVisible());
+				QVERIFY(variable->isVisible());
+				QVERIFY(!pages->isEnabled());
+				QVERIFY(!QApplication::activeModalWidget());
+				const QPointer<QMessageBox> warningGuard(warning);
+				warning->accept();
+				QTRY_VERIFY(!warningGuard);
+				QVERIFY(!pages->isEnabled());
+				QVERIFY(variable->isVisible());
+				name->setText(QStringLiteral("Renamed"));
+				buttons->button(QDialogButtonBox::Ok)->click();
+				// The valid result is queued; owner cancellation must win before any variable is written.
+				editor->reject();
+				QVERIFY(!variableGuard);
+				QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+				QCOMPARE(runtime.variables().value(QStringLiteral("original")).content,
+				         QStringLiteral("old"));
+				QVERIFY(!runtime.variables().contains(QStringLiteral("renamed")));
+
+				editor = std::make_unique<WorldPreferencesDialog>(&runtime, nullptr);
+				editor->setInitialPage(WorldPreferencesDialog::PageVariables);
+				editor->show();
+				pages = editor->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				for (auto *button : pages->currentWidget()->findChildren<QPushButton *>())
+					if (button->text() == QStringLiteral("&Add..."))
+						button->click();
+				variable = qobject_cast<QDialog *>(activePreferencesChild());
+				QVERIFY(variable);
+				variable->findChild<QLineEdit *>()->setText(QStringLiteral("Original"));
+				variable->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+				warning = variable->findChild<QMessageBox *>();
+				QVERIFY(warning && warning->isVisible());
+				const QPointer<QDialog>     nested(variable);
+				const QPointer<QMessageBox> nestedWarning(warning);
+				runtime.beginWorldSessionClose();
+				QVERIFY(!nested && !nestedWarning);
+				QVERIFY(!editor->isVisible());
+			}
+
+			/**
+			 * @brief Completes auxiliary settings before combining gzip and open errors into one modeless notice.
+			 */
+			static void applyCompletesBeforeCombinedNotifications()
+			{
+				const QString home = qEnvironmentVariable("QMUD_HOME");
+				QVERIFY(!home.isEmpty());
+				QTemporaryDir directory(QDir(home).filePath(QStringLiteral("preferences-apply-XXXXXX")));
+				QVERIFY(directory.isValid());
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setStartupDirectory(home);
+				runtime.setDefaultLogDirectory(directory.path());
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Notification world"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4100"));
+				runtime.setWorldAttribute(QStringLiteral("auto_log_file_name"),
+				                          QStringLiteral("original.log"));
+				runtime.setWorldAttribute(QStringLiteral("log_rotate_gzip"), QStringLiteral("1"));
+				QCOMPARE(runtime.openLog(QString(), true), eOK);
+				QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("original.log.gz")));
+				QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("blocked")));
+				WorldPreferencesDialog editor(&runtime, nullptr);
+				editor.setInitialPage(WorldPreferencesDialog::PageCustomColours);
+				auto *customName = editor.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
+				QVERIFY(customName);
+				customName->setText(QStringLiteral("Committed colour"));
+				editor.setInitialPage(WorldPreferencesDialog::PageLogging);
+				QLineEdit *path = nullptr;
+				for (auto *field : editor.findChildren<QLineEdit *>())
+					if (field->text() == QStringLiteral("original.log"))
+						path = field;
+				QVERIFY(path);
+				path->setText(QStringLiteral("blocked"));
+				editor.show();
+				editor.accept();
+				auto *notice = editor.findChild<QDialog *>(QStringLiteral("preferencesApplyNotifications"));
+				QVERIFY(notice && notice->isVisible() && !notice->isModal());
+				QVERIFY(!QApplication::activeModalWidget());
+				auto *messages =
+				    notice->findChild<QPlainTextEdit *>(QStringLiteral("preferencesApplyNotificationText"));
+				QVERIFY(messages);
+				const QString text = messages->toPlainText();
+				QVERIFY(text.contains(QStringLiteral("gzip writing")));
+				QVERIFY(text.contains(QStringLiteral("Could not open the new log file")));
+				QVERIFY(text.indexOf(QStringLiteral("gzip writing")) <
+				        text.indexOf(QStringLiteral("Could not open the new log file")));
+				QCOMPARE(editor.findChildren<QMessageBox *>().size(), 0);
+				bool colourCommitted = false;
+				for (const auto &colour : runtime.colours())
+					colourCommitted |=
+					    colour.attributes.value(QStringLiteral("name")) == QStringLiteral("Committed colour");
+				QVERIFY(colourCommitted);
+				QCOMPARE(runtime.worldAttributeValue(QStringLiteral("auto_log_file_name")),
+				         QStringLiteral("blocked"));
+				const QPointer<QDialog> noticeGuard(notice);
+				editor.reject();
+				QVERIFY(!noticeGuard);
+				QVERIFY(!runtime.isLogOpen());
+				QVERIFY(QFileInfo::exists(QDir(directory.path()).filePath(QStringLiteral("original.log"))));
+				QCOMPARE(runtime.openLog(QStringLiteral("original.log"), true), eOK);
+				bool normalDiagnosticShown = false;
+				QTimer::singleShot(
+				    0, &editor,
+				    [&]
+				    {
+					    if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+					    {
+						    normalDiagnosticShown = message->text().contains(QStringLiteral("gzip writing"));
+						    message->accept();
+					    }
+				    });
+				QCOMPARE(runtime.closeLog(), eOK);
+				QVERIFY(normalDiagnosticShown);
+			}
+
 			/**
 			 * @brief Verifies screen constraints account for frames and non-primary screen origins.
 			 */
@@ -1172,6 +1569,7 @@ namespace
 				    "<qmud><triggers><trigger name=\"Discarded enabling edit\" "
 				    "match=\"discard-enable\"><send>discard</send></trigger></triggers></qmud>"));
 				triggerWidgets.pasteButton->click();
+				waitForPreferencesOperation(triggerWidgets.pasteButton);
 				QCOMPARE(runtime.triggers().size(), 1);
 				QCOMPARE(triggerWidgets.table->rowCount(), 2);
 				QCheckBox *const useDefaultTriggers =
@@ -1182,13 +1580,13 @@ namespace
 				    &triggerDialog,
 				    []
 				    {
-					    if (auto *const message =
-					            qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    if (auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 					        message)
 						    message->button(QMessageBox::No)->click();
 				    },
 				    Qt::QueuedConnection));
 				useDefaultTriggers->setChecked(true);
+				waitForPreferencesOperation(useDefaultTriggers);
 				QVERIFY(!useDefaultTriggers->isChecked());
 				QCOMPARE(triggerWidgets.table->rowCount(), 2);
 				QString confirmationText;
@@ -1196,7 +1594,7 @@ namespace
 				    &triggerDialog,
 				    [&confirmationText]
 				    {
-					    auto *const message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 					    if (!message)
 						    return;
 					    confirmationText = message->text();
@@ -1204,10 +1602,12 @@ namespace
 				    },
 				    Qt::QueuedConnection));
 				useDefaultTriggers->setChecked(true);
+				waitForPreferencesOperation(useDefaultTriggers);
 				QCOMPARE(triggerWidgets.table->rowCount(), 1);
 				QVERIFY(!triggerWidgets.table->findItems(QStringLiteral("Default trigger"), Qt::MatchExactly)
 				             .isEmpty());
 				triggerDialog.accept();
+				waitForPreferencesOperation(&triggerDialog);
 				QVERIFY(confirmationText.contains(QStringLiteral("temporarily replace")));
 				QVERIFY(confirmationText.contains(QStringLiteral("will be preserved")));
 				QVERIFY(!confirmationText.contains(QStringLiteral("PERMANENTLY")));
@@ -1242,31 +1642,36 @@ namespace
 				QVERIFY(restoreTriggers);
 				QVERIFY(restoreTriggers->isChecked());
 				restoreTriggers->setChecked(false);
+				waitForPreferencesOperation(restoreTriggers);
 				QVERIFY(!restoreTriggers->isChecked());
 				QVERIFY(restoreWidgets.pasteButton->isEnabled());
 				clipboard->setText(
 				    QStringLiteral("<qmud><triggers><trigger name=\"Post-disable edit\" "
 				                   "match=\"post-disable\"><send>kept</send></trigger></triggers></qmud>"));
 				restoreWidgets.pasteButton->click();
+				waitForPreferencesOperation(restoreWidgets.pasteButton);
 				QVERIFY(!restoreTriggers->isChecked());
 				QCOMPARE(restoreWidgets.table->rowCount(), 2);
 				QVERIFY(QMetaObject::invokeMethod(
 				    &restoreDialog,
 				    []
 				    {
-					    if (auto *const message =
-					            qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    if (auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 					        message)
 						    message->button(QMessageBox::Yes)->click();
 				    },
 				    Qt::QueuedConnection));
 				restoreTriggers->setChecked(true);
+				waitForPreferencesOperation(restoreTriggers);
 				QCOMPARE(restoreWidgets.table->rowCount(), 1);
 				restoreTriggers->setChecked(false);
+				waitForPreferencesOperation(restoreTriggers);
 				QCOMPARE(restoreWidgets.table->rowCount(), 1);
 				restoreWidgets.pasteButton->click();
+				waitForPreferencesOperation(restoreWidgets.pasteButton);
 				QCOMPARE(runtime.triggers().size(), 1);
 				restoreDialog.accept();
+				waitForPreferencesOperation(&restoreDialog);
 				QCOMPARE(restoreDialog.result(), static_cast<int>(QDialog::Accepted));
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("use_default_triggers")),
 				         QStringLiteral("0"));
@@ -1618,7 +2023,7 @@ namespace
 				    &dialog,
 				    [&warningText]
 				    {
-					    auto *const message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 					    if (!message)
 						    return;
 					    warningText = message->text();
@@ -1626,8 +2031,10 @@ namespace
 				    },
 				    Qt::QueuedConnection));
 				useDefaultTriggers->setChecked(true);
+				waitForPreferencesOperation(useDefaultTriggers);
 				QVERIFY(!useDefaultTriggers->isChecked());
 				dialog.accept();
+				waitForPreferencesOperation(&dialog);
 				QVERIFY(warningText.contains(QStringLiteral("does not exist")));
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("use_default_triggers")),
 				         QStringLiteral("0"));
@@ -1845,9 +2252,18 @@ namespace
 				span.action = QStringLiteral("score");
 				runtime.addLine(QStringLiteral("x"), WorldRuntime::LineOutput, QVector{span});
 				calculate->click();
+				auto *progress = dialog.findChild<QProgressDialog *>();
+				QVERIFY(progress && progress->isVisible());
+				QVERIFY(!progress->isModal());
+				QVERIFY(!QApplication::activeModalWidget());
+				progress->reject();
+				waitForPreferencesOperation(calculate);
+				QCOMPARE(memory->text(), QStringLiteral("-"));
+				QVERIFY(calculate->isEnabled());
+				calculate->click();
 				QCOMPARE(actions->text(), QStringLiteral("1"));
 				QCOMPARE(references->text(), QStringLiteral("1001"));
-				QVERIFY(memory->text() != QStringLiteral("-"));
+				QTRY_VERIFY(memory->text() != QStringLiteral("-"));
 				QVERIFY(!calculate->isEnabled());
 			}
 
@@ -2378,6 +2794,115 @@ namespace
 				QVERIFY(restoredOption->isChecked());
 			}
 
+			/**
+			 * @brief Persists GMCP preferences, checks category placement, and preserves dependent values while disabled.
+			 */
+			void gmcpProtocolOptions()
+			{
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(QDir::currentPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("native_gmcp"), QStringLiteral("1"));
+				QWidget                browserOwner;
+				WorldPreferencesDialog dialog(&runtime, nullptr, &browserOwner);
+				dialog.setInitialPage(WorldPreferencesDialog::PageGmcp);
+				auto *tree = dialog.findChild<QTreeWidget *>();
+				QVERIFY(tree);
+				int section = -1;
+				for (int i = 0; i < tree->topLevelItemCount(); ++i)
+					if (tree->topLevelItem(i)->text(0) == QLatin1String("Protocol Options"))
+						section = i;
+				QVERIFY(section > 0 && section + 1 < tree->topLevelItemCount());
+				QCOMPARE(tree->topLevelItem(section - 1)->text(0), QStringLiteral("Input"));
+				QCOMPARE(tree->topLevelItem(section + 1)->text(0), QStringLiteral("Paste/Send"));
+				QCOMPARE(tree->topLevelItem(section)->childCount(), 1);
+				QCOMPARE(tree->topLevelItem(section)->child(0)->text(0), QStringLiteral("GMCP"));
+				auto *native        = dialog.findChild<QCheckBox *>(QStringLiteral("nativeGmcpCheckBox"));
+				auto *ping          = dialog.findChild<QCheckBox *>(QStringLiteral("gmcpPingEnabled"));
+				auto *pingInterval  = dialog.findChild<QSpinBox *>(QStringLiteral("gmcpPingInterval"));
+				auto *rtt           = dialog.findChild<QCheckBox *>(QStringLiteral("gmcpPingSendRtt"));
+				auto *keep          = dialog.findChild<QCheckBox *>(QStringLiteral("gmcpKeepAliveEnabled"));
+				auto *keepInterval  = dialog.findChild<QSpinBox *>(QStringLiteral("gmcpKeepAliveInterval"));
+				auto *label         = dialog.findChild<QLabel *>(QStringLiteral("gmcpRoundTripLabel"));
+				auto *browserButton = dialog.findChild<QPushButton *>(QStringLiteral("gmcpBrowserButton"));
+				QVERIFY(native && ping && pingInterval && rtt && keep && keepInterval && label);
+				QVERIFY(browserButton);
+				QCOMPARE(browserButton->text(), QStringLiteral("GMCP Browser"));
+				QVERIFY(!browserButton->autoDefault());
+				GmcpBrowserDialog::open(&runtime, &browserOwner);
+				auto *browser = browserOwner.findChild<QWidget *>(QStringLiteral("gmcpBrowser"));
+				QVERIFY(browser);
+#ifndef NDEBUG
+				QVERIFY(browserButton->isEnabled());
+				browserButton->click();
+#else
+				QVERIFY(!browserButton->isEnabled());
+				GmcpBrowserDialog::open(&runtime, &browserOwner);
+#endif
+				QCOMPARE(browserOwner.findChild<QWidget *>(QStringLiteral("gmcpBrowser")), browser);
+				QCOMPARE(browser->parentWidget(), &browserOwner);
+				QVERIFY(!dialog.findChild<QWidget *>(QStringLiteral("gmcpBrowser")));
+				const QPointer<QWidget> browserGuard(browser);
+				{
+					WorldPreferencesDialog temporary(&runtime, nullptr, &browserOwner);
+					temporary.setInitialPage(WorldPreferencesDialog::PageGmcp);
+#ifndef NDEBUG
+					temporary.findChild<QPushButton *>(QStringLiteral("gmcpBrowserButton"))->click();
+#endif
+				}
+				QVERIFY(browserGuard);
+				QCOMPARE(browserGuard->parentWidget(), &browserOwner);
+				QVERIFY(browser->findChild<QCheckBox *>(QStringLiteral("gmcpPause"))->isChecked());
+				QVERIFY(native->isChecked() && ping->isChecked() && rtt->isChecked() && keep->isChecked());
+				QCOMPARE(label->text(), QStringLiteral("0 ms"));
+				QCOMPARE(pingInterval->minimum(), 1);
+				QCOMPARE(pingInterval->maximum(), 120);
+				QCOMPARE(pingInterval->value(), 5);
+				QCOMPARE(keepInterval->minimum(), 1);
+				QCOMPARE(keepInterval->maximum(), 120);
+				QCOMPARE(keepInterval->value(), 15);
+				emit runtime.gmcpRoundTripChanged(37);
+				QCOMPARE(label->text(), QStringLiteral("37 ms"));
+				ping->setChecked(false);
+				QVERIFY(!pingInterval->isEnabled() && !rtt->isEnabled());
+				QVERIFY(keepInterval->isEnabled());
+				ping->setChecked(true);
+				keep->setChecked(false);
+				QVERIFY(!keepInterval->isEnabled());
+				keep->setChecked(true);
+				pingInterval->setValue(7);
+				keepInterval->setValue(23);
+				rtt->setChecked(false);
+				native->setChecked(false);
+				QVERIFY(!ping->isEnabled() && !pingInterval->isEnabled() && !rtt->isEnabled());
+				QVERIFY(!keep->isEnabled() && !keepInterval->isEnabled() && !label->isEnabled());
+				dialog.accept();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("gmcp_ping_interval")),
+				         QStringLiteral("7"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("gmcp_keepalive_interval")),
+				         QStringLiteral("23"));
+				WorldPreferencesDialog reopened(&runtime, nullptr);
+				reopened.setInitialPage(WorldPreferencesDialog::PageGmcp);
+				QCOMPARE(reopened.findChild<QSpinBox *>(QStringLiteral("gmcpPingInterval"))->value(), 7);
+				QVERIFY(!reopened.findChild<QCheckBox *>(QStringLiteral("nativeGmcpCheckBox"))->isChecked());
+				QVERIFY(!reopened.findChild<QCheckBox *>(QStringLiteral("gmcpPingSendRtt"))->isChecked());
+				QTemporaryDir directory(QDir::current().filePath(QStringLiteral("gmcp-preferences-XXXXXX")));
+				QVERIFY(directory.isValid());
+				const auto path = QDir(directory.path()).filePath(QStringLiteral("synthetic.qdl"));
+				QString    error;
+				QVERIFY2(runtime.saveWorldFile(path, &error), qPrintable(error));
+				WorldDocument saved;
+				QVERIFY2(saved.loadFromFile(path), qPrintable(saved.errorString()));
+				QCOMPARE(saved.worldAttributes().value(QStringLiteral("gmcp_ping_interval")),
+				         QStringLiteral("7"));
+				QCOMPARE(saved.worldAttributes().value(QStringLiteral("gmcp_keepalive_interval")),
+				         QStringLiteral("23"));
+				QCOMPARE(QMudWorldPreferencesRouting::initialPageForCommand(
+				             QStringLiteral("Preferences"), WorldPreferencesDialog::PageGmcp, {}),
+				         WorldPreferencesDialog::PageGmcp);
+				runtime.setWorldFileModified(false);
+			}
+
 			void automaticTelnetProtectionOwnsManualOptionAndPreservesItsValue()
 			{
 				WorldRuntime runtime;
@@ -2525,7 +3050,7 @@ namespace
 				    &dialog,
 				    [&inspectedKeyboardDialog]
 				    {
-					    auto *keyboardDialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+					    auto *keyboardDialog = qobject_cast<QDialog *>(activePreferencesChild());
 					    QVERIFY(keyboardDialog);
 					    const auto closeDialog = qScopeGuard(
 					        [keyboardDialog]
@@ -2565,8 +3090,10 @@ namespace
 				    Qt::QueuedConnection));
 
 				QTest::mouseClick(keyboardPreferences, Qt::LeftButton);
+				waitForPreferencesOperation(keyboardPreferences);
 				QVERIFY(inspectedKeyboardDialog);
 				dialog.accept();
+				waitForPreferencesOperation(&dialog);
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("save_deleted_command")),
 				         QStringLiteral("1"));
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
@@ -2850,8 +3377,7 @@ namespace
 						    &dialog,
 						    [&cancellationHandled]
 						    {
-							    auto *const message =
-							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 							    if (!message)
 								    return;
 							    cancellationHandled = true;
@@ -2859,6 +3385,7 @@ namespace
 						    },
 						    Qt::QueuedConnection));
 						widgets.removeButton->click();
+						waitForPreferencesOperation(widgets.removeButton);
 						QVERIFY(cancellationHandled);
 						QCOMPARE(widgets.table->rowCount(), 3);
 						QCOMPARE(selectedRuleIds(*widgets.table), treeMode ? QList<quint64>{} : removedIds);
@@ -2869,8 +3396,7 @@ namespace
 						    &dialog,
 						    [&confirmationText]
 						    {
-							    auto *const message =
-							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 							    if (!message)
 								    return;
 							    confirmationText = message->text();
@@ -2878,6 +3404,7 @@ namespace
 						    },
 						    Qt::QueuedConnection));
 						widgets.removeButton->click();
+						waitForPreferencesOperation(widgets.removeButton);
 						const QString plural = kind == RuleKind::Alias     ? QStringLiteral("aliases")
 						                       : kind == RuleKind::Trigger ? QStringLiteral("triggers")
 						                                                   : QStringLiteral("timers");
@@ -2908,6 +3435,7 @@ namespace
 						};
 						QCOMPARE(runtimeIds().size(), 3);
 						dialog.accept();
+						waitForPreferencesOperation(&dialog);
 						QCOMPARE(runtimeIds(), QList<quint64>{survivorId});
 					}
 				}
@@ -3038,8 +3566,7 @@ namespace
 						    &dialog,
 						    [&confirmationHandled]
 						    {
-							    auto *message =
-							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    auto *message = qobject_cast<QMessageBox *>(activePreferencesChild());
 							    if (!message)
 								    return;
 							    confirmationHandled = true;
@@ -3047,6 +3574,7 @@ namespace
 						    },
 						    Qt::QueuedConnection));
 						widgets.removeButton->click();
+						waitForPreferencesOperation(widgets.removeButton);
 						QVERIFY(confirmationHandled);
 						QCOMPARE(widgets.table->rowCount(), 2);
 
@@ -3065,7 +3593,10 @@ namespace
 						};
 						QCOMPARE(runtimeSize(), 3);
 						if (acceptDialog)
+						{
 							dialog.accept();
+							waitForPreferencesOperation(&dialog);
+						}
 						else
 							dialog.reject();
 						QCOMPARE(runtimeSize(), acceptDialog ? 2 : 3);
@@ -3101,6 +3632,7 @@ namespace
 				                   "<send>second pasted</send></trigger></triggers></qmud>"));
 
 				widgets.pasteButton->click();
+				waitForPreferencesOperation(widgets.pasteButton);
 				QCOMPARE(widgets.table->rowCount(), 3);
 				QCOMPARE(runtime.triggers().size(), 1);
 
@@ -3109,7 +3641,7 @@ namespace
 				    &dialog,
 				    [&duplicateMessage]
 				    {
-					    auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    auto *message = qobject_cast<QMessageBox *>(activePreferencesChild());
 					    if (!message)
 						    return;
 					    duplicateMessage = message->text();
@@ -3117,6 +3649,7 @@ namespace
 				    },
 				    Qt::QueuedConnection));
 				dialog.accept();
+				waitForPreferencesOperation(&dialog);
 				QVERIFY(
 				    duplicateMessage.contains(QStringLiteral("Named rules and variables should be unique:")));
 				QVERIFY(duplicateMessage.contains(QStringLiteral("Triggers\n  3 named Existing")));
@@ -3160,7 +3693,7 @@ namespace
 					    &dialog,
 					    [name]
 					    {
-						    auto *editor = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+						    auto *editor = qobject_cast<QDialog *>(activePreferencesChild());
 						    QVERIFY(editor);
 						    auto *nameEdit = editor->findChild<QLineEdit *>();
 						    QVERIFY(nameEdit);
@@ -3171,20 +3704,24 @@ namespace
 				};
 				QVERIFY(enterName(QStringLiteral("AddedName")));
 				add->click();
+				waitForPreferencesOperation(add);
 				QCOMPARE(variables->rowCount(), 1);
 				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("AddedName"));
 				QVERIFY(enterName(QStringLiteral("RenamedName")));
 				edit->click();
+				waitForPreferencesOperation(edit);
 				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("RenamedName"));
 				auto *clipboard = QGuiApplication::clipboard();
 				QVERIFY(clipboard);
 				clipboard->setText(
 				    QStringLiteral("<variables><variable name=\"PastedName\">value</variable></variables>"));
 				paste->click();
+				waitForPreferencesOperation(paste);
 				QCOMPARE(variables->rowCount(), 2);
 				QCOMPARE(variables->item(0, 0)->text(), QStringLiteral("PastedName"));
 				QCOMPARE(variables->item(1, 0)->text(), QStringLiteral("RenamedName"));
 				dialog.accept();
+				waitForPreferencesOperation(&dialog);
 				QCOMPARE(runtime.variables().value(QStringLiteral("renamedname")).label,
 				         QStringLiteral("RenamedName"));
 				QCOMPARE(runtime.variables().value(QStringLiteral("pastedname")).content,
@@ -3405,7 +3942,7 @@ namespace
 					     kind]
 					    {
 						    editorCallbackInvoked = true;
-						    QWidget *activeModal  = QApplication::activeModalWidget();
+						    QWidget *activeModal  = activePreferencesChild();
 						    auto    *editor       = qobject_cast<QDialog *>(activeModal);
 						    if (!editor)
 						    {
@@ -3475,9 +4012,11 @@ namespace
 					    },
 					    Qt::QueuedConnection));
 					widgets.editButton->click();
+					waitForPreferencesOperation(widgets.editButton);
 					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
 					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
 					dialog.accept();
+					waitForPreferencesOperation(&dialog);
 
 					switch (kind)
 					{
@@ -3648,7 +4187,7 @@ namespace
 					    [&editorCallbackFailure, &editorCallbackInvoked]
 					    {
 						    editorCallbackInvoked = true;
-						    QWidget *activeModal  = QApplication::activeModalWidget();
+						    QWidget *activeModal  = activePreferencesChild();
 						    auto    *editor       = qobject_cast<QDialog *>(activeModal);
 						    if (!editor)
 						    {
@@ -3686,9 +4225,11 @@ namespace
 					    },
 					    Qt::QueuedConnection));
 					widgets.editButton->click();
+					waitForPreferencesOperation(widgets.editButton);
 					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
 					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
 					dialog.accept();
+					waitForPreferencesOperation(&dialog);
 
 					switch (kind)
 					{
@@ -3810,7 +4351,7 @@ namespace
 									    break;
 								    }
 								    }
-								    QWidget *activeModal = QApplication::activeModalWidget();
+								    QWidget *activeModal = activePreferencesChild();
 								    auto    *message     = qobject_cast<QMessageBox *>(activeModal);
 								    if (!message)
 								    {
@@ -3832,6 +4373,7 @@ namespace
 							    },
 							    Qt::QueuedConnection));
 							widgets.removeButton->click();
+							waitForPreferencesOperation(widgets.removeButton);
 							QVERIFY2(confirmationCallbackInvoked,
 							         "Removal confirmation callback did not run.");
 							QVERIFY2(confirmationCallbackFailure.isEmpty(),
@@ -3934,8 +4476,7 @@ namespace
 								    break;
 							    }
 							    }
-							    auto *const message =
-							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    auto *const message = qobject_cast<QMessageBox *>(activePreferencesChild());
 							    if (!message)
 								    return;
 							    confirmationHandled = true;
@@ -3943,6 +4484,7 @@ namespace
 						    },
 						    Qt::QueuedConnection));
 						widgets.removeButton->click();
+						waitForPreferencesOperation(widgets.removeButton);
 						QVERIFY(confirmationHandled);
 						QCOMPARE(widgets.table->rowCount(), 3);
 						QVERIFY(findRuleRowByRuntimeId(*widgets.table, removedRuntimeId) >= 0);
@@ -4034,7 +4576,7 @@ namespace
 						    {
 							    if (removeClickReturned)
 								    return;
-							    if (QWidget *activeModal = QApplication::activeModalWidget())
+							    if (QWidget *activeModal = activePreferencesChild())
 							    {
 								    unexpectedConfirmation = true;
 								    activeModal->close();
@@ -4042,6 +4584,7 @@ namespace
 						    },
 						    Qt::QueuedConnection));
 						widgets.removeButton->click();
+						waitForPreferencesOperation(widgets.removeButton);
 						removeClickReturned = true;
 						QCoreApplication::sendPostedEvents(&dialog, QEvent::MetaCall);
 						QVERIFY(!unexpectedConfirmation);

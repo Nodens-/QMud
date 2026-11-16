@@ -411,6 +411,7 @@ void WorldDocument::clearState()
 	m_dateSaved = QDateTime();
 	m_worldAttributes.clear();
 	m_worldMultilineAttributes.clear();
+	m_gmcpMergeOverrides.clear();
 	m_triggers.clear();
 	m_aliases.clear();
 	m_timers.clear();
@@ -556,6 +557,37 @@ bool WorldDocument::loadFromXmlWithPolicy(const QString &xmlText, const PluginPo
 					if (reader.isStartElement())
 					{
 						const QString childName = reader.name().toString();
+						if (childName == QLatin1String("gmcp_merge_policies"))
+						{
+							// Merge overrides belong to the main world, never to includes or plugins.
+							if (m_loadedFromInclude || m_pluginFile)
+							{
+								reader.skipCurrentElement();
+								continue;
+							}
+							while (reader.readNextStartElement())
+							{
+								const auto policyAttributes = reader.attributes();
+								const auto path  = policyAttributes.value(QLatin1String("name")).toString();
+								const auto force = policyAttributes.value(QLatin1String("force")).toString();
+								QMudGmcp::Message   parsed;
+								QMudGmcp::MergeMode mode;
+								QString             error;
+								if (reader.name() != QLatin1String("policy") ||
+								    !QMudGmcp::decode(path.toUtf8(), parsed, error) || parsed.name != path ||
+								    !QMudGmcp::parseMode(
+								        policyAttributes.value(QLatin1String("mode")).toString(), mode) ||
+								    (force != QLatin1String("0") && force != QLatin1String("1")))
+								{
+									reader.raiseError(QStringLiteral("Invalid GMCP merge policy"));
+									break;
+								}
+								m_gmcpMergeOverrides.insert(path.toLower(),
+								                            {mode, force == QLatin1String("1")});
+								reader.skipCurrentElement();
+							}
+							continue;
+						}
 						const QString childText =
 						    reader.readElementText(QXmlStreamReader::IncludeChildElements);
 						m_worldMultilineAttributes.insert(childName, childText);
@@ -932,13 +964,13 @@ bool WorldDocument::loadFromXmlWithPolicy(const QString &xmlText, const PluginPo
 						{
 							static const QHash<QString, QString> kForbiddenPluginChildTagWarnings = {
 							    {QStringLiteral("macros"),
-							     QStringLiteral("<macros> tag cannot be used inside a plugin")  },
+								 QStringLiteral("<macros> tag cannot be used inside a plugin")  },
 							    {QStringLiteral("colours"),
-							     QStringLiteral("<colours> tag cannot be used inside a plugin") },
+								 QStringLiteral("<colours> tag cannot be used inside a plugin") },
 							    {QStringLiteral("keypad"),
-							     QStringLiteral("<keypad> tag cannot be used inside a plugin")  },
+								 QStringLiteral("<keypad> tag cannot be used inside a plugin")  },
 							    {QStringLiteral("printing"),
-							     QStringLiteral("<printing> tag cannot be used inside a plugin")}
+								 QStringLiteral("<printing> tag cannot be used inside a plugin")}
                             };
 							const auto forbiddenTagWarning =
 							    kForbiddenPluginChildTagWarnings.constFind(childName);
@@ -1159,6 +1191,7 @@ bool WorldDocument::loadFromXmlWithPolicy(const QString &xmlText, const PluginPo
 	{
 		m_worldAttributes.clear();
 		m_worldMultilineAttributes.clear();
+		m_gmcpMergeOverrides.clear();
 	}
 	if (!(m_loadMask & XML_TRIGGERS))
 		m_triggers.clear();
@@ -1928,4 +1961,9 @@ unsigned int WorldDocument::includeMergeFlags() const
 const QStringList &WorldDocument::warnings() const
 {
 	return m_warnings;
+}
+
+const QMudGmcp::MergeOverrides &WorldDocument::gmcpMergeOverrides() const
+{
+	return m_gmcpMergeOverrides;
 }

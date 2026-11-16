@@ -1,67 +1,74 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE muclient>
+<!DOCTYPE qmud>
 
-<muclient>
-<plugin
-   name="GMCP_to_world"
-   author="Tyler Spivey"
-   id="b007454f07bf5e41d15f15a0"
-   language="Lua"
-   purpose="Send GMCP events to the world"
-   date_written="2018-12-30"
-   requires="4.50"
-   version="1.0"
-   >
-<description trim="y">
-<![CDATA[
-Install into IRE games to catch ATCP messages.
+<qmud>
+    <plugin
+            name="GMCP_to_world"
+            author="Tyler Spivey, Nodens"
+            id="b007454f07bf5e41d15f15a0"
+            language="Lua"
+            purpose="Send GMCP events to the world"
+            date_written="2018-12-30"
+            date_modified="2026-11-15"
+            requires="15.00"
+            version="2.0"
+    >
+        <description trim="y">
+            <![CDATA[
+Use QMud native GMCP to publish prompt-delimited message batches to world variables.
+No GMCP handler plugin is required.
 
 ]]>
-</description>
+        </description>
 
-</plugin>
+    </plugin>
 
-<!--  Aliases  -->
-<aliases>
-  <alias
-   match="^gmcp (.*)$"
-   enabled="y"
-   regexp="y"
-   send_to="12"
-   sequence="100"
-  >
-  <send>if "%1" ~= "debug" then
-	SendGMCPPacket("%1")
-  Send("")
-	end
-  </send>
-  </alias>
-	<alias
-		match = "^__TOGGLELOG$"
-		enabled = "y"
-		regexp = "y"
-		send_to="12"
-		sequence = "100"
-		keep_evaluating = "y"
-	>
-	<send>toggleLogMode()
-	</send>
-	</alias>
-</aliases>
+    <!--  Aliases  -->
+    <aliases>
+        <alias
+                match="^gmcp (.*)$"
+                enabled="y"
+                regexp="y"
+                script="send_gmcp"
+                sequence="100"
+        />
+        <alias
+                match="^__TOGGLELOG$"
+                enabled="y"
+                regexp="y"
+                send_to="12"
+                sequence="100"
+                keep_evaluating="y"
+        >
+            <send>toggleLogMode()
+            </send>
+        </alias>
+    </aliases>
 
-<!--  Script  -->
+    <!--  Script  -->
 
 
-<script>
-<![CDATA[
-require "json"
+    <script>
+        <![CDATA[
 require "serialize"
 
-local CLIENT_ID = json.encode({client="MUSHclient", version=Version ()})
-local IAC, SB, SE, DO = 0xFF, 0xFA, 0xF0, 0xFD
-local ATCP = 201
-local gmcpQueue = {}
+local supports = {
+  {"Char", 1}, {"Char.Skills", 1}, {"Char.Items", 1}, {"Comm.Channel", 1},
+  {"IRE.Rift", 1}, {"IRE.FileStore", 1}, {"Room", 1}, {"IRE.Composer", 1},
+  {"Redirect", 1}, {"IRE.Display", 3}, {"IRE.Tasks", 1}, {"IRE.Sound", 1},
+  {"IRE.Misc", 1}, {"IRE.Time", 1}, {"IRE.Target", 1},
+}
 
+--- @brief Registers this plugin's modules.
+local function register_gmcp_modules ()
+  if gmcp then
+    for _, module in ipairs (supports) do
+      gmcpRegisterModule (module[1], module[2])
+    end
+  end
+end
+
+local gmcpQueue = {}
 local logFile = io.open("GMCP_log.txt", "w")
 local logQueue = {}
 local logLength = logLength or 0
@@ -98,46 +105,63 @@ function toggleLogMode(state)
 	return logMode
 end
 
+--- @brief Sends an unframed message through GMCP.
+--- @param data Message name and optional JSON text.
+--- @return GMCP status code.
 function SendGMCPPacket(data)
-  SendPkt(string.char (IAC, SB, ATCP) .. data .. string.char (IAC, SE))
+  return gmcpSend(data)
 end
 
--- agree to use ATCP
-function OnPluginTelnetRequest (type, data)
-  
-  if type == ATCP and data == "WILL" then
-    return true
-  end -- if
-  
-  if type == ATCP and data == "SENT_DO" then
-    Note ("Enabling GMCP.")
-    SendGMCPPacket("Core.Hello " .. CLIENT_ID)
-    supports = {"Char 1", "Char.Skills 1", "Char.Items 1", "Comm.Channel 1", "IRE.Rift 1", "IRE.FileStore 1", "Room 1", "IRE.Composer 1", "Redirect 1", "IRE.Display 3", "IRE.Tasks 1", "IRE.Sound 1", "IRE.Misc 1", "IRE.Time 1", "IRE.Target 1"};
+--- @brief Sends alias text through GMCP without interpolating it into Lua source.
+--- @param name Alias name.
+--- @param line Original command line.
+--- @param wildcards Captured unframed GMCP message.
+function send_gmcp(name, line, wildcards)
+  if wildcards[1] ~= "debug" and SendGMCPPacket(wildcards[1]) == 0 then
+    Send("")
+  end
+end
 
-    SendGMCPPacket("Core.Supports.Set " .. json.encode(supports))
+--- @brief Registers required modules.
+function OnPluginInstall()
+  register_gmcp_modules()
+end
 
-     return true
-  end -- if ATCP login needed (just sent DO)
-  
-  return false
-  
-end -- function OnPluginTelnetRequest
+--- @brief Registers required modules.
+function OnPluginEnable()
+  register_gmcp_modules()
+end
 
-function OnPluginTelnetSubnegotiation (type, option)
+--- @brief Clears the previous connection's prompt batch and registers GMCP modules.
+function OnPluginConnect()
+  gmcpQueue = {}
+  PromptAck()
+  register_gmcp_modules()
+end
 
-  if type ~= ATCP then
-    return
-  end -- not Achaea subnegotiation
+--- @brief Discards unacknowledged messages from the closed connection.
+function OnPluginDisconnect()
+  gmcpQueue = {}
+  PromptAck()
+end
 
-  local command, args = string.match (option, "^([%a.]+)%s+(.*)$")
-  
-  if not command then
-    return
-  end -- don't seem to have a command
-  
-  --ExecuteNoStack("handle_GMCP " .. command .. "=" .. args)
-  gmcpQueue[#gmcpQueue+1] = {command, args}
-end -- function OnPluginTelnetSubnegotiation
+--- @brief Registers required modules after GMCP negotiation.
+--- @param enabled Whether GMCP is negotiated.
+function OnPluginGmcpStateChanged(enabled)
+  if enabled then
+    register_gmcp_modules()
+  end
+end
+
+--- @brief Processes the received GMCP event without consulting later live state.
+--- @param message Received message name.
+--- @param payload Parsed payload for this event.
+--- @param state Accumulated value for this event.
+--- @param raw Original unframed message.
+function onPluginGmcpMessage(message, payload, state, raw)
+  local args = raw:sub(#message + 1):match("^%s*(.*)$")
+  gmcpQueue[#gmcpQueue + 1] = {message, args}
+end
 
 function OnPlugin_IAC_GA()
   local gmcpQueueStr = serialize.save("gmcpQueue", gmcpQueue)
@@ -164,8 +188,17 @@ function ExecuteNoStack(cmd)
   Execute(cmd)
   SetOption("enable_command_stack", s)
 end
+
+--- @brief Closes the plugin's log file.
+function OnPluginClose()
+  if logFile then
+    logFile:close()
+    logFile = nil
+  end
+end
+
 ]]>
-</script>
+    </script>
 
 
-</muclient>
+</qmud>

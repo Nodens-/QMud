@@ -9,6 +9,7 @@
 #include "dialogs/WorldAliasDialog.h"
 #include "StringUtils.h"
 #include "WorldOptions.h"
+#include "dialogs/WorldPreferencesDialog.h"
 #include "helpers/WorldEditUtils.h"
 
 #include <QCheckBox>
@@ -20,7 +21,6 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSizePolicy>
@@ -29,7 +29,16 @@
 
 namespace
 {
-	bool editTextDialog(QWidget *parent, const QString &title, QString &text, const bool multiline)
+	/**
+	 * @brief Collects text changes from a modeless expression editor.
+	 * @param parent Owning rule editor.
+	 * @param title Dialog title.
+	 * @param text Caller-frame text updated on acceptance.
+	 * @param multiline Whether line breaks are retained.
+	 * @return Operation yielding whether edited text was accepted.
+	 */
+	QMudPreferences::Operation<bool> editTextDialog(QWidget *parent, QString title, QString &text,
+	                                                const bool multiline)
 	{
 		QDialog dlg(parent);
 		dlg.setWindowTitle(title);
@@ -49,10 +58,10 @@ namespace
 			QObject::connect(buttons.get(), &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
 			QObject::connect(buttons.get(), &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 			layoutPtr->addWidget(buttons.release());
-			if (dlg.exec() != QDialog::Accepted)
-				return false;
+			if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+				co_return false;
 			text = editPtr->toPlainText();
-			return true;
+			co_return true;
 		}
 
 		auto  edit    = std::make_unique<QPlainTextEdit>(&dlg);
@@ -65,12 +74,12 @@ namespace
 		QObject::connect(buttons.get(), &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
 		QObject::connect(buttons.get(), &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 		layoutPtr->addWidget(buttons.release());
-		if (dlg.exec() != QDialog::Accepted)
-			return false;
+		if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+			co_return false;
 		text = editPtr->toPlainText();
 		text.replace(QLatin1Char('\r'), QLatin1Char('\n'));
 		text.replace(QLatin1Char('\n'), QLatin1Char(' '));
-		return true;
+		co_return true;
 	}
 } // namespace
 
@@ -91,10 +100,10 @@ WorldRuntime::Alias WorldAliasDialog::alias() const
 	return m_alias;
 }
 
-void WorldAliasDialog::accept()
+QMudPreferences::Operation<void> WorldAliasDialog::acceptAsync()
 {
-	if (!validateAlias())
-		return;
+	if (!(co_await validateAlias()))
+		co_return;
 
 	QMap<QString, QString> &attrs = m_alias.attributes;
 	attrs.insert(QStringLiteral("match"), m_match->text());
@@ -121,19 +130,31 @@ void WorldAliasDialog::accept()
 
 	QDialog::accept();
 }
-
-void WorldAliasDialog::onEditMatch()
+void WorldAliasDialog::accept()
 {
-	if (QString text = m_match->text();
-	    editTextDialog(this, QStringLiteral("Edit alias 'match' text"), text, false))
-		m_match->setText(text);
+	(void)acceptAsync();
 }
 
-void WorldAliasDialog::onEditSend()
+QMudPreferences::Operation<void> WorldAliasDialog::onEditMatchAsync()
+{
+	if (QString text = m_match->text();
+	    (co_await editTextDialog(this, QStringLiteral("Edit alias 'match' text"), text, false)))
+		m_match->setText(text);
+}
+void WorldAliasDialog::onEditMatch()
+{
+	(void)onEditMatchAsync();
+}
+
+QMudPreferences::Operation<void> WorldAliasDialog::onEditSendAsync()
 {
 	if (QString text = m_send->toPlainText();
-	    editTextDialog(this, QStringLiteral("Edit alias 'send' text"), text, true))
+	    (co_await editTextDialog(this, QStringLiteral("Edit alias 'send' text"), text, true)))
 		m_send->setPlainText(text);
+}
+void WorldAliasDialog::onEditSend()
+{
+	(void)onEditSendAsync();
 }
 
 void WorldAliasDialog::onConvertToRegexp()
@@ -149,15 +170,19 @@ void WorldAliasDialog::onConvertToRegexp()
 	m_regexp->setChecked(true);
 }
 
-void WorldAliasDialog::onReverseSpeedwalk()
+QMudPreferences::Operation<void> WorldAliasDialog::onReverseSpeedwalkAsync()
 {
 	const QString result = WorldEditUtils::reverseSpeedwalk(m_send->toPlainText());
 	if (!result.isEmpty() && result.at(0) == QLatin1Char('*'))
 	{
-		QMessageBox::warning(this, QStringLiteral("QMud"), result.mid(1));
-		return;
+		(co_await QMudPreferences::warning(this, QStringLiteral("QMud"), result.mid(1)));
+		co_return;
 	}
 	m_send->setPlainText(result);
+}
+void WorldAliasDialog::onReverseSpeedwalk()
+{
+	(void)onReverseSpeedwalkAsync();
 }
 
 void WorldAliasDialog::onSendToChanged(int) const
@@ -349,10 +374,10 @@ void WorldAliasDialog::buildUi()
 	connect(m_buttons, &QDialogButtonBox::accepted, this, &WorldAliasDialog::accept);
 	connect(m_buttons, &QDialogButtonBox::rejected, this, &WorldAliasDialog::reject);
 	connect(m_buttons->button(QDialogButtonBox::Help), &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
-		        QMessageBox::information(this, QStringLiteral("Help"),
-		                                 QStringLiteral("Help is not available for this dialog."));
+		        (co_await QMudPreferences::information(
+		            this, QStringLiteral("Help"), QStringLiteral("Help is not available for this dialog.")));
 	        });
 	mainLayoutPtr->addWidget(m_buttons);
 
@@ -407,7 +432,7 @@ void WorldAliasDialog::loadAlias() const
 	onSendToChanged(m_sendTo->currentIndex());
 }
 
-bool WorldAliasDialog::validateAlias()
+QMudPreferences::Operation<bool> WorldAliasDialog::validateAlias()
 {
 	const QString matchText = m_match->text();
 	const QString sendText  = m_send->toPlainText();
@@ -423,9 +448,10 @@ bool WorldAliasDialog::validateAlias()
 
 	if (matchText.isEmpty())
 	{
-		QMessageBox::warning(this, QStringLiteral("QMud"), QStringLiteral("The alias cannot be blank."));
+		(co_await QMudPreferences::warning(this, QStringLiteral("QMud"),
+		                                   QStringLiteral("The alias cannot be blank.")));
 		m_match->setFocus();
-		return false;
+		co_return false;
 	}
 
 	// check for foolishly using ** in a non-regular expression
@@ -433,7 +459,7 @@ bool WorldAliasDialog::validateAlias()
 	{
 		WorldEditUtils::showMultipleAsterisksWarning(this);
 		m_match->setFocus();
-		return false;
+		co_return false;
 	}
 
 	const QList<ushort> invalidMatch = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -442,14 +468,14 @@ bool WorldAliasDialog::validateAlias()
 	    invalidMatchPos != -1)
 	{
 		const ushort code = matchText.at(invalidMatchPos).unicode();
-		QMessageBox::warning(
+		(co_await QMudPreferences::warning(
 		    this, QStringLiteral("QMud"),
 		    QStringLiteral("The alias 'match' text contains an invalid non-printable character "
-		                   "(hex %1) at position %2.")
+			               "(hex %1) at position %2.")
 		        .arg(code, 2, 16, QLatin1Char('0'))
-		        .arg(invalidMatchPos + 1));
+		        .arg(invalidMatchPos + 1)));
 		m_match->setFocus();
-		return false;
+		co_return false;
 	}
 
 	// we allow carriage-return, linefeed, tab here
@@ -459,14 +485,14 @@ bool WorldAliasDialog::validateAlias()
 	    invalidSendPos != -1)
 	{
 		const ushort code = sendText.at(invalidSendPos).unicode();
-		QMessageBox::warning(
+		(co_await QMudPreferences::warning(
 		    this, QStringLiteral("QMud"),
 		    QStringLiteral("The alias 'send' text contains an invalid non-printable character "
-		                   "(hex %1) at position %2.")
+			               "(hex %1) at position %2.")
 		        .arg(code, 2, 16, QLatin1Char('0'))
-		        .arg(invalidSendPos + 1));
+		        .arg(invalidSendPos + 1)));
 		m_send->setFocus();
-		return false;
+		co_return false;
 	}
 
 	if (m_regexp->isChecked())
@@ -477,7 +503,7 @@ bool WorldAliasDialog::validateAlias()
 		if (!WorldEditUtils::checkRegularExpression(this, matchText, opts))
 		{
 			m_match->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -491,22 +517,22 @@ bool WorldAliasDialog::validateAlias()
 			if (const QString other = alias.attributes.value(QStringLiteral("name"));
 			    !other.isEmpty() && other.compare(label, Qt::CaseInsensitive) == 0)
 			{
-				QMessageBox::warning(
+				(co_await QMudPreferences::warning(
 				    this, QStringLiteral("QMud"),
-				    QStringLiteral("The alias label \"%1\" is already in the list of aliases.").arg(label));
+				    QStringLiteral("The alias label \"%1\" is already in the list of aliases.").arg(label)));
 				m_label->setFocus();
-				return false;
+				co_return false;
 			}
 		}
 
 		if (WorldEditUtils::checkLabelInvalid(label, false))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The label must start with a letter and consist of letters, numbers "
-			                   "or the underscore character."));
+				               "or the underscore character.")));
 			m_label->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -514,23 +540,23 @@ bool WorldAliasDialog::validateAlias()
 	{
 		if (sendToValue() == eSendToVariable)
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
-			    QStringLiteral("When sending to a variable you must specify a variable name."));
+			    QStringLiteral("When sending to a variable you must specify a variable name.")));
 			m_variable->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 	else
 	{
 		if (WorldEditUtils::checkLabelInvalid(variable, false))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The variable name must start with a letter and consist of letters, "
-			                   "numbers or the underscore character."));
+				               "numbers or the underscore character.")));
 			m_variable->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -543,35 +569,35 @@ bool WorldAliasDialog::validateAlias()
 		if (const QString result = WorldEditUtils::evaluateSpeedwalk(sendText, filler);
 		    !result.isEmpty() && result.at(0) == QLatin1Char('*'))
 		{
-			QMessageBox::warning(this, QStringLiteral("QMud"), result.mid(1));
+			(co_await QMudPreferences::warning(this, QStringLiteral("QMud"), result.mid(1)));
 			m_send->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
 	if (sendText.isEmpty() && procedure.isEmpty())
 	{
-		QMessageBox::warning(
+		(co_await QMudPreferences::warning(
 		    this, QStringLiteral("QMud"),
-		    QStringLiteral("The alias contents cannot be blank unless you specify a script subroutine."));
+		    QStringLiteral("The alias contents cannot be blank unless you specify a script subroutine.")));
 		m_send->setFocus();
-		return false;
+		co_return false;
 	}
 
 	if (!procedure.isEmpty())
 	{
 		if (WorldEditUtils::checkLabelInvalid(procedure, true))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The script subroutine name must start with a letter and consist of "
-			                   "letters, numbers or the underscore character."));
+				               "letters, numbers or the underscore character.")));
 			m_script->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
-	return true;
+	co_return true;
 }
 
 bool WorldAliasDialog::isIncluded() const

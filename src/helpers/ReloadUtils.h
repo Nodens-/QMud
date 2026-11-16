@@ -70,6 +70,7 @@ struct ReloadWorldState
 		bool               mccpDisableSucceeded{false};
 		bool               nawsNegotiated{false};
 		bool               mspNegotiated{false};
+		QByteArray         nativeGmcpState;
 		QString            mspDefaultSoundUrl;
 		QString            mxpDefaultSoundUrl;
 		bool               utf8Enabled{false};
@@ -178,6 +179,17 @@ struct ReloadMccpProbeIngressInput
 class ReloadSocketRecoveryOps
 {
 	public:
+		/**
+		 * @brief Prepares preserved GMCP state before adoption.
+		 * @param state Serialized GMCP state.
+		 * @return Whether the state is valid.
+		 */
+		virtual bool prepareNativeGmcpRestore(const QByteArray &state)
+		{
+			Q_UNUSED(state);
+			return true;
+		}
+
 		virtual ~ReloadSocketRecoveryOps() = default;
 		/**
 		 * @brief Adopts a preserved connected socket and its negotiated protocol state.

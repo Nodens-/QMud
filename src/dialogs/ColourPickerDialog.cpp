@@ -7,6 +7,7 @@
  */
 
 #include "ColourPickerDialog.h"
+#include "dialogs/WorldPreferencesDialog.h"
 
 #include "ColorPacking.h"
 
@@ -382,22 +383,22 @@ ColourPickerDialog::ColourPickerDialog(QWidget *parent) : QDialog(parent)
 	        });
 
 	connect(m_swatch, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        QColorDialog dlg(m_colour, this);
 		        dlg.setOption(QColorDialog::ShowAlphaChannel, false);
-		        if (dlg.exec() != Accepted)
-			        return;
+		        if ((co_await QMudPreferences::wait(dlg)) != Accepted)
+			        co_return;
 		        setColour(dlg.selectedColor());
 	        });
 
 	connect(otherColourPtr, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        QColorDialog dlg(m_colour, this);
 		        dlg.setOption(QColorDialog::ShowAlphaChannel, false);
-		        if (dlg.exec() != Accepted)
-			        return;
+		        if ((co_await QMudPreferences::wait(dlg)) != Accepted)
+			        co_return;
 		        setColour(dlg.selectedColor());
 	        });
 	connect(randomPtr, &QPushButton::clicked, this,

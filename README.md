@@ -111,7 +111,7 @@ correctly on the active platform.
 4. Copy your MUSHclient world directory into QMud/ without overwriting anything.
 5. Delete QMud.conf and QMud.sqlite from QMud/ directory.
 6. Copy your mushclient.ini and mushclient_prefs.sqlite to QMud/ directory.
-7. Copy your *.db sqlite databases to QMud/ directory.
+7. Copy your *.db SQLite databases to QMud/ directory.
 8. Run QMud.
 9. Change Terminal Type (TTYPE) in world preferences to "QMud" unless you have a reason to keep it mushclient (e.g. Mud
    does some special handling on TTYPE).
@@ -253,6 +253,7 @@ Configure once (Docker targets are Linux-host only):
 ```bash
 cmake -S . -B cmake-build-release \
   -DCMAKE_BUILD_TYPE=Release \
+  -DQMUD_BUILD_NATIVE=OFF \
   -DQMUD_ENABLE_APPIMAGE=OFF \
   -DQMUD_ENABLE_APPIMAGE_DOCKER=ON \
   -DQMUD_ENABLE_MAC_DOCKER=ON \

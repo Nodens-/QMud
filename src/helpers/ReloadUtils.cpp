@@ -192,6 +192,9 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 		entry.insert(QStringLiteral("mccp_disable_succeeded"), world.mccpDisableSucceeded);
 		entry.insert(QStringLiteral("naws_negotiated"), world.nawsNegotiated);
 		entry.insert(QStringLiteral("msp_negotiated"), world.mspNegotiated);
+		if (!world.nativeGmcpState.isEmpty())
+			entry.insert(QStringLiteral("native_gmcp_state"),
+			             QString::fromLatin1(world.nativeGmcpState.toBase64()));
 		entry.insert(QStringLiteral("msp_default_sound_url"), world.mspDefaultSoundUrl);
 		entry.insert(QStringLiteral("mxp_default_sound_url"), world.mxpDefaultSoundUrl);
 		entry.insert(QStringLiteral("utf8_enabled"), world.utf8Enabled);
@@ -315,6 +318,26 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		}
 		const QJsonObject object = rawEntry.toObject();
 		ReloadWorldState  world;
+		if (object.contains(QStringLiteral("native_gmcp_state")))
+		{
+			const auto encoded = object.value(QStringLiteral("native_gmcp_state"));
+			if (!encoded.isString())
+			{
+				if (errorMessage)
+					*errorMessage = QStringLiteral("Invalid native GMCP handoff field.");
+				return false;
+			}
+			const auto result = QByteArray::fromBase64Encoding(encoded.toString().toLatin1(),
+			                                                   QByteArray::AbortOnBase64DecodingErrors);
+			if (!result)
+			{
+				if (errorMessage)
+					*errorMessage = QStringLiteral("Invalid native GMCP handoff encoding.");
+				return false;
+			}
+			world.nativeGmcpState = result.decoded;
+		}
+
 		if (!parseIntField(object, "sequence", world.sequence) ||
 		    !parseIntField(object, "fd", world.socketDescriptor) || !parsePortField(object, world.port))
 		{
@@ -505,7 +528,7 @@ ReloadMccpDisableDecision resolveReloadMccpDisableStatus(const ReloadMccpDisable
 		decision.statusLabel  = "failed";
 		decision.failureNote =
 		    QStringLiteral("MCCP shutdown encountered a fatal compression error during reload "
-		                   "preparation; the socket was preserved for startup reattach validation.");
+			               "preparation; the socket was preserved for startup reattach validation.");
 		break;
 	}
 	return decision;
@@ -549,6 +572,13 @@ ReloadRecoverySocketDecision applyReloadSocketRecovery(ReloadSocketRecoveryOps &
 	{
 		runtime.markReloadReattachConnectActionsSuppressed();
 		QString adoptError;
+		if (!runtime.prepareNativeGmcpRestore(worldState.nativeGmcpState))
+		{
+			(void)runtime.consumeReloadReattachConnectActionsSuppressed();
+			decision.outcome = ReloadRecoverySocketOutcome::ReconnectQueued;
+			decision.error   = QStringLiteral("Invalid saved GMCP state.");
+			return decision;
+		}
 		if (!runtime.adoptConnectedSocketDescriptor(worldState.socketDescriptor, worldState.nawsNegotiated,
 		                                            worldState.mspNegotiated, worldState.mspDefaultSoundUrl,
 		                                            worldState.mxpDefaultSoundUrl, &adoptError))
@@ -637,7 +667,7 @@ ReloadMccpProbeTimeoutAction resolveReloadMccpProbeTimeoutAction(const QByteArra
 		return ReloadMccpProbeTimeoutAction::WaitSecondPass;
 	return shouldReconnectOnReloadMccpProbeTimeout(bufferedProbePayload)
 	           ? ReloadMccpProbeTimeoutAction::Reconnect
-	           : ReloadMccpProbeTimeoutAction::KeepReattach;
+			   : ReloadMccpProbeTimeoutAction::KeepReattach;
 }
 
 QByteArray extractReloadMccpProbeDecisionPayload(const QByteArray &probeBuffer, const bool lookProbeSent,

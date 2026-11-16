@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
-project(QMud LANGUAGES C CXX)
+project(QMud LANGUAGES NONE)
+
+option(QMUD_BUILD_NATIVE "Configure native QMud, tests, and native packaging targets" ON)
+if (QMUD_BUILD_NATIVE)
+    enable_language(C CXX)
+endif ()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,1386 +78,1412 @@ if (CMAKE_LIBRARY_ARCHITECTURE)
 endif ()
 list(REMOVE_DUPLICATES QMUD_LUA_MODULE_SEARCH_PATHS)
 
-if (POLICY CMP0069)
-    cmake_policy(SET CMP0069 NEW)
-endif ()
-option(QMUD_PROBE_IPO "Probe toolchain for IPO/LTO support at configure time" ON)
-option(QMUD_LIMIT_PARALLEL_LINKS "Limit Ninja to two concurrent linker processes outside Debug builds" ON)
-if (CMAKE_GENERATOR MATCHES "Ninja"
-        AND QMUD_LIMIT_PARALLEL_LINKS
-        AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_property(GLOBAL PROPERTY JOB_POOLS link_pool=2)
-    set(CMAKE_JOB_POOL_LINK link_pool)
-endif ()
-include(ProcessorCount)
-ProcessorCount(QMUD_DETECTED_PROCESSOR_COUNT)
-if (QMUD_DETECTED_PROCESSOR_COUNT EQUAL 0)
-    set(QMUD_COMPUTED_GCC_LTO_JOBS 4)
-else ()
-    math(EXPR QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE "${QMUD_DETECTED_PROCESSOR_COUNT} - 4")
-    if (QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE LESS 4)
+if (QMUD_BUILD_NATIVE)
+    if (POLICY CMP0069)
+        cmake_policy(SET CMP0069 NEW)
+    endif ()
+    option(QMUD_PROBE_IPO "Probe toolchain for IPO/LTO support at configure time" ON)
+    option(QMUD_LIMIT_PARALLEL_LINKS "Limit Ninja to two concurrent linker processes outside Debug builds" ON)
+    if (CMAKE_GENERATOR MATCHES "Ninja"
+            AND QMUD_LIMIT_PARALLEL_LINKS
+            AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set_property(GLOBAL PROPERTY JOB_POOLS link_pool=2)
+        set(CMAKE_JOB_POOL_LINK link_pool)
+    endif ()
+    include(ProcessorCount)
+    ProcessorCount(QMUD_DETECTED_PROCESSOR_COUNT)
+    if (QMUD_DETECTED_PROCESSOR_COUNT EQUAL 0)
         set(QMUD_COMPUTED_GCC_LTO_JOBS 4)
-    elseif (QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE GREATER 12)
-        set(QMUD_COMPUTED_GCC_LTO_JOBS 12)
     else ()
-        set(QMUD_COMPUTED_GCC_LTO_JOBS "${QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE}")
+        math(EXPR QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE "${QMUD_DETECTED_PROCESSOR_COUNT} - 4")
+        if (QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE LESS 4)
+            set(QMUD_COMPUTED_GCC_LTO_JOBS 4)
+        elseif (QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE GREATER 12)
+            set(QMUD_COMPUTED_GCC_LTO_JOBS 12)
+        else ()
+            set(QMUD_COMPUTED_GCC_LTO_JOBS "${QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE}")
+        endif ()
     endif ()
-endif ()
-if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_C_COMPILE_OPTIONS_IPO "-flto=${QMUD_COMPUTED_GCC_LTO_JOBS}" "-fno-fat-lto-objects")
-endif ()
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_CXX_COMPILE_OPTIONS_IPO "-flto=${QMUD_COMPUTED_GCC_LTO_JOBS}" "-fno-fat-lto-objects")
-endif ()
-if (QMUD_PROBE_IPO)
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT QMUD_IPO_SUPPORTED OUTPUT QMUD_IPO_OUTPUT)
-    if (NOT QMUD_IPO_SUPPORTED)
-        message(STATUS "IPO/LTO is unavailable for this toolchain: ${QMUD_IPO_OUTPUT}")
+    if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        set(CMAKE_C_COMPILE_OPTIONS_IPO "-flto=${QMUD_COMPUTED_GCC_LTO_JOBS}" "-fno-fat-lto-objects")
     endif ()
-else ()
-    set(QMUD_IPO_SUPPORTED FALSE)
-    set(QMUD_IPO_OUTPUT "Skipped (QMUD_PROBE_IPO=OFF)")
-    message(STATUS "IPO/LTO probe skipped: ${QMUD_IPO_OUTPUT}")
-endif ()
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(CMAKE_CXX_COMPILE_OPTIONS_IPO "-flto=${QMUD_COMPUTED_GCC_LTO_JOBS}" "-fno-fat-lto-objects")
+    endif ()
+    if (QMUD_PROBE_IPO)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT QMUD_IPO_SUPPORTED OUTPUT QMUD_IPO_OUTPUT)
+        if (NOT QMUD_IPO_SUPPORTED)
+            message(STATUS "IPO/LTO is unavailable for this toolchain: ${QMUD_IPO_OUTPUT}")
+        endif ()
+    else ()
+        set(QMUD_IPO_SUPPORTED FALSE)
+        set(QMUD_IPO_OUTPUT "Skipped (QMUD_PROBE_IPO=OFF)")
+        message(STATUS "IPO/LTO probe skipped: ${QMUD_IPO_OUTPUT}")
+    endif ()
 
-function(qmud_apply_release_optimizations target_name)
-    get_target_property(QMUD_RELEASE_OPTIMIZATION_TARGET_TYPE ${target_name} TYPE)
-    if (MSVC)
-        target_compile_options(${target_name} PRIVATE
-                $<$<CONFIG:Release>:/O2>
-                $<$<CONFIG:Release>:/Oi>
-                $<$<CONFIG:Release>:/Gy>
-                $<$<CONFIG:Release>:/GL>
-        )
-        if (NOT QMUD_RELEASE_OPTIMIZATION_TARGET_TYPE STREQUAL "STATIC_LIBRARY")
-            target_link_options(${target_name} PRIVATE
-                    $<$<CONFIG:Release>:/OPT:REF>
-                    $<$<CONFIG:Release>:/OPT:ICF>
-                    $<$<CONFIG:Release>:/LTCG>
-            )
-        endif ()
-        if (QMUD_RELEASE_NATIVE_OPTIMIZATIONS)
+    function(qmud_apply_release_optimizations target_name)
+        get_target_property(QMUD_RELEASE_OPTIMIZATION_TARGET_TYPE ${target_name} TYPE)
+        if (MSVC)
             target_compile_options(${target_name} PRIVATE
-                    $<$<CONFIG:Release>:/arch:AVX2>
+                    $<$<CONFIG:Release>:/O2>
+                    $<$<CONFIG:Release>:/Oi>
+                    $<$<CONFIG:Release>:/Gy>
+                    $<$<CONFIG:Release>:/GL>
             )
-        endif ()
-    else ()
-        target_compile_options(${target_name} PRIVATE
-                $<$<CONFIG:Release>:-O3>
-                $<$<CONFIG:Release>:-fomit-frame-pointer>
-        )
-        if (NOT APPLE)
             if (NOT QMUD_RELEASE_OPTIMIZATION_TARGET_TYPE STREQUAL "STATIC_LIBRARY")
                 target_link_options(${target_name} PRIVATE
-                        $<$<CONFIG:Release>:-Wl,-O1>
+                        $<$<CONFIG:Release>:/OPT:REF>
+                        $<$<CONFIG:Release>:/OPT:ICF>
+                        $<$<CONFIG:Release>:/LTCG>
+                )
+            endif ()
+            if (QMUD_RELEASE_NATIVE_OPTIMIZATIONS)
+                target_compile_options(${target_name} PRIVATE
+                        $<$<CONFIG:Release>:/arch:AVX2>
+                )
+            endif ()
+        else ()
+            target_compile_options(${target_name} PRIVATE
+                    $<$<CONFIG:Release>:-O3>
+                    $<$<CONFIG:Release>:-fomit-frame-pointer>
+            )
+            if (NOT APPLE)
+                if (NOT QMUD_RELEASE_OPTIMIZATION_TARGET_TYPE STREQUAL "STATIC_LIBRARY")
+                    target_link_options(${target_name} PRIVATE
+                            $<$<CONFIG:Release>:-Wl,-O1>
+                    )
+                endif ()
+            endif ()
+            if (QMUD_RELEASE_NATIVE_OPTIMIZATIONS)
+                target_compile_options(${target_name} PRIVATE
+                        $<$<CONFIG:Release>:-march=native>
+                        $<$<CONFIG:Release>:-mtune=native>
                 )
             endif ()
         endif ()
-        if (QMUD_RELEASE_NATIVE_OPTIMIZATIONS)
-            target_compile_options(${target_name} PRIVATE
-                    $<$<CONFIG:Release>:-march=native>
-                    $<$<CONFIG:Release>:-mtune=native>
-            )
+
+        target_compile_definitions(${target_name} PRIVATE
+                $<$<CONFIG:Release>:NDEBUG>
+        )
+
+        if (QMUD_IPO_SUPPORTED)
+            set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
         endif ()
+    endfunction()
+
+    find_package(Qt6 REQUIRED COMPONENTS Widgets Network Sql PrintSupport)
+    find_package(Qt6 QUIET COMPONENTS Multimedia TextToSpeech)
+    if (QMUD_ENABLE_TESTING)
+        find_package(Qt6 REQUIRED COMPONENTS Test)
+        include(CTest)
+        enable_testing()
+    endif ()
+    find_package(PkgConfig QUIET)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+
+    set(QMUD_ZLIB_TARGET "")
+    if (PkgConfig_FOUND)
+        pkg_check_modules(ZLIB_PKG QUIET IMPORTED_TARGET zlib)
+    endif ()
+    if (TARGET PkgConfig::ZLIB_PKG)
+        # Prefer pkg-config zlib provider (zlib-ng compat on when available).
+        set(QMUD_ZLIB_TARGET PkgConfig::ZLIB_PKG)
+        message(STATUS "Using pkg-config zlib provider (prefer zlib-ng compat when available)")
+    else ()
+        find_package(ZLIB REQUIRED)
+        set(QMUD_ZLIB_TARGET ZLIB::ZLIB)
+        message(STATUS "Using CMake ZLIB provider fallback")
     endif ()
 
-    target_compile_definitions(${target_name} PRIVATE
-            $<$<CONFIG:Release>:NDEBUG>
+    # Basic Qt project setup (sets AUTOUIC/AUTOMOC/AUTORCC and other Qt defaults)
+    qt_standard_project_setup()
+    set(QMUD_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+    # FileExtensions.h is the single source of truth for runtime file handling and macOS bundle metadata.
+    set(QMUD_FILE_ASSOCIATIONS_HEADER "${QMUD_SRC_DIR}/FileExtensions.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${QMUD_FILE_ASSOCIATIONS_HEADER}")
+    file(READ "${QMUD_FILE_ASSOCIATIONS_HEADER}" QMUD_FILE_ASSOCIATIONS_CONTENT)
+
+    set(QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN
+            "static[ \t\r\n]+const[ \t\r\n]+QList<Entry>[ \t\r\n]+kEntries[ \t\r\n]*=")
+    string(REGEX MATCHALL "${QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN}"
+            QMUD_FILE_ASSOCIATIONS_DECLARATIONS "${QMUD_FILE_ASSOCIATIONS_CONTENT}")
+    list(LENGTH QMUD_FILE_ASSOCIATIONS_DECLARATIONS QMUD_FILE_ASSOCIATIONS_DECLARATION_COUNT)
+    if (NOT QMUD_FILE_ASSOCIATIONS_DECLARATION_COUNT EQUAL 1)
+        message(FATAL_ERROR "FileExtensions.h must contain exactly one kEntries association table")
+    endif ()
+    set(QMUD_FILE_ASSOCIATIONS_TABLE_PATTERN
+            "${QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN}[ \t\r\n]*\\{([^;]*)\\};")
+    if (NOT QMUD_FILE_ASSOCIATIONS_CONTENT MATCHES "${QMUD_FILE_ASSOCIATIONS_TABLE_PATTERN}")
+        message(FATAL_ERROR "Unable to parse the FileExtensions.h kEntries initializer")
+    endif ()
+    set(QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT "${CMAKE_MATCH_1}")
+
+    set(QMUD_FILE_ASSOCIATION_ROW_PATTERN
+            "\\{[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*\\}")
+    string(REGEX MATCHALL "\\{[ \t\r\n]*\"" QMUD_FILE_ASSOCIATION_ROW_STARTS
+            "${QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT}")
+    string(REGEX MATCHALL "${QMUD_FILE_ASSOCIATION_ROW_PATTERN}" QMUD_FILE_ASSOCIATION_ROWS
+            "${QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT}")
+    list(LENGTH QMUD_FILE_ASSOCIATION_ROW_STARTS QMUD_FILE_ASSOCIATION_ROW_START_COUNT)
+    list(LENGTH QMUD_FILE_ASSOCIATION_ROWS QMUD_FILE_ASSOCIATION_ROW_COUNT)
+    if (QMUD_FILE_ASSOCIATION_ROW_COUNT EQUAL 0 OR
+            NOT QMUD_FILE_ASSOCIATION_ROW_COUNT EQUAL QMUD_FILE_ASSOCIATION_ROW_START_COUNT)
+        message(FATAL_ERROR
+                "Every FileExtensions.h entry must be a six-string aggregate initializer; found "
+                "${QMUD_FILE_ASSOCIATION_ROW_COUNT} valid rows from ${QMUD_FILE_ASSOCIATION_ROW_START_COUNT} entries")
+    endif ()
+
+    function(qmud_xml_escape output_name input_value)
+        set(escaped "${input_value}")
+        string(REPLACE "&" "&amp;" escaped "${escaped}")
+        string(REPLACE "<" "&lt;" escaped "${escaped}")
+        string(REPLACE ">" "&gt;" escaped "${escaped}")
+        string(REPLACE "\"" "&quot;" escaped "${escaped}")
+        string(REPLACE "'" "&apos;" escaped "${escaped}")
+        set(${output_name} "${escaped}" PARENT_SCOPE)
+    endfunction()
+
+    set(QMUD_MAC_DOCUMENT_TYPES_XML "\t<key>CFBundleDocumentTypes</key>\n\t<array>\n")
+    set(QMUD_MAC_EXPORTED_TYPES_XML "\t<key>UTExportedTypeDeclarations</key>\n\t<array>\n")
+    set(QMUD_FILE_ASSOCIATION_WORLD_COUNT 0)
+
+    foreach (association_row IN LISTS QMUD_FILE_ASSOCIATION_ROWS)
+        if (NOT association_row MATCHES "^${QMUD_FILE_ASSOCIATION_ROW_PATTERN}$")
+            message(FATAL_ERROR "Unable to parse a FileExtensions.h entry")
+        endif ()
+        set(program_id_suffix "${CMAKE_MATCH_1}")
+        set(description "${CMAKE_MATCH_2}")
+        set(mime_type "${CMAKE_MATCH_3}")
+        set(modern_extension "${CMAKE_MATCH_4}")
+        set(legacy_extension "${CMAKE_MATCH_5}")
+        set(uniform_type_identifier "${CMAKE_MATCH_6}")
+
+        if (program_id_suffix STREQUAL "World")
+            math(EXPR QMUD_FILE_ASSOCIATION_WORLD_COUNT "${QMUD_FILE_ASSOCIATION_WORLD_COUNT} + 1")
+        endif ()
+
+        qmud_xml_escape(description_xml "${description}")
+        qmud_xml_escape(mime_type_xml "${mime_type}")
+        qmud_xml_escape(modern_extension_xml "${modern_extension}")
+        qmud_xml_escape(legacy_extension_xml "${legacy_extension}")
+        qmud_xml_escape(uniform_type_identifier_xml "${uniform_type_identifier}")
+
+        string(APPEND QMUD_MAC_DOCUMENT_TYPES_XML
+                "\t\t<dict>\n"
+                "\t\t\t<key>CFBundleTypeName</key>\n"
+                "\t\t\t<string>${description_xml}</string>\n"
+                "\t\t\t<key>CFBundleTypeRole</key>\n"
+                "\t\t\t<string>Editor</string>\n"
+                "\t\t\t<key>LSHandlerRank</key>\n"
+                "\t\t\t<string>Owner</string>\n"
+                "\t\t\t<key>LSItemContentTypes</key>\n"
+                "\t\t\t<array>\n"
+                "\t\t\t\t<string>${uniform_type_identifier_xml}</string>\n"
+                "\t\t\t</array>\n"
+                "\t\t</dict>\n")
+        string(APPEND QMUD_MAC_EXPORTED_TYPES_XML
+                "\t\t<dict>\n"
+                "\t\t\t<key>UTTypeConformsTo</key>\n"
+                "\t\t\t<array>\n"
+                "\t\t\t\t<string>public.xml</string>\n"
+                "\t\t\t</array>\n"
+                "\t\t\t<key>UTTypeDescription</key>\n"
+                "\t\t\t<string>${description_xml}</string>\n"
+                "\t\t\t<key>UTTypeIdentifier</key>\n"
+                "\t\t\t<string>${uniform_type_identifier_xml}</string>\n"
+                "\t\t\t<key>UTTypeTagSpecification</key>\n"
+                "\t\t\t<dict>\n"
+                "\t\t\t\t<key>public.filename-extension</key>\n"
+                "\t\t\t\t<array>\n"
+                "\t\t\t\t\t<string>${modern_extension_xml}</string>\n"
+                "\t\t\t\t\t<string>${legacy_extension_xml}</string>\n"
+                "\t\t\t\t</array>\n"
+                "\t\t\t\t<key>public.mime-type</key>\n"
+                "\t\t\t\t<string>${mime_type_xml}</string>\n"
+                "\t\t\t</dict>\n"
+                "\t\t</dict>\n")
+    endforeach ()
+
+    if (NOT QMUD_FILE_ASSOCIATION_WORLD_COUNT EQUAL 1)
+        message(FATAL_ERROR "FileExtensions.h must contain exactly one World association")
+    endif ()
+
+    string(APPEND QMUD_MAC_DOCUMENT_TYPES_XML "\t</array>")
+    string(APPEND QMUD_MAC_EXPORTED_TYPES_XML "\t</array>")
+    set(QMUD_MAC_INFO_PLIST_TEMPLATE "${CMAKE_CURRENT_BINARY_DIR}/QMudInfo.plist.in")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/macos/QMudInfo.plist.in"
+            "${QMUD_MAC_INFO_PLIST_TEMPLATE}" @ONLY)
+
+    # Core Qt entry-point sources (start minimal, expand as modules are ported)
+    set(QMUD_SOURCES
+            Main.cpp
+            helpers/MainWindowHostResolver.cpp
+            MainFrame.cpp
+            helpers/MainFrameActionUtils.cpp
+            helpers/MainFrameMdiUtils.cpp
+            TabActivationHistory.cpp
+            AppController.cpp
+            helpers/UpdateCheckUtils.cpp
+            helpers/TimeFormatUtils.cpp
+            helpers/TraceDispatchUtils.cpp
+            helpers/WorldSessionRestoreFlowUtils.cpp
+            helpers/WorldSessionStateUtils.cpp
+            helpers/ReloadUtils.cpp
+            helpers/SingleInstanceIpc.cpp
+            helpers/MushclientImportUtils.cpp
+            Environment.cpp
+            Accelerators.cpp
+            helpers/AliasMatchUtils.cpp
+            helpers/HyperlinkActionUtils.cpp
+            helpers/NoteColourUtils.cpp
+            helpers/WorldCommandProcessorUtils.cpp
+            helpers/SoundFileRoutingUtils.cpp
+            SoundEngine.cpp
+            SoundPcmStream.cpp
+            MspProtocol.cpp
+            helpers/ShortcutPreferenceUtils.cpp
+            helpers/LuaExecutionUtils.cpp
+            helpers/LuaModalDialogUtils.cpp
+            helpers/AccessibleTextUtils.cpp
+            helpers/PluginPathUtils.cpp
+            helpers/OutputWrapUtils.cpp
+            helpers/GuiSystemUtils.cpp
+            NameGeneration.cpp
+            DoubleMetaphone.cpp
+            ErrorDescriptions.cpp
+            AsciiArt.cpp
+            helpers/WorldPreferencesRoutingUtils.cpp
+            WorldChildWindow.cpp
+            dialogs/TipDialog.cpp
+            dialogs/WelcomeDialog.cpp
+            dialogs/WelcomeUpgradeDialog.cpp
+            ActivityDocument.cpp
+            ActivityWindow.cpp
+            dialogs/ImportXmlDialog.cpp
+            WorldDocument.cpp
+            NativePluginRegistry.cpp
+            SqliteCompat.cpp
+            WorldRuntime.cpp
+            PluginStatePersistence.cpp
+            WorldCommandProcessor.cpp
+            SpeedwalkParser.cpp
+            helpers/TimerSchedulingUtils.cpp
+            helpers/AnsiSgrParseUtils.cpp
+            WorldView.cpp
+            WorldSocket.cpp
+            GmcpProtocol.cpp
+            TelnetProcessor.cpp
+            WorldOptions.cpp
+            WorldOptionDefaults.cpp
+            MxpDebugWindow.cpp
+            helpers/EncodingUtils.cpp
+            helpers/ColorUtils.cpp
+            helpers/MiniWindowUtils.cpp
+            helpers/FontUtils.cpp
+            BraceMatch.cpp
+            LuaExecutor.cpp
+            LuaExecutorWorker.cpp
+            helpers/LuaCompletionDeliveryUtils.cpp
+            LuaCallbackEngine.cpp
+            LuaApiExport.cpp
+            LuaFunctionMetadata.cpp
+            InfoTypesMetadata.cpp
+            helpers/StringUtils.cpp
+            LuaSupport.cpp
+            TtsEngine.cpp
+            LuaLuacomShim.cpp
+            helpers/AcceleratorUtils.cpp
+            dialogs/LogSessionDialog.cpp
+            MdiTabs.cpp
+            dialogs/PluginsDialog.cpp
+            dialogs/PluginWizardDialog.cpp
+            dialogs/GeneratedNameDialog.cpp
+            dialogs/GmcpBrowserDialog.cpp
+            dialogs/ColourPickerDialog.cpp
+            dialogs/ConfirmPreambleDialog.cpp
+            dialogs/HighlightPhraseDialog.cpp
+            dialogs/SpellCheckDialog.cpp
+            dialogs/FindDialog.cpp
+            dialogs/CommandHistoryDialog.cpp
+            dialogs/WorldPreferencesDialog.cpp
+            helpers/WorldEditUtils.cpp
+            dialogs/WorldAliasDialog.cpp
+            dialogs/WorldTriggerDialog.cpp
+            dialogs/WorldTimerDialog.cpp
+            dialogs/GlobalPreferencesDialog.cpp
     )
 
-    if (QMUD_IPO_SUPPORTED)
-        set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    # Optionally collect headers (helps IDEs) — not required for build
+    set(QMUD_HEADERS
+            MainWindowHost.h
+            AtomicSharedPtrCompat.h
+            helpers/MainWindowHostResolver.h
+            Version.h
+            MainFrame.h
+            helpers/MainFrameActionUtils.h
+            helpers/MainFrameMdiUtils.h
+            helpers/LuaCallbackNotepadPresentationUtils.h
+            helpers/LuaExecutionUtils.h
+            helpers/LuaCompletionDeliveryUtils.h
+            helpers/LuaModalDialogUtils.h
+            helpers/AccessibleTextUtils.h
+            helpers/PluginPathUtils.h
+            helpers/OutputWrapUtils.h
+            TabActivationHistory.h
+            AppController.h
+            Environment.h
+            helpers/LogCompressionUtils.h
+            helpers/ReloadUtils.h
+            helpers/SingleInstanceIpc.h
+            helpers/MushclientImportUtils.h
+            helpers/WorldSessionRestoreFlowUtils.h
+            helpers/WorldSessionStateUtils.h
+            helpers/PluginCallbackCatalogUtils.h
+            helpers/PluginCallbackDispatchUtils.h
+            Accelerators.h
+            helpers/AcceleratorUtils.h
+            helpers/AliasMatchUtils.h
+            helpers/NoteColourUtils.h
+            CommandMappingTypes.h
+            helpers/WorldCommandProcessorUtils.h
+            helpers/SoundFileRoutingUtils.h
+            SoundEngine.h
+            SoundPcmStream.h
+            helpers/ShortcutPreferenceUtils.h
+            ErrorDescriptions.h
+            InfoTypesMetadata.h
+            InfoTypeData.inc
+            LuaFunctionTypes.h
+            SqliteCompat.h
+            TtsEngine.h
+            LuaLuacomShim.h
+            AsciiArt.h
+            WorldChildWindow.h
+            dialogs/TipDialog.h
+            dialogs/WelcomeDialog.h
+            dialogs/WelcomeUpgradeDialog.h
+            ActivityDocument.h
+            ActivityWindow.h
+            dialogs/ImportXmlDialog.h
+            WorldDocument.h
+            PluginStatePersistence.h
+            helpers/XmlEscapeUtils.h
+            XmlImportResult.h
+            NativePluginRegistry.h
+            WorldRuntime.h
+            helpers/WorldRuntimeAttributeUtils.h
+            MiniWindow.h
+            helpers/MiniWindowUtils.h
+            WorldCommandProcessor.h
+            SpeedwalkParser.h
+            helpers/TimerSchedulingUtils.h
+            helpers/AnsiSgrParseUtils.h
+            WorldView.h
+            CommandIds.h
+            WorldSocketService.h
+            WorldSocket.h
+            GmcpProtocol.h
+            TelnetProcessor.h
+            WorldOptions.h
+            WorldOptionDefaults.h
+            WorldOptionsDataNumeric.inc
+            MxpDiagnostics.h
+            MxpDebugWindow.h
+            BraceMatch.h
+            LuaExecutor.h
+            LuaCallbackContinuation.h
+            LuaExecutorWorker.h
+            LuaCallbackEngine.h
+            LuaApiExport.h
+            FileExtensions.h
+            helpers/WorldPreferencesRoutingUtils.h
+            dialogs/LogSessionDialog.h
+            MdiTabs.h
+            dialogs/PluginsDialog.h
+            dialogs/PluginWizardDialog.h
+            dialogs/GeneratedNameDialog.h
+            dialogs/GmcpBrowserDialog.h
+            dialogs/ColourPickerDialog.h
+            dialogs/ConfirmPreambleDialog.h
+            dialogs/HighlightPhraseDialog.h
+            dialogs/SpellCheckDialog.h
+            dialogs/FindDialog.h
+            dialogs/CommandHistoryDialog.h
+            dialogs/WorldPreferencesDialog.h
+            helpers/WorldEditUtils.h
+            dialogs/WorldAliasDialog.h
+            dialogs/WorldTriggerDialog.h
+            dialogs/WorldTimerDialog.h
+            dialogs/GlobalPreferencesDialog.h
+    )
+
+    set(QMUD_SOURCE_FILES_ABS)
+    foreach (QMUD_SOURCE_FILE IN LISTS QMUD_SOURCES)
+        list(APPEND QMUD_SOURCE_FILES_ABS "${QMUD_SRC_DIR}/${QMUD_SOURCE_FILE}")
+    endforeach ()
+
+    set(QMUD_HEADER_FILES_ABS)
+    set(QMUD_MISSING_HEADER_FILES)
+    foreach (QMUD_HEADER_FILE IN LISTS QMUD_HEADERS)
+        set(QMUD_HEADER_PATH "${QMUD_SRC_DIR}/${QMUD_HEADER_FILE}")
+        if (EXISTS "${QMUD_HEADER_PATH}")
+            list(APPEND QMUD_HEADER_FILES_ABS "${QMUD_HEADER_PATH}")
+        else ()
+            list(APPEND QMUD_MISSING_HEADER_FILES "${QMUD_HEADER_FILE}")
+        endif ()
+    endforeach ()
+    if (QMUD_MISSING_HEADER_FILES)
+        string(JOIN "\n  - " QMUD_MISSING_HEADER_FILES_JOINED ${QMUD_MISSING_HEADER_FILES})
+        message(WARNING
+                "Skipping missing QMud headers listed for IDE grouping:\n"
+                "  - ${QMUD_MISSING_HEADER_FILES_JOINED}\n"
+                "Build will continue; verify file renames/casing if unexpected.")
     endif ()
-endfunction()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network Sql PrintSupport)
-find_package(Qt6 QUIET COMPONENTS Multimedia TextToSpeech)
-if (QMUD_ENABLE_TESTING)
-    find_package(Qt6 REQUIRED COMPONENTS Test)
-    include(CTest)
-    enable_testing()
-endif ()
-find_package(PkgConfig QUIET)
-find_package(Python3 QUIET COMPONENTS Interpreter)
+    set(QMUD_APP_SOURCE_FILES_ABS ${QMUD_SOURCE_FILES_ABS})
+    list(REMOVE_ITEM QMUD_APP_SOURCE_FILES_ABS "${QMUD_SRC_DIR}/Main.cpp")
 
-set(QMUD_ZLIB_TARGET "")
-if (PkgConfig_FOUND)
-    pkg_check_modules(ZLIB_PKG QUIET IMPORTED_TARGET zlib)
-endif ()
-if (TARGET PkgConfig::ZLIB_PKG)
-    # Prefer pkg-config zlib provider (zlib-ng compat on when available).
-    set(QMUD_ZLIB_TARGET PkgConfig::ZLIB_PKG)
-    message(STATUS "Using pkg-config zlib provider (prefer zlib-ng compat when available)")
-else ()
-    find_package(ZLIB REQUIRED)
-    set(QMUD_ZLIB_TARGET ZLIB::ZLIB)
-    message(STATUS "Using CMake ZLIB provider fallback")
-endif ()
-
-# Basic Qt project setup (sets AUTOUIC/AUTOMOC/AUTORCC and other Qt defaults)
-qt_standard_project_setup()
-set(QMUD_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
-
-# FileExtensions.h is the single source of truth for runtime file handling and macOS bundle metadata.
-set(QMUD_FILE_ASSOCIATIONS_HEADER "${QMUD_SRC_DIR}/FileExtensions.h")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${QMUD_FILE_ASSOCIATIONS_HEADER}")
-file(READ "${QMUD_FILE_ASSOCIATIONS_HEADER}" QMUD_FILE_ASSOCIATIONS_CONTENT)
-
-set(QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN
-        "static[ \t\r\n]+const[ \t\r\n]+QList<Entry>[ \t\r\n]+kEntries[ \t\r\n]*=")
-string(REGEX MATCHALL "${QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN}"
-        QMUD_FILE_ASSOCIATIONS_DECLARATIONS "${QMUD_FILE_ASSOCIATIONS_CONTENT}")
-list(LENGTH QMUD_FILE_ASSOCIATIONS_DECLARATIONS QMUD_FILE_ASSOCIATIONS_DECLARATION_COUNT)
-if (NOT QMUD_FILE_ASSOCIATIONS_DECLARATION_COUNT EQUAL 1)
-    message(FATAL_ERROR "FileExtensions.h must contain exactly one kEntries association table")
-endif ()
-set(QMUD_FILE_ASSOCIATIONS_TABLE_PATTERN
-        "${QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN}[ \t\r\n]*\\{([^;]*)\\};")
-if (NOT QMUD_FILE_ASSOCIATIONS_CONTENT MATCHES "${QMUD_FILE_ASSOCIATIONS_TABLE_PATTERN}")
-    message(FATAL_ERROR "Unable to parse the FileExtensions.h kEntries initializer")
-endif ()
-set(QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT "${CMAKE_MATCH_1}")
-
-set(QMUD_FILE_ASSOCIATION_ROW_PATTERN
-        "\\{[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*\\}")
-string(REGEX MATCHALL "\\{[ \t\r\n]*\"" QMUD_FILE_ASSOCIATION_ROW_STARTS
-        "${QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT}")
-string(REGEX MATCHALL "${QMUD_FILE_ASSOCIATION_ROW_PATTERN}" QMUD_FILE_ASSOCIATION_ROWS
-        "${QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT}")
-list(LENGTH QMUD_FILE_ASSOCIATION_ROW_STARTS QMUD_FILE_ASSOCIATION_ROW_START_COUNT)
-list(LENGTH QMUD_FILE_ASSOCIATION_ROWS QMUD_FILE_ASSOCIATION_ROW_COUNT)
-if (QMUD_FILE_ASSOCIATION_ROW_COUNT EQUAL 0 OR
-        NOT QMUD_FILE_ASSOCIATION_ROW_COUNT EQUAL QMUD_FILE_ASSOCIATION_ROW_START_COUNT)
-    message(FATAL_ERROR
-            "Every FileExtensions.h entry must be a six-string aggregate initializer; found "
-            "${QMUD_FILE_ASSOCIATION_ROW_COUNT} valid rows from ${QMUD_FILE_ASSOCIATION_ROW_START_COUNT} entries")
-endif ()
-
-function(qmud_xml_escape output_name input_value)
-    set(escaped "${input_value}")
-    string(REPLACE "&" "&amp;" escaped "${escaped}")
-    string(REPLACE "<" "&lt;" escaped "${escaped}")
-    string(REPLACE ">" "&gt;" escaped "${escaped}")
-    string(REPLACE "\"" "&quot;" escaped "${escaped}")
-    string(REPLACE "'" "&apos;" escaped "${escaped}")
-    set(${output_name} "${escaped}" PARENT_SCOPE)
-endfunction()
-
-set(QMUD_MAC_DOCUMENT_TYPES_XML "\t<key>CFBundleDocumentTypes</key>\n\t<array>\n")
-set(QMUD_MAC_EXPORTED_TYPES_XML "\t<key>UTExportedTypeDeclarations</key>\n\t<array>\n")
-set(QMUD_FILE_ASSOCIATION_WORLD_COUNT 0)
-
-foreach (association_row IN LISTS QMUD_FILE_ASSOCIATION_ROWS)
-    if (NOT association_row MATCHES "^${QMUD_FILE_ASSOCIATION_ROW_PATTERN}$")
-        message(FATAL_ERROR "Unable to parse a FileExtensions.h entry")
-    endif ()
-    set(program_id_suffix "${CMAKE_MATCH_1}")
-    set(description "${CMAKE_MATCH_2}")
-    set(mime_type "${CMAKE_MATCH_3}")
-    set(modern_extension "${CMAKE_MATCH_4}")
-    set(legacy_extension "${CMAKE_MATCH_5}")
-    set(uniform_type_identifier "${CMAKE_MATCH_6}")
-
-    if (program_id_suffix STREQUAL "World")
-        math(EXPR QMUD_FILE_ASSOCIATION_WORLD_COUNT "${QMUD_FILE_ASSOCIATION_WORLD_COUNT} + 1")
+    add_library(qmud_app_core STATIC ${QMUD_APP_SOURCE_FILES_ABS} ${QMUD_HEADER_FILES_ABS})
+    add_executable(QMud "${QMUD_SRC_DIR}/Main.cpp")
+    if (WIN32)
+        set_target_properties(QMud PROPERTIES WIN32_EXECUTABLE TRUE)
     endif ()
 
-    qmud_xml_escape(description_xml "${description}")
-    qmud_xml_escape(mime_type_xml "${mime_type}")
-    qmud_xml_escape(modern_extension_xml "${modern_extension}")
-    qmud_xml_escape(legacy_extension_xml "${legacy_extension}")
-    qmud_xml_escape(uniform_type_identifier_xml "${uniform_type_identifier}")
 
-    string(APPEND QMUD_MAC_DOCUMENT_TYPES_XML
-            "\t\t<dict>\n"
-            "\t\t\t<key>CFBundleTypeName</key>\n"
-            "\t\t\t<string>${description_xml}</string>\n"
-            "\t\t\t<key>CFBundleTypeRole</key>\n"
-            "\t\t\t<string>Editor</string>\n"
-            "\t\t\t<key>LSHandlerRank</key>\n"
-            "\t\t\t<string>Owner</string>\n"
-            "\t\t\t<key>LSItemContentTypes</key>\n"
-            "\t\t\t<array>\n"
-            "\t\t\t\t<string>${uniform_type_identifier_xml}</string>\n"
-            "\t\t\t</array>\n"
-            "\t\t</dict>\n")
-    string(APPEND QMUD_MAC_EXPORTED_TYPES_XML
-            "\t\t<dict>\n"
-            "\t\t\t<key>UTTypeConformsTo</key>\n"
-            "\t\t\t<array>\n"
-            "\t\t\t\t<string>public.xml</string>\n"
-            "\t\t\t</array>\n"
-            "\t\t\t<key>UTTypeDescription</key>\n"
-            "\t\t\t<string>${description_xml}</string>\n"
-            "\t\t\t<key>UTTypeIdentifier</key>\n"
-            "\t\t\t<string>${uniform_type_identifier_xml}</string>\n"
-            "\t\t\t<key>UTTypeTagSpecification</key>\n"
-            "\t\t\t<dict>\n"
-            "\t\t\t\t<key>public.filename-extension</key>\n"
-            "\t\t\t\t<array>\n"
-            "\t\t\t\t\t<string>${modern_extension_xml}</string>\n"
-            "\t\t\t\t\t<string>${legacy_extension_xml}</string>\n"
-            "\t\t\t\t</array>\n"
-            "\t\t\t\t<key>public.mime-type</key>\n"
-            "\t\t\t\t<string>${mime_type_xml}</string>\n"
-            "\t\t\t</dict>\n"
-            "\t\t</dict>\n")
-endforeach ()
+    # Ensure Qt auto tools are ON (redundant with qt_standard_project_setup, kept as fallback)
+    set_target_properties(qmud_app_core PROPERTIES
+            CXX_STANDARD 20
+            AUTOMOC ON
+            AUTOUIC ON
+            AUTORCC ON
+    )
+    set_target_properties(QMud PROPERTIES
+            CXX_STANDARD 20
+            AUTOMOC ON
+            AUTOUIC ON
+            AUTORCC ON
+    )
+    target_include_directories(qmud_app_core
+            PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/helpers")
 
-if (NOT QMUD_FILE_ASSOCIATION_WORLD_COUNT EQUAL 1)
-    message(FATAL_ERROR "FileExtensions.h must contain exactly one World association")
-endif ()
-
-string(APPEND QMUD_MAC_DOCUMENT_TYPES_XML "\t</array>")
-string(APPEND QMUD_MAC_EXPORTED_TYPES_XML "\t</array>")
-set(QMUD_MAC_INFO_PLIST_TEMPLATE "${CMAKE_CURRENT_BINARY_DIR}/QMudInfo.plist.in")
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/macos/QMudInfo.plist.in"
-        "${QMUD_MAC_INFO_PLIST_TEMPLATE}" @ONLY)
-
-# Core Qt entry-point sources (start minimal, expand as modules are ported)
-set(QMUD_SOURCES
-        Main.cpp
-        helpers/MainWindowHostResolver.cpp
-        MainFrame.cpp
-        helpers/MainFrameActionUtils.cpp
-        helpers/MainFrameMdiUtils.cpp
-        TabActivationHistory.cpp
-        AppController.cpp
-        helpers/UpdateCheckUtils.cpp
-        helpers/TimeFormatUtils.cpp
-        helpers/TraceDispatchUtils.cpp
-        helpers/WorldSessionRestoreFlowUtils.cpp
-        helpers/WorldSessionStateUtils.cpp
-        helpers/ReloadUtils.cpp
-        helpers/SingleInstanceIpc.cpp
-        helpers/MushclientImportUtils.cpp
-        Environment.cpp
-        Accelerators.cpp
-        helpers/AliasMatchUtils.cpp
-        helpers/HyperlinkActionUtils.cpp
-        helpers/NoteColourUtils.cpp
-        helpers/WorldCommandProcessorUtils.cpp
-        helpers/SoundFileRoutingUtils.cpp
-        SoundEngine.cpp
-        SoundPcmStream.cpp
-        MspProtocol.cpp
-        helpers/ShortcutPreferenceUtils.cpp
-        helpers/LuaExecutionUtils.cpp
-        helpers/LuaModalDialogUtils.cpp
-        helpers/AccessibleTextUtils.cpp
-        helpers/PluginPathUtils.cpp
-        helpers/OutputWrapUtils.cpp
-        helpers/GuiSystemUtils.cpp
-        NameGeneration.cpp
-        DoubleMetaphone.cpp
-        ErrorDescriptions.cpp
-        AsciiArt.cpp
-        helpers/WorldPreferencesRoutingUtils.cpp
-        WorldChildWindow.cpp
-        dialogs/TipDialog.cpp
-        dialogs/WelcomeDialog.cpp
-        dialogs/WelcomeUpgradeDialog.cpp
-        ActivityDocument.cpp
-        ActivityWindow.cpp
-        dialogs/ImportXmlDialog.cpp
-        WorldDocument.cpp
-        NativePluginRegistry.cpp
-        SqliteCompat.cpp
-        WorldRuntime.cpp
-        PluginStatePersistence.cpp
-        WorldCommandProcessor.cpp
-        SpeedwalkParser.cpp
-        helpers/TimerSchedulingUtils.cpp
-        helpers/AnsiSgrParseUtils.cpp
-        WorldView.cpp
-        WorldSocket.cpp
-        TelnetProcessor.cpp
-        WorldOptions.cpp
-        WorldOptionDefaults.cpp
-        MxpDebugWindow.cpp
-        helpers/EncodingUtils.cpp
-        helpers/ColorUtils.cpp
-        helpers/MiniWindowUtils.cpp
-        helpers/FontUtils.cpp
-        BraceMatch.cpp
-        LuaExecutor.cpp
-        LuaExecutorWorker.cpp
-        helpers/LuaCompletionDeliveryUtils.cpp
-        LuaCallbackEngine.cpp
-        LuaApiExport.cpp
-        LuaFunctionMetadata.cpp
-        InfoTypesMetadata.cpp
-        helpers/StringUtils.cpp
-        LuaSupport.cpp
-        TtsEngine.cpp
-        LuaLuacomShim.cpp
-        helpers/AcceleratorUtils.cpp
-        dialogs/LogSessionDialog.cpp
-        MdiTabs.cpp
-        dialogs/PluginsDialog.cpp
-        dialogs/PluginWizardDialog.cpp
-        dialogs/GeneratedNameDialog.cpp
-        dialogs/ColourPickerDialog.cpp
-        dialogs/ConfirmPreambleDialog.cpp
-        dialogs/HighlightPhraseDialog.cpp
-        dialogs/SpellCheckDialog.cpp
-        dialogs/FindDialog.cpp
-        dialogs/CommandHistoryDialog.cpp
-        dialogs/WorldPreferencesDialog.cpp
-        helpers/WorldEditUtils.cpp
-        dialogs/WorldAliasDialog.cpp
-        dialogs/WorldTriggerDialog.cpp
-        dialogs/WorldTimerDialog.cpp
-        dialogs/GlobalPreferencesDialog.cpp
-)
-
-# Optionally collect headers (helps IDEs) — not required for build
-set(QMUD_HEADERS
-        MainWindowHost.h
-        AtomicSharedPtrCompat.h
-        helpers/MainWindowHostResolver.h
-        Version.h
-        MainFrame.h
-        helpers/MainFrameActionUtils.h
-        helpers/MainFrameMdiUtils.h
-        helpers/LuaCallbackNotepadPresentationUtils.h
-        helpers/LuaExecutionUtils.h
-        helpers/LuaCompletionDeliveryUtils.h
-        helpers/LuaModalDialogUtils.h
-        helpers/AccessibleTextUtils.h
-        helpers/PluginPathUtils.h
-        helpers/OutputWrapUtils.h
-        TabActivationHistory.h
-        AppController.h
-        Environment.h
-        helpers/LogCompressionUtils.h
-        helpers/ReloadUtils.h
-        helpers/SingleInstanceIpc.h
-        helpers/MushclientImportUtils.h
-        helpers/WorldSessionRestoreFlowUtils.h
-        helpers/WorldSessionStateUtils.h
-        helpers/PluginCallbackCatalogUtils.h
-        helpers/PluginCallbackDispatchUtils.h
-        Accelerators.h
-        helpers/AcceleratorUtils.h
-        helpers/AliasMatchUtils.h
-        helpers/NoteColourUtils.h
-        CommandMappingTypes.h
-        helpers/WorldCommandProcessorUtils.h
-        helpers/SoundFileRoutingUtils.h
-        SoundEngine.h
-        SoundPcmStream.h
-        helpers/ShortcutPreferenceUtils.h
-        ErrorDescriptions.h
-        InfoTypesMetadata.h
-        InfoTypeData.inc
-        LuaFunctionTypes.h
-        SqliteCompat.h
-        TtsEngine.h
-        LuaLuacomShim.h
-        AsciiArt.h
-        WorldChildWindow.h
-        dialogs/TipDialog.h
-        dialogs/WelcomeDialog.h
-        dialogs/WelcomeUpgradeDialog.h
-        ActivityDocument.h
-        ActivityWindow.h
-        dialogs/ImportXmlDialog.h
-        WorldDocument.h
-        PluginStatePersistence.h
-        helpers/XmlEscapeUtils.h
-        XmlImportResult.h
-        NativePluginRegistry.h
-        WorldRuntime.h
-        helpers/WorldRuntimeAttributeUtils.h
-        MiniWindow.h
-        helpers/MiniWindowUtils.h
-        WorldCommandProcessor.h
-        SpeedwalkParser.h
-        helpers/TimerSchedulingUtils.h
-        helpers/AnsiSgrParseUtils.h
-        WorldView.h
-        CommandIds.h
-        WorldSocketService.h
-        WorldSocket.h
-        TelnetProcessor.h
-        WorldOptions.h
-        WorldOptionDefaults.h
-        WorldOptionsDataNumeric.inc
-        MxpDiagnostics.h
-        MxpDebugWindow.h
-        BraceMatch.h
-        LuaExecutor.h
-        LuaCallbackContinuation.h
-        LuaExecutorWorker.h
-        LuaCallbackEngine.h
-        LuaApiExport.h
-        FileExtensions.h
-        helpers/WorldPreferencesRoutingUtils.h
-        dialogs/LogSessionDialog.h
-        MdiTabs.h
-        dialogs/PluginsDialog.h
-        dialogs/PluginWizardDialog.h
-        dialogs/GeneratedNameDialog.h
-        dialogs/ColourPickerDialog.h
-        dialogs/ConfirmPreambleDialog.h
-        dialogs/HighlightPhraseDialog.h
-        dialogs/SpellCheckDialog.h
-        dialogs/FindDialog.h
-        dialogs/CommandHistoryDialog.h
-        dialogs/WorldPreferencesDialog.h
-        helpers/WorldEditUtils.h
-        dialogs/WorldAliasDialog.h
-        dialogs/WorldTriggerDialog.h
-        dialogs/WorldTimerDialog.h
-        dialogs/GlobalPreferencesDialog.h
-)
-
-set(QMUD_SOURCE_FILES_ABS)
-foreach (QMUD_SOURCE_FILE IN LISTS QMUD_SOURCES)
-    list(APPEND QMUD_SOURCE_FILES_ABS "${QMUD_SRC_DIR}/${QMUD_SOURCE_FILE}")
-endforeach ()
-
-set(QMUD_HEADER_FILES_ABS)
-set(QMUD_MISSING_HEADER_FILES)
-foreach (QMUD_HEADER_FILE IN LISTS QMUD_HEADERS)
-    set(QMUD_HEADER_PATH "${QMUD_SRC_DIR}/${QMUD_HEADER_FILE}")
-    if (EXISTS "${QMUD_HEADER_PATH}")
-        list(APPEND QMUD_HEADER_FILES_ABS "${QMUD_HEADER_PATH}")
+    set(QMUD_QT_MULTIMEDIA_TARGET "")
+    set(QMUD_ENABLE_SOUND_VALUE 0)
+    if (TARGET Qt6::Multimedia)
+        set(QMUD_QT_MULTIMEDIA_TARGET Qt6::Multimedia)
+        set(QMUD_ENABLE_SOUND_VALUE 1)
     else ()
-        list(APPEND QMUD_MISSING_HEADER_FILES "${QMUD_HEADER_FILE}")
+        message(WARNING "Qt6 Multimedia module not found; building with QMUD_ENABLE_SOUND=0")
     endif ()
-endforeach ()
-if (QMUD_MISSING_HEADER_FILES)
-    string(JOIN "\n  - " QMUD_MISSING_HEADER_FILES_JOINED ${QMUD_MISSING_HEADER_FILES})
-    message(WARNING
-            "Skipping missing QMud headers listed for IDE grouping:\n"
-            "  - ${QMUD_MISSING_HEADER_FILES_JOINED}\n"
-            "Build will continue; verify file renames/casing if unexpected.")
-endif ()
 
-set(QMUD_APP_SOURCE_FILES_ABS ${QMUD_SOURCE_FILES_ABS})
-list(REMOVE_ITEM QMUD_APP_SOURCE_FILES_ABS "${QMUD_SRC_DIR}/Main.cpp")
-
-add_library(qmud_app_core STATIC ${QMUD_APP_SOURCE_FILES_ABS} ${QMUD_HEADER_FILES_ABS})
-add_executable(QMud "${QMUD_SRC_DIR}/Main.cpp")
-if (WIN32)
-    set_target_properties(QMud PROPERTIES WIN32_EXECUTABLE TRUE)
-endif ()
-
-
-# Ensure Qt auto tools are ON (redundant with qt_standard_project_setup, kept as fallback)
-set_target_properties(qmud_app_core PROPERTIES
-        CXX_STANDARD 20
-        AUTOMOC ON
-        AUTOUIC ON
-        AUTORCC ON
-)
-set_target_properties(QMud PROPERTIES
-        CXX_STANDARD 20
-        AUTOMOC ON
-        AUTOUIC ON
-        AUTORCC ON
-)
-target_include_directories(qmud_app_core
-        PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/helpers")
-
-set(QMUD_QT_MULTIMEDIA_TARGET "")
-set(QMUD_ENABLE_SOUND_VALUE 0)
-if (TARGET Qt6::Multimedia)
-    set(QMUD_QT_MULTIMEDIA_TARGET Qt6::Multimedia)
-    set(QMUD_ENABLE_SOUND_VALUE 1)
-else ()
-    message(WARNING "Qt6 Multimedia module not found; building with QMUD_ENABLE_SOUND=0")
-endif ()
-
-set(QMUD_QT_TEXTTOSPEECH_TARGET "")
-set(QMUD_ENABLE_TEXT_TO_SPEECH_VALUE 0)
-if (TARGET Qt6::TextToSpeech)
-    set(QMUD_QT_TEXTTOSPEECH_TARGET Qt6::TextToSpeech)
-    set(QMUD_ENABLE_TEXT_TO_SPEECH_VALUE 1)
-else ()
-    message(WARNING "Qt6 TextToSpeech module not found; building with QMUD_ENABLE_TEXT_TO_SPEECH=0")
-endif ()
-
-target_link_libraries(qmud_app_core PUBLIC Qt6::Widgets Qt6::Network Qt6::Sql Qt6::PrintSupport ${QMUD_ZLIB_TARGET} ${QMUD_QT_MULTIMEDIA_TARGET} ${QMUD_QT_TEXTTOSPEECH_TARGET})
-target_link_libraries(QMud PRIVATE qmud_app_core)
-if (APPLE)
-    target_link_libraries(qmud_app_core PUBLIC "-framework CoreServices")
-endif ()
-if (WIN32)
-    target_link_libraries(qmud_app_core PUBLIC ole32 oleaut32)
-endif ()
-target_compile_definitions(qmud_app_core PUBLIC QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE}
-        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
-
-if (QMUD_ENABLE_LUA_SCRIPTING)
-    set(QMUD_LUA_LIBRARY_FILES "")
-    set(QMUD_RESOLVED_LPEG_PROVIDER "${QMUD_LPEG_PROVIDER}")
-    set(QMUD_RESOLVED_BC_PROVIDER "${QMUD_BC_PROVIDER}")
-    set(QMUD_RESOLVED_LUASOCKET_PROVIDER "${QMUD_LUASOCKET_PROVIDER}")
-
-    find_package(Lua 5.4 REQUIRED)
-    target_compile_definitions(qmud_app_core PUBLIC QMUD_ENABLE_LUA_SCRIPTING)
-    if (TARGET Lua::Lua)
-        target_link_libraries(qmud_app_core PUBLIC Lua::Lua)
-        set(QMUD_IMPORTED_LUA_LIBRARY "")
-        get_target_property(QMUD_IMPORTED_LUA_LIBRARY Lua::Lua IMPORTED_LOCATION)
-        if (NOT QMUD_IMPORTED_LUA_LIBRARY)
-            get_target_property(QMUD_IMPORTED_LUA_LIBRARY Lua::Lua IMPORTED_LOCATION_RELEASE)
-        endif ()
-        if (NOT QMUD_IMPORTED_LUA_LIBRARY)
-            get_target_property(QMUD_IMPORTED_LUA_LIBRARY Lua::Lua IMPORTED_LOCATION_DEBUG)
-        endif ()
-        if (QMUD_IMPORTED_LUA_LIBRARY AND EXISTS "${QMUD_IMPORTED_LUA_LIBRARY}")
-            list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_IMPORTED_LUA_LIBRARY}")
-            file(REAL_PATH "${QMUD_IMPORTED_LUA_LIBRARY}" QMUD_IMPORTED_LUA_LIBRARY_REAL)
-            if (QMUD_IMPORTED_LUA_LIBRARY_REAL AND EXISTS "${QMUD_IMPORTED_LUA_LIBRARY_REAL}")
-                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_IMPORTED_LUA_LIBRARY_REAL}")
-            endif ()
-        endif ()
+    set(QMUD_QT_TEXTTOSPEECH_TARGET "")
+    set(QMUD_ENABLE_TEXT_TO_SPEECH_VALUE 0)
+    if (TARGET Qt6::TextToSpeech)
+        set(QMUD_QT_TEXTTOSPEECH_TARGET Qt6::TextToSpeech)
+        set(QMUD_ENABLE_TEXT_TO_SPEECH_VALUE 1)
     else ()
-        target_link_libraries(qmud_app_core PUBLIC ${LUA_LIBRARIES})
+        message(WARNING "Qt6 TextToSpeech module not found; building with QMUD_ENABLE_TEXT_TO_SPEECH=0")
     endif ()
-    foreach (QMUD_LUA_LIB_CANDIDATE IN LISTS LUA_LIBRARIES)
-        if (IS_ABSOLUTE "${QMUD_LUA_LIB_CANDIDATE}" AND EXISTS "${QMUD_LUA_LIB_CANDIDATE}")
-            list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LIB_CANDIDATE}")
-            file(REAL_PATH "${QMUD_LUA_LIB_CANDIDATE}" QMUD_LUA_LIB_CANDIDATE_REAL)
-            if (QMUD_LUA_LIB_CANDIDATE_REAL AND EXISTS "${QMUD_LUA_LIB_CANDIDATE_REAL}")
-                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LIB_CANDIDATE_REAL}")
+
+    target_link_libraries(qmud_app_core PUBLIC Qt6::Widgets Qt6::Network Qt6::Sql Qt6::PrintSupport ${QMUD_ZLIB_TARGET} ${QMUD_QT_MULTIMEDIA_TARGET} ${QMUD_QT_TEXTTOSPEECH_TARGET})
+    target_link_libraries(QMud PRIVATE qmud_app_core)
+    if (APPLE)
+        target_link_libraries(qmud_app_core PUBLIC "-framework CoreServices")
+    endif ()
+    if (WIN32)
+        target_link_libraries(qmud_app_core PUBLIC ole32 oleaut32)
+    endif ()
+    target_compile_definitions(qmud_app_core PUBLIC QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE}
+            QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
+
+    if (QMUD_ENABLE_LUA_SCRIPTING)
+        set(QMUD_LUA_LIBRARY_FILES "")
+        set(QMUD_RESOLVED_LPEG_PROVIDER "${QMUD_LPEG_PROVIDER}")
+        set(QMUD_RESOLVED_BC_PROVIDER "${QMUD_BC_PROVIDER}")
+        set(QMUD_RESOLVED_LUASOCKET_PROVIDER "${QMUD_LUASOCKET_PROVIDER}")
+
+        find_package(Lua 5.4 EXACT REQUIRED)
+        target_compile_definitions(qmud_app_core PUBLIC QMUD_ENABLE_LUA_SCRIPTING)
+        if (TARGET Lua::Lua)
+            target_link_libraries(qmud_app_core PUBLIC Lua::Lua)
+            set(QMUD_IMPORTED_LUA_LIBRARY "")
+            get_target_property(QMUD_IMPORTED_LUA_LIBRARY Lua::Lua IMPORTED_LOCATION)
+            if (NOT QMUD_IMPORTED_LUA_LIBRARY)
+                get_target_property(QMUD_IMPORTED_LUA_LIBRARY Lua::Lua IMPORTED_LOCATION_RELEASE)
             endif ()
-        elseif (QMUD_LUA_LIB_CANDIDATE MATCHES "^-l(.+)$")
-            # Resolve linker-style Lua entries (eg: -llua-5.4) to concrete shared objects for AppImage staging.
-            set(QMUD_LUA_LINK_NAME "${CMAKE_MATCH_1}")
-            find_library(QMUD_LUA_LINK_RESOLVED
-                    NAMES "${QMUD_LUA_LINK_NAME}"
+            if (NOT QMUD_IMPORTED_LUA_LIBRARY)
+                get_target_property(QMUD_IMPORTED_LUA_LIBRARY Lua::Lua IMPORTED_LOCATION_DEBUG)
+            endif ()
+            if (QMUD_IMPORTED_LUA_LIBRARY AND EXISTS "${QMUD_IMPORTED_LUA_LIBRARY}")
+                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_IMPORTED_LUA_LIBRARY}")
+                file(REAL_PATH "${QMUD_IMPORTED_LUA_LIBRARY}" QMUD_IMPORTED_LUA_LIBRARY_REAL)
+                if (QMUD_IMPORTED_LUA_LIBRARY_REAL AND EXISTS "${QMUD_IMPORTED_LUA_LIBRARY_REAL}")
+                    list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_IMPORTED_LUA_LIBRARY_REAL}")
+                endif ()
+            endif ()
+        else ()
+            target_link_libraries(qmud_app_core PUBLIC ${LUA_LIBRARIES})
+        endif ()
+        foreach (QMUD_LUA_LIB_CANDIDATE IN LISTS LUA_LIBRARIES)
+            if (IS_ABSOLUTE "${QMUD_LUA_LIB_CANDIDATE}" AND EXISTS "${QMUD_LUA_LIB_CANDIDATE}")
+                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LIB_CANDIDATE}")
+                file(REAL_PATH "${QMUD_LUA_LIB_CANDIDATE}" QMUD_LUA_LIB_CANDIDATE_REAL)
+                if (QMUD_LUA_LIB_CANDIDATE_REAL AND EXISTS "${QMUD_LUA_LIB_CANDIDATE_REAL}")
+                    list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LIB_CANDIDATE_REAL}")
+                endif ()
+            elseif (QMUD_LUA_LIB_CANDIDATE MATCHES "^-l(.+)$")
+                # Resolve linker-style Lua entries (eg: -llua-5.4) to concrete shared objects for AppImage staging.
+                set(QMUD_LUA_LINK_NAME "${CMAKE_MATCH_1}")
+                find_library(QMUD_LUA_LINK_RESOLVED
+                        NAMES "${QMUD_LUA_LINK_NAME}"
+                        PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                )
+                if (QMUD_LUA_LINK_RESOLVED AND EXISTS "${QMUD_LUA_LINK_RESOLVED}")
+                    list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LINK_RESOLVED}")
+                    file(REAL_PATH "${QMUD_LUA_LINK_RESOLVED}" QMUD_LUA_LINK_RESOLVED_REAL)
+                    if (QMUD_LUA_LINK_RESOLVED_REAL AND EXISTS "${QMUD_LUA_LINK_RESOLVED_REAL}")
+                        list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LINK_RESOLVED_REAL}")
+                    endif ()
+                endif ()
+            endif ()
+        endforeach ()
+        if (NOT QMUD_LUA_LIBRARY_FILES)
+            # Fallback for distro setups where find_package() only provides includes and linker flags.
+            find_library(QMUD_LUA_FALLBACK_SHARED
+                    NAMES lua5.4 lua-5.4 lua54 lua
                     PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
             )
-            if (QMUD_LUA_LINK_RESOLVED AND EXISTS "${QMUD_LUA_LINK_RESOLVED}")
-                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LINK_RESOLVED}")
-                file(REAL_PATH "${QMUD_LUA_LINK_RESOLVED}" QMUD_LUA_LINK_RESOLVED_REAL)
-                if (QMUD_LUA_LINK_RESOLVED_REAL AND EXISTS "${QMUD_LUA_LINK_RESOLVED_REAL}")
-                    list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_LINK_RESOLVED_REAL}")
+            if (QMUD_LUA_FALLBACK_SHARED AND EXISTS "${QMUD_LUA_FALLBACK_SHARED}")
+                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_FALLBACK_SHARED}")
+                file(REAL_PATH "${QMUD_LUA_FALLBACK_SHARED}" QMUD_LUA_FALLBACK_SHARED_REAL)
+                if (QMUD_LUA_FALLBACK_SHARED_REAL AND EXISTS "${QMUD_LUA_FALLBACK_SHARED_REAL}")
+                    list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_FALLBACK_SHARED_REAL}")
                 endif ()
             endif ()
         endif ()
+        list(FILTER QMUD_LUA_LIBRARY_FILES INCLUDE REGEX ".*/liblua[^/]*\\.so(\\..*)?$")
+        list(REMOVE_DUPLICATES QMUD_LUA_LIBRARY_FILES)
+        if (DEFINED LUA_INCLUDE_DIR)
+            target_include_directories(qmud_app_core SYSTEM BEFORE PUBLIC ${LUA_INCLUDE_DIR})
+        elseif (DEFINED LUA_INCLUDE_DIRS)
+            target_include_directories(qmud_app_core SYSTEM BEFORE PUBLIC ${LUA_INCLUDE_DIRS})
+        endif ()
+        target_sources(qmud_app_core PRIVATE src/Sqlite3Lua.cpp)
+        set(QMUD_HAS_SYSTEM_LPEG OFF)
+        set(QMUD_LUA_INTERPRETER "")
+        if (NOT CMAKE_CROSSCOMPILING)
+            if (DEFINED LUA_EXECUTABLE AND NOT LUA_EXECUTABLE STREQUAL "")
+                execute_process(
+                        COMMAND "${LUA_EXECUTABLE}" -e "assert(_VERSION == 'Lua 5.4')"
+                        RESULT_VARIABLE QMUD_LUA_INTERPRETER_RESULT
+                        OUTPUT_QUIET
+                        ERROR_QUIET
+                )
+                if (NOT QMUD_LUA_INTERPRETER_RESULT STREQUAL "0")
+                    message(FATAL_ERROR "LUA_EXECUTABLE must be a runnable Lua 5.4 interpreter.")
+                endif ()
+                set(QMUD_LUA_INTERPRETER "${LUA_EXECUTABLE}")
+            else ()
+                foreach (QMUD_LUA_PROGRAM_NAME lua5.4 lua54 lua-5.4 lua)
+                    unset(QMUD_LUA_PROGRAM)
+                    find_program(QMUD_LUA_PROGRAM NAMES "${QMUD_LUA_PROGRAM_NAME}" NO_CACHE)
+                    if (QMUD_LUA_PROGRAM)
+                        execute_process(
+                                COMMAND "${QMUD_LUA_PROGRAM}" -e "assert(_VERSION == 'Lua 5.4')"
+                                RESULT_VARIABLE QMUD_LUA_INTERPRETER_RESULT
+                                OUTPUT_QUIET
+                                ERROR_QUIET
+                        )
+                        if (QMUD_LUA_INTERPRETER_RESULT STREQUAL "0")
+                            set(QMUD_LUA_INTERPRETER "${QMUD_LUA_PROGRAM}")
+                            break()
+                        endif ()
+                    endif ()
+                endforeach ()
+            endif ()
+        endif ()
+
+        if (QMUD_LPEG_PROVIDER STREQUAL "SYSTEM")
+            set(QMUD_HAS_SYSTEM_LPEG ON)
+        elseif (QMUD_LPEG_PROVIDER STREQUAL "AUTO")
+            if (QMUD_LUA_INTERPRETER)
+                execute_process(
+                        COMMAND "${QMUD_LUA_INTERPRETER}" -e "require('lpeg')"
+                        RESULT_VARIABLE QMUD_LPEG_REQUIRE_RESULT
+                        OUTPUT_QUIET
+                        ERROR_QUIET
+                )
+                if (QMUD_LPEG_REQUIRE_RESULT EQUAL 0)
+                    set(QMUD_HAS_SYSTEM_LPEG ON)
+                endif ()
+            endif ()
+
+            if (NOT QMUD_HAS_SYSTEM_LPEG)
+                find_file(QMUD_SYSTEM_LPEG_SO
+                        NAMES lpeg.so
+                        PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                        PATH_SUFFIXES lua/5.4
+                )
+                if (QMUD_SYSTEM_LPEG_SO)
+                    set(QMUD_HAS_SYSTEM_LPEG ON)
+                endif ()
+            endif ()
+        endif ()
+
+        if (QMUD_HAS_SYSTEM_LPEG)
+            set(QMUD_RESOLVED_LPEG_PROVIDER "SYSTEM")
+            message(STATUS "Using system LPeg module (lua-lpeg)")
+            target_compile_definitions(qmud_app_core PUBLIC QMUD_HAS_SYSTEM_LPEG=1)
+        else ()
+            message(FATAL_ERROR
+                    "System LPeg module (lpeg.so) not found. Install lua-lpeg or set "
+                    "QMUD_SYSTEM_LUA_MODULES_PREFIX to a path containing lpeg.so.")
+        endif ()
+
+        set(QMUD_HAS_SYSTEM_BC OFF)
+        if (QMUD_BC_PROVIDER STREQUAL "SYSTEM")
+            set(QMUD_HAS_SYSTEM_BC ON)
+        elseif (QMUD_BC_PROVIDER STREQUAL "AUTO")
+            if (QMUD_LUA_INTERPRETER)
+                execute_process(
+                        COMMAND "${QMUD_LUA_INTERPRETER}" -e "require('bc')"
+                        RESULT_VARIABLE QMUD_BC_REQUIRE_RESULT
+                        OUTPUT_QUIET
+                        ERROR_QUIET
+                )
+                if (QMUD_BC_REQUIRE_RESULT EQUAL 0)
+                    set(QMUD_HAS_SYSTEM_BC ON)
+                endif ()
+            endif ()
+            if (NOT QMUD_HAS_SYSTEM_BC)
+                find_file(QMUD_SYSTEM_BC_SO
+                        NAMES bc.so
+                        PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                        PATH_SUFFIXES lua/5.4
+                )
+                if (QMUD_SYSTEM_BC_SO)
+                    set(QMUD_HAS_SYSTEM_BC ON)
+                endif ()
+            endif ()
+        endif ()
+
+        if (QMUD_HAS_SYSTEM_BC)
+            set(QMUD_RESOLVED_BC_PROVIDER "SYSTEM")
+            message(STATUS "Using system Lua bc module")
+            target_compile_definitions(qmud_app_core PUBLIC QMUD_HAS_SYSTEM_BC=1)
+        else ()
+            set(QMUD_RESOLVED_BC_PROVIDER "BUNDLED")
+            message(STATUS "System bc not found, building bundled bc fallback")
+            target_sources(qmud_app_core PRIVATE src/scripting/Number.cpp)
+            target_sources(qmud_app_core PRIVATE src/scripting/Lbc.cpp)
+            target_compile_definitions(qmud_app_core PUBLIC QMUD_BUNDLED_BC=1)
+        endif ()
+
+        set(QMUD_HAS_SYSTEM_LUASOCKET OFF)
+        if (QMUD_LUA_INTERPRETER)
+            execute_process(
+                    COMMAND "${QMUD_LUA_INTERPRETER}" -e "require('socket'); require('mime')"
+                    RESULT_VARIABLE QMUD_LUASOCKET_REQUIRE_RESULT
+                    OUTPUT_QUIET
+                    ERROR_QUIET
+            )
+            if (QMUD_LUASOCKET_REQUIRE_RESULT EQUAL 0)
+                set(QMUD_HAS_SYSTEM_LUASOCKET ON)
+            endif ()
+        endif ()
+        if (NOT QMUD_HAS_SYSTEM_LUASOCKET)
+            find_file(QMUD_SYSTEM_SOCKET_CORE_SO
+                    NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                    PATH_SUFFIXES "" socket lua/5.4/socket
+                    NO_CMAKE_FIND_ROOT_PATH
+            )
+            find_file(QMUD_SYSTEM_MIME_CORE_SO
+                    NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                    PATH_SUFFIXES "" mime lua/5.4/mime
+                    NO_CMAKE_FIND_ROOT_PATH
+            )
+            if (QMUD_SYSTEM_SOCKET_CORE_SO AND QMUD_SYSTEM_MIME_CORE_SO)
+                set(QMUD_HAS_SYSTEM_LUASOCKET ON)
+            endif ()
+        endif ()
+        if (QMUD_HAS_SYSTEM_LUASOCKET)
+            set(QMUD_RESOLVED_LUASOCKET_PROVIDER "SYSTEM")
+            message(STATUS "Using system LuaSocket modules (socket/mime)")
+        elseif (QMUD_LUASOCKET_PROVIDER STREQUAL "SYSTEM")
+            message(FATAL_ERROR
+                    "QMUD_LUASOCKET_PROVIDER=SYSTEM requires system LuaSocket modules (socket/mime), "
+                    "but they were not found in the build environment.")
+        else ()
+            message(FATAL_ERROR
+                    "System LuaSocket modules (socket/mime) not found. Bundled fallback has been removed; "
+                    "install LuaSocket modules in the build environment.")
+        endif ()
+
+        message(STATUS "Lua module provider resolution: lpeg=${QMUD_RESOLVED_LPEG_PROVIDER}, bc=${QMUD_RESOLVED_BC_PROVIDER}, luasocket=${QMUD_RESOLVED_LUASOCKET_PROVIDER}")
+    endif ()
+
+    # Qt target include root: keep build-visible sources isolated under src/.
+    target_include_directories(QMud PRIVATE "${QMUD_SRC_DIR}" "${QMUD_SRC_DIR}/helpers")
+
+    # Add optional subprojects (preserve original behavior)
+    foreach (dir lsqlite png scripting mxp lua luacom)
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${dir}/CMakeLists.txt")
+            add_subdirectory(${dir})
+        endif ()
     endforeach ()
-    if (NOT QMUD_LUA_LIBRARY_FILES)
-        # Fallback for distro setups where find_package() only provides includes and linker flags.
-        find_library(QMUD_LUA_FALLBACK_SHARED
-                NAMES lua5.4 lua-5.4 lua54 lua
-                PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+
+    # Link common known targets if the subprojects provided them
+    foreach (tgt lsqlite png lua luacom)
+        if (TARGET ${tgt})
+            target_link_libraries(qmud_app_core PUBLIC ${tgt})
+        endif ()
+    endforeach ()
+
+    if (QMUD_ENABLE_TESTING)
+        add_subdirectory(tests)
+    endif ()
+
+    # Optional: resources (.qrc)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud.qrc")
+        # Compile the existing .qrc directly.
+        target_sources(QMud PRIVATE resources/qmud.qrc)
+    endif ()
+
+    # Windows-only executable manifest (DPI awareness, long-path support, modern compatibility tags).
+    if (WIN32)
+        set(QMUD_WINDOWS_MANIFEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/QMud.Windows.manifest")
+        set(QMUD_WINDOWS_RC_IN "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/QMud.Windows.rc.in")
+        set(QMUD_WINDOWS_MANIFEST_DST "${CMAKE_CURRENT_BINARY_DIR}/QMud.Windows.manifest")
+        set(QMUD_WINDOWS_RC_DST "${CMAKE_CURRENT_BINARY_DIR}/QMud.Windows.rc")
+        set(QMUD_WINDOWS_ICON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/QMud.ico")
+        set(QMUD_WINDOWS_ICON_DST "${CMAKE_CURRENT_BINARY_DIR}/QMud.ico")
+        set(QMUD_WINDOWS_VERSION_COMMAS "10,0,0,0")
+        set(QMUD_WINDOWS_VERSION_DOTS "10.0.0.0")
+        set(QMUD_WINDOWS_COMPANY_NAME "Abnormal Frequency")
+        set(QMUD_WINDOWS_AUTHOR_NAME "Panagiotis Kalogiratos (Nodens)")
+        set(QMUD_WINDOWS_PRODUCT_NAME "QMud")
+        set(QMUD_WINDOWS_FILE_DESCRIPTION "QMud MUD Client")
+        set(QMUD_WINDOWS_ORIGINAL_FILENAME "QMud.exe")
+        set(QMUD_WINDOWS_LEGAL_COPYRIGHT "Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)")
+        set(QMUD_WINDOWS_COMMENTS "Author: Panagiotis Kalogiratos (Nodens)")
+
+        if (EXISTS "${QMUD_WINDOWS_MANIFEST_SRC}" AND EXISTS "${QMUD_WINDOWS_RC_IN}" AND EXISTS "${QMUD_WINDOWS_ICON_SRC}")
+            configure_file("${QMUD_WINDOWS_MANIFEST_SRC}" "${QMUD_WINDOWS_MANIFEST_DST}" COPYONLY)
+            configure_file("${QMUD_WINDOWS_ICON_SRC}" "${QMUD_WINDOWS_ICON_DST}" COPYONLY)
+            configure_file("${QMUD_WINDOWS_RC_IN}" "${QMUD_WINDOWS_RC_DST}" @ONLY)
+            target_sources(QMud PRIVATE "${QMUD_WINDOWS_RC_DST}")
+        else ()
+            message(WARNING "Windows manifest/resource files are missing (manifest/rc/icon); QMud will use default linker-generated metadata.")
+        endif ()
+    endif ()
+
+    # Sync skeleton/ into the build tree (copy only when new/changed).
+    set(SKELETON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/skeleton")
+    set(SKELETON_DST "${CMAKE_CURRENT_BINARY_DIR}")
+    set(QMUD_SYSTEM_LUA_SEARCH_PATHS
+            /usr/share/lua/5.4
+            /usr/local/share/lua/5.4
+    )
+    if (QMUD_SYSTEM_LUA_MODULES_PREFIX)
+        list(PREPEND QMUD_SYSTEM_LUA_SEARCH_PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}")
+    endif ()
+    list(REMOVE_DUPLICATES QMUD_SYSTEM_LUA_SEARCH_PATHS)
+    find_path(QMUD_SYSTEM_JSON_LUA_DIR
+            NAMES init.lua decode.lua encode.lua util.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            PATH_SUFFIXES json
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    find_file(QMUD_SYSTEM_SOCKET_LUA_FILE
+            NAMES socket.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    find_file(QMUD_SYSTEM_MIME_LUA_FILE
+            NAMES mime.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    find_file(QMUD_SYSTEM_LTN12_LUA_FILE
+            NAMES ltn12.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    find_file(QMUD_SYSTEM_JSON_TOP_LUA_FILE
+            NAMES json.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    find_file(QMUD_SYSTEM_RE_LUA_FILE
+            NAMES re.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    if (NOT QMUD_SYSTEM_SSL_LUA_FILE)
+        find_file(QMUD_SYSTEM_SSL_LUA_FILE
+                NAMES ssl.lua
+                PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
         )
-        if (QMUD_LUA_FALLBACK_SHARED AND EXISTS "${QMUD_LUA_FALLBACK_SHARED}")
-            list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_FALLBACK_SHARED}")
-            file(REAL_PATH "${QMUD_LUA_FALLBACK_SHARED}" QMUD_LUA_FALLBACK_SHARED_REAL)
-            if (QMUD_LUA_FALLBACK_SHARED_REAL AND EXISTS "${QMUD_LUA_FALLBACK_SHARED_REAL}")
-                list(APPEND QMUD_LUA_LIBRARY_FILES "${QMUD_LUA_FALLBACK_SHARED_REAL}")
-            endif ()
-        endif ()
     endif ()
-    list(FILTER QMUD_LUA_LIBRARY_FILES INCLUDE REGEX ".*/liblua[^/]*\\.so(\\..*)?$")
-    list(REMOVE_DUPLICATES QMUD_LUA_LIBRARY_FILES)
-    if (DEFINED LUA_INCLUDE_DIR)
-        target_include_directories(qmud_app_core SYSTEM BEFORE PUBLIC ${LUA_INCLUDE_DIR})
-    elseif (DEFINED LUA_INCLUDE_DIRS)
-        target_include_directories(qmud_app_core SYSTEM BEFORE PUBLIC ${LUA_INCLUDE_DIRS})
-    endif ()
-    target_sources(qmud_app_core PRIVATE src/Sqlite3Lua.cpp)
-    set(QMUD_HAS_SYSTEM_LPEG OFF)
-    set(QMUD_LUA_INTERPRETER "")
-    if (DEFINED LUA_EXECUTABLE AND EXISTS "${LUA_EXECUTABLE}")
-        set(QMUD_LUA_INTERPRETER "${LUA_EXECUTABLE}")
-    else ()
-        find_program(QMUD_LUA_INTERPRETER NAMES lua lua5.4 lua54)
-    endif ()
-
-    if (QMUD_LPEG_PROVIDER STREQUAL "SYSTEM")
-        set(QMUD_HAS_SYSTEM_LPEG ON)
-    elseif (QMUD_LPEG_PROVIDER STREQUAL "AUTO")
-        if (QMUD_LUA_INTERPRETER)
-            execute_process(
-                    COMMAND "${QMUD_LUA_INTERPRETER}" -e "require('lpeg')"
-                    RESULT_VARIABLE QMUD_LPEG_REQUIRE_RESULT
-                    OUTPUT_QUIET
-                    ERROR_QUIET
-            )
-            if (QMUD_LPEG_REQUIRE_RESULT EQUAL 0)
-                set(QMUD_HAS_SYSTEM_LPEG ON)
-            endif ()
-        endif ()
-
-        if (NOT QMUD_HAS_SYSTEM_LPEG)
-            find_file(QMUD_SYSTEM_LPEG_SO
-                    NAMES lpeg.so
-                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
-            )
-            if (QMUD_SYSTEM_LPEG_SO)
-                set(QMUD_HAS_SYSTEM_LPEG ON)
-            endif ()
-        endif ()
-    endif ()
-
-    if (QMUD_HAS_SYSTEM_LPEG)
-        set(QMUD_RESOLVED_LPEG_PROVIDER "SYSTEM")
-        message(STATUS "Using system LPeg module (lua-lpeg)")
-        target_compile_definitions(qmud_app_core PUBLIC QMUD_HAS_SYSTEM_LPEG=1)
-    else ()
-        message(FATAL_ERROR
-                "System LPeg module (lpeg.so) not found. Install lua-lpeg or set "
-                "QMUD_SYSTEM_LUA_MODULES_PREFIX to a path containing lpeg.so.")
-    endif ()
-
-    set(QMUD_HAS_SYSTEM_BC OFF)
-    if (QMUD_BC_PROVIDER STREQUAL "SYSTEM")
-        set(QMUD_HAS_SYSTEM_BC ON)
-    elseif (QMUD_BC_PROVIDER STREQUAL "AUTO")
-        if (QMUD_LUA_INTERPRETER)
-            execute_process(
-                    COMMAND "${QMUD_LUA_INTERPRETER}" -e "require('bc')"
-                    RESULT_VARIABLE QMUD_BC_REQUIRE_RESULT
-                    OUTPUT_QUIET
-                    ERROR_QUIET
-            )
-            if (QMUD_BC_REQUIRE_RESULT EQUAL 0)
-                set(QMUD_HAS_SYSTEM_BC ON)
-            endif ()
-        endif ()
-        if (NOT QMUD_HAS_SYSTEM_BC)
-            find_file(QMUD_SYSTEM_BC_SO
-                    NAMES bc.so
-                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
-            )
-            if (QMUD_SYSTEM_BC_SO)
-                set(QMUD_HAS_SYSTEM_BC ON)
-            endif ()
-        endif ()
-    endif ()
-
-    if (QMUD_HAS_SYSTEM_BC)
-        set(QMUD_RESOLVED_BC_PROVIDER "SYSTEM")
-        message(STATUS "Using system Lua bc module")
-        target_compile_definitions(qmud_app_core PUBLIC QMUD_HAS_SYSTEM_BC=1)
-    else ()
-        set(QMUD_RESOLVED_BC_PROVIDER "BUNDLED")
-        message(STATUS "System bc not found, building bundled bc fallback")
-        target_sources(qmud_app_core PRIVATE src/scripting/Number.cpp)
-        target_sources(qmud_app_core PRIVATE src/scripting/Lbc.cpp)
-        target_compile_definitions(qmud_app_core PUBLIC QMUD_BUNDLED_BC=1)
-    endif ()
-
-    set(QMUD_HAS_SYSTEM_LUASOCKET OFF)
-    if (QMUD_LUA_INTERPRETER)
-        execute_process(
-                COMMAND "${QMUD_LUA_INTERPRETER}" -e "require('socket'); require('mime')"
-                RESULT_VARIABLE QMUD_LUASOCKET_REQUIRE_RESULT
-                OUTPUT_QUIET
-                ERROR_QUIET
+    if (NOT QMUD_SYSTEM_SSL_LUA_DIR)
+        find_path(QMUD_SYSTEM_SSL_LUA_DIR
+                NAMES https.lua options.lua
+                PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+                PATH_SUFFIXES ssl
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
         )
-        if (QMUD_LUASOCKET_REQUIRE_RESULT EQUAL 0)
-            set(QMUD_HAS_SYSTEM_LUASOCKET ON)
-        endif ()
     endif ()
-    if (NOT QMUD_HAS_SYSTEM_LUASOCKET)
+    find_path(QMUD_SYSTEM_SOCKET_LUA_DIR
+            NAMES http.lua ftp.lua smtp.lua tp.lua url.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            PATH_SUFFIXES socket
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+    if (QMUD_SYSTEM_SOCKET_LUA_DIR)
+        file(GLOB QMUD_SYSTEM_SOCKET_ALL_LUA_FILES CONFIGURE_DEPENDS
+                "${QMUD_SYSTEM_SOCKET_LUA_DIR}/*.lua")
+        find_file(QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE
+                NAMES socket.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE
+                NAMES ltn12.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE
+                NAMES mime.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_FTP_LUA_FILE
+                NAMES ftp.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_HTTP_LUA_FILE
+                NAMES http.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_SMTP_LUA_FILE
+                NAMES smtp.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_TP_LUA_FILE
+                NAMES tp.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_URL_LUA_FILE
+                NAMES url.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+        find_file(QMUD_SYSTEM_SOCKET_DIR_HEADERS_LUA_FILE
+                NAMES headers.lua
+                PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+                NO_DEFAULT_PATH
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+    endif ()
+    if (NOT QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE)
+        set(QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE "${QMUD_SYSTEM_SOCKET_LUA_FILE}")
+    endif ()
+    if (NOT QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE)
+        set(QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE "${QMUD_SYSTEM_LTN12_LUA_FILE}")
+    endif ()
+    if (NOT QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE)
+        set(QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE "${QMUD_SYSTEM_MIME_LUA_FILE}")
+    endif ()
+    if (NOT QMUD_SYSTEM_SOCKET_CORE_SO)
         find_file(QMUD_SYSTEM_SOCKET_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
                 PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
+                PATH_SUFFIXES "" socket lua/5.4/socket
                 NO_CMAKE_FIND_ROOT_PATH
         )
+    endif ()
+    if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND QMUD_SYSTEM_SOCKET_CORE_SO)
+        get_filename_component(QMUD_SYSTEM_SOCKET_CMODULE_DIR "${QMUD_SYSTEM_SOCKET_CORE_SO}" DIRECTORY)
+    endif ()
+    if (NOT QMUD_SYSTEM_MIME_CORE_SO)
         find_file(QMUD_SYSTEM_MIME_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
                 PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
+                PATH_SUFFIXES "" mime lua/5.4/mime
                 NO_CMAKE_FIND_ROOT_PATH
         )
-        if (QMUD_SYSTEM_SOCKET_CORE_SO AND QMUD_SYSTEM_MIME_CORE_SO)
-            set(QMUD_HAS_SYSTEM_LUASOCKET ON)
-        endif ()
     endif ()
-    if (QMUD_HAS_SYSTEM_LUASOCKET)
-        set(QMUD_RESOLVED_LUASOCKET_PROVIDER "SYSTEM")
-        message(STATUS "Using system LuaSocket modules (socket/mime)")
-    elseif (QMUD_LUASOCKET_PROVIDER STREQUAL "SYSTEM")
-        message(FATAL_ERROR
-                "QMUD_LUASOCKET_PROVIDER=SYSTEM requires system LuaSocket modules (socket/mime), "
-                "but they were not found in the build environment.")
-    else ()
-        message(FATAL_ERROR
-                "System LuaSocket modules (socket/mime) not found. Bundled fallback has been removed; "
-                "install LuaSocket modules in the build environment.")
+    if (NOT QMUD_SYSTEM_SSL_CORE_SO)
+        find_file(QMUD_SYSTEM_SSL_CORE_SO
+                NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                PATH_SUFFIXES ssl lua/5.4/ssl
+                NO_CMAKE_FIND_ROOT_PATH
+        )
     endif ()
-
-    message(STATUS "Lua module provider resolution: lpeg=${QMUD_RESOLVED_LPEG_PROVIDER}, bc=${QMUD_RESOLVED_BC_PROVIDER}, luasocket=${QMUD_RESOLVED_LUASOCKET_PROVIDER}")
-endif ()
-
-# Qt target include root: keep build-visible sources isolated under src/.
-target_include_directories(QMud PRIVATE "${QMUD_SRC_DIR}" "${QMUD_SRC_DIR}/helpers")
-
-# Add optional subprojects (preserve original behavior)
-foreach (dir lsqlite png scripting mxp lua luacom)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${dir}/CMakeLists.txt")
-        add_subdirectory(${dir})
+    if (NOT QMUD_SYSTEM_SSL_CORE_SO)
+        find_file(QMUD_SYSTEM_SSL_CORE_SO
+                NAMES ssl.so
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                PATH_SUFFIXES lua/5.4
+                NO_CMAKE_FIND_ROOT_PATH
+        )
     endif ()
-endforeach ()
-
-# Link common known targets if the subprojects provided them
-foreach (tgt lsqlite png lua luacom)
-    if (TARGET ${tgt})
-        target_link_libraries(qmud_app_core PUBLIC ${tgt})
+    if (NOT QMUD_SYSTEM_SSL_CORE_SO AND EXISTS "/usr/lib64/lua/5.4/ssl.so")
+        set(QMUD_SYSTEM_SSL_CORE_SO "/usr/lib64/lua/5.4/ssl.so" CACHE FILEPATH
+                "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)" FORCE)
     endif ()
-endforeach ()
-
-if (QMUD_ENABLE_TESTING)
-    add_subdirectory(tests)
-endif ()
-
-# Optional: resources (.qrc)
-if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud.qrc")
-    # Compile the existing .qrc directly.
-    target_sources(QMud PRIVATE resources/qmud.qrc)
-endif ()
-
-# Windows-only executable manifest (DPI awareness, long-path support, modern compatibility tags).
-if (WIN32)
-    set(QMUD_WINDOWS_MANIFEST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/QMud.Windows.manifest")
-    set(QMUD_WINDOWS_RC_IN "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/QMud.Windows.rc.in")
-    set(QMUD_WINDOWS_MANIFEST_DST "${CMAKE_CURRENT_BINARY_DIR}/QMud.Windows.manifest")
-    set(QMUD_WINDOWS_RC_DST "${CMAKE_CURRENT_BINARY_DIR}/QMud.Windows.rc")
-    set(QMUD_WINDOWS_ICON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/QMud.ico")
-    set(QMUD_WINDOWS_ICON_DST "${CMAKE_CURRENT_BINARY_DIR}/QMud.ico")
-    set(QMUD_WINDOWS_VERSION_COMMAS "10,0,0,0")
-    set(QMUD_WINDOWS_VERSION_DOTS "10.0.0.0")
-    set(QMUD_WINDOWS_COMPANY_NAME "Abnormal Frequency")
-    set(QMUD_WINDOWS_AUTHOR_NAME "Panagiotis Kalogiratos (Nodens)")
-    set(QMUD_WINDOWS_PRODUCT_NAME "QMud")
-    set(QMUD_WINDOWS_FILE_DESCRIPTION "QMud MUD Client")
-    set(QMUD_WINDOWS_ORIGINAL_FILENAME "QMud.exe")
-    set(QMUD_WINDOWS_LEGAL_COPYRIGHT "Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)")
-    set(QMUD_WINDOWS_COMMENTS "Author: Panagiotis Kalogiratos (Nodens)")
-
-    if (EXISTS "${QMUD_WINDOWS_MANIFEST_SRC}" AND EXISTS "${QMUD_WINDOWS_RC_IN}" AND EXISTS "${QMUD_WINDOWS_ICON_SRC}")
-        configure_file("${QMUD_WINDOWS_MANIFEST_SRC}" "${QMUD_WINDOWS_MANIFEST_DST}" COPYONLY)
-        configure_file("${QMUD_WINDOWS_ICON_SRC}" "${QMUD_WINDOWS_ICON_DST}" COPYONLY)
-        configure_file("${QMUD_WINDOWS_RC_IN}" "${QMUD_WINDOWS_RC_DST}" @ONLY)
-        target_sources(QMud PRIVATE "${QMUD_WINDOWS_RC_DST}")
-    else ()
-        message(WARNING "Windows manifest/resource files are missing (manifest/rc/icon); QMud will use default linker-generated metadata.")
+    if (NOT QMUD_SYSTEM_SSL_LUA_FILE AND EXISTS "/usr/share/lua/5.4/ssl.lua")
+        set(QMUD_SYSTEM_SSL_LUA_FILE "/usr/share/lua/5.4/ssl.lua" CACHE FILEPATH
+                "Optional explicit path to system LuaSec top-level Lua file (ssl.lua)" FORCE)
     endif ()
-endif ()
-
-# Sync skeleton/ into the build tree (copy only when new/changed).
-set(SKELETON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/skeleton")
-set(SKELETON_DST "${CMAKE_CURRENT_BINARY_DIR}")
-set(QMUD_SYSTEM_LUA_SEARCH_PATHS
-        /usr/share/lua/5.4
-        /usr/share/lua/5.3
-        /usr/share/lua/5.2
-        /usr/share/lua/5.1
-        /usr/local/share/lua/5.4
-        /usr/local/share/lua/5.3
-        /usr/local/share/lua/5.2
-        /usr/local/share/lua/5.1
-)
-if (QMUD_SYSTEM_LUA_MODULES_PREFIX)
-    list(PREPEND QMUD_SYSTEM_LUA_SEARCH_PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}")
-endif ()
-list(REMOVE_DUPLICATES QMUD_SYSTEM_LUA_SEARCH_PATHS)
-find_path(QMUD_SYSTEM_JSON_LUA_DIR
-        NAMES init.lua decode.lua encode.lua util.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        PATH_SUFFIXES json
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-find_file(QMUD_SYSTEM_SOCKET_LUA_FILE
-        NAMES socket.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-find_file(QMUD_SYSTEM_MIME_LUA_FILE
-        NAMES mime.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-find_file(QMUD_SYSTEM_LTN12_LUA_FILE
-        NAMES ltn12.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-find_file(QMUD_SYSTEM_JSON_TOP_LUA_FILE
-        NAMES json.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-find_file(QMUD_SYSTEM_RE_LUA_FILE
-        NAMES re.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-if (NOT QMUD_SYSTEM_SSL_LUA_FILE)
-    find_file(QMUD_SYSTEM_SSL_LUA_FILE
-            NAMES ssl.lua
-            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-if (NOT QMUD_SYSTEM_SSL_LUA_DIR)
-    find_path(QMUD_SYSTEM_SSL_LUA_DIR
-            NAMES https.lua options.lua
-            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-            PATH_SUFFIXES ssl
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-find_path(QMUD_SYSTEM_SOCKET_LUA_DIR
-        NAMES http.lua ftp.lua smtp.lua tp.lua url.lua
-        PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
-        PATH_SUFFIXES socket
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-)
-if (QMUD_SYSTEM_SOCKET_LUA_DIR)
-    file(GLOB QMUD_SYSTEM_SOCKET_ALL_LUA_FILES CONFIGURE_DEPENDS
-            "${QMUD_SYSTEM_SOCKET_LUA_DIR}/*.lua")
-    find_file(QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE
-            NAMES socket.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE
-            NAMES ltn12.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE
-            NAMES mime.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_FTP_LUA_FILE
-            NAMES ftp.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_HTTP_LUA_FILE
-            NAMES http.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_SMTP_LUA_FILE
-            NAMES smtp.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_TP_LUA_FILE
-            NAMES tp.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_URL_LUA_FILE
-            NAMES url.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-    find_file(QMUD_SYSTEM_SOCKET_DIR_HEADERS_LUA_FILE
-            NAMES headers.lua
-            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
-            NO_DEFAULT_PATH
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-if (NOT QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE)
-    set(QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE "${QMUD_SYSTEM_SOCKET_LUA_FILE}")
-endif ()
-if (NOT QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE)
-    set(QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE "${QMUD_SYSTEM_LTN12_LUA_FILE}")
-endif ()
-if (NOT QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE)
-    set(QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE "${QMUD_SYSTEM_MIME_LUA_FILE}")
-endif ()
-if (NOT QMUD_SYSTEM_SOCKET_CORE_SO)
-    find_file(QMUD_SYSTEM_SOCKET_CORE_SO
-            NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND QMUD_SYSTEM_SOCKET_CORE_SO)
-    get_filename_component(QMUD_SYSTEM_SOCKET_CMODULE_DIR "${QMUD_SYSTEM_SOCKET_CORE_SO}" DIRECTORY)
-endif ()
-if (NOT QMUD_SYSTEM_MIME_CORE_SO)
-    find_file(QMUD_SYSTEM_MIME_CORE_SO
-            NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-if (NOT QMUD_SYSTEM_SSL_CORE_SO)
-    find_file(QMUD_SYSTEM_SSL_CORE_SO
-            NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-if (NOT QMUD_SYSTEM_SSL_CORE_SO)
-    find_file(QMUD_SYSTEM_SSL_CORE_SO
-            NAMES ssl.so
-            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
-            NO_CMAKE_FIND_ROOT_PATH
-    )
-endif ()
-if (NOT QMUD_SYSTEM_SSL_CORE_SO AND EXISTS "/usr/lib64/lua/5.4/ssl.so")
-    set(QMUD_SYSTEM_SSL_CORE_SO "/usr/lib64/lua/5.4/ssl.so" CACHE FILEPATH
-            "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)" FORCE)
-endif ()
-if (NOT QMUD_SYSTEM_SSL_LUA_FILE AND EXISTS "/usr/share/lua/5.4/ssl.lua")
-    set(QMUD_SYSTEM_SSL_LUA_FILE "/usr/share/lua/5.4/ssl.lua" CACHE FILEPATH
-            "Optional explicit path to system LuaSec top-level Lua file (ssl.lua)" FORCE)
-endif ()
-if (NOT QMUD_SYSTEM_SSL_LUA_DIR AND EXISTS "/usr/share/lua/5.4/ssl")
-    set(QMUD_SYSTEM_SSL_LUA_DIR "/usr/share/lua/5.4/ssl" CACHE PATH
-            "Optional explicit path to system LuaSec Lua directory (ssl/*.lua)" FORCE)
-endif ()
-if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND EXISTS "/usr/lib64/lua/5.4/socket")
-    set(QMUD_SYSTEM_SOCKET_CMODULE_DIR "/usr/lib64/lua/5.4/socket" CACHE PATH
-            "Optional explicit path to system LuaSocket C modules directory (socket/*.so)" FORCE)
-endif ()
-if (EXISTS "${SKELETON_SRC}")
-    file(GLOB_RECURSE SKELETON_FILES CONFIGURE_DEPENDS
-            "${SKELETON_SRC}/*")
-    file(GLOB_RECURSE SKELETON_PATHS LIST_DIRECTORIES true CONFIGURE_DEPENDS
-            "${SKELETON_SRC}/*")
-    set(SKELETON_DIRS)
-    foreach (_skeleton_path IN LISTS SKELETON_PATHS)
-        if (IS_DIRECTORY "${_skeleton_path}")
-            list(APPEND SKELETON_DIRS "${_skeleton_path}")
-        endif ()
-    endforeach ()
-    set(QMUD_SYSTEM_TOPLEVEL_LUA_FILES)
-    foreach (_qmud_system_lua_file
-            "${QMUD_SYSTEM_JSON_TOP_LUA_FILE}"
-            "${QMUD_SYSTEM_RE_LUA_FILE}")
-        if (_qmud_system_lua_file)
-            list(APPEND QMUD_SYSTEM_TOPLEVEL_LUA_FILES "${_qmud_system_lua_file}")
-        endif ()
-    endforeach ()
-    set(QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES)
-    foreach (_qmud_socket_lua_file
-            "${QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE}"
-            "${QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE}"
-            "${QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE}")
-        if (_qmud_socket_lua_file)
-            list(APPEND QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES "${_qmud_socket_lua_file}")
-        endif ()
-    endforeach ()
-    if (QMUD_ENABLE_LUA_SCRIPTING)
-        if (NOT QMUD_SYSTEM_SOCKET_LUA_DIR)
-            message(FATAL_ERROR "System LuaSocket socket/ module directory not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket ltn12.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket mime.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_FTP_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket/ftp.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_HTTP_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket/http.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_SMTP_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket/smtp.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_TP_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket/tp.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_URL_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket/url.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_DIR_HEADERS_LUA_FILE)
-            message(FATAL_ERROR "System LuaSocket socket/headers.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_SOCKET_ALL_LUA_FILES)
-            message(FATAL_ERROR "System LuaSocket socket/*.lua files not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_JSON_TOP_LUA_FILE)
-            message(FATAL_ERROR "System json.lua not found.")
-        endif ()
-        if (NOT QMUD_SYSTEM_RE_LUA_FILE)
-            message(FATAL_ERROR "System re.lua not found.")
-        endif ()
+    if (NOT QMUD_SYSTEM_SSL_LUA_DIR AND EXISTS "/usr/share/lua/5.4/ssl")
+        set(QMUD_SYSTEM_SSL_LUA_DIR "/usr/share/lua/5.4/ssl" CACHE PATH
+                "Optional explicit path to system LuaSec Lua directory (ssl/*.lua)" FORCE)
     endif ()
-    if (QMUD_SYSTEM_JSON_LUA_DIR)
-        file(GLOB_RECURSE QMUD_SYSTEM_JSON_LUA_FILES CONFIGURE_DEPENDS
-                "${QMUD_SYSTEM_JSON_LUA_DIR}/*.lua")
-    else ()
-        set(QMUD_SYSTEM_JSON_LUA_FILES)
+    if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND EXISTS "/usr/lib64/lua/5.4/socket")
+        set(QMUD_SYSTEM_SOCKET_CMODULE_DIR "/usr/lib64/lua/5.4/socket" CACHE PATH
+                "Optional explicit path to system LuaSocket C modules directory (socket/*.so)" FORCE)
+    endif ()
+    if (EXISTS "${SKELETON_SRC}")
+        file(GLOB_RECURSE SKELETON_FILES CONFIGURE_DEPENDS
+                "${SKELETON_SRC}/*")
+        file(GLOB_RECURSE SKELETON_PATHS LIST_DIRECTORIES true CONFIGURE_DEPENDS
+                "${SKELETON_SRC}/*")
+        set(SKELETON_DIRS)
+        foreach (_skeleton_path IN LISTS SKELETON_PATHS)
+            if (IS_DIRECTORY "${_skeleton_path}")
+                list(APPEND SKELETON_DIRS "${_skeleton_path}")
+            endif ()
+        endforeach ()
+        set(QMUD_SYSTEM_TOPLEVEL_LUA_FILES)
+        foreach (_qmud_system_lua_file
+                "${QMUD_SYSTEM_JSON_TOP_LUA_FILE}"
+                "${QMUD_SYSTEM_RE_LUA_FILE}")
+            if (_qmud_system_lua_file)
+                list(APPEND QMUD_SYSTEM_TOPLEVEL_LUA_FILES "${_qmud_system_lua_file}")
+            endif ()
+        endforeach ()
+        set(QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES)
+        foreach (_qmud_socket_lua_file
+                "${QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE}"
+                "${QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE}"
+                "${QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE}")
+            if (_qmud_socket_lua_file)
+                list(APPEND QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES "${_qmud_socket_lua_file}")
+            endif ()
+        endforeach ()
         if (QMUD_ENABLE_LUA_SCRIPTING)
-            message(FATAL_ERROR "System Lua JSON module directory not found.")
+            if (NOT QMUD_SYSTEM_SOCKET_LUA_DIR)
+                message(FATAL_ERROR "System LuaSocket socket/ module directory not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket ltn12.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket mime.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_FTP_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket/ftp.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_HTTP_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket/http.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_SMTP_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket/smtp.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_TP_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket/tp.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_URL_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket/url.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_DIR_HEADERS_LUA_FILE)
+                message(FATAL_ERROR "System LuaSocket socket/headers.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_SOCKET_ALL_LUA_FILES)
+                message(FATAL_ERROR "System LuaSocket socket/*.lua files not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_JSON_TOP_LUA_FILE)
+                message(FATAL_ERROR "System json.lua not found.")
+            endif ()
+            if (NOT QMUD_SYSTEM_RE_LUA_FILE)
+                message(FATAL_ERROR "System re.lua not found.")
+            endif ()
         endif ()
-    endif ()
-    set(SKELETON_STAMP "${SKELETON_DST}/.skeleton.stamp")
-    add_custom_command(
-            OUTPUT "${SKELETON_STAMP}"
-            COMMENT "Syncing skeleton/ to build dir"
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${SKELETON_DST}"
-            DEPENDS
-            ${SKELETON_FILES}
-            ${SKELETON_DIRS}
-            ${QMUD_SYSTEM_TOPLEVEL_LUA_FILES}
-            ${QMUD_SYSTEM_JSON_LUA_FILES}
-            ${QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES}
-            ${QMUD_SYSTEM_SOCKET_ALL_LUA_FILES}
-            ${QMUD_SYSTEM_SOCKET_CORE_SO}
-            ${QMUD_SYSTEM_MIME_CORE_SO}
-    )
-    foreach (d IN LISTS SKELETON_DIRS)
-        file(RELATIVE_PATH rel_dir "${SKELETON_SRC}" "${d}")
-        if (NOT rel_dir STREQUAL "")
+        if (QMUD_SYSTEM_JSON_LUA_DIR)
+            file(GLOB_RECURSE QMUD_SYSTEM_JSON_LUA_FILES CONFIGURE_DEPENDS
+                    "${QMUD_SYSTEM_JSON_LUA_DIR}/*.lua")
+        else ()
+            set(QMUD_SYSTEM_JSON_LUA_FILES)
+            if (QMUD_ENABLE_LUA_SCRIPTING)
+                message(FATAL_ERROR "System Lua JSON module directory not found.")
+            endif ()
+        endif ()
+        set(SKELETON_STAMP "${SKELETON_DST}/.skeleton.stamp")
+        add_custom_command(
+                OUTPUT "${SKELETON_STAMP}"
+                COMMENT "Syncing skeleton/ to build dir"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${SKELETON_DST}"
+                DEPENDS
+                ${SKELETON_FILES}
+                ${SKELETON_DIRS}
+                ${QMUD_SYSTEM_TOPLEVEL_LUA_FILES}
+                ${QMUD_SYSTEM_JSON_LUA_FILES}
+                ${QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES}
+                ${QMUD_SYSTEM_SOCKET_ALL_LUA_FILES}
+                ${QMUD_SYSTEM_SOCKET_CORE_SO}
+                ${QMUD_SYSTEM_MIME_CORE_SO}
+        )
+        foreach (d IN LISTS SKELETON_DIRS)
+            file(RELATIVE_PATH rel_dir "${SKELETON_SRC}" "${d}")
+            if (NOT rel_dir STREQUAL "")
+                add_custom_command(
+                        OUTPUT "${SKELETON_STAMP}"
+                        APPEND
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${SKELETON_DST}/${rel_dir}>"
+                )
+            endif ()
+        endforeach ()
+        foreach (f IN LISTS SKELETON_FILES)
+            file(RELATIVE_PATH rel "${SKELETON_SRC}" "${f}")
+            get_filename_component(rel_dir "${rel}" DIRECTORY)
+            if (rel_dir STREQUAL "")
+                set(dest_dir "${SKELETON_DST}")
+            else ()
+                set(dest_dir "${SKELETON_DST}/${rel_dir}")
+            endif ()
             add_custom_command(
                     OUTPUT "${SKELETON_STAMP}"
                     APPEND
                     COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<SHELL_PATH:${SKELETON_DST}/${rel_dir}>"
+                    "$<SHELL_PATH:${dest_dir}>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${f}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/${rel}>"
             )
-        endif ()
-    endforeach ()
-    foreach (f IN LISTS SKELETON_FILES)
-        file(RELATIVE_PATH rel "${SKELETON_SRC}" "${f}")
-        get_filename_component(rel_dir "${rel}" DIRECTORY)
-        if (rel_dir STREQUAL "")
-            set(dest_dir "${SKELETON_DST}")
-        else ()
-            set(dest_dir "${SKELETON_DST}/${rel_dir}")
-        endif ()
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${dest_dir}>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${f}>"
-                "$<SHELL_PATH:${SKELETON_DST}/${rel}>"
-        )
-    endforeach ()
-    foreach (f IN LISTS QMUD_SYSTEM_TOPLEVEL_LUA_FILES)
-        get_filename_component(name "${f}" NAME)
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${SKELETON_DST}/lua>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${f}>"
-                "$<SHELL_PATH:${SKELETON_DST}/lua/${name}>"
-        )
-    endforeach ()
-    foreach (f IN LISTS QMUD_SYSTEM_JSON_LUA_FILES)
-        file(RELATIVE_PATH rel "${QMUD_SYSTEM_JSON_LUA_DIR}" "${f}")
-        get_filename_component(rel_dir "${rel}" DIRECTORY)
-        if (rel_dir STREQUAL "")
-            set(dest_dir "${SKELETON_DST}/lua/json")
-        else ()
-            set(dest_dir "${SKELETON_DST}/lua/json/${rel_dir}")
-        endif ()
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${dest_dir}>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${f}>"
-                "$<SHELL_PATH:${SKELETON_DST}/lua/json/${rel}>"
-        )
-    endforeach ()
-    foreach (f IN LISTS QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES)
-        get_filename_component(name "${f}" NAME)
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${SKELETON_DST}/lua>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${f}>"
-                "$<SHELL_PATH:${SKELETON_DST}/lua/${name}>"
-        )
-    endforeach ()
-    foreach (f IN LISTS QMUD_SYSTEM_SOCKET_ALL_LUA_FILES)
-        get_filename_component(name "${f}" NAME)
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${SKELETON_DST}/socket>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${f}>"
-                "$<SHELL_PATH:${SKELETON_DST}/socket/${name}>"
-        )
-    endforeach ()
-    if (QMUD_SYSTEM_SOCKET_CORE_SO)
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${SKELETON_DST}/socket>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${QMUD_SYSTEM_SOCKET_CORE_SO}>"
-                "$<SHELL_PATH:${SKELETON_DST}/socket/${QMUD_LUA_MODULE_CORE_OUTPUT_NAME}>"
-        )
-    endif ()
-    if (QMUD_SYSTEM_MIME_CORE_SO)
-        add_custom_command(
-                OUTPUT "${SKELETON_STAMP}"
-                APPEND
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<SHELL_PATH:${SKELETON_DST}/mime>"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<SHELL_PATH:${QMUD_SYSTEM_MIME_CORE_SO}>"
-                "$<SHELL_PATH:${SKELETON_DST}/mime/${QMUD_LUA_MODULE_CORE_OUTPUT_NAME}>"
-        )
-    endif ()
-    add_custom_command(
-            OUTPUT "${SKELETON_STAMP}"
-            APPEND
-            COMMAND ${CMAKE_COMMAND} -E touch "${SKELETON_STAMP}"
-    )
-    add_custom_target(sync_skeleton DEPENDS "${SKELETON_STAMP}")
-    add_dependencies(QMud sync_skeleton)
-endif ()
-
-set(QMUD_API_EXPORT_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/skeleton/docs/lua_api_inventory")
-set(QMUD_API_EXPORT_COMMAND "$<TARGET_FILE:QMud>" --dump-lua-api "${QMUD_API_EXPORT_OUTPUT_DIR}")
-if (UNIX AND NOT APPLE)
-    set(QMUD_API_EXPORT_COMMAND
-            ${CMAKE_COMMAND} -E env QT_QPA_PLATFORM=offscreen
-            "$<TARGET_FILE:QMud>" --dump-lua-api "${QMUD_API_EXPORT_OUTPUT_DIR}")
-endif ()
-add_custom_target(ApiExport
-        DEPENDS QMud
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_API_EXPORT_OUTPUT_DIR}"
-        COMMAND ${QMUD_API_EXPORT_COMMAND}
-        COMMENT "Exporting QMud Lua API inventory into skeleton/docs/lua_api_inventory"
-        USES_TERMINAL
-)
-
-
-# Helpful compile definitions for portability.
-# They are safe on Linux and useful to avoid common Windows macros bleeding into code.
-string(TIMESTAMP QMUD_BUILD_DATE_UTC "%Y-%m-%d" UTC)
-string(TIMESTAMP QMUD_BUILD_TIME_UTC "%H:%M:%S" UTC)
-target_compile_definitions(qmud_app_core PUBLIC
-        NOMINMAX
-        _CRT_SECURE_NO_WARNINGS
-        QMUD_BUILD_DATE_UTC="${QMUD_BUILD_DATE_UTC}"
-        QMUD_BUILD_TIME_UTC="${QMUD_BUILD_TIME_UTC}"
-)
-if (QMUD_CI_BUILD)
-    target_compile_definitions(qmud_app_core PUBLIC CI_BUILD)
-endif ()
-
-# Recommended: enable warnings and reasonable flags (adjust per taste)
-if (MSVC)
-    target_compile_options(qmud_app_core PRIVATE /W4 /permissive-)
-    target_compile_options(QMud PRIVATE /W4 /permissive-)
-else ()
-    target_compile_options(qmud_app_core PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(QMud PRIVATE -Wall -Wextra -Wpedantic)
-endif ()
-if (MINGW)
-    target_compile_options(qmud_app_core PRIVATE "$<$<CONFIG:Debug>:-Wa,-mbig-obj>")
-endif ()
-
-qmud_apply_release_optimizations(qmud_app_core)
-qmud_apply_release_optimizations(QMud)
-if (APPLE AND CMAKE_CROSSCOMPILING)
-    # Suppress noisy osxcross/tbd linker warnings (e.g. libz/libcups out-of-sync stubs).
-    target_link_options(QMud PRIVATE -Wl,-w)
-endif ()
-
-if (APPLE)
-    option(QMUD_ENABLE_MACAPP "Enable macOS .app packaging target" ON)
-    if (QMUD_ENABLE_MACAPP)
-        set(QMUD_MACAPP_VERSION "dev" CACHE STRING "Version string embedded in QMud.app metadata")
-        set(QMUD_MACAPP_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/macapp-out" CACHE PATH "Output directory for generated macOS app bundle")
-        set(QMUD_MACDEPLOYQT_EXECUTABLE "" CACHE FILEPATH "Path to macdeployqt executable")
-        set(QMUD_MACAPP_ICON_ICNS "" CACHE FILEPATH "Optional explicit .icns file for the macOS app icon")
-
-        if (NOT QMUD_MACDEPLOYQT_EXECUTABLE)
-            if (DEFINED Qt6_DIR)
-                get_filename_component(QMUD_QT6_CMAKE_DIR "${Qt6_DIR}" ABSOLUTE)
-                get_filename_component(QMUD_QT6_ROOT "${QMUD_QT6_CMAKE_DIR}/../../.." ABSOLUTE)
-                find_program(QMUD_MACDEPLOYQT_EXECUTABLE
-                        NAMES macdeployqt
-                        HINTS "${QMUD_QT6_ROOT}/bin")
-            endif ()
-        endif ()
-        if (NOT QMUD_MACDEPLOYQT_EXECUTABLE)
-            find_program(QMUD_MACDEPLOYQT_EXECUTABLE NAMES macdeployqt)
-        endif ()
-
-        set(QMUD_MACAPP_BUNDLE_VERSION "${QMUD_MACAPP_VERSION}")
-        if (DEFINED PROJECT_VERSION AND NOT PROJECT_VERSION STREQUAL "")
-            set(QMUD_MACAPP_BUNDLE_VERSION "${PROJECT_VERSION}")
-        endif ()
-
-        set(QMUD_MACAPP_ICON_SOURCE "${QMUD_MACAPP_ICON_ICNS}")
-        set(QMUD_MACAPP_ICON_IS_GENERATED FALSE)
-        if (QMUD_MACAPP_ICON_SOURCE AND NOT EXISTS "${QMUD_MACAPP_ICON_SOURCE}")
-            message(FATAL_ERROR "Configured macOS app icon does not exist: ${QMUD_MACAPP_ICON_SOURCE}")
-        endif ()
-        if (NOT QMUD_MACAPP_ICON_SOURCE)
-            set(QMUD_MACAPP_ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/res/QMud.icns")
-            if (NOT EXISTS "${QMUD_MACAPP_ICON_SOURCE}")
-                set(QMUD_MACAPP_ICON_PNG_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/res/QMud.png")
-                set(QMUD_MACAPP_ICON_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts/png_to_icns.py")
-                if (NOT EXISTS "${QMUD_MACAPP_ICON_PNG_SOURCE}")
-                    message(FATAL_ERROR "Missing macOS app icon source: ${QMUD_MACAPP_ICON_PNG_SOURCE}")
-                endif ()
-                if (NOT Python3_Interpreter_FOUND)
-                    message(FATAL_ERROR "Python3 is required to generate the macOS app icon")
-                endif ()
-                set(QMUD_MACAPP_ICON_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/QMud.icns")
-                set(QMUD_MACAPP_ICON_IS_GENERATED TRUE)
-                add_custom_command(
-                        OUTPUT "${QMUD_MACAPP_ICON_SOURCE}"
-                        COMMAND "${Python3_EXECUTABLE}" "${QMUD_MACAPP_ICON_GENERATOR}"
-                        "${QMUD_MACAPP_ICON_PNG_SOURCE}" "${QMUD_MACAPP_ICON_SOURCE}"
-                        DEPENDS "${QMUD_MACAPP_ICON_GENERATOR}" "${QMUD_MACAPP_ICON_PNG_SOURCE}"
-                        VERBATIM)
-            endif ()
-        endif ()
-
-        set_target_properties(QMud PROPERTIES
-                MACOSX_BUNDLE TRUE
-                MACOSX_BUNDLE_BUNDLE_NAME "QMud"
-                MACOSX_BUNDLE_GUI_IDENTIFIER "com.abnormalfrequency.qmud"
-                MACOSX_BUNDLE_BUNDLE_VERSION "${QMUD_MACAPP_BUNDLE_VERSION}"
-                MACOSX_BUNDLE_SHORT_VERSION_STRING "${QMUD_MACAPP_BUNDLE_VERSION}"
-                MACOSX_BUNDLE_INFO_PLIST "${QMUD_MAC_INFO_PLIST_TEMPLATE}"
-                MACOSX_RPATH TRUE
-                BUILD_WITH_INSTALL_RPATH TRUE
-                INSTALL_RPATH "@executable_path/../Frameworks;@loader_path/../Frameworks"
-                BUILD_RPATH "@executable_path/../Frameworks;@loader_path/../Frameworks"
-                INSTALL_RPATH_USE_LINK_PATH FALSE
-        )
-
-        if (EXISTS "${QMUD_MACAPP_ICON_SOURCE}" OR QMUD_MACAPP_ICON_IS_GENERATED)
-            get_filename_component(QMUD_MACAPP_ICON_NAME "${QMUD_MACAPP_ICON_SOURCE}" NAME)
-            set_source_files_properties("${QMUD_MACAPP_ICON_SOURCE}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-            if (QMUD_MACAPP_ICON_IS_GENERATED)
-                set_source_files_properties("${QMUD_MACAPP_ICON_SOURCE}" PROPERTIES GENERATED TRUE)
-            endif ()
-            target_sources(QMud PRIVATE "${QMUD_MACAPP_ICON_SOURCE}")
-            set_target_properties(QMud PROPERTIES MACOSX_BUNDLE_ICON_FILE "${QMUD_MACAPP_ICON_NAME}")
-        endif ()
-
-        set(QMUD_MACAPP_BUNDLE_DIR "$<TARGET_BUNDLE_DIR:QMud>")
-        set(QMUD_MACAPP_BUNDLE_RESOURCES_DIR "${QMUD_MACAPP_BUNDLE_DIR}/Contents/Resources")
-        set(QMUD_MACAPP_STAGE_DIR "${QMUD_MACAPP_OUTPUT_DIR}/QMud.app")
-        option(QMUD_MACAPP_FORCE_NO_MACDEPLOYQT "Force MacApp target to skip macdeployqt even when found" OFF)
-        option(QMUD_MACAPP_ALLOW_NO_MACDEPLOYQT "Allow MacApp target without macdeployqt (dependencies must be staged manually)" OFF)
-        option(QMUD_MACAPP_MACDEPLOYQT_NO_PLUGINS "Pass -no-plugins to macdeployqt (plugins must be staged manually)" OFF)
-        set(QMUD_MACAPP_MACDEPLOYQT_LIBPATHS "" CACHE STRING "Semicolon-separated extra library search paths passed to macdeployqt via -libpath")
-        set(QMUD_MACDEPLOYQT_ARGS -always-overwrite)
-        if (QMUD_MACAPP_MACDEPLOYQT_NO_PLUGINS)
-            list(APPEND QMUD_MACDEPLOYQT_ARGS -no-plugins)
-        endif ()
-        foreach (_qmud_mac_libpath IN LISTS QMUD_MACAPP_MACDEPLOYQT_LIBPATHS)
-            if (NOT _qmud_mac_libpath STREQUAL "")
-                list(APPEND QMUD_MACDEPLOYQT_ARGS "-libpath=${_qmud_mac_libpath}")
-            endif ()
         endforeach ()
-        set(QMUD_MACAPP_STAGEABLE OFF)
-
-        if (QMUD_MACAPP_FORCE_NO_MACDEPLOYQT)
-            set(QMUD_MACDEPLOYQT_EXECUTABLE "")
+        foreach (f IN LISTS QMUD_SYSTEM_TOPLEVEL_LUA_FILES)
+            get_filename_component(name "${f}" NAME)
+            add_custom_command(
+                    OUTPUT "${SKELETON_STAMP}"
+                    APPEND
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<SHELL_PATH:${SKELETON_DST}/lua>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${f}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/lua/${name}>"
+            )
+        endforeach ()
+        foreach (f IN LISTS QMUD_SYSTEM_JSON_LUA_FILES)
+            file(RELATIVE_PATH rel "${QMUD_SYSTEM_JSON_LUA_DIR}" "${f}")
+            get_filename_component(rel_dir "${rel}" DIRECTORY)
+            if (rel_dir STREQUAL "")
+                set(dest_dir "${SKELETON_DST}/lua/json")
+            else ()
+                set(dest_dir "${SKELETON_DST}/lua/json/${rel_dir}")
+            endif ()
+            add_custom_command(
+                    OUTPUT "${SKELETON_STAMP}"
+                    APPEND
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<SHELL_PATH:${dest_dir}>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${f}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/lua/json/${rel}>"
+            )
+        endforeach ()
+        foreach (f IN LISTS QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES)
+            get_filename_component(name "${f}" NAME)
+            add_custom_command(
+                    OUTPUT "${SKELETON_STAMP}"
+                    APPEND
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<SHELL_PATH:${SKELETON_DST}/lua>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${f}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/lua/${name}>"
+            )
+        endforeach ()
+        foreach (f IN LISTS QMUD_SYSTEM_SOCKET_ALL_LUA_FILES)
+            get_filename_component(name "${f}" NAME)
+            add_custom_command(
+                    OUTPUT "${SKELETON_STAMP}"
+                    APPEND
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<SHELL_PATH:${SKELETON_DST}/socket>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${f}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/socket/${name}>"
+            )
+        endforeach ()
+        if (QMUD_SYSTEM_SOCKET_CORE_SO)
+            add_custom_command(
+                    OUTPUT "${SKELETON_STAMP}"
+                    APPEND
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<SHELL_PATH:${SKELETON_DST}/socket>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${QMUD_SYSTEM_SOCKET_CORE_SO}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/socket/${QMUD_LUA_MODULE_CORE_OUTPUT_NAME}>"
+            )
         endif ()
-
-        if (QMUD_MACDEPLOYQT_EXECUTABLE AND NOT QMUD_MACAPP_FORCE_NO_MACDEPLOYQT)
-            add_custom_target(MacApp
-                    DEPENDS QMud
-                    COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MACAPP_OUTPUT_DIR}"
-                    COMMAND "${QMUD_MACDEPLOYQT_EXECUTABLE}" "${QMUD_MACAPP_BUNDLE_DIR}" ${QMUD_MACDEPLOYQT_ARGS}
-                    COMMAND ${CMAKE_COMMAND} -E rm -rf "${QMUD_MACAPP_STAGE_DIR}"
-                    COMMAND ${CMAKE_COMMAND} -E copy_directory "${QMUD_MACAPP_BUNDLE_DIR}" "${QMUD_MACAPP_STAGE_DIR}"
-                    COMMENT "Building QMud.app bundle with macdeployqt"
-                    USES_TERMINAL
-            )
-            set(QMUD_MACAPP_STAGEABLE ON)
-        elseif (QMUD_MACAPP_ALLOW_NO_MACDEPLOYQT OR QMUD_MACAPP_FORCE_NO_MACDEPLOYQT)
-            add_custom_target(MacApp
-                    DEPENDS QMud
-                    COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MACAPP_OUTPUT_DIR}"
-                    COMMAND ${CMAKE_COMMAND} -E rm -rf "${QMUD_MACAPP_STAGE_DIR}"
-                    COMMAND ${CMAKE_COMMAND} -E copy_directory "${QMUD_MACAPP_BUNDLE_DIR}" "${QMUD_MACAPP_STAGE_DIR}"
-                    COMMENT "Building QMud.app bundle without macdeployqt (manual dependency staging expected)"
-                    USES_TERMINAL
-            )
-            set(QMUD_MACAPP_STAGEABLE ON)
-        else ()
-            add_custom_target(MacApp
-                    COMMAND ${CMAKE_COMMAND} -E echo "Mac app packaging requires macdeployqt."
-                    COMMAND ${CMAKE_COMMAND} -E echo "Set QMUD_MACDEPLOYQT_EXECUTABLE or ensure macdeployqt is on PATH."
-                    COMMAND ${CMAKE_COMMAND} -E false
+        if (QMUD_SYSTEM_MIME_CORE_SO)
+            add_custom_command(
+                    OUTPUT "${SKELETON_STAMP}"
+                    APPEND
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<SHELL_PATH:${SKELETON_DST}/mime>"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<SHELL_PATH:${QMUD_SYSTEM_MIME_CORE_SO}>"
+                    "$<SHELL_PATH:${SKELETON_DST}/mime/${QMUD_LUA_MODULE_CORE_OUTPUT_NAME}>"
             )
         endif ()
+        add_custom_command(
+                OUTPUT "${SKELETON_STAMP}"
+                APPEND
+                COMMAND ${CMAKE_COMMAND} -E touch "${SKELETON_STAMP}"
+        )
+        add_custom_target(sync_skeleton DEPENDS "${SKELETON_STAMP}")
+        add_dependencies(QMud sync_skeleton)
+    endif ()
 
-        if (QMUD_MACAPP_STAGEABLE AND EXISTS "${SKELETON_SRC}")
-            add_custom_command(TARGET MacApp POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS"
-                    COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "$<SHELL_PATH:${SKELETON_SRC}>"
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS>"
-                    COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "$<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/lua>"
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua>"
-                    COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "$<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/socket>"
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/socket>"
-                    COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "$<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/mime>"
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/mime>"
-                    COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/linux-x86_64>"
-                    COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/macos-universal>"
-                    COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/macos-arm64>"
-                    COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/macos-x86_64>"
-                    COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/windows-x86_64>"
-                    COMMENT "Copying skeleton into QMud.app resources"
+    set(QMUD_API_EXPORT_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/skeleton/docs/lua_api_inventory")
+    set(QMUD_API_EXPORT_COMMAND "$<TARGET_FILE:QMud>" --dump-lua-api "${QMUD_API_EXPORT_OUTPUT_DIR}")
+    if (UNIX AND NOT APPLE)
+        set(QMUD_API_EXPORT_COMMAND
+                ${CMAKE_COMMAND} -E env QT_QPA_PLATFORM=offscreen
+                "$<TARGET_FILE:QMud>" --dump-lua-api "${QMUD_API_EXPORT_OUTPUT_DIR}")
+    endif ()
+    add_custom_target(ApiExport
+            DEPENDS QMud
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_API_EXPORT_OUTPUT_DIR}"
+            COMMAND ${QMUD_API_EXPORT_COMMAND}
+            COMMENT "Exporting QMud Lua API inventory into skeleton/docs/lua_api_inventory"
+            USES_TERMINAL
+    )
+
+
+    # Helpful compile definitions for portability.
+    # They are safe on Linux and useful to avoid common Windows macros bleeding into code.
+    string(TIMESTAMP QMUD_BUILD_DATE_UTC "%Y-%m-%d" UTC)
+    string(TIMESTAMP QMUD_BUILD_TIME_UTC "%H:%M:%S" UTC)
+    target_compile_definitions(qmud_app_core PUBLIC
+            NOMINMAX
+            _CRT_SECURE_NO_WARNINGS
+            QMUD_BUILD_DATE_UTC="${QMUD_BUILD_DATE_UTC}"
+            QMUD_BUILD_TIME_UTC="${QMUD_BUILD_TIME_UTC}"
+    )
+    if (QMUD_CI_BUILD)
+        target_compile_definitions(qmud_app_core PUBLIC CI_BUILD)
+    endif ()
+
+    # Recommended: enable warnings and reasonable flags (adjust per taste)
+    if (MSVC)
+        target_compile_options(qmud_app_core PRIVATE /W4 /permissive-)
+        target_compile_options(QMud PRIVATE /W4 /permissive-)
+    else ()
+        target_compile_options(qmud_app_core PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(QMud PRIVATE -Wall -Wextra -Wpedantic)
+    endif ()
+    if (MINGW)
+        target_compile_options(qmud_app_core PRIVATE "$<$<CONFIG:Debug>:-Wa,-mbig-obj>")
+    endif ()
+
+    qmud_apply_release_optimizations(qmud_app_core)
+    qmud_apply_release_optimizations(QMud)
+    if (APPLE AND CMAKE_CROSSCOMPILING)
+        # Suppress noisy osxcross/tbd linker warnings (e.g. libz/libcups out-of-sync stubs).
+        target_link_options(QMud PRIVATE -Wl,-w)
+    endif ()
+
+    if (APPLE)
+        option(QMUD_ENABLE_MACAPP "Enable macOS .app packaging target" ON)
+        if (QMUD_ENABLE_MACAPP)
+            set(QMUD_MACAPP_VERSION "dev" CACHE STRING "Version string embedded in QMud.app metadata")
+            set(QMUD_MACAPP_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/macapp-out" CACHE PATH "Output directory for generated macOS app bundle")
+            set(QMUD_MACDEPLOYQT_EXECUTABLE "" CACHE FILEPATH "Path to macdeployqt executable")
+            set(QMUD_MACAPP_ICON_ICNS "" CACHE FILEPATH "Optional explicit .icns file for the macOS app icon")
+
+            if (NOT QMUD_MACDEPLOYQT_EXECUTABLE)
+                if (DEFINED Qt6_DIR)
+                    get_filename_component(QMUD_QT6_CMAKE_DIR "${Qt6_DIR}" ABSOLUTE)
+                    get_filename_component(QMUD_QT6_ROOT "${QMUD_QT6_CMAKE_DIR}/../../.." ABSOLUTE)
+                    find_program(QMUD_MACDEPLOYQT_EXECUTABLE
+                            NAMES macdeployqt
+                            HINTS "${QMUD_QT6_ROOT}/bin")
+                endif ()
+            endif ()
+            if (NOT QMUD_MACDEPLOYQT_EXECUTABLE)
+                find_program(QMUD_MACDEPLOYQT_EXECUTABLE NAMES macdeployqt)
+            endif ()
+
+            set(QMUD_MACAPP_BUNDLE_VERSION "${QMUD_MACAPP_VERSION}")
+            if (DEFINED PROJECT_VERSION AND NOT PROJECT_VERSION STREQUAL "")
+                set(QMUD_MACAPP_BUNDLE_VERSION "${PROJECT_VERSION}")
+            endif ()
+
+            set(QMUD_MACAPP_ICON_SOURCE "${QMUD_MACAPP_ICON_ICNS}")
+            set(QMUD_MACAPP_ICON_IS_GENERATED FALSE)
+            if (QMUD_MACAPP_ICON_SOURCE AND NOT EXISTS "${QMUD_MACAPP_ICON_SOURCE}")
+                message(FATAL_ERROR "Configured macOS app icon does not exist: ${QMUD_MACAPP_ICON_SOURCE}")
+            endif ()
+            if (NOT QMUD_MACAPP_ICON_SOURCE)
+                set(QMUD_MACAPP_ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/res/QMud.icns")
+                if (NOT EXISTS "${QMUD_MACAPP_ICON_SOURCE}")
+                    set(QMUD_MACAPP_ICON_PNG_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/res/QMud.png")
+                    set(QMUD_MACAPP_ICON_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts/png_to_icns.py")
+                    if (NOT EXISTS "${QMUD_MACAPP_ICON_PNG_SOURCE}")
+                        message(FATAL_ERROR "Missing macOS app icon source: ${QMUD_MACAPP_ICON_PNG_SOURCE}")
+                    endif ()
+                    if (NOT Python3_Interpreter_FOUND)
+                        message(FATAL_ERROR "Python3 is required to generate the macOS app icon")
+                    endif ()
+                    set(QMUD_MACAPP_ICON_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/QMud.icns")
+                    set(QMUD_MACAPP_ICON_IS_GENERATED TRUE)
+                    add_custom_command(
+                            OUTPUT "${QMUD_MACAPP_ICON_SOURCE}"
+                            COMMAND "${Python3_EXECUTABLE}" "${QMUD_MACAPP_ICON_GENERATOR}"
+                            "${QMUD_MACAPP_ICON_PNG_SOURCE}" "${QMUD_MACAPP_ICON_SOURCE}"
+                            DEPENDS "${QMUD_MACAPP_ICON_GENERATOR}" "${QMUD_MACAPP_ICON_PNG_SOURCE}"
+                            VERBATIM)
+                endif ()
+            endif ()
+
+            set_target_properties(QMud PROPERTIES
+                    MACOSX_BUNDLE TRUE
+                    MACOSX_BUNDLE_BUNDLE_NAME "QMud"
+                    MACOSX_BUNDLE_GUI_IDENTIFIER "com.abnormalfrequency.qmud"
+                    MACOSX_BUNDLE_BUNDLE_VERSION "${QMUD_MACAPP_BUNDLE_VERSION}"
+                    MACOSX_BUNDLE_SHORT_VERSION_STRING "${QMUD_MACAPP_BUNDLE_VERSION}"
+                    MACOSX_BUNDLE_INFO_PLIST "${QMUD_MAC_INFO_PLIST_TEMPLATE}"
+                    MACOSX_RPATH TRUE
+                    BUILD_WITH_INSTALL_RPATH TRUE
+                    INSTALL_RPATH "@executable_path/../Frameworks;@loader_path/../Frameworks"
+                    BUILD_RPATH "@executable_path/../Frameworks;@loader_path/../Frameworks"
+                    INSTALL_RPATH_USE_LINK_PATH FALSE
             )
+
+            if (EXISTS "${QMUD_MACAPP_ICON_SOURCE}" OR QMUD_MACAPP_ICON_IS_GENERATED)
+                get_filename_component(QMUD_MACAPP_ICON_NAME "${QMUD_MACAPP_ICON_SOURCE}" NAME)
+                set_source_files_properties("${QMUD_MACAPP_ICON_SOURCE}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+                if (QMUD_MACAPP_ICON_IS_GENERATED)
+                    set_source_files_properties("${QMUD_MACAPP_ICON_SOURCE}" PROPERTIES GENERATED TRUE)
+                endif ()
+                target_sources(QMud PRIVATE "${QMUD_MACAPP_ICON_SOURCE}")
+                set_target_properties(QMud PROPERTIES MACOSX_BUNDLE_ICON_FILE "${QMUD_MACAPP_ICON_NAME}")
+            endif ()
+
+            set(QMUD_MACAPP_BUNDLE_DIR "$<TARGET_BUNDLE_DIR:QMud>")
+            set(QMUD_MACAPP_BUNDLE_RESOURCES_DIR "${QMUD_MACAPP_BUNDLE_DIR}/Contents/Resources")
+            set(QMUD_MACAPP_STAGE_DIR "${QMUD_MACAPP_OUTPUT_DIR}/QMud.app")
+            option(QMUD_MACAPP_FORCE_NO_MACDEPLOYQT "Force MacApp target to skip macdeployqt even when found" OFF)
+            option(QMUD_MACAPP_ALLOW_NO_MACDEPLOYQT "Allow MacApp target without macdeployqt (dependencies must be staged manually)" OFF)
+            option(QMUD_MACAPP_MACDEPLOYQT_NO_PLUGINS "Pass -no-plugins to macdeployqt (plugins must be staged manually)" OFF)
+            set(QMUD_MACAPP_MACDEPLOYQT_LIBPATHS "" CACHE STRING "Semicolon-separated extra library search paths passed to macdeployqt via -libpath")
+            set(QMUD_MACDEPLOYQT_ARGS -always-overwrite)
+            if (QMUD_MACAPP_MACDEPLOYQT_NO_PLUGINS)
+                list(APPEND QMUD_MACDEPLOYQT_ARGS -no-plugins)
+            endif ()
+            foreach (_qmud_mac_libpath IN LISTS QMUD_MACAPP_MACDEPLOYQT_LIBPATHS)
+                if (NOT _qmud_mac_libpath STREQUAL "")
+                    list(APPEND QMUD_MACDEPLOYQT_ARGS "-libpath=${_qmud_mac_libpath}")
+                endif ()
+            endforeach ()
+            set(QMUD_MACAPP_STAGEABLE OFF)
+
+            if (QMUD_MACAPP_FORCE_NO_MACDEPLOYQT)
+                set(QMUD_MACDEPLOYQT_EXECUTABLE "")
+            endif ()
+
+            if (QMUD_MACDEPLOYQT_EXECUTABLE AND NOT QMUD_MACAPP_FORCE_NO_MACDEPLOYQT)
+                add_custom_target(MacApp
+                        DEPENDS QMud
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MACAPP_OUTPUT_DIR}"
+                        COMMAND "${QMUD_MACDEPLOYQT_EXECUTABLE}" "${QMUD_MACAPP_BUNDLE_DIR}" ${QMUD_MACDEPLOYQT_ARGS}
+                        COMMAND ${CMAKE_COMMAND} -E rm -rf "${QMUD_MACAPP_STAGE_DIR}"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory "${QMUD_MACAPP_BUNDLE_DIR}" "${QMUD_MACAPP_STAGE_DIR}"
+                        COMMENT "Building QMud.app bundle with macdeployqt"
+                        USES_TERMINAL
+                )
+                set(QMUD_MACAPP_STAGEABLE ON)
+            elseif (QMUD_MACAPP_ALLOW_NO_MACDEPLOYQT OR QMUD_MACAPP_FORCE_NO_MACDEPLOYQT)
+                add_custom_target(MacApp
+                        DEPENDS QMud
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MACAPP_OUTPUT_DIR}"
+                        COMMAND ${CMAKE_COMMAND} -E rm -rf "${QMUD_MACAPP_STAGE_DIR}"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory "${QMUD_MACAPP_BUNDLE_DIR}" "${QMUD_MACAPP_STAGE_DIR}"
+                        COMMENT "Building QMud.app bundle without macdeployqt (manual dependency staging expected)"
+                        USES_TERMINAL
+                )
+                set(QMUD_MACAPP_STAGEABLE ON)
+            else ()
+                add_custom_target(MacApp
+                        COMMAND ${CMAKE_COMMAND} -E echo "Mac app packaging requires macdeployqt."
+                        COMMAND ${CMAKE_COMMAND} -E echo "Set QMUD_MACDEPLOYQT_EXECUTABLE or ensure macdeployqt is on PATH."
+                        COMMAND ${CMAKE_COMMAND} -E false
+                )
+            endif ()
+
+            if (QMUD_MACAPP_STAGEABLE AND EXISTS "${SKELETON_SRC}")
+                add_custom_command(TARGET MacApp POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${SKELETON_SRC}>"
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS>"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/lua>"
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua>"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/socket>"
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/socket>"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/mime>"
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/mime>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/linux-x86_64>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/macos-universal>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/macos-arm64>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/macos-x86_64>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_MACAPP_STAGE_DIR}/Contents/MacOS/lua/native/windows-x86_64>"
+                        COMMENT "Copying skeleton into QMud.app resources"
+                )
+            endif ()
         endif ()
     endif ()
 endif ()
@@ -1813,7 +1844,7 @@ if (UNIX AND NOT APPLE)
     endif ()
 
     option(QMUD_ENABLE_APPIMAGE "Enable AppImage packaging target (Linux only)" ON)
-    if (QMUD_ENABLE_APPIMAGE)
+    if (QMUD_ENABLE_APPIMAGE AND QMUD_BUILD_NATIVE)
         option(QMUD_APPIMAGE_STRICT_QT_SOURCE
                 "Restrict AppImage Qt runtime and plugin discovery to configured Qt SDK paths (disable /usr fallback plugin paths)"
                 OFF)
@@ -1945,7 +1976,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_LPEG_SO
                     NAMES lpeg.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
+                    PATH_SUFFIXES lua/5.4
             )
         endif ()
 
@@ -1954,7 +1985,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_SOCKET_CORE_SO
                     NAMES core.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
+                    PATH_SUFFIXES lua/5.4/socket
             )
         endif ()
 
@@ -1963,7 +1994,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_MIME_CORE_SO
                     NAMES core.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
+                    PATH_SUFFIXES lua/5.4/mime
             )
         endif ()
         set(QMUD_APPIMAGE_SOCKET_CMODULE_DIR "${QMUD_SYSTEM_SOCKET_CMODULE_DIR}")
@@ -1981,14 +2012,14 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_SSL_CORE_SO
                     NAMES core.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
+                    PATH_SUFFIXES ssl lua/5.4/ssl
             )
         endif ()
         if (NOT QMUD_APPIMAGE_SSL_CORE_SO)
             find_file(QMUD_APPIMAGE_SSL_CORE_SO
                     NAMES ssl.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
+                    PATH_SUFFIXES lua/5.4
             )
         endif ()
 

@@ -9,6 +9,7 @@
 #include "dialogs/WorldTriggerDialog.h"
 #include "StringUtils.h"
 #include "WorldOptions.h"
+#include "dialogs/WorldPreferencesDialog.h"
 #include "helpers/ColorUtils.h"
 #include "helpers/WorldEditUtils.h"
 
@@ -45,8 +46,17 @@ namespace
 		        QStringLiteral("blue"),  QStringLiteral("fuchsia"), QStringLiteral("aqua"),
 		        QStringLiteral("white")};
 	}
+	/**
+	 * @brief Collects text changes from a modeless expression editor.
+	 * @param parent Owning rule editor.
+	 * @param title Dialog title.
+	 * @param text Caller-frame text updated on acceptance.
+	 * @param multiline Whether line breaks are retained.
+	 * @return Operation yielding whether edited text was accepted.
+	 */
 
-	bool editTextDialog(QWidget *parent, const QString &title, QString &text, const bool multiline)
+	QMudPreferences::Operation<bool> editTextDialog(QWidget *parent, QString title, QString &text,
+	                                                const bool multiline)
 	{
 		QDialog dlg(parent);
 		dlg.setWindowTitle(title);
@@ -68,8 +78,8 @@ namespace
 		QObject::connect(buttonsPtr, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 		layoutPtr->addWidget(buttons.release());
 
-		if (dlg.exec() != QDialog::Accepted)
-			return false;
+		if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+			co_return false;
 
 		text = editPtr->toPlainText();
 		if (!multiline)
@@ -77,7 +87,7 @@ namespace
 			text.replace(QLatin1Char('\r'), QLatin1Char('\n'));
 			text.replace(QLatin1Char('\n'), QLatin1Char(' '));
 		}
-		return true;
+		co_return true;
 	}
 
 	constexpr int kMaxRecentLines = 200;
@@ -100,10 +110,10 @@ WorldRuntime::Trigger WorldTriggerDialog::trigger() const
 	return m_trigger;
 }
 
-void WorldTriggerDialog::accept()
+QMudPreferences::Operation<void> WorldTriggerDialog::acceptAsync()
 {
-	if (!validateTrigger())
-		return;
+	if (!(co_await validateTrigger()))
+		co_return;
 
 	QMap<QString, QString> &attrs = m_trigger.attributes;
 	attrs.insert(QStringLiteral("match"), m_match->text());
@@ -163,19 +173,31 @@ void WorldTriggerDialog::accept()
 
 	QDialog::accept();
 }
-
-void WorldTriggerDialog::onEditMatch()
+void WorldTriggerDialog::accept()
 {
-	if (QString text = m_match->text();
-	    editTextDialog(this, QStringLiteral("Edit trigger 'match' text"), text, false))
-		m_match->setText(text);
+	(void)acceptAsync();
 }
 
-void WorldTriggerDialog::onEditSend()
+QMudPreferences::Operation<void> WorldTriggerDialog::onEditMatchAsync()
+{
+	if (QString text = m_match->text();
+	    (co_await editTextDialog(this, QStringLiteral("Edit trigger 'match' text"), text, false)))
+		m_match->setText(text);
+}
+void WorldTriggerDialog::onEditMatch()
+{
+	(void)onEditMatchAsync();
+}
+
+QMudPreferences::Operation<void> WorldTriggerDialog::onEditSendAsync()
 {
 	if (QString text = m_send->toPlainText();
-	    editTextDialog(this, QStringLiteral("Edit trigger 'send' text"), text, true))
+	    (co_await editTextDialog(this, QStringLiteral("Edit trigger 'send' text"), text, true)))
 		m_send->setPlainText(text);
+}
+void WorldTriggerDialog::onEditSend()
+{
+	(void)onEditSendAsync();
 }
 
 void WorldTriggerDialog::onConvertToRegexp()
@@ -191,13 +213,17 @@ void WorldTriggerDialog::onConvertToRegexp()
 	m_regexp->setChecked(true);
 }
 
-void WorldTriggerDialog::onBrowseSound()
+QMudPreferences::Operation<void> WorldTriggerDialog::onBrowseSoundAsync()
 {
-	const QString fileName =
-	    QFileDialog::getOpenFileName(this, QStringLiteral("Choose sound file"), QString(),
-	                                 QStringLiteral("Sound files (*.wav *.mp3 *.ogg);;All files (*.*)"));
+	const QString fileName = (co_await QMudPreferences::getOpenFileName(
+	    this, QStringLiteral("Choose sound file"), QString(),
+	    QStringLiteral("Sound files (*.wav *.mp3 *.ogg);;All files (*.*)")));
 	if (!fileName.isEmpty())
 		m_soundPathLabel->setText(fileName);
+}
+void WorldTriggerDialog::onBrowseSound()
+{
+	(void)onBrowseSoundAsync();
 }
 
 void WorldTriggerDialog::onNoSound() const
@@ -205,10 +231,14 @@ void WorldTriggerDialog::onNoSound() const
 	m_soundPathLabel->setText(QStringLiteral("(No sound)"));
 }
 
+QMudPreferences::Operation<void> WorldTriggerDialog::onTestSoundAsync()
+{
+	(co_await QMudPreferences::information(this, QStringLiteral("Sound"),
+	                                       QStringLiteral("Use a world trigger to test sound playback.")));
+}
 void WorldTriggerDialog::onTestSound()
 {
-	QMessageBox::information(this, QStringLiteral("Sound"),
-	                         QStringLiteral("Use a world trigger to test sound playback."));
+	(void)onTestSoundAsync();
 }
 
 void WorldTriggerDialog::onSendToChanged(int) const
@@ -517,10 +547,10 @@ void WorldTriggerDialog::buildUi()
 	connect(m_buttons, &QDialogButtonBox::accepted, this, &WorldTriggerDialog::accept);
 	connect(m_buttons, &QDialogButtonBox::rejected, this, &WorldTriggerDialog::reject);
 	connect(m_buttons->button(QDialogButtonBox::Help), &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
-		        QMessageBox::information(this, QStringLiteral("Help"),
-		                                 QStringLiteral("Help is not available for this dialog."));
+		        (co_await QMudPreferences::information(
+		            this, QStringLiteral("Help"), QStringLiteral("Help is not available for this dialog.")));
 	        });
 	mainLayoutPtr->addWidget(m_buttons);
 
@@ -538,11 +568,14 @@ void WorldTriggerDialog::buildUi()
 	connect(m_triggerColour, qOverload<int>(&QComboBox::currentIndexChanged), this,
 	        [this] { updateControls(); });
 	connect(m_otherTextColour, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QColor current(m_otherTextColour->property("colourValue").toString());
-		        const QColor chosen =
-		            QColorDialog::getColor(current, this, QStringLiteral("Choose text colour"));
+		        QColorDialog dialog(current, this);
+		        dialog.setWindowTitle(QStringLiteral("Choose text colour"));
+		        if (co_await QMudPreferences::wait(dialog) != QDialog::Accepted)
+			        co_return;
+		        const QColor chosen = dialog.selectedColor();
 		        if (chosen.isValid())
 		        {
 			        m_otherTextColour->setProperty("colourValue", chosen.name());
@@ -550,11 +583,14 @@ void WorldTriggerDialog::buildUi()
 		        }
 	        });
 	connect(m_otherBackColour, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QColor current(m_otherBackColour->property("colourValue").toString());
-		        const QColor chosen =
-		            QColorDialog::getColor(current, this, QStringLiteral("Choose back colour"));
+		        QColorDialog dialog(current, this);
+		        dialog.setWindowTitle(QStringLiteral("Choose back colour"));
+		        if (co_await QMudPreferences::wait(dialog) != QDialog::Accepted)
+			        co_return;
+		        const QColor chosen = dialog.selectedColor();
 		        if (chosen.isValid())
 		        {
 			        m_otherBackColour->setProperty("colourValue", chosen.name());
@@ -644,7 +680,7 @@ void WorldTriggerDialog::loadTrigger() const
 	updateTriggerColourSwatches();
 }
 
-bool WorldTriggerDialog::validateTrigger()
+QMudPreferences::Operation<bool> WorldTriggerDialog::validateTrigger()
 {
 	const QString matchText = m_match->text();
 	const QString sendText  = m_send->toPlainText();
@@ -660,10 +696,10 @@ bool WorldTriggerDialog::validateTrigger()
 
 	if (matchText.isEmpty())
 	{
-		QMessageBox::warning(this, QStringLiteral("QMud"),
-		                     QStringLiteral("The trigger match text cannot be blank."));
+		(co_await QMudPreferences::warning(this, QStringLiteral("QMud"),
+		                                   QStringLiteral("The trigger match text cannot be blank.")));
 		m_match->setFocus();
-		return false;
+		co_return false;
 	}
 
 	// check for foolishly using ** in a non-regular expression
@@ -671,7 +707,7 @@ bool WorldTriggerDialog::validateTrigger()
 	{
 		WorldEditUtils::showMultipleAsterisksWarning(this);
 		m_match->setFocus();
-		return false;
+		co_return false;
 	}
 
 	const QList<ushort> invalidMatch = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -680,14 +716,14 @@ bool WorldTriggerDialog::validateTrigger()
 	    invalidMatchPos != -1)
 	{
 		const ushort code = matchText.at(invalidMatchPos).unicode();
-		QMessageBox::warning(
+		(co_await QMudPreferences::warning(
 		    this, QStringLiteral("QMud"),
 		    QStringLiteral("The trigger 'match' text contains an invalid non-printable character "
 		                   "(hex %1) at position %2.")
 		        .arg(code, 2, 16, QLatin1Char('0'))
-		        .arg(invalidMatchPos + 1));
+		        .arg(invalidMatchPos + 1)));
 		m_match->setFocus();
-		return false;
+		co_return false;
 	}
 
 	// we allow carriage-return, linefeed, tab here
@@ -697,14 +733,14 @@ bool WorldTriggerDialog::validateTrigger()
 	    invalidSendPos != -1)
 	{
 		const ushort code = sendText.at(invalidSendPos).unicode();
-		QMessageBox::warning(
+		(co_await QMudPreferences::warning(
 		    this, QStringLiteral("QMud"),
 		    QStringLiteral("The trigger 'send' text contains an invalid non-printable character "
 		                   "(hex %1) at position %2.")
 		        .arg(code, 2, 16, QLatin1Char('0'))
-		        .arg(invalidSendPos + 1));
+		        .arg(invalidSendPos + 1)));
 		m_send->setFocus();
-		return false;
+		co_return false;
 	}
 
 	if (m_regexp->isChecked())
@@ -715,7 +751,7 @@ bool WorldTriggerDialog::validateTrigger()
 		if (!WorldEditUtils::checkRegularExpression(this, matchText, opts))
 		{
 			m_match->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -729,23 +765,23 @@ bool WorldTriggerDialog::validateTrigger()
 			if (const QString other = trigger.attributes.value(QStringLiteral("name"));
 			    !other.isEmpty() && other.compare(label, Qt::CaseInsensitive) == 0)
 			{
-				QMessageBox::warning(
+				(co_await QMudPreferences::warning(
 				    this, QStringLiteral("QMud"),
 				    QStringLiteral("The trigger label \"%1\" is already in the list of triggers.")
-				        .arg(label));
+				        .arg(label)));
 				m_label->setFocus();
-				return false;
+				co_return false;
 			}
 		}
 
 		if (WorldEditUtils::checkLabelInvalid(label, false))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The label must start with a letter and consist of letters, numbers "
-			                   "or the underscore character."));
+			                   "or the underscore character.")));
 			m_label->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -753,23 +789,23 @@ bool WorldTriggerDialog::validateTrigger()
 	{
 		if (sendToValue() == eSendToVariable)
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
-			    QStringLiteral("When sending to a variable you must specify a variable name."));
+			    QStringLiteral("When sending to a variable you must specify a variable name.")));
 			m_variable->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 	else
 	{
 		if (WorldEditUtils::checkLabelInvalid(variable, false))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The variable must start with a letter and consist of letters, "
-			                   "numbers or the underscore character."));
+			                   "numbers or the underscore character.")));
 			m_variable->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
@@ -777,48 +813,49 @@ bool WorldTriggerDialog::validateTrigger()
 	{
 		if (WorldEditUtils::checkLabelInvalid(procedure, true))
 		{
-			QMessageBox::warning(
+			(co_await QMudPreferences::warning(
 			    this, QStringLiteral("QMud"),
 			    QStringLiteral("The script subroutine name must start with a letter and consist of "
-			                   "letters, numbers or the underscore character."));
+			                   "letters, numbers or the underscore character.")));
 			m_script->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
 	if (sendToValue() != eSendToWorld && sendText.isEmpty())
 	{
-		const int choice = QMessageBox::question(
+		const int choice = (co_await QMudPreferences::question(
 		    this, QStringLiteral("QMud"),
 		    QStringLiteral("Your trigger is set to 'send to %1' however the 'Send:' field is blank.\n\n"
 		                   "You can use \"%%0\" to send the entire matching line to the specified place.\n\n"
 		                   "(You can eliminate this message by sending to 'world')\n\n"
 		                   "Do you want to change the trigger to fix this?")
 		        .arg(WorldEditUtils::sendToLabel(sendToValue())),
-		    QMessageBox::Yes | QMessageBox::No);
+		    QMessageBox::Yes | QMessageBox::No));
 		if (choice == QMessageBox::Yes)
 		{
 			m_send->setFocus();
-			return false;
+			co_return false;
 		}
 	}
 
 	if (m_multiLine->isChecked() && !m_regexp->isChecked())
 	{
-		QMessageBox::warning(this, QStringLiteral("QMud"),
-		                     QStringLiteral("Multi-line triggers must be a regular expression"));
-		return false;
+		(co_await QMudPreferences::warning(
+		    this, QStringLiteral("QMud"),
+		    QStringLiteral("Multi-line triggers must be a regular expression")));
+		co_return false;
 	}
 
 	if (m_multiLine->isChecked() && m_linesToMatch->value() < 2)
 	{
-		QMessageBox::warning(this, QStringLiteral("QMud"),
-		                     QStringLiteral("Multi-line triggers must match at least 2 lines"));
+		(co_await QMudPreferences::warning(
+		    this, QStringLiteral("QMud"), QStringLiteral("Multi-line triggers must match at least 2 lines")));
 		m_linesToMatch->setFocus();
-		return false;
+		co_return false;
 	}
 
-	return true;
+	co_return true;
 }
 
 bool WorldTriggerDialog::isIncluded() const

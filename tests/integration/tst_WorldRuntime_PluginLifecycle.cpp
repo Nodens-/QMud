@@ -25,6 +25,7 @@
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QDir>
 #include <QEvent>
 #include <QFile>
@@ -53,6 +54,33 @@ extern "C"
 #include <lua.h>
 }
 #endif
+
+/**
+ * @brief Invokes reload requests without exporting confirmation policy through the environment.
+ */
+class AppControllerTestAccess final
+{
+	public:
+		/**
+		 * @brief Requests a confirmed reload with an optional fallback after cleanup.
+		 * @param controller Controller owning the request.
+		 * @param fallback Completion used to observe a returned attempt.
+		 */
+		static void reload(AppController &controller, std::function<void()> fallback = {})
+		{
+			controller.m_workingDir = QStringLiteral(QMUD_TEST_BUILD_DIR) + QLatin1Char('/');
+			controller.handleReloadQmud(false, true, {}, std::move(fallback));
+		}
+		/**
+		 * @brief Reads the number of attempts that reached reload preparation.
+		 * @param controller Controller under test.
+		 * @return Number of started attempts.
+		 */
+		static int attempts(const AppController &controller)
+		{
+			return controller.m_reloadAttempts;
+		}
+};
 
 namespace
 {
@@ -344,7 +372,7 @@ function OnPluginTelnetSubnegotiation(msg_type, data)
   Send("qcmd-telnet-b73")
 end
 
-function OnPluginIacGa()
+function OnPlugin_IAC_GA()
   qcb_append_order("iac")
   Note("iac-note-c84")
   Send("qcmd-iac-c84")
@@ -911,7 +939,7 @@ end
 	}
 
 	/**
-	 * @brief Creates a direct script trigger that emits plain and coloured notes.
+	 * @brief Creates a direct script trigger that emits plain and colored notes.
 	 * @param match Trigger match text.
 	 * @return Trigger fixture.
 	 */
@@ -1932,7 +1960,6 @@ end
 			                                 "reload-controller-mccp-cleanup"));
 			QVERIFY(QDir().mkpath(artifactDirectory));
 
-			const QByteArray originalAssumeYes    = qgetenv("QMUD_RELOAD_ASSUME_YES");
 			const QByteArray originalReloadDryRun = qgetenv("QMUD_RELOAD_DRY_RUN");
 			const QString    originalCurrentPath  = QDir::currentPath();
 			const auto       restoreEnvironment   = qScopeGuard(
@@ -1945,12 +1972,10 @@ end
 					    else
 						    qputenv(name, value);
 				    };
-				    restoreVariable("QMUD_RELOAD_ASSUME_YES", originalAssumeYes);
 				    restoreVariable("QMUD_RELOAD_DRY_RUN", originalReloadDryRun);
 				    (void)QDir::setCurrent(originalCurrentPath);
 			    });
 			QVERIFY(QDir::setCurrent(artifactDirectory));
-			QVERIFY(qputenv("QMUD_RELOAD_ASSUME_YES", QByteArrayLiteral("1")));
 			QVERIFY(qputenv("QMUD_RELOAD_DRY_RUN", QByteArrayLiteral("1")));
 
 			AppController app;
@@ -1985,13 +2010,93 @@ end
 
 			activateMccp2(*runtime);
 			QVERIFY(runtime->isCompressing());
-			app.onCommandTriggered(QStringLiteral("ReloadQMud"));
+			AppControllerTestAccess::reload(app);
 
 			QCOMPARE(runtime->reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Inactive);
 			QVERIFY(runtime->isCompressing());
 
 			runtime->disconnectFromWorld();
 			primary->setRuntime(nullptr);
+		}
+
+		/**
+		 * @brief Retains confirmation and fallback until the deferred reload finishes its transport cleanup.
+		 */
+		static void deferredReloadRetainsRequest()
+		{
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+			const auto previousDryRun     = qgetenv("QMUD_RELOAD_DRY_RUN");
+			const auto restoreEnvironment = qScopeGuard(
+			    [&]
+			    {
+				    if (previousDryRun.isNull())
+					    qunsetenv("QMUD_RELOAD_DRY_RUN");
+				    else
+					    qputenv("QMUD_RELOAD_DRY_RUN", previousDryRun);
+			    });
+			QVERIFY(qputenv("QMUD_RELOAD_DRY_RUN", QByteArrayLiteral("1")));
+			AppController controller;
+			MainWindow    frame;
+			controller.setMainWindow(&frame);
+			controller.setGlobalOptionInt(QStringLiteral("EnableReloadFeature"), 1);
+			WorldRuntime runtime;
+			runtime.applyDefaultWorldOptions();
+			runtime.setStartupDirectory(QStringLiteral(QMUD_TEST_BUILD_DIR));
+			runtime.setWorldAttribute(QStringLiteral("save_world_automatically"), QStringLiteral("0"));
+			auto *primary = new WorldChildWindow(QStringLiteral("Deferred reload test"));
+			primary->setRuntime(&runtime);
+			const auto detach = qScopeGuard([&] { primary->setRuntime(nullptr); });
+			frame.addMdiSubWindow(primary, true);
+			int  completions                       = 0;
+			bool cleanCompletion                   = false;
+			runtime.m_pluginCallbackDispatchActive = true;
+			const auto releaseDispatch = qScopeGuard([&] { runtime.m_pluginCallbackDispatchActive = false; });
+			AppControllerTestAccess::reload(controller,
+			                                [&]
+			                                {
+				                                ++completions;
+				                                cleanCompletion = !runtime.reloadPreparing() &&
+				                                                  !QApplication::activeModalWidget();
+			                                });
+			QCOMPARE(completions, 0);
+			QCOMPARE(AppControllerTestAccess::attempts(controller), 0);
+			runtime.m_pluginCallbackDispatchActive = false;
+			QTRY_COMPARE(completions, 1);
+			QCOMPARE(AppControllerTestAccess::attempts(controller), 1);
+			QVERIFY(cleanCompletion);
+			QCoreApplication::sendPostedEvents(&controller, QEvent::MetaCall);
+			QCOMPARE(completions, 1);
+			runtime.setWorldFileModified(false);
+#endif
+		}
+
+		/**
+		 * @brief Drops a deferred reload and its fallback when its controller is destroyed.
+		 */
+		static void destroyedControllerCancelsDeferredReload()
+		{
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+			MainWindow   frame;
+			WorldRuntime runtime;
+			runtime.applyDefaultWorldOptions();
+			auto *primary = new WorldChildWindow(QStringLiteral("Canceled reload test"));
+			primary->setRuntime(&runtime);
+			const auto detach = qScopeGuard([&] { primary->setRuntime(nullptr); });
+			frame.addMdiSubWindow(primary, true);
+			int completions                        = 0;
+			runtime.m_pluginCallbackDispatchActive = true;
+			{
+				AppController controller;
+				controller.setMainWindow(&frame);
+				controller.setGlobalOptionInt(QStringLiteral("EnableReloadFeature"), 1);
+				AppControllerTestAccess::reload(controller, [&] { ++completions; });
+				QCOMPARE(AppControllerTestAccess::attempts(controller), 0);
+			}
+			runtime.m_pluginCallbackDispatchActive = false;
+			QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+			QCOMPARE(completions, 0);
+			runtime.setWorldFileModified(false);
+#endif
 		}
 
 		static void reloadMccpRequestSucceedsWhenCompressionIsAlreadyInactive()
@@ -6520,8 +6625,19 @@ end
 		 */
 		static void nativeLuaAudioVariablesUsePluginStateLifecycle()
 		{
+			const QString buildDirectory = QStringLiteral(QMUD_TEST_BUILD_DIR);
+			const auto    previousHome   = qgetenv("QMUD_HOME");
+			const auto    restoreHome    = qScopeGuard(
+			    [&]
+			    {
+				    if (previousHome.isNull())
+					    qunsetenv("QMUD_HOME");
+				    else
+					    qputenv("QMUD_HOME", previousHome);
+			    });
+			qputenv("QMUD_HOME", buildDirectory.toUtf8());
 			PluginStateTestDirectory tempDir(
-			    QDir::current().filePath(QStringLiteral("native_audio_state_XXXXXX")));
+			    QDir(buildDirectory).filePath(QStringLiteral("native_audio_state_XXXXXX")));
 			QVERIFY(tempDir.isValid());
 
 			const QString stateDir = QDir(tempDir.path()).filePath(QStringLiteral("state"));
@@ -6551,7 +6667,7 @@ end
 			const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
 			{
 				WorldRuntime runtime;
-				runtime.setStartupDirectory(QDir::currentPath());
+				runtime.setStartupDirectory(buildDirectory);
 				runtime.setStateFilesDirectory(stateDir);
 				runtime.applyFromDocument(document);
 				QString loadError;
@@ -6582,7 +6698,7 @@ end
 			QVERIFY(QFileInfo::exists(stateFile));
 
 			WorldRuntime restored;
-			restored.setStartupDirectory(QDir::currentPath());
+			restored.setStartupDirectory(buildDirectory);
 			restored.setStateFilesDirectory(stateDir);
 			restored.applyFromDocument(document);
 			QCOMPARE(restored.pluginVariableValue(audioId.toUpper(), QStringLiteral("vol")),

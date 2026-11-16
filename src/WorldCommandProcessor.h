@@ -41,6 +41,11 @@ class WorldCommandProcessor : public QObject
 
 	public:
 		/**
+		 * @brief Checks input processing, timer evaluation, and pending sends for reload.
+		 * @return Whether all active callback work has completed.
+		 */
+		bool reloadDrained() const;
+		/**
 		 * @brief Creates a command processor for one world/session.
 		 * @param parent Optional Qt parent object.
 		 */
@@ -311,15 +316,32 @@ class WorldCommandProcessor : public QObject
 				LogicalOperationCompletionPtr operationCompletion;
 		};
 		/**
-		 * @brief Parses and executes one command line.
+		 * @brief Parses command text and executes its physical lines in order.
 		 * @param input Command input text.
-		 * @param allowCommandStacking Apply command stacking when `true`; stacked children pass `false` so escaped
-		 * separators remain literal during their normal command processing.
+		 * @param allowCommandStacking Expand configured separators when `true`; Send to Execute passes `false`.
 		 * @param completion Callback invoked when this command has fully completed, including suspended callbacks.
 		 * @return `true` when command was processed successfully.
 		 */
 		bool evaluateCommand(const QString &input, bool allowCommandStacking = true,
 		                     CommandCompletion completion = {});
+		/**
+		 * @brief Executes a prepared command through callbacks, aliases, and sending without whole-input preparation.
+		 * @param line Prepared command line with no physical line endings.
+		 * @param completion Callback invoked after this command and its asynchronous descendants complete.
+		 * @return Whether normal alias and send evaluation was reached.
+		 */
+		bool evaluatePreparedCommand(const QString &line, CommandCompletion completion = {});
+		/**
+		 * @brief Prepares one Send to Execute command without expanding command-stack separators.
+		 * @param input Command text to prepare.
+		 * @param completion Callback invoked after the command finishes.
+		 * @return Whether normal command evaluation was reached.
+		 */
+		bool evaluateUnstackedCommand(const QString &input, CommandCompletion completion);
+		/**
+		 * @brief Command entry point used by the shared ordered sequence.
+		 */
+		using CommandEvaluator = bool (WorldCommandProcessor::*)(const QString &, CommandCompletion);
 		/**
 		 * @brief Starts one logical command and retains its nesting depth through suspension.
 		 * @param text Command text.
@@ -379,13 +401,16 @@ class WorldCommandProcessor : public QObject
 		 */
 		bool    continueEvaluateCommandAfterPluginCommand(const QString &line, bool echoInput);
 		/**
-		 * @brief Starts ordered evaluation of an expanded command stack.
-		 * @param commands Expanded commands in execution order.
+		 * @brief Starts ordered evaluation of prepared command lines.
+		 * @param commands Prepared command lines in execution order.
 		 * @param completion Callback invoked after the final command completes.
 		 * @param autoSayEvaluation Continue through the auto-say fallback when `true`.
+		 * @param evaluator Command entry point, defaulting to execution of already-prepared lines.
 		 */
-		void    evaluateCommandSequence(QStringList commands, CommandCompletion completion,
-		                                bool autoSayEvaluation = false);
+		void
+		evaluateCommandSequence(QStringList commands, CommandCompletion completion,
+		                        bool             autoSayEvaluation = false,
+		                        CommandEvaluator evaluator = &WorldCommandProcessor::evaluatePreparedCommand);
 		/**
 		 * @brief Runs one rule action under a child logical-completion group.
 		 * @param action Action to start in the captured command context.
@@ -855,13 +880,13 @@ class WorldCommandProcessor : public QObject
 		 * @return Cached decoded alias data.
 		 */
 		const AliasEvaluationCacheEntry      &
-        decodedAliasEvaluationCache(const QList<WorldRuntime::Alias> &aliases);
+		decodedAliasEvaluationCache(const QList<WorldRuntime::Alias> &aliases);
 		/**
 		 * @brief Clears cached decoded trigger evaluation data.
 		 */
 		void invalidateTriggerEvaluationCache();
 		/**
-		 * @brief Ensures cached palette/default output colours match runtime settings.
+		 * @brief Ensures cached palette/default output colors match runtime settings.
 		 * @param attrs World attributes used by output rendering.
 		 */
 		void ensurePaletteCache(const QMap<QString, QString> &attrs) const;
@@ -974,7 +999,7 @@ class WorldCommandProcessor : public QObject
 				bool                          bypassSpamPrevention{false};
 		};
 		/**
-		 * @brief Processes a send and either transmits or stages its encoded payload.
+		 * @brief Processes send and either transmits or stages its encoded payload.
 		 * @param text Text to send.
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
@@ -1008,7 +1033,7 @@ class WorldCommandProcessor : public QObject
 		 */
 		void cancelPendingPluginSends();
 		/**
-		 * @brief Finishes a send after OnPluginSend accepts it.
+		 * @brief Finishes send after OnPluginSend accepts it.
 		 * @param text Newline-terminated outbound text.
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
@@ -1046,7 +1071,7 @@ class WorldCommandProcessor : public QObject
 		beginAcceptedPluginSentNotification(const std::shared_ptr<PendingOutboundCommand>    &command,
 		                                    const QSharedPointer<OutboundCommandTransaction> &transaction);
 		/**
-		 * @brief Finishes host-side accounting after OnPluginSent completes or is cancelled after acceptance.
+		 * @brief Finishes host-side accounting after OnPluginSent completes or is canceled after acceptance.
 		 * @param command Accepted outbound command state.
 		 * @param transaction Physical-write transaction and causal continuation.
 		 * @param completionMode Whether work retained by the accepted command may continue.
@@ -1075,7 +1100,7 @@ class WorldCommandProcessor : public QObject
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
 		 * @param transport Transport timing and priority.
-		 * @param accepted Whether plugins accepted the send.
+		 * @param accepted Whether plugins accepted send.
 		 * @param mutationCompletion Deferred mutation completion retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
 		 * @param bypassSpamPrevention Skip insertion of another spam filler for this send.
@@ -1086,7 +1111,7 @@ class WorldCommandProcessor : public QObject
 		                                LogicalOperationCompletionPtr operationCompletion,
 		                                bool                          bypassSpamPrevention);
 		/**
-		 * @brief Completes a send that cannot cross its captured connection epoch.
+		 * @brief Completes send that cannot cross its captured connection epoch.
 		 * @param mutationCompletion Deferred mutation continuation retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
 		 * @param drainPendingSends Continue draining queued sends when `true`.
@@ -1099,7 +1124,7 @@ class WorldCommandProcessor : public QObject
 		 * @param mutationCompletion Deferred mutation continuation retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
 		 * @param drainPendingSends Continue draining queued sends when `true`.
-		 * @return `true` when the send was rejected and completed.
+		 * @return `true` when send was rejected and completed.
 		 */
 		[[nodiscard]] bool rejectInvalidOutboundContext(std::function<void(bool)>     &mutationCompletion,
 		                                                LogicalOperationCompletionPtr &operationCompletion,
@@ -1113,7 +1138,7 @@ class WorldCommandProcessor : public QObject
 		 * @param text Line text.
 		 * @param preambleKey Preamble option key.
 		 * @param postambleKey Postamble option key.
-		 * @param spans Optional output style spans for coloured HTML logging.
+		 * @param spans Optional output style spans for colored HTML logging.
 		 */
 		void logLine(const QString &text, const QString &preambleKey, const QString &postambleKey,
 		             const QVector<WorldRuntime::StyleSpan> &spans = {}) const;

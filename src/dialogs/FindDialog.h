@@ -15,6 +15,10 @@
 /**
  * @brief Reusable find/search dialog with history support.
  */
+class QComboBox;
+class QCheckBox;
+class QRadioButton;
+
 class FindDialog : public QDialog
 {
 	public:
@@ -81,18 +85,31 @@ class FindDialog : public QDialog
 		 */
 		[[nodiscard]] bool    forwards() const;
 
+		/**
+		 * @brief Validates the search and publishes accepted values.
+		 */
+		void                  accept() override;
+
 	private:
 		/**
 		 * @brief Opens help for supported regular expression syntax.
 		 */
-		static void  onRegexpHelp();
+		void          onRegexpHelp();
+		/**
+		 * @brief Builds controls shared by modal and modeless callers.
+		 */
+		void          buildUi();
+		QComboBox    *m_findCombo{nullptr};
+		QCheckBox    *m_matchCaseControl{nullptr};
+		QCheckBox    *m_regexpControl{nullptr};
+		QRadioButton *m_down{nullptr};
 
-		bool         m_matchCase{false};
-		bool         m_forwards{false};
-		bool         m_regexp{false};
-		QString      m_findText;
-		QString      m_title;
-		QStringList &m_findHistory;
+		bool          m_matchCase{false};
+		bool          m_forwards{false};
+		bool          m_regexp{false};
+		QString       m_findText;
+		QString       m_title;
+		QStringList  &m_findHistory;
 };
 
 #endif // QMUD_FINDDIALOG_H

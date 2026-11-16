@@ -247,6 +247,8 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	        &WorldChildWindow::onWorldAttributeChanged, Qt::UniqueConnection);
 	if (primary)
 	{
+		connect(worldRuntime, &WorldRuntime::initialConfigurationPendingChanged, this,
+		        [this](bool) { refreshAutosaveTimer(); });
 		connect(worldRuntime, &WorldRuntime::luaScriptingAvailabilityChanged, this,
 		        [this](bool)
 		        {
@@ -636,7 +638,7 @@ void WorldChildWindow::refreshAutosaveTimer() const
 	}
 
 	const WorldRuntime *runtime = m_runtime;
-	if (!runtime)
+	if (!runtime || runtime->initialConfigurationPending())
 	{
 		m_autosaveTimer->stop();
 		return;
@@ -729,7 +731,7 @@ void WorldChildWindow::handleAutosaveTick()
 		return;
 
 	WorldRuntime *runtime = m_runtime;
-	if (!runtime)
+	if (!runtime || runtime->initialConfigurationPending())
 		return;
 
 	AppController *app = AppController::instance();
@@ -789,7 +791,7 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 		}
 	}
 
-	if (runtime &&
+	if (runtime && !runtime->initialConfigurationPending() &&
 	    isEnabledFlagValue(runtime->worldAttributes().value(QStringLiteral("save_world_automatically"))) &&
 	    (runtime->worldFileModified() || runtime->variablesChanged()))
 	{
@@ -806,7 +808,8 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 		runtime->setWorldFileModified(false);
 	}
 
-	if (app && runtime && runtime->variablesChanged() && !runtime->worldFileModified() &&
+	if (app && runtime && !runtime->initialConfigurationPending() && runtime->variablesChanged() &&
+	    !runtime->worldFileModified() &&
 	    app->getGlobalOption(QStringLiteral("ConfirmBeforeSavingVariables")).toInt() != 0)
 	{
 		QString name = runtime->worldFilePath();

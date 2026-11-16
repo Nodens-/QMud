@@ -10,6 +10,7 @@
 #define QMUD_WORLDTIMERDIALOG_H
 
 #include "WorldRuntime.h"
+#include "dialogs/WorldPreferencesDialog.h"
 #include <QDialog>
 
 class QCheckBox;
@@ -46,11 +47,10 @@ class WorldTimerDialog : public QDialog
 		 */
 		[[nodiscard]] WorldRuntime::Timer timer() const;
 
-	protected:
 		/**
 		 * @brief Validates fields and commits edited timer.
 		 */
-		void accept() override;
+		void                              accept() override;
 
 	private slots:
 		/**
@@ -69,69 +69,79 @@ class WorldTimerDialog : public QDialog
 
 	private:
 		/**
+		 * @brief Asynchronously validates fields and commits edited timer.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> acceptAsync();
+		/**
+		 * @brief Asynchronously opens expression editor for send text.
+		 * @return Operation completion.
+		 */
+		QMudPreferences::Operation<void> onEditSendAsync();
+		/**
 		 * @brief Builds dialog controls.
 		 */
-		void                buildUi();
+		void                             buildUi();
 		/**
 		 * @brief Loads timer values into controls.
 		 */
-		void                loadTimer() const;
+		void                             loadTimer() const;
 		/**
 		 * @brief Performs semantic timer validation.
-		 * @return `true` when timer settings are valid.
+		 * @return Operation yielding `true` when timer settings are valid.
 		 */
-		bool                validateTimer();
+		QMudPreferences::Operation<bool> validateTimer();
 		/**
 		 * @brief Reports whether timer comes from included source.
 		 * @return `true` when timer is from an included file.
 		 */
-		[[nodiscard]] bool  isIncluded() const;
+		[[nodiscard]] bool               isIncluded() const;
 		/**
 		 * @brief Returns selected send-target enum value.
 		 * @return Selected send-target enum value.
 		 */
-		[[nodiscard]] int   sendToValue() const;
+		[[nodiscard]] int                sendToValue() const;
 		/**
 		 * @brief Returns true when timer uses absolute time mode.
 		 * @return `true` when absolute-time mode is selected.
 		 */
-		[[nodiscard]] bool  isAtTime() const;
+		[[nodiscard]] bool               isAtTime() const;
 
-		WorldRuntime       *m_runtime{nullptr};
-		WorldRuntime::Timer m_timer;
+		WorldRuntime                    *m_runtime{nullptr};
+		WorldRuntime::Timer              m_timer;
 
-		QRadioButton       *m_everyInterval{nullptr};
-		QRadioButton       *m_atTime{nullptr};
-		QSpinBox           *m_everyHour{nullptr};
-		QSpinBox           *m_everyMinute{nullptr};
-		QDoubleSpinBox     *m_everySecond{nullptr};
-		QSpinBox           *m_offsetHour{nullptr};
-		QSpinBox           *m_offsetMinute{nullptr};
-		QDoubleSpinBox     *m_offsetSecond{nullptr};
-		QSpinBox           *m_atHour{nullptr};
-		QSpinBox           *m_atMinute{nullptr};
-		QDoubleSpinBox     *m_atSecond{nullptr};
+		QRadioButton                    *m_everyInterval{nullptr};
+		QRadioButton                    *m_atTime{nullptr};
+		QSpinBox                        *m_everyHour{nullptr};
+		QSpinBox                        *m_everyMinute{nullptr};
+		QDoubleSpinBox                  *m_everySecond{nullptr};
+		QSpinBox                        *m_offsetHour{nullptr};
+		QSpinBox                        *m_offsetMinute{nullptr};
+		QDoubleSpinBox                  *m_offsetSecond{nullptr};
+		QSpinBox                        *m_atHour{nullptr};
+		QSpinBox                        *m_atMinute{nullptr};
+		QDoubleSpinBox                  *m_atSecond{nullptr};
 
-		QPlainTextEdit     *m_send{nullptr};
-		QComboBox          *m_sendTo{nullptr};
-		QLineEdit          *m_label{nullptr};
-		QLineEdit          *m_script{nullptr};
-		QLineEdit          *m_group{nullptr};
-		QLineEdit          *m_variable{nullptr};
+		QPlainTextEdit                  *m_send{nullptr};
+		QComboBox                       *m_sendTo{nullptr};
+		QLineEdit                       *m_label{nullptr};
+		QLineEdit                       *m_script{nullptr};
+		QLineEdit                       *m_group{nullptr};
+		QLineEdit                       *m_variable{nullptr};
 
-		QCheckBox          *m_enabled{nullptr};
-		QCheckBox          *m_oneShot{nullptr};
-		QCheckBox          *m_temporary{nullptr};
-		QCheckBox          *m_activeWhenClosed{nullptr};
-		QCheckBox          *m_omitFromOutput{nullptr};
-		QCheckBox          *m_omitFromLog{nullptr};
+		QCheckBox                       *m_enabled{nullptr};
+		QCheckBox                       *m_oneShot{nullptr};
+		QCheckBox                       *m_temporary{nullptr};
+		QCheckBox                       *m_activeWhenClosed{nullptr};
+		QCheckBox                       *m_omitFromOutput{nullptr};
+		QCheckBox                       *m_omitFromLog{nullptr};
 
-		QLabel             *m_includedLabel{nullptr};
-		QLabel             *m_matchesLabel{nullptr};
-		QLabel             *m_callsLabel{nullptr};
+		QLabel                          *m_includedLabel{nullptr};
+		QLabel                          *m_matchesLabel{nullptr};
+		QLabel                          *m_callsLabel{nullptr};
 
-		QPushButton        *m_editSendButton{nullptr};
-		QDialogButtonBox   *m_buttons{nullptr};
+		QPushButton                     *m_editSendButton{nullptr};
+		QDialogButtonBox                *m_buttons{nullptr};
 };
 
 #endif // QMUD_WORLDTIMERDIALOG_H

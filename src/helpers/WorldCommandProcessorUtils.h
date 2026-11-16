@@ -26,16 +26,16 @@ namespace QMudCommandStack
 	[[nodiscard]] bool         isValidSeparator(const QString &separator);
 
 	/**
-	 * @brief Expands one command line according to command-stacking rules.
+	 * @brief Expands command-stack separators into newlines without splitting the text.
 	 *
-	 * A separator at the start disables stacking for the line and is removed. Elsewhere, one separator splits
-	 * commands and two consecutive separators produce one literal separator.
+	 * A separator at the start disables stacking for the submitted text and is removed. Elsewhere, one separator
+	 * becomes a newline and two consecutive separators produce one literal separator. Existing newlines are retained.
 	 *
 	 * @param command Command line to expand.
 	 * @param separator Valid command-stack separator.
-	 * @return Expanded commands, or the unchanged command when the separator is invalid.
+	 * @return Expanded text, or the unchanged text when the separator is invalid.
 	 */
-	[[nodiscard]] QStringList  expand(const QString &command, const QString &separator);
+	[[nodiscard]] QString      expand(const QString &command, const QString &separator);
 } // namespace QMudCommandStack
 
 namespace QMudCommandPattern
@@ -111,6 +111,13 @@ namespace QMudCommandQueue
 
 namespace QMudCommandText
 {
+	/**
+	 * @brief Splits command text at physical newlines independently of command stacking.
+	 * @param source Command text whose carriage returns have already been removed.
+	 * @return Commands in input order, retaining empty lines and one empty command for empty input.
+	 */
+	[[nodiscard]] QStringList splitCommandLines(const QString &source);
+
 	/**
 	 * @brief Expands escaped control sequences in command text.
 	 * @param source Raw command text with escape sequences.

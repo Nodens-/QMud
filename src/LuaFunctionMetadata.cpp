@@ -12,6 +12,17 @@
 // Canonical Lua function metadata source of truth used by `utils.functionlist`,
 // `utils.functionargs`, and API inventory exports.
 const InternalFunctionMetadata kInternalFunctionMetadataTable[] = {
+    {"gmcpSend",                  "( Message , JsonPayload )"                                                           },
+    {"gmcpGet",                   "( Source , Path , Default )"                                                         },
+    {"gmcpGetString",             "( Source , Path , Default )"                                                         },
+    {"gmcpToTable",               "( Value , WrapScalars )"                                                             },
+    {"gmcpType",                  "( Value )"                                                                           },
+    {"gmcpGetRaw",                "( Message )"                                                                         },
+    {"gmcpGetMessages",           "( )"                                                                                 },
+    {"gmcpIsEnabled",             "( )"                                                                                 },
+    {"gmcpRegisterModule",        "( Module , Version )"                                                                },
+    {"gmcpUnregisterModule",      "( Module )"                                                                          },
+
     {"Accelerator",               "( Key , Send )"                                                                      },
     {"AcceleratorList",           "( )"                                                                                 },
     {"AcceleratorTo",             "( Key , Send , SendTo )"                                                             },

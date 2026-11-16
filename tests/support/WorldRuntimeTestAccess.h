@@ -9,6 +9,7 @@
 #pragma once
 
 #include "WorldRuntime.h"
+#include "WorldSocketService.h"
 
 /**
  * @brief Keeps test-only access to runtime internals out of WorldRuntime's production API.
@@ -223,6 +224,56 @@ class WorldRuntimeTestAccess final
 		static void setConnectPhase(WorldRuntime &runtime, const WorldRuntime::ConnectPhase phase)
 		{
 			runtime.m_connectPhase = phase;
+		}
+		/**
+		 * @brief Delivers a synthetic native event through production runtime wiring.
+		 * @param runtime Owning world.
+		 * @param record History record.
+		 * @param message Optional application event.
+		 */
+		static void deliverGmcpRecord(const WorldRuntime &runtime, const QMudGmcp::Record &record,
+		                              const std::shared_ptr<const QMudGmcp::Message> &message)
+		{
+			emit runtime.m_socket->gmcpObserved(record, message);
+		}
+		/**
+		 * @brief Runs the production history eviction check at a deterministic test timestamp.
+		 * @param runtime Owning runtime.
+		 * @param now Check timestamp.
+		 */
+		static void evictGmcpHistory(WorldRuntime &runtime, const QDateTime &now)
+		{
+			runtime.evictGmcpHistory(now);
+		}
+		/**
+		 * @brief Reads snapshot capture work for callback-free delivery assertions.
+		 * @param runtime Owning runtime.
+		 * @return Number of callback snapshots captured.
+		 */
+		static quint64 callbackSnapshotCaptureCount(const WorldRuntime &runtime)
+		{
+			return runtime.m_luaCallbackDispatchSnapshotCaptureCount;
+		}
+		/**
+		 * @brief Reads a synthetic registration for lifecycle assertions.
+		 * @param runtime Owning runtime.
+		 * @param owner Script/plugin identity.
+		 * @param module Module name.
+		 * @return Registered version, or zero.
+		 */
+		static int gmcpModuleVersion(const WorldRuntime &runtime, const QString &owner, const QString &module)
+		{
+			return runtime.m_gmcpModules.value(owner).value(module.toLower());
+		}
+		/**
+		 * @brief Supplies a synthetic live GMCP publisher.
+		 * @param runtime Owning runtime.
+		 * @param publication Synthetic publication endpoint.
+		 */
+		static void setGmcpPublication(WorldRuntime                                 &runtime,
+		                               const std::shared_ptr<QMudGmcp::Publication> &publication)
+		{
+			runtime.m_gmcpPublication = publication;
 		}
 		/**
 		 * @brief Installs a test-owned socket service for physical-write boundary tests.

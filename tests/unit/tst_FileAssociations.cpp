@@ -233,6 +233,6 @@ namespace
 
 } // namespace
 
-QTEST_MAIN(tst_FileAssociations)
+QTEST_GUILESS_MAIN(tst_FileAssociations)
 
 #include "tst_FileAssociations.moc"

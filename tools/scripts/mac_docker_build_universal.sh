@@ -271,6 +271,29 @@ cp "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/sqldrivers/libqsqlite.dylib" "$APP_PLUGIN
 if [ -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia" ]; then
   cp -R "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia/." "$APP_PLUGINS_DIR/multimedia/"
 fi
+
+# Use the FFmpeg build shipped with this Qt, including its versioned loader names.
+# Dereference aliases so none of the packaged libraries point outside the bundle.
+for FFMPEG_COMPONENT in avcodec avformat avutil swresample swscale; do
+  FFMPEG_COMPONENT_FOUND=0
+  for FFMPEG_LIBRARY in \
+    "$QMUD_MAC_DOCKER_QT_PREFIX/lib/lib${FFMPEG_COMPONENT}."*.dylib \
+    "$QMUD_MAC_DOCKER_QT_PREFIX/lib/lib${FFMPEG_COMPONENT}.dylib"; do
+    if [ ! -f "$FFMPEG_LIBRARY" ]; then
+      continue
+    fi
+    FFMPEG_TARGET="$APP_FRAMEWORKS_DIR/${FFMPEG_LIBRARY##*/}"
+    cp -L "$FFMPEG_LIBRARY" "$FFMPEG_TARGET"
+    verify_universal "$FFMPEG_TARGET"
+    FFMPEG_COMPONENT_FOUND=1
+  done
+  if [ "$FFMPEG_COMPONENT_FOUND" -eq 0 ]; then
+    echo "Error: Qt's FFmpeg runtime library lib${FFMPEG_COMPONENT} is missing from $QMUD_MAC_DOCKER_QT_PREFIX/lib." >&2
+    exit 1
+  fi
+done
+verify_universal "$APP_PLUGINS_DIR/multimedia/libffmpegmediaplugin.dylib"
+
 if [ ! -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/texttospeech" ]; then
   echo "Error: Qt TextToSpeech plugins directory is missing at $QMUD_MAC_DOCKER_QT_PREFIX/plugins/texttospeech." >&2
   exit 1

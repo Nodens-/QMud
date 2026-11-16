@@ -24,6 +24,7 @@
 #include "WorldView.h"
 #include "dialogs/GeneratedNameDialog.h"
 #include "dialogs/HighlightPhraseDialog.h"
+#include "dialogs/WorldPreferencesDialog.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QAction>
@@ -32,13 +33,18 @@
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QCheckBox>
 #include <QDir>
 #include <QFile>
+#include <QGridLayout>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QScopeGuard>
+#include <QSpinBox>
+#include <QStackedWidget>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
 #include <QTextEdit>
@@ -66,6 +72,31 @@ class AppControllerTestAccess final
 		{
 			controller.m_workingDir = QDir::cleanPath(workingDirectory) + QLatin1Char('/');
 		}
+		/**
+		 * @brief Seeds synthetic remembered Quick Connect fields for default-selection coverage.
+		 * @param controller Controller whose remembered fields are set.
+		 * @param name Remembered name.
+		 * @param host Remembered address.
+		 * @param port Remembered port.
+		 */
+		static void setQuickConnectDefaults(AppController &controller, const QString &name,
+		                                    const QString &host, quint16 port)
+		{
+			controller.m_lastQuickConnectWorldName = name;
+			controller.m_lastQuickConnectHost      = host;
+			controller.m_lastQuickConnectPort      = port;
+		}
+
+		/**
+		 * @brief Discards Preferences using the same cancellation path as an automatic restart.
+		 * @param controller Controller owning all open Preferences editors.
+		 * @return True when all registered editors finished.
+		 */
+		static bool discardPreferences(AppController &controller)
+		{
+			return controller.preferencesClosedForRestart(QStringLiteral("Synthetic restart"), true);
+		}
+
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		/**
 		 * @brief Executes setup code in the dedicated spell-check Lua state.
@@ -237,6 +268,431 @@ namespace
 			Q_OBJECT
 
 		private slots:
+			/**
+			 * @brief Reuses modeless Preferences across primary and observer presentations and isolates worlds.
+			 */
+			static void modelessPreferencesFollowWorldLifetime()
+			{
+				AppController controller(true);
+				MainWindow    frame;
+				WorldRuntime  first;
+				WorldRuntime  second;
+				controller.setMainWindow(&frame);
+				AppControllerTestAccess::setWorkingDirectory(controller, QDir::currentPath());
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeClosingWorld"), 0);
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeSavingVariables"), 0);
+				for (auto *runtime : {&first, &second})
+				{
+					runtime->applyDefaultWorldOptions();
+					runtime->setWorldAttribute(QStringLiteral("name"),
+					                           QStringLiteral("Synthetic preferences world"));
+					runtime->setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+					runtime->setWorldAttribute(QStringLiteral("port"), QStringLiteral("4100"));
+					runtime->setWorldFileModified(false);
+				}
+				auto *primary  = new WorldChildWindow(QStringLiteral("Primary"));
+				auto *observer = new WorldChildWindow(QStringLiteral("Observer"));
+				auto *other    = new WorldChildWindow(QStringLiteral("Other"));
+				primary->setRuntime(&first);
+				observer->setRuntimeObserver(&first);
+				other->setRuntime(&second);
+				const QPointer primaryGuard(primary);
+				const QPointer observerGuard(observer);
+				const QPointer otherGuard(other);
+				const auto     detach = qScopeGuard(
+				    [&]
+				    {
+					    if (primaryGuard)
+						    primaryGuard->setRuntime(nullptr);
+					    if (observerGuard)
+						    observerGuard->setRuntimeObserver(nullptr);
+					    if (otherGuard)
+						    otherGuard->setRuntime(nullptr);
+				    });
+				frame.addMdiSubWindow(primary, true);
+				frame.addMdiSubWindow(observer, false);
+				frame.addMdiSubWindow(other, false);
+				frame.activateWorldWindow(primary);
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				auto editors = frame.findChildren<WorldPreferencesDialog *>();
+				QCOMPARE(editors.size(), 1);
+				const QPointer<WorldPreferencesDialog> firstEditor(editors.first());
+				QVERIFY(!firstEditor->isModal());
+				QVERIFY(!QApplication::activeModalWidget());
+				QCOMPARE(firstEditor->parentWidget(), &frame);
+				controller.onCommandTriggered(QStringLiteral("ConfigureAliases"));
+				QCOMPARE(frame.findChildren<WorldPreferencesDialog *>().size(), 1);
+				QCOMPARE(firstEditor->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"))
+				             ->currentIndex(),
+				         static_cast<int>(WorldPreferencesDialog::PageAliases));
+				frame.activateWorldWindow(observer);
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				QCOMPARE(frame.findChildren<WorldPreferencesDialog *>().size(), 1);
+				observer->close();
+				QVERIFY(firstEditor && firstEditor->isVisible());
+				frame.activateWorldWindow(other);
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				editors = frame.findChildren<WorldPreferencesDialog *>();
+				QCOMPARE(editors.size(), 2);
+				auto *secondEditor = editors.first() == firstEditor ? editors.last() : editors.first();
+				const QPointer<WorldPreferencesDialog> oldSecond(secondEditor);
+				secondEditor->reject();
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				const auto              afterReopen = frame.findChildren<WorldPreferencesDialog *>();
+				WorldPreferencesDialog *replacement = nullptr;
+				for (auto *editor : afterReopen)
+					if (editor != firstEditor && editor != oldSecond)
+						replacement = editor;
+				QVERIFY(replacement);
+				const QPointer<WorldPreferencesDialog> replacementGuard(replacement);
+				QTRY_VERIFY(!oldSecond);
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				QCOMPARE(frame.findChildren<WorldPreferencesDialog *>().size(), 2);
+				primary->close();
+				QTRY_VERIFY(!firstEditor);
+				QVERIFY(replacementGuard && replacementGuard->isVisible());
+				second.beginWorldSessionClose();
+				QTRY_VERIFY(!replacementGuard);
+			}
+
+			/**
+			 * @brief Covers nested validation and a child result queued just before restart cancellation.
+			 */
+			static void restartDiscardsPreferencesAndChildren_data()
+			{
+				QTest::addColumn<bool>("queuedAcceptance");
+				QTest::newRow("nested-warning") << false;
+				QTest::newRow("queued-acceptance") << true;
+			}
+			/**
+			 * @brief Discards multiple editors and every nested child without applying staged values.
+			 */
+			static void restartDiscardsPreferencesAndChildren()
+			{
+				QFETCH(bool, queuedAcceptance);
+				AppController controller(true);
+				MainWindow    frame;
+				controller.setMainWindow(&frame);
+				WorldRuntime first;
+				WorldRuntime second;
+				for (auto *runtime : {&first, &second})
+				{
+					runtime->applyDefaultWorldOptions();
+					runtime->setWorldAttribute(QStringLiteral("name"), QStringLiteral("Original settings"));
+					runtime->setWorldFileModified(false);
+				}
+				auto *primary = new WorldChildWindow(QStringLiteral("Restart first"));
+				auto *other   = new WorldChildWindow(QStringLiteral("Restart second"));
+				primary->setRuntime(&first);
+				other->setRuntime(&second);
+				const auto detach = qScopeGuard(
+				    [&]
+				    {
+					    primary->setRuntime(nullptr);
+					    other->setRuntime(nullptr);
+				    });
+				frame.addMdiSubWindow(primary, true);
+				frame.addMdiSubWindow(other, false);
+				frame.activateWorldWindow(primary);
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				const QPointer<WorldPreferencesDialog> editor(frame.findChild<WorldPreferencesDialog *>());
+				QVERIFY(editor);
+				editor->findChild<QLineEdit *>(QStringLiteral("worldNameEdit"))
+				    ->setText(QStringLiteral("Discard me"));
+				editor->requestPage(WorldPreferencesDialog::PageVariables);
+				auto *pages = editor->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+				QVERIFY(pages);
+				for (auto *button : pages->currentWidget()->findChildren<QPushButton *>())
+					if (button->text() == QStringLiteral("&Add..."))
+						button->click();
+				QPointer<QDialog> variable;
+				for (auto *child : editor->findChildren<QDialog *>())
+					if (child->windowTitle() == QStringLiteral("Variable") && child->isVisible())
+						variable = child;
+				QVERIFY(variable);
+				if (queuedAcceptance)
+					variable->findChildren<QLineEdit *>().first()->setText(
+					    QStringLiteral("discarded_variable"));
+				variable->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+				const QPointer<QMessageBox> warning(variable->findChild<QMessageBox *>());
+				if (!queuedAcceptance)
+					QVERIFY(warning && warning->isVisible());
+				frame.activateWorldWindow(other);
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				QCOMPARE(frame.findChildren<WorldPreferencesDialog *>().size(), 2);
+				QVERIFY(AppControllerTestAccess::discardPreferences(controller));
+				QVERIFY(!variable && !warning);
+				for (auto *root : frame.findChildren<WorldPreferencesDialog *>())
+					QVERIFY(!root->isVisible());
+				QTRY_VERIFY(!editor);
+				QCOMPARE(first.worldAttributeValue(QStringLiteral("name")),
+				         QStringLiteral("Original settings"));
+				QVERIFY(!first.variables().contains(QStringLiteral("discarded_variable")));
+				QVERIFY(!first.worldFileModified() && !second.worldFileModified());
+				QTRY_VERIFY(frame.findChildren<WorldPreferencesDialog *>().isEmpty());
+				controller.onCommandTriggered(QStringLiteral("Preferences"));
+				auto *replacement = frame.findChild<WorldPreferencesDialog *>();
+				QVERIFY(replacement && replacement->isVisible());
+				replacement->reject();
+			}
+
+			/**
+			 * @brief Keeps new-world defaults and runs acceptance or cancellation once without a modal wait.
+			 */
+			static void newWorldPreferencesCompleteModelessly()
+			{
+				AppController controller(true);
+				MainWindow    frame;
+				controller.setMainWindow(&frame);
+				AppControllerTestAccess::setWorkingDirectory(controller, QDir::currentPath());
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeClosingWorld"), 0);
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeSavingVariables"), 0);
+				WorldRuntime defaults;
+				defaults.applyDefaultWorldOptions();
+				controller.onCommandTriggered(QStringLiteral("New"));
+				auto *world = frame.activeWorldChildWindow();
+				QVERIFY(world);
+				const QPointer<WorldRuntime> runtime(world->runtime());
+				QVERIFY(runtime && runtime->initialConfigurationPending());
+				auto *autosave = world->findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+				QVERIFY(autosave && !autosave->isActive());
+				for (const auto &key :
+				     {QStringLiteral("name"), QStringLiteral("site"), QStringLiteral("port")})
+					QCOMPARE(runtime->worldAttributeValue(key), defaults.worldAttributeValue(key));
+				QCOMPARE(runtime->worldAttributeValue(QStringLiteral("native_gmcp")), QStringLiteral("1"));
+				auto *editor = frame.findChild<WorldPreferencesDialog *>();
+				QVERIFY(editor && !editor->isModal());
+				QVERIFY(!QApplication::activeModalWidget());
+				editor->findChild<QLineEdit *>(QStringLiteral("worldNameEdit"))
+				    ->setText(QStringLiteral("Created test world"));
+				editor->findChild<QLineEdit *>(QStringLiteral("worldHostEdit"))
+				    ->setText(QStringLiteral("example.invalid"));
+				editor->findChild<QSpinBox *>(QStringLiteral("worldPortSpinBox"))->setValue(4300);
+				const QPointer<WorldPreferencesDialog> editorGuard(editor);
+				editor->accept();
+				QTRY_VERIFY(!editorGuard);
+				QVERIFY(runtime && !runtime->initialConfigurationPending());
+				QVERIFY(autosave->isActive());
+				QCOMPARE(autosave->interval(), 60 * 60 * 1000);
+				QCOMPARE(runtime->worldAttributeValue(QStringLiteral("name")),
+				         QStringLiteral("Created test world"));
+				QCOMPARE(runtime->worldAttributeValue(QStringLiteral("site")),
+				         QStringLiteral("example.invalid"));
+				QCOMPARE(runtime->worldAttributeValue(QStringLiteral("port")), QStringLiteral("4300"));
+				QVERIFY(!runtime->isConnected() && !runtime->isConnecting());
+				controller.onCommandTriggered(QStringLiteral("New"));
+				const QPointer<WorldChildWindow> canceledWindow(frame.activeWorldChildWindow());
+				const QPointer<WorldRuntime>     canceledRuntime(canceledWindow->runtime());
+				auto                            *canceledEditor = frame.findChild<WorldPreferencesDialog *>();
+				QVERIFY(canceledEditor);
+				canceledEditor->reject();
+				QTRY_VERIFY(!canceledWindow && !canceledRuntime);
+				QTRY_COMPARE(frame.activeWorldChildWindow()->runtime(), runtime.data());
+				runtime->setWorldFileModified(false);
+			}
+
+			/**
+			 * @brief Exercises editor cancellation, accepted close, direct teardown, and application close for creation.
+			 */
+			static void discardedNewWorldRetainsRuntimeUntilBindingsEnd_data()
+			{
+				QTest::addColumn<int>("exitPath");
+				QTest::newRow("cancel-editor") << 0;
+				QTest::newRow("close-world") << 1;
+				QTest::newRow("destroy-primary") << 2;
+				QTest::newRow("close-frame") << 3;
+				QTest::newRow("refused-close") << 4;
+				QTest::newRow("restart-refused-close") << 5;
+			}
+			/**
+			 * @brief Discards imported autosave configuration without deleting a bound runtime or saving a file.
+			 */
+			static void discardedNewWorldRetainsRuntimeUntilBindingsEnd()
+			{
+				QFETCH(int, exitPath);
+				AppController controller(true);
+				MainWindow    frame;
+				controller.setMainWindow(&frame);
+				AppControllerTestAccess::setWorkingDirectory(controller, QDir::currentPath());
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeClosingQmud"), 0);
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeClosingWorld"), 0);
+				controller.onCommandTriggered(QStringLiteral("New"));
+				const QPointer<WorldChildWindow> primary(frame.activeWorldChildWindow());
+				QVERIFY(primary);
+				const QPointer<WorldRuntime> runtime(primary->runtime());
+				QVERIFY(runtime);
+				const auto imported = controller.importXmlFromText(
+				    runtime,
+				    QStringLiteral(
+				        R"(<qmud><world name="Provisional import" site="example.invalid" port="4100" save_world_automatically="y" autosave_minutes="1"/></qmud>)"),
+				    WorldDocument::XML_GENERAL);
+				QVERIFY2(imported.ok, qPrintable(imported.errorMessage));
+				QCOMPARE(runtime->worldAttributeValue(QStringLiteral("save_world_automatically")),
+				         QStringLiteral("y"));
+				auto *autosave = primary->findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+				QVERIFY(autosave && !autosave->isActive());
+				QVERIFY(runtime->worldFilePath().isEmpty());
+				auto *observer = new WorldChildWindow(QStringLiteral("Creation observer"));
+				observer->setRuntimeObserver(runtime);
+				frame.addMdiSubWindow(observer, false);
+				const QPointer<WorldChildWindow> observerGuard(observer);
+				bool                             bindingsReleased = false;
+				QObject                          observations;
+				connect(runtime, &QObject::destroyed, &observations,
+				        [&]
+				        {
+					        bindingsReleased = (!primary || !primary->runtime()) &&
+					                           (!observerGuard || !observerGuard->runtime());
+				        });
+				auto *editor = frame.findChild<WorldPreferencesDialog *>();
+				QVERIFY(editor);
+				const QPointer<WorldPreferencesDialog> editorGuard(editor);
+				switch (exitPath)
+				{
+				case 0:
+				{
+					editor->requestPage(WorldPreferencesDialog::PageVariables);
+					auto *pages =
+					    editor->findChild<QStackedWidget *>(QStringLiteral("worldPreferencesPages"));
+					QVERIFY(pages);
+					for (auto *button : pages->currentWidget()->findChildren<QPushButton *>())
+						if (button->text() == QStringLiteral("&Add..."))
+							button->click();
+					QDialog *variable = nullptr;
+					for (auto *child : editor->findChildren<QDialog *>())
+						if (child->windowTitle() == QStringLiteral("Variable") && child->isVisible())
+							variable = child;
+					QVERIFY(variable);
+					variable->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+					const QPointer<QDialog>     childGuard(variable);
+					const QPointer<QMessageBox> warningGuard(variable->findChild<QMessageBox *>());
+					QVERIFY(warningGuard && warningGuard->isVisible());
+					editor->reject();
+					QVERIFY(!childGuard && !warningGuard);
+					break;
+				}
+				case 1:
+					QVERIFY(primary->close());
+					break;
+				case 2:
+					delete primary.data();
+					break;
+				case 3:
+					QVERIFY(frame.close());
+					break;
+				case 4:
+				case 5:
+				{
+					/**
+					 * @brief Refuses one close attempt to exercise creation-context recovery.
+					 */
+					class RefuseClose final : public QObject
+					{
+						public:
+							bool refuse{true};
+							/**
+							 * @brief Refuses close while retaining all other event behavior.
+							 * @param watched Window receiving the event.
+							 * @param event Event under inspection.
+							 * @return True when closure was refused.
+							 */
+							bool eventFilter(QObject *watched, QEvent *event) override
+							{
+								if (refuse && event->type() == QEvent::Close)
+								{
+									event->ignore();
+									return true;
+								}
+								return QObject::eventFilter(watched, event);
+							}
+					} filter;
+					primary->installEventFilter(&filter);
+					if (exitPath == 5)
+					{
+						QVERIFY(AppControllerTestAccess::discardPreferences(controller));
+						for (auto *candidate : frame.findChildren<WorldPreferencesDialog *>())
+							QVERIFY(!candidate->isVisible());
+						controller.onCommandTriggered(QStringLiteral("Preferences"));
+					}
+					else
+						editor->reject();
+					QVERIFY(runtime && primary && runtime->initialConfigurationPending());
+					WorldPreferencesDialog *replacement = nullptr;
+					for (auto *candidate : frame.findChildren<WorldPreferencesDialog *>())
+						if (candidate != editor && candidate->isVisible())
+							replacement = candidate;
+					QVERIFY(replacement);
+					filter.refuse = false;
+					replacement->reject();
+					break;
+				}
+				default:
+					QFAIL("Unexpected exit path");
+				}
+				QTRY_VERIFY(!primary && !observerGuard && !runtime && !editorGuard);
+				QVERIFY(bindingsReleased);
+			}
+
+			/**
+			 * @brief Preserves remembered and fallback Quick Connect fields while its separate dialog is unchanged.
+			 */
+			static void quickConnectDefaultFieldsRemainUnchanged()
+			{
+				AppController controller(true);
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+				AppControllerTestAccess::setWorkingDirectory(controller, QDir::currentPath());
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Fallback world"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("fallback.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("6500"));
+				auto *world = new WorldChildWindow(QStringLiteral("Quick Connect defaults"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     detach = qScopeGuard(
+				    [&]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				frame.addMdiSubWindow(world, true);
+				for (const bool remembered : {false, true})
+				{
+					AppControllerTestAccess::setQuickConnectDefaults(
+					    controller, remembered ? QStringLiteral("Remembered world") : QString(),
+					    remembered ? QStringLiteral("remembered.invalid") : QString(), remembered ? 6200 : 0);
+					QString name;
+					QString host;
+					int     port      = 0;
+					bool    inspected = false;
+					QVERIFY(QMetaObject::invokeMethod(
+					    qApp,
+					    [&]
+					    {
+						    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+						    QVERIFY(dialog);
+						    const auto reject = qScopeGuard([dialog] { dialog->reject(); });
+						    QCOMPARE(dialog->windowTitle(), QStringLiteral("Quick Connect"));
+						    auto *layout = qobject_cast<QGridLayout *>(dialog->layout());
+						    QVERIFY(layout);
+						    name = qobject_cast<QLineEdit *>(layout->itemAtPosition(0, 1)->widget())->text();
+						    host = qobject_cast<QLineEdit *>(layout->itemAtPosition(1, 1)->widget())->text();
+						    port = qobject_cast<QSpinBox *>(layout->itemAtPosition(2, 1)->widget())->value();
+						    inspected = true;
+					    },
+					    Qt::QueuedConnection));
+					controller.onCommandTriggered(QStringLiteral("QuickConnect"));
+					QVERIFY(inspected);
+					QCOMPARE(name, remembered ? QStringLiteral("Remembered world")
+					                          : QStringLiteral("Fallback world"));
+					QCOMPARE(host, remembered ? QStringLiteral("remembered.invalid")
+					                          : QStringLiteral("fallback.invalid"));
+					QCOMPARE(port, remembered ? 6200 : 4000);
+				}
+				runtime.setWorldFileModified(false);
+			}
+
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 			/**
 			 * @brief Verifies every public spell-check path has the utilities required by the spell script.

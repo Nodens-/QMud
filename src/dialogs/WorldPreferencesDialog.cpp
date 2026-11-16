@@ -18,6 +18,7 @@
 #include "WorldView.h"
 #include "dialogs/ColourPickerDialog.h"
 #include "dialogs/FindDialog.h"
+#include "dialogs/GmcpBrowserDialog.h"
 #include "dialogs/WorldAliasDialog.h"
 #include "dialogs/WorldTimerDialog.h"
 #include "dialogs/WorldTriggerDialog.h"
@@ -34,7 +35,6 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
-#include <QColorDialog>
 #include <QComboBox>
 #include <QDesktopServices>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -59,6 +59,7 @@
 #include <QMetaObject>
 #include <QPainter>
 #include <QPalette>
+#include <QPlainTextEdit>
 #include <QProcess>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -85,6 +86,7 @@
 #include <QTextCursor>
 #include <QTextEdit>
 #include <QTextStream>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QUrl>
@@ -131,19 +133,27 @@ static QColor parseColourValue(const QString &value)
  * @param plural Plural rule-kind name used when removing multiple rules.
  * @return `true` when confirmation is disabled or the user accepts removal.
  */
-static bool confirmRemoval(QWidget *parent, const QString &singular, const qsizetype count = 1,
-                           const QString &plural = {})
+/**
+ * @brief Confirms removal without blocking other windows.
+ * @param parent Owning Preferences editor.
+ * @param singular Singular item description.
+ * @param count Number of selected items.
+ * @param plural Plural item description.
+ * @return Operation yielding whether removal was confirmed.
+ */
+static QMudPreferences::Operation<bool> confirmRemoval(QWidget *parent, QString singular,
+                                                       const qsizetype count = 1, QString plural = {})
 {
 	if (AppController *app = AppController::instance();
 	    !app || app->getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt() == 0)
-		return true;
+		co_return true;
 
 	const QString message = count == 1
 	                            ? QStringLiteral("Delete this %1 - are you sure?").arg(singular)
 	                            : QStringLiteral("Delete these %1 %2 - are you sure?").arg(count).arg(plural);
-	const QMessageBox::StandardButton result = QMessageBox::question(
-	    parent, QStringLiteral("Confirm"), message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-	return result == QMessageBox::Yes;
+	const QMessageBox::StandardButton result = (co_await QMudPreferences::question(
+	    parent, QStringLiteral("Confirm"), message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No));
+	co_return result == QMessageBox::Yes;
 }
 
 static quint64 totalPhysicalMemoryBytes()
@@ -161,20 +171,312 @@ static bool bringOwnedWindowToFrontByTitle(const QString &title)
 	const QString target = title.trimmed();
 	if (target.isEmpty())
 		return false;
-	for (const auto windows = QApplication::topLevelWidgets(); QWidget *window : windows)
-	{
-		if (!window)
-			continue;
-		if (window->windowTitle().trimmed().compare(target, Qt::CaseInsensitive) != 0)
-			continue;
-		if (!window->isVisible())
-			window->show();
-		window->raise();
-		window->activateWindow();
-		return true;
-	}
-	return false;
+	return std::ranges::any_of(
+	    QApplication::topLevelWidgets(),
+	    [&target](QWidget *window)
+	    {
+		    if (!window || window->windowTitle().trimmed().compare(target, Qt::CaseInsensitive) != 0)
+			    return false;
+		    if (!window->isVisible())
+			    window->show();
+		    window->raise();
+		    window->activateWindow();
+		    return true;
+	    });
 }
+
+namespace
+{
+	/**
+	 * @brief Disables an editor's controls while leaving its cancellation button usable.
+	 * @param parent Editor whose direct controls are protected.
+	 * @return Controls that must be restored when the owning operation ends.
+	 */
+	QVector<QPointer<QWidget>> disableEditorControls(const QWidget *parent)
+	{
+		QVector<QPointer<QWidget>> disabled;
+		for (QWidget *widget : parent->findChildren<QWidget *>(Qt::FindDirectChildrenOnly))
+		{
+			if (auto *buttons = qobject_cast<QDialogButtonBox *>(widget))
+			{
+				for (QAbstractButton *button : buttons->buttons())
+					if (buttons->buttonRole(button) != QDialogButtonBox::RejectRole &&
+					    button->isEnabledTo(parent))
+					{
+						disabled.append(button);
+						button->setEnabled(false);
+					}
+				continue;
+			}
+			if (!widget->isWindow() && widget->isEnabledTo(parent))
+			{
+				disabled.append(widget);
+				widget->setEnabled(false);
+			}
+		}
+		return disabled;
+	}
+
+	/**
+	 * @brief Pending GUI completion retained until its owner finishes or is destroyed.
+	 */
+	struct PreferencesDialogWait
+	{
+			QPointer<QDialog>                dialog;
+			QPointer<QWidget>                parent;
+			QPointer<WorldPreferencesDialog> preferences;
+			QVector<QPointer<QWidget>>       disabled;
+			QVector<QMetaObject::Connection> connections;
+			std::coroutine_handle<>          continuation;
+			std::function<void()>            start;
+			QString                          error;
+			int                              result{QDialog::Rejected};
+			bool                             canceled{false};
+			bool                             completing{false};
+			bool                             registered{false};
+
+			/**
+			 * @brief Disconnects every delivery path and optionally restores editing controls.
+			 * @param restore Whether the owning window remains usable.
+			 */
+			void                             disconnect(bool restore)
+			{
+				for (const auto &connection : std::as_const(connections))
+					QObject::disconnect(connection);
+				connections.clear();
+				for (const auto &widget : std::as_const(disabled))
+					if (restore && widget)
+						widget->setEnabled(true);
+				disabled.clear();
+			}
+			/**
+			 * @brief Delivers exactly one completion on the GUI thread.
+			 * @param cancel Whether the editor owner has ended.
+			 */
+			void complete(bool cancel)
+			{
+				if (!continuation)
+					return;
+				canceled |= cancel;
+				disconnect(!cancel);
+				const QPointer<WorldPreferencesDialog> owner   = preferences;
+				const bool                             release = registered;
+				const auto                             handle  = std::exchange(continuation, {});
+				handle.resume();
+				if (owner && release)
+					owner->endChildOperation();
+			}
+	};
+
+	/**
+	 * @brief Awaiter whose state outlives queued completion notifications.
+	 */
+	struct PreferencesDialogAwaiter
+	{
+			std::shared_ptr<PreferencesDialogWait> state;
+			/**
+			 * @brief Skips starting work when its owner has already canceled.
+			 * @return True for an already canceled operation.
+			 */
+			[[nodiscard]] bool                     await_ready() const noexcept
+			{
+				return state->canceled;
+			}
+			/**
+			 * @brief Connects owner cancellation before showing an editor or starting a save.
+			 * @param continuation Suspended GUI operation.
+			 */
+			void await_suspend(std::coroutine_handle<> continuation) const
+			{
+				const auto pending    = state;
+				pending->continuation = continuation;
+				auto *dialog          = pending->dialog.data();
+				auto *parent          = dialog ? dialog->parentWidget() : pending->parent.data();
+				pending->parent       = parent;
+				for (QWidget *ancestor = parent; ancestor; ancestor = ancestor->parentWidget())
+					if (auto *preferences = qobject_cast<WorldPreferencesDialog *>(ancestor))
+					{
+						pending->preferences = preferences;
+						break;
+					}
+				if (pending->preferences && !pending->preferences->bindingValid())
+				{
+					pending->complete(true);
+					return;
+				}
+				if (pending->preferences)
+				{
+					pending->preferences->beginChildOperation();
+					pending->registered = true;
+				}
+				if (parent)
+				{
+					if (parent != pending->preferences)
+						pending->disabled = disableEditorControls(parent);
+					pending->connections.append(QObject::connect(
+					    parent, &QObject::destroyed, qApp, [pending] { pending->complete(true); },
+					    Qt::DirectConnection));
+				}
+				if (pending->preferences)
+					pending->connections.append(QObject::connect(
+					    pending->preferences, &WorldPreferencesDialog::operationsCanceled, qApp,
+					    [pending] { pending->complete(true); }, Qt::DirectConnection));
+				pending->connections.append(QObject::connect(
+				    qApp, &QCoreApplication::aboutToQuit, qApp, [pending] { pending->complete(true); },
+				    Qt::DirectConnection));
+				if (pending->start)
+				{
+					pending->start();
+					return;
+				}
+
+				pending->connections.append(QObject::connect(
+				    dialog, &QDialog::finished, qApp,
+				    [pending](int result)
+				    {
+					    if (pending->completing)
+						    return;
+					    pending->completing = true;
+					    pending->result     = result;
+					    QMetaObject::invokeMethod(
+					        qApp, [pending] { pending->complete(false); }, Qt::QueuedConnection);
+				    }));
+				dialog->setWindowModality(Qt::NonModal);
+				dialog->setAttribute(Qt::WA_DeleteOnClose, false);
+				dialog->show();
+				dialog->raise();
+				dialog->activateWindow();
+			}
+			/**
+			 * @brief Retrieves the user result after owner validation.
+			 * @return Accepted or rejected result.
+			 */
+			[[nodiscard]] int await_resume() const
+			{
+				if (state->canceled || (state->preferences && !state->preferences->bindingValid()))
+					throw QMudPreferences::Canceled{};
+				return state->result;
+			}
+	};
+} // namespace
+
+namespace QMudPreferences
+{
+	Operation<int> wait(QDialog &dialog)
+	{
+		auto state    = std::make_shared<PreferencesDialogWait>();
+		state->dialog = &dialog;
+		co_return co_await PreferencesDialogAwaiter{std::move(state)};
+	}
+	Operation<std::pair<bool, QString>> saveWorldFile(WorldPreferencesDialog *owner, WorldRuntime *runtime,
+	                                                  QString fileName)
+	{
+		auto state      = std::make_shared<PreferencesDialogWait>();
+		state->parent   = owner;
+		state->canceled = !owner || !runtime || !owner->bindingValid();
+		if (!state->canceled)
+			state->connections.append(QObject::connect(
+			    runtime, &QObject::destroyed, qApp, [state] { state->complete(true); },
+			    Qt::DirectConnection));
+		const std::weak_ptr<PreferencesDialogWait> weak(state);
+		state->start = [weak, runtime = QPointer<WorldRuntime>(runtime), fileName = std::move(fileName)]
+		{
+			if (!runtime)
+				return;
+			runtime->saveWorldFileContinuable(
+			    fileName,
+			    [weak]
+			    {
+				    const auto pending = weak.lock();
+				    return pending && pending->continuation && !pending->canceled && pending->preferences &&
+				           pending->preferences->bindingValid();
+			    },
+			    [weak](const bool saved, const QString &error)
+			    {
+				    const auto pending = weak.lock();
+				    if (!pending || !pending->continuation)
+					    return;
+				    pending->result = saved ? QDialog::Accepted : QDialog::Rejected;
+				    pending->error  = error;
+				    QMetaObject::invokeMethod(
+				        qApp, [pending] { pending->complete(false); }, Qt::QueuedConnection);
+			    });
+		};
+		const bool saved = (co_await PreferencesDialogAwaiter{state}) == QDialog::Accepted;
+		co_return std::pair{saved, state->error};
+	}
+
+	Operation<QMessageBox::StandardButton> message(QWidget *parent, QMessageBox::Icon icon, QString title,
+	                                               QString text, QMessageBox::StandardButtons buttons,
+	                                               QMessageBox::StandardButton defaultButton)
+	{
+		QMessageBox dialog(icon, title, text, buttons, parent);
+		if (defaultButton != QMessageBox::NoButton)
+			dialog.setDefaultButton(defaultButton);
+		co_return static_cast<QMessageBox::StandardButton>(co_await wait(dialog));
+	}
+	Operation<QMessageBox::StandardButton> information(QWidget *parent, QString title, QString text,
+	                                                   QMessageBox::StandardButtons buttons,
+	                                                   QMessageBox::StandardButton  defaultButton)
+	{
+		co_return co_await message(parent, QMessageBox::Information, title, text, buttons, defaultButton);
+	}
+	Operation<QMessageBox::StandardButton> warning(QWidget *parent, QString title, QString text,
+	                                               QMessageBox::StandardButtons buttons,
+	                                               QMessageBox::StandardButton  defaultButton)
+	{
+		co_return co_await message(parent, QMessageBox::Warning, title, text, buttons, defaultButton);
+	}
+	Operation<QMessageBox::StandardButton> question(QWidget *parent, QString title, QString text,
+	                                                QMessageBox::StandardButtons buttons,
+	                                                QMessageBox::StandardButton  defaultButton)
+	{
+		co_return co_await message(parent, QMessageBox::Question, title, text, buttons, defaultButton);
+	}
+	Operation<QString> selectPath(QWidget *parent, QString title, QString directory, QString filter,
+	                              QFileDialog::FileMode mode, QFileDialog::AcceptMode acceptMode,
+	                              QFileDialog::Options options)
+	{
+		QFileDialog dialog(parent, title, directory, filter);
+		dialog.setFileMode(mode);
+		dialog.setAcceptMode(acceptMode);
+		dialog.setOptions(options | QFileDialog::DontConfirmOverwrite);
+		while (co_await wait(dialog) == QDialog::Accepted)
+		{
+			const auto    files = dialog.selectedFiles();
+			const QString path  = files.isEmpty() ? QString() : files.first();
+			if (acceptMode == QFileDialog::AcceptSave &&
+			    !options.testFlag(QFileDialog::DontConfirmOverwrite) && QFileInfo::exists(path))
+			{
+				const auto answer =
+				    co_await question(parent, title,
+				                      QStringLiteral("%1 already exists.\nDo you want to replace it?")
+				                          .arg(QFileInfo(path).fileName()),
+				                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+				if (answer != QMessageBox::Yes)
+					continue;
+			}
+			co_return path;
+		}
+		co_return QString();
+	}
+	Operation<QString> getOpenFileName(QWidget *parent, QString title, QString directory, QString filter)
+	{
+		co_return co_await selectPath(parent, title, directory, filter, QFileDialog::ExistingFile,
+		                              QFileDialog::AcceptOpen);
+	}
+	Operation<QString> getSaveFileName(QWidget *parent, QString title, QString directory, QString filter)
+	{
+		co_return co_await selectPath(parent, title, directory, filter, QFileDialog::AnyFile,
+		                              QFileDialog::AcceptSave);
+	}
+	Operation<QString> getExistingDirectory(QWidget *parent, QString title, QString directory,
+	                                        QFileDialog::Options options)
+	{
+		co_return co_await selectPath(parent, title, directory, {}, QFileDialog::Directory,
+		                              QFileDialog::AcceptOpen, options);
+	}
+} // namespace QMudPreferences
 
 struct WorldPreferencesDialog::WorkingLists
 {
@@ -1182,9 +1484,21 @@ static void updateFindHistory(QStringList &history, const QString &text)
 	if (history.isEmpty() || history.first() != text)
 		history.prepend(text);
 }
+/**
+ * @brief Collects search settings from a modeless Find dialog.
+ * @param parent Owning editor.
+ * @param history Owner-held search history.
+ * @param text Search text updated after acceptance.
+ * @param matchCase Case-sensitivity choice.
+ * @param regex Regular-expression choice.
+ * @param forwards Search direction.
+ * @param title Dialog title.
+ * @return Operation yielding whether search settings were accepted.
+ */
 
-static bool runFindDialog(QWidget *parent, QStringList &history, QString &text, bool &matchCase, bool &regex,
-                          bool &forwards, const QString &title)
+static QMudPreferences::Operation<bool> runFindDialog(QWidget *parent, QStringList &history, QString &text,
+                                                      bool &matchCase, bool &regex, bool &forwards,
+                                                      QString title)
 {
 	FindDialog dlg(history, parent);
 	dlg.setTitleText(title);
@@ -1192,14 +1506,14 @@ static bool runFindDialog(QWidget *parent, QStringList &history, QString &text, 
 	dlg.setMatchCase(matchCase);
 	dlg.setRegexp(regex);
 	dlg.setForwards(forwards);
-	if (dlg.execModal() != QDialog::Accepted)
-		return false;
+	if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+		co_return false;
 	text      = dlg.findText();
 	matchCase = dlg.matchCase();
 	regex     = dlg.regexp();
 	forwards  = dlg.forwards();
 	updateFindHistory(history, text);
-	return true;
+	co_return true;
 }
 
 static bool matchFindText(const QString &haystack, const QString &needle, const bool matchCase,
@@ -1215,19 +1529,27 @@ static bool matchFindText(const QString &haystack, const QString &needle, const 
 		return false;
 	return pattern.match(haystack).hasMatch();
 }
+/**
+ * @brief Updates a sound field after modeless file selection.
+ * @param runtime World whose browsing directory is maintained.
+ * @param parent Owning editor.
+ * @param target Sound path field.
+ * @return Selection completion.
+ */
 
-static void browseSoundFile(WorldRuntime *runtime, QWidget *parent, QLineEdit *target)
+static QMudPreferences::Operation<void> browseSoundFile(WorldRuntime *runtime, QWidget *parent,
+                                                        QLineEdit *target)
 {
 	if (!target)
-		return;
+		co_return;
 	QString start = target->text().trimmed();
 	if (start == QStringLiteral("(No sound)"))
 		start.clear();
 	const QString startDir    = runtime ? runtime->fileBrowsingDirectory() : QString();
 	const QString initialPath = start.isEmpty() ? startDir : start;
-	const QString fileName    = QFileDialog::getOpenFileName(
+	const QString fileName    = (co_await QMudPreferences::getOpenFileName(
 	    parent, QStringLiteral("Select sound to play"), initialPath,
-	    QStringLiteral("Waveaudio files (*.wav);;MIDI files (*.mid);;Sequencer files (*.rmi)"));
+	    QStringLiteral("Waveaudio files (*.wav);;MIDI files (*.mid);;Sequencer files (*.rmi)")));
 	if (!fileName.isEmpty())
 	{
 		if (runtime)
@@ -1243,11 +1565,19 @@ static bool canTestSoundFile(const QLineEdit *target)
 	const QString value = target->text();
 	return !value.isEmpty() && value != QStringLiteral("(No sound)");
 }
+/**
+ * @brief Updates a text field after modeless editing.
+ * @param parent Owning editor.
+ * @param target Text field to update.
+ * @param title Dialog title.
+ * @return Editor completion.
+ */
 
-static void editPlainTextWithDialog(QWidget *parent, QTextEdit *target, const QString &title)
+static QMudPreferences::Operation<void> editPlainTextWithDialog(QWidget *parent, QTextEdit *target,
+                                                                QString title)
 {
 	if (!target)
-		return;
+		co_return;
 	QDialog dialog(parent);
 	dialog.setWindowTitle(title);
 	auto *dialogLayout = new QVBoxLayout(&dialog);
@@ -1258,11 +1588,18 @@ static void editPlainTextWithDialog(QWidget *parent, QTextEdit *target, const QS
 	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 	dialogLayout->addWidget(buttons);
-	if (dialog.exec() == QDialog::Accepted)
+	if ((co_await QMudPreferences::wait(dialog)) == QDialog::Accepted)
 		target->setPlainText(edit->toPlainText());
 }
+/**
+ * @brief Updates a filter after modeless editing.
+ * @param parent Owning editor.
+ * @param target Owner-held filter text.
+ * @param title Dialog title.
+ * @return Operation yielding whether the filter was accepted.
+ */
 
-static bool editFilterDialog(QWidget *parent, QString &target, const QString &title)
+static QMudPreferences::Operation<bool> editFilterDialog(QWidget *parent, QString &target, QString title)
 {
 	QDialog dialog(parent);
 	dialog.setWindowTitle(title);
@@ -1274,33 +1611,46 @@ static bool editFilterDialog(QWidget *parent, QString &target, const QString &ti
 	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 	layout->addWidget(buttons);
-	if (dialog.exec() != QDialog::Accepted)
-		return false;
+	if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+		co_return false;
 	target = edit->toPlainText();
-	return true;
+	co_return true;
 }
+/**
+ * @brief Finds a table row using modeless search configuration.
+ * @param dialog Owning Preferences editor.
+ * @param table Table to search.
+ * @param rowText Produces searchable row contents.
+ * @param findText Owner-held search text.
+ * @param findIndex Current match position.
+ * @param history Owner-held search history.
+ * @param matchCase Case-sensitivity choice.
+ * @param regex Regular-expression choice.
+ * @param forwards Search direction.
+ * @param title Dialog title.
+ * @param continueFromCurrent Whether to continue the existing search.
+ * @return Search completion.
+ */
 
-static void doFindAdvanced(WorldPreferencesDialog *dialog, QTableWidget *table,
-                           const std::function<QString(int)> &rowText, QString &findText, int &findIndex,
-                           QStringList &history, bool &matchCase, bool &regex, bool &forwards,
-                           const QString &title, const bool continueFromCurrent)
+static QMudPreferences::Operation<void> doFindAdvanced(WorldPreferencesDialog *dialog, QTableWidget *table,
+                                                       const std::function<QString(int)> &rowText,
+                                                       QString &findText, int &findIndex,
+                                                       QStringList &history, bool &matchCase, bool &regex,
+                                                       bool &forwards, QString title,
+                                                       const bool continueFromCurrent)
 {
 	if (!table)
-		return;
+		co_return;
 	if (!continueFromCurrent || findText.isEmpty())
 	{
-		if (!runFindDialog(dialog, history, findText, matchCase, regex, forwards, title))
-			return;
+		if (!(co_await runFindDialog(dialog, history, findText, matchCase, regex, forwards, title)))
+			co_return;
 		findIndex = -1;
 	}
 	const int rowCount = table->rowCount();
 	if (rowCount <= 0 || findText.isEmpty())
-		return;
-	int startRow = 0;
-	if (continueFromCurrent)
-		startRow = findIndex + (forwards ? 1 : -1);
-	else
-		startRow = forwards ? 0 : rowCount - 1;
+		co_return;
+	int startRow = continueFromCurrent ? findIndex + (forwards ? 1 : -1) : (forwards ? 0 : rowCount - 1);
 	if (startRow < 0)
 		startRow = rowCount - 1;
 	if (startRow >= rowCount)
@@ -1312,11 +1662,11 @@ static void doFindAdvanced(WorldPreferencesDialog *dialog, QTableWidget *table,
 		{
 			findIndex = row;
 			selectRow(table, row);
-			return;
+			co_return;
 		}
 	}
-	QMessageBox::information(dialog, QStringLiteral("Find"),
-	                         QStringLiteral("The requested text was not found."));
+	(co_await QMudPreferences::information(dialog, QStringLiteral("Find"),
+	                                       QStringLiteral("The requested text was not found.")));
 }
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -1396,7 +1746,7 @@ namespace
 				if (m_errorShown)
 					return;
 				m_errorShown = true;
-				QMessageBox::warning(m_owner, QStringLiteral("Filter"), message);
+				QMudPreferences::warning(m_owner, QStringLiteral("Filter"), message);
 			}
 
 			LuaStateOwner m_state;
@@ -1474,11 +1824,34 @@ static QString fixHtmlMultilineString(const QString &value)
 WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView *view, QWidget *parent)
     : QDialog(parent), m_runtime(runtime), m_view(view), m_workingLists(std::make_unique<WorkingLists>())
 {
-	setWindowTitle(QStringLiteral("World Configuration"));
+	setWindowTitle(runtime ? QStringLiteral("World Configuration — %1")
+	                             .arg(runtime->worldAttributeValue(QStringLiteral("name")))
+	                       : QStringLiteral("World Configuration"));
 	resize(700, 520);
 	buildUi();
-	m_pagePopulationStates.fill(PagePopulationState::Unloaded, PageChat + 1);
+	m_pagePopulationStates.fill(PagePopulationState::Unloaded, PageGmcp + 1);
 	setSizeGripEnabled(true);
+	connect(this, &QDialog::finished, this,
+	        [this]
+	        {
+		        m_finishing = true;
+		        cancelPendingPagePopulation();
+		        emit operationsCanceled();
+	        });
+	if (m_runtime)
+	{
+		connect(m_runtime, &QObject::destroyed, this, &WorldPreferencesDialog::invalidate);
+		connect(m_runtime, &WorldRuntime::worldSessionClosing, this, &WorldPreferencesDialog::invalidate);
+		connect(m_runtime, &WorldRuntime::worldAttributeChanged, this,
+		        [this](const QString &key)
+		        {
+			        if (key == QStringLiteral("name") && bindingValid())
+				        setWindowTitle(QStringLiteral("World Configuration — %1")
+				                           .arg(m_runtime->worldAttributeValue(QStringLiteral("name"))));
+		        });
+	}
+	if (m_view)
+		connect(m_view, &QObject::destroyed, this, &WorldPreferencesDialog::invalidate);
 
 	if (AppController *app = AppController::instance())
 	{
@@ -1497,7 +1870,7 @@ WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView 
 				if (settings.contains(worldId))
 				{
 					const int pageIndex = settings.value(worldId).toInt();
-					if (pageIndex >= PageGeneral && pageIndex <= PageChat && pageIndex != PageSound)
+					if (pageIndex >= PageGeneral && pageIndex <= PageGmcp && pageIndex != PageSound)
 						m_runtime->setLastPreferencesPage(pageIndex);
 				}
 				settings.endGroup();
@@ -1530,7 +1903,62 @@ WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView 
 	}
 }
 
-WorldPreferencesDialog::~WorldPreferencesDialog() = default;
+WorldPreferencesDialog::~WorldPreferencesDialog()
+{
+	m_invalidated = true;
+	cancelPendingPagePopulation();
+	emit operationsCanceled();
+	Q_ASSERT(m_childOperations == 0);
+}
+
+bool WorldPreferencesDialog::bindingValid() const
+{
+	return !m_invalidated && !m_finishing && m_runtime && !m_runtime->runtimeDestructionStarted() &&
+	       !m_runtime->worldSessionCloseStarted() && (!m_view || m_view->runtime() == m_runtime);
+}
+
+void WorldPreferencesDialog::requestPage(const Page page)
+{
+	if (!bindingValid())
+		return;
+	if (m_childOperations != 0)
+		m_requestedPage = page;
+	else
+		setInitialPage(page);
+}
+void WorldPreferencesDialog::beginChildOperation()
+{
+	if (m_childOperations++ == 0)
+		m_disabledChildControls = disableEditorControls(this);
+}
+void WorldPreferencesDialog::endChildOperation()
+{
+	Q_ASSERT(m_childOperations > 0);
+	--m_childOperations;
+	if (m_childOperations == 0)
+	{
+		if (bindingValid())
+			for (const auto &control : std::as_const(m_disabledChildControls))
+				if (control)
+					control->setEnabled(true);
+		m_disabledChildControls.clear();
+	}
+	if (bindingValid() && m_childOperations == 0 && m_requestedPage)
+		setInitialPage(std::exchange(m_requestedPage, {}).value());
+	if (bindingValid() && m_childOperations == 0 && isVisible() && m_initialDialogSizingFinalized)
+		scheduleRemainingPagePopulation();
+}
+
+void WorldPreferencesDialog::invalidate()
+{
+	if (m_invalidated)
+		return;
+	m_invalidated = true;
+	cancelPendingPagePopulation();
+	emit operationsCanceled();
+	if (!m_finishing)
+		reject();
+}
 
 bool WorldPreferencesDialog::event(QEvent *event)
 {
@@ -1883,7 +2311,7 @@ void WorldPreferencesDialog::initializeWorkingList(const Page page) const
 	}
 }
 
-bool WorldPreferencesDialog::confirmDefaultOverrideEnable(const QString &optionName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::confirmDefaultOverrideEnable(QString optionName)
 {
 	QString   description;
 	QString   noun;
@@ -1921,13 +2349,13 @@ bool WorldPreferencesDialog::confirmDefaultOverrideEnable(const QString &optionN
 	}
 	else
 	{
-		return true;
+		co_return true;
 	}
 
 	if (!noun.isEmpty())
 	{
 		if (count == 0)
-			return true;
+			co_return true;
 		QString plural;
 		if (count != 1)
 			plural = noun == QStringLiteral("alias") ? QStringLiteral("es") : QStringLiteral("s");
@@ -1938,8 +2366,9 @@ bool WorldPreferencesDialog::confirmDefaultOverrideEnable(const QString &optionN
 		                  .arg(noun, QString::number(count), plural);
 	}
 
-	return QMessageBox::question(this, QStringLiteral("World Configuration"), description,
-	                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+	co_return (co_await QMudPreferences::question(this, QStringLiteral("World Configuration"), description,
+	                                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No)) ==
+	    QMessageBox::Yes;
 }
 
 void WorldPreferencesDialog::resetDefaultOverrideEditor(const QString &optionName, const bool enabled,
@@ -2131,11 +2560,12 @@ void WorldPreferencesDialog::resetDefaultOverrideEditor(const QString &optionNam
 	}
 }
 
-void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionName, QCheckBox *checkBox,
-                                                         const bool enabled)
+QMudPreferences::Operation<void> WorldPreferencesDialog::handleDefaultOverrideToggleAsync(QString optionName,
+                                                                                          QCheckBox *checkBox,
+                                                                                          const bool enabled)
 {
 	if (!m_runtime || !checkBox || m_handlingDefaultOverrideToggle)
-		return;
+		co_return;
 
 	Page page = PageGeneral;
 	if (optionName == QStringLiteral("use_default_triggers"))
@@ -2153,23 +2583,32 @@ void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionNa
 	else if (optionName == QStringLiteral("use_default_output_font"))
 		page = PageOutput;
 	if (!isPagePopulated(page))
-		return;
+		co_return;
 
 	m_handlingDefaultOverrideToggle = true;
-	const auto handlingGuard        = qScopeGuard([this] { m_handlingDefaultOverrideToggle = false; });
-	const auto rejectTransition     = [checkBox, enabled]
+	const QPointer<WorldPreferencesDialog> owner(this);
+	const auto                             handlingGuard = qScopeGuard(
+	    [owner]
+	    {
+		    if (owner)
+			    owner->m_handlingDefaultOverrideToggle = false;
+	    });
+	const auto rejectTransition = [owner, checkBox = QPointer<QCheckBox>(checkBox), enabled]
 	{
-		const QSignalBlocker blocker(checkBox);
-		checkBox->setChecked(!enabled);
+		if (owner && owner->bindingValid() && checkBox)
+		{
+			const QSignalBlocker blocker(checkBox);
+			checkBox->setChecked(!enabled);
+		}
 	};
 
 	AppController *const app = AppController::instance();
 	if (!app)
 	{
 		rejectTransition();
-		QMessageBox::warning(this, QStringLiteral("World Configuration"),
-		                     QStringLiteral("The application controller is unavailable."));
-		return;
+		(co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"),
+		                                   QStringLiteral("The application controller is unavailable.")));
+		co_return;
 	}
 
 	const bool collectionOverride = optionName != QStringLiteral("use_default_input_font") &&
@@ -2180,8 +2619,8 @@ void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionNa
 	    !app->loadWorldDefaultCollection(m_runtime, optionName, enabled, document, &transitionError))
 	{
 		rejectTransition();
-		QMessageBox::warning(this, QStringLiteral("World Configuration"), transitionError);
-		return;
+		(co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"), transitionError));
+		co_return;
 	}
 	if (enabled && !collectionOverride)
 	{
@@ -2191,22 +2630,22 @@ void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionNa
 		if (!available)
 		{
 			rejectTransition();
-			QMessageBox::warning(this, QStringLiteral("World Configuration"),
-			                     QStringLiteral("No default font is configured."));
-			return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"),
+			                                   QStringLiteral("No default font is configured.")));
+			co_return;
 		}
 	}
-	if (enabled && !confirmDefaultOverrideEnable(optionName))
+	if (enabled && !(co_await confirmDefaultOverrideEnable(optionName)))
 	{
 		rejectTransition();
-		return;
+		co_return;
 	}
-	if (enabled && !app->saveWorldBeforeDefaultOverride(m_runtime, this, &transitionError))
+	if (enabled && !(co_await app->saveWorldBeforeDefaultOverride(m_runtime, this, &transitionError)))
 	{
 		rejectTransition();
 		if (!transitionError.isEmpty())
-			QMessageBox::warning(this, QStringLiteral("World Configuration"), transitionError);
-		return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"), transitionError));
+		co_return;
 	}
 
 	resetDefaultOverrideEditor(optionName, enabled, document.get());
@@ -2218,11 +2657,16 @@ void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionNa
 	updateInputFontControls();
 	updateOutputFontControls();
 }
+void WorldPreferencesDialog::handleDefaultOverrideToggle(const QString &optionName, QCheckBox *checkBox,
+                                                         const bool enabled)
+{
+	(void)handleDefaultOverrideToggleAsync(optionName, checkBox, enabled);
+}
 
 void WorldPreferencesDialog::ensurePagePopulated(const Page page)
 {
 	const int index = page;
-	if (index < PageGeneral || index > PageChat || page == PageSound ||
+	if (index < PageGeneral || index > PageGmcp || page == PageSound ||
 	    m_pagePopulationStates.value(index, PagePopulationState::Unloaded) != PagePopulationState::Unloaded)
 	{
 		return;
@@ -2303,6 +2747,9 @@ void WorldPreferencesDialog::ensurePagePopulated(const Page page)
 	case PageChat:
 		populateChat();
 		break;
+	case PageGmcp:
+		populateGmcp();
+		break;
 	case PageSound:
 		break;
 	}
@@ -2315,11 +2762,11 @@ void WorldPreferencesDialog::ensurePagePopulated(const Page page)
 
 void WorldPreferencesDialog::scheduleRemainingPagePopulation()
 {
-	if (m_pagePopulationScheduled)
+	if (m_pagePopulationScheduled || m_childOperations != 0 || !bindingValid())
 		return;
 	if (m_pendingPagePopulation.isEmpty())
 	{
-		for (int index = PageGeneral; index <= PageChat; ++index)
+		for (int index = PageGeneral; index <= PageGmcp; ++index)
 		{
 			const auto page = static_cast<Page>(index);
 			if (page != PageSound && page != PageInfo && !isPagePopulated(page))
@@ -2347,6 +2794,8 @@ void WorldPreferencesDialog::scheduleRemainingPagePopulation()
 
 void WorldPreferencesDialog::populateNextPendingPage()
 {
+	if (m_childOperations != 0 || !bindingValid())
+		return;
 	while (!m_pendingPagePopulation.isEmpty())
 	{
 		const Page page = m_pendingPagePopulation.takeFirst();
@@ -2538,6 +2987,8 @@ std::optional<WorldPreferencesDialog::Page> WorldPreferencesDialog::pageForWorld
 		add(PageInfo, {"id"});
 		add(PageAutoSay, {"enable_auto_say", "re_evaluate_auto_say", "autosay_exclude_non_alpha",
 		                  "autosay_exclude_macros", "auto_say_string", "auto_say_override_prefix"});
+		add(PageGmcp, {"native_gmcp", "gmcp_ping_enabled", "gmcp_ping_interval", "gmcp_ping_send_rtt",
+		               "gmcp_keepalive_enabled", "gmcp_keepalive_interval"});
 		add(PageConnecting, {"player", "password", "connect_text", "connect_method", "connect_delay",
 		                     "automatically_protect_against_telnet_option_renegotiation_loops",
 		                     "only_negotiate_telnet_options_once"});
@@ -2660,10 +3111,11 @@ void WorldPreferencesDialog::capturePageBaseline(const Page page)
 	m_pageAuxiliaryBaselines.insert(page, collectAuxiliaryPageValues(page));
 }
 
-bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidationScope scope)
+QMudPreferences::Operation<bool>
+WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidationScope scope)
 {
 	if (!m_workingLists)
-		return true;
+		co_return true;
 
 	const bool includeTriggers =
 	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Triggers;
@@ -2710,10 +3162,11 @@ bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidatio
 	{
 		if (!variable.attributes.value(QStringLiteral("name")).trimmed().isEmpty())
 			continue;
-		QMessageBox::information(this, QStringLiteral("Variables"),
-		                         QStringLiteral("Variable names cannot be blank."), QMessageBox::Ok);
+		(co_await QMudPreferences::information(this, QStringLiteral("Variables"),
+		                                       QStringLiteral("Variable names cannot be blank."),
+		                                       QMessageBox::Ok));
 		setInitialPage(PageVariables);
-		return false;
+		co_return false;
 	}
 
 	auto duplicateLines = [](const auto &items, auto nameKey) -> QStringList
@@ -2763,13 +3216,13 @@ bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidatio
 		              duplicateLines(variables, [](const QString &name)
 		                             { return QMudVariableMapUtils::Name(name).key(); }));
 	if (sections.isEmpty())
-		return true;
+		co_return true;
 
-	QMessageBox::information(this, QStringLiteral("Duplicate names"),
-	                         QStringLiteral("Named rules and variables should be unique:\n\n") +
-	                             sections.join(QStringLiteral("\n\n")),
-	                         QMessageBox::Ok);
-	return false;
+	(co_await QMudPreferences::information(this, QStringLiteral("Duplicate names"),
+	                                       QStringLiteral("Named rules and variables should be unique:\n\n") +
+	                                           sections.join(QStringLiteral("\n\n")),
+	                                       QMessageBox::Ok));
+	co_return false;
 }
 
 QList<WorldPreferencesDialog::ResolvedVariable> WorldPreferencesDialog::effectiveWorkingVariables() const
@@ -3539,6 +3992,24 @@ WorldPreferencesDialog::OptionValues WorldPreferencesDialog::collectWorldOptionV
 		    m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked() ? QStringLiteral("1")
 		                                                                             : QStringLiteral("0"));
 	}
+	if (m_nativeGmcp)
+		values.attributes.insert(QStringLiteral("native_gmcp"),
+		                         m_nativeGmcp->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+	if (m_gmcpPing)
+		values.attributes.insert(QStringLiteral("gmcp_ping_enabled"),
+		                         boolAttributeValue(m_gmcpPing->isChecked()));
+	if (m_gmcpPingInterval)
+		values.attributes.insert(QStringLiteral("gmcp_ping_interval"),
+		                         QString::number(m_gmcpPingInterval->value()));
+	if (m_gmcpSendRtt)
+		values.attributes.insert(QStringLiteral("gmcp_ping_send_rtt"),
+		                         boolAttributeValue(m_gmcpSendRtt->isChecked()));
+	if (m_gmcpKeepAlive)
+		values.attributes.insert(QStringLiteral("gmcp_keepalive_enabled"),
+		                         boolAttributeValue(m_gmcpKeepAlive->isChecked()));
+	if (m_gmcpKeepAliveInterval)
+		values.attributes.insert(QStringLiteral("gmcp_keepalive_interval"),
+		                         QString::number(m_gmcpKeepAliveInterval->value()));
 	if (m_onlyNegotiateTelnetOptionsOnce)
 		values.attributes.insert(QStringLiteral("only_negotiate_telnet_options_once"),
 		                         m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
@@ -3631,14 +4102,23 @@ WorldPreferencesDialog::OptionValues WorldPreferencesDialog::collectWorldOptionV
 	return values;
 }
 
-void WorldPreferencesDialog::accept()
+QMudPreferences::Operation<void> WorldPreferencesDialog::acceptAsync()
 {
+	m_accepting = true;
+	const QPointer<WorldPreferencesDialog> guard(this);
+	const auto                             clearAccepting = qScopeGuard(
+	    [guard]
+	    {
+		    if (guard)
+			    guard->m_accepting = false;
+	    });
+
 	cancelPendingPagePopulation();
 	bool       accepted                  = false;
 	const auto resumePopulationOnFailure = qScopeGuard(
-	    [this, &accepted]
+	    [this, guard, &accepted]
 	    {
-		    if (!accepted && isVisible())
+		    if (guard && !m_invalidated && !m_finishing && !accepted && isVisible())
 			    scheduleRemainingPagePopulation();
 	    });
 	const OptionValues     candidates = collectWorldOptionValues();
@@ -3670,8 +4150,9 @@ void WorldPreferencesDialog::accept()
 			if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(),
 			                                m_defaultWorldSoundDirectory->text(), &paths, &error))
 			{
-				QMessageBox::warning(this, QStringLiteral("Default world sound directory"), error);
-				return;
+				(co_await QMudPreferences::warning(this, QStringLiteral("Default world sound directory"),
+				                                   error));
+				co_return;
 			}
 			const QString key = QStringLiteral("default_world_sound_directory");
 			if (m_runtime->worldAttributes().value(key, QString::fromLatin1(kDefaultWorldSoundDirectory)) ==
@@ -3696,23 +4177,24 @@ void WorldPreferencesDialog::accept()
 		                        { return pendingAttributes.contains(key); });
 		if (validateGeneral && m_worldName && m_worldName->text().trimmed().isEmpty())
 		{
-			QMessageBox::warning(this, QStringLiteral("World Configuration"),
-			                     QStringLiteral("Your world name cannot be blank.\n\n"
-			                                    "You must fill in your world name, TCP/IP address and "
-			                                    "port number before tabbing to other configuration screens"));
-			return;
+			(co_await QMudPreferences::warning(
+			    this, QStringLiteral("World Configuration"),
+			    QStringLiteral("Your world name cannot be blank.\n\n"
+			                   "You must fill in your world name, TCP/IP address and "
+			                   "port number before tabbing to other configuration screens")));
+			co_return;
 		}
 		if (validateGeneral && m_host && m_host->text().trimmed().isEmpty())
 		{
-			QMessageBox::warning(this, QStringLiteral("World Configuration"),
-			                     QStringLiteral("The world IP address cannot be blank."));
-			return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"),
+			                                   QStringLiteral("The world IP address cannot be blank.")));
+			co_return;
 		}
 		if (validateGeneral && m_port && m_port->value() == 0)
 		{
-			QMessageBox::warning(this, QStringLiteral("World Configuration"),
-			                     QStringLiteral("The world port number must be specified."));
-			return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"),
+			                                   QStringLiteral("The world port number must be specified.")));
+			co_return;
 		}
 		const auto anyAttributePending = [&pendingAttributes](const std::initializer_list<const char *> keys)
 		{
@@ -3729,15 +4211,17 @@ void WorldPreferencesDialog::accept()
 				const int     port   = m_proxyPort ? m_proxyPort->value() : 0;
 				if (server.isEmpty())
 				{
-					QMessageBox::warning(this, QStringLiteral("Proxy"),
-					                     QStringLiteral("The proxy server address cannot be blank."));
-					return;
+					(co_await QMudPreferences::warning(
+					    this, QStringLiteral("Proxy"),
+					    QStringLiteral("The proxy server address cannot be blank.")));
+					co_return;
 				}
 				if (port == 0)
 				{
-					QMessageBox::warning(this, QStringLiteral("Proxy"),
-					                     QStringLiteral("The proxy server port must be specified."));
-					return;
+					(co_await QMudPreferences::warning(
+					    this, QStringLiteral("Proxy"),
+					    QStringLiteral("The proxy server port must be specified.")));
+					co_return;
 				}
 			}
 		}
@@ -3746,9 +4230,10 @@ void WorldPreferencesDialog::accept()
 			if (const int method = m_connectMethod->currentData().toInt();
 			    method != eNoAutoConnect && m_playerName->text().trimmed().isEmpty())
 			{
-				QMessageBox::warning(this, QStringLiteral("Connecting"),
-				                     QStringLiteral("Your character name cannot be blank for auto-connect."));
-				return;
+				(co_await QMudPreferences::warning(
+				    this, QStringLiteral("Connecting"),
+				    QStringLiteral("Your character name cannot be blank for auto-connect.")));
+				co_return;
 			}
 		}
 		if (m_enableCommandStack && m_commandStackCharacter &&
@@ -3759,10 +4244,11 @@ void WorldPreferencesDialog::accept()
 				const QString value = m_commandStackCharacter->text();
 				if (!QMudCommandStack::isValidSeparator(value))
 				{
-					QMessageBox::warning(this, QStringLiteral("Commands"),
-					                     QStringLiteral("The command stack separator must contain one or two "
-					                                    "printable, non-space characters."));
-					return;
+					(co_await QMudPreferences::warning(
+					    this, QStringLiteral("Commands"),
+					    QStringLiteral("The command stack separator must contain one or two "
+					                   "printable, non-space characters.")));
+					co_return;
 				}
 			}
 		}
@@ -3771,18 +4257,19 @@ void WorldPreferencesDialog::accept()
 		{
 			if (m_enableSpeedWalk->isChecked() && m_speedWalkPrefix->text().isEmpty())
 			{
-				QMessageBox::warning(this, QStringLiteral("Commands"),
-				                     QStringLiteral("You must supply a speed-walk prefix."));
-				return;
+				(co_await QMudPreferences::warning(this, QStringLiteral("Commands"),
+				                                   QStringLiteral("You must supply a speed-walk prefix.")));
+				co_return;
 			}
 		}
 		if (m_enableAutoSay && m_autoSayString && anyAttributePending({"enable_auto_say", "auto_say_string"}))
 		{
 			if (m_enableAutoSay->isChecked() && m_autoSayString->text().trimmed().isEmpty())
 			{
-				QMessageBox::warning(this, QStringLiteral("Auto say"),
-				                     QStringLiteral("Your \"auto say\" string cannot be blank"));
-				return;
+				(co_await QMudPreferences::warning(
+				    this, QStringLiteral("Auto say"),
+				    QStringLiteral("Your \"auto say\" string cannot be blank")));
+				co_return;
 			}
 		}
 		if (m_maxLines && pendingAttributes.contains(QStringLiteral("max_output_lines")))
@@ -3802,11 +4289,11 @@ void WorldPreferencesDialog::accept()
 						                   "RAM. This is not recommended. Do you wish to continue anyway?")
 						        .arg(newLines)
 						        .arg(totalPhys / (1024ULL * 1024ULL));
-						const QMessageBox::StandardButton reply =
-						    QMessageBox::question(this, QStringLiteral("Output buffer"), message,
-						                          QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+						const QMessageBox::StandardButton reply = (co_await QMudPreferences::question(
+						    this, QStringLiteral("Output buffer"), message,
+						    QMessageBox::Yes | QMessageBox::No, QMessageBox::No));
 						if (reply != QMessageBox::Yes)
-							return;
+							co_return;
 					}
 				}
 			}
@@ -3815,23 +4302,26 @@ void WorldPreferencesDialog::accept()
 		{
 			if (!m_logOutput->isChecked() && !m_logRaw->isChecked())
 			{
-				const QMessageBox::StandardButton reply = QMessageBox::question(
+				const QMessageBox::StandardButton reply = (co_await QMudPreferences::question(
 				    this, QStringLiteral("Logging"),
 				    QStringLiteral("You are not logging output from the MUD - is this intentional?"),
-				    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+				    QMessageBox::Yes | QMessageBox::No, QMessageBox::No));
 				if (reply != QMessageBox::Yes)
-					return;
+					co_return;
 			}
 		}
-		if (m_workingLists->triggersStaged && !validateWorkingListNames(WorkingListValidationScope::Triggers))
-			return;
-		if (m_workingLists->aliasesStaged && !validateWorkingListNames(WorkingListValidationScope::Aliases))
-			return;
-		if (m_workingLists->timersStaged && !validateWorkingListNames(WorkingListValidationScope::Timers))
-			return;
+		if (m_workingLists->triggersStaged &&
+		    !(co_await validateWorkingListNames(WorkingListValidationScope::Triggers)))
+			co_return;
+		if (m_workingLists->aliasesStaged &&
+		    !(co_await validateWorkingListNames(WorkingListValidationScope::Aliases)))
+			co_return;
+		if (m_workingLists->timersStaged &&
+		    !(co_await validateWorkingListNames(WorkingListValidationScope::Timers)))
+			co_return;
 		if (m_workingLists->variablesStaged &&
-		    !validateWorkingListNames(WorkingListValidationScope::Variables))
-			return;
+		    !(co_await validateWorkingListNames(WorkingListValidationScope::Variables)))
+			co_return;
 		QSet<QString> changedOverrideOptions;
 		for (const QString &key :
 		     {QStringLiteral("use_default_triggers"), QStringLiteral("use_default_aliases"),
@@ -3881,158 +4371,195 @@ void WorldPreferencesDialog::accept()
 				pendingAttributes.remove(key);
 			}
 		}
-		if (!changedDefaultOptions.isEmpty())
+		QStringList notifications;
+		QString     applyError;
+		const auto  apply = [&]() -> bool
 		{
-			AppController *const app = AppController::instance();
-			if (!app)
+			WorldRuntime::LogDiagnosticScope loggingDiagnostics(*m_runtime, notifications);
+			if (!changedDefaultOptions.isEmpty())
 			{
-				QMessageBox::warning(this, QStringLiteral("World Configuration"),
-				                     QStringLiteral("The application controller is unavailable."));
-				return;
-			}
-			QString loadError;
-			if (!app->applyConfiguredWorldDefaults(m_runtime, changedDefaultOptions, pendingAttributes,
-			                                       &loadError))
-			{
-				QMessageBox::warning(this, QStringLiteral("World Configuration"), loadError);
-				return;
-			}
-		}
-		const bool workingListsChanged = m_workingLists->triggersStaged || m_workingLists->aliasesStaged ||
-		                                 m_workingLists->timersStaged || m_workingLists->variablesStaged ||
-		                                 m_workingLists->macrosStaged || m_workingLists->coloursStaged;
-		commitWorkingListChanges(suppressedDefaultOptions);
-
-		const QMap<QString, QString> worldAttributesBeforeApply = m_runtime->worldAttributes();
-		const QMap<QString, QString> worldMultilineBeforeApply  = m_runtime->worldMultilineAttributes();
-		const bool                   hadLogOpenBeforeApply      = m_runtime->isLogOpen();
-		const QString                previousAutoLogFileName =
-		    worldAttributesBeforeApply.value(QStringLiteral("auto_log_file_name"));
-
-		for (auto it = pendingAttributes.cbegin(); it != pendingAttributes.cend(); ++it)
-			m_runtime->setWorldAttribute(it.key(), it.value());
-		if (pendingAttributes.contains(QStringLiteral("default_world_sound_directory")))
-			m_runtime->updateWorldSoundDirectory();
-		for (auto it = pendingMultilineAttributes.cbegin(); it != pendingMultilineAttributes.cend(); ++it)
-			m_runtime->setWorldMultilineAttribute(it.key(), it.value());
-		if (pendingAttributes.contains(QStringLiteral("note_text_colour")))
-		{
-			const int notePublicIndex = QMudNoteColour::publicIndexFromWorldAttribute(
-			    pendingAttributes.value(QStringLiteral("note_text_colour")));
-			m_runtime->setNoteTextColour(notePublicIndex);
-		}
-
-		const QString updatedAutoLogFileName =
-		    m_runtime->worldAttributes().value(QStringLiteral("auto_log_file_name"));
-		const bool shouldReopenLogForUpdatedPath = hadLogOpenBeforeApply &&
-		                                           !updatedAutoLogFileName.trimmed().isEmpty() &&
-		                                           updatedAutoLogFileName != previousAutoLogFileName;
-		if (shouldReopenLogForUpdatedPath)
-		{
-			if (m_runtime->closeLog() != eOK)
-			{
-				QMessageBox::warning(this, QStringLiteral("Logging"),
-				                     QStringLiteral("Could not close the current log file."));
-			}
-			else
-			{
-				(void)m_runtime->openLog(QString(), true);
-				if (!m_runtime->isLogOpen())
+				AppController *const app = AppController::instance();
+				if (!app)
 				{
-					QMessageBox::warning(this, QStringLiteral("Logging"),
-					                     QStringLiteral("Could not open the new log file \"%1\".")
-					                         .arg(updatedAutoLogFileName));
+					applyError = QStringLiteral("The application controller is unavailable.");
+					return false;
+				}
+				QString loadError;
+				if (!app->applyConfiguredWorldDefaults(m_runtime, changedDefaultOptions, pendingAttributes,
+				                                       &loadError))
+				{
+					applyError = loadError;
+					return false;
+				}
+			}
+			const bool workingListsChanged = m_workingLists->triggersStaged ||
+			                                 m_workingLists->aliasesStaged || m_workingLists->timersStaged ||
+			                                 m_workingLists->variablesStaged ||
+			                                 m_workingLists->macrosStaged || m_workingLists->coloursStaged;
+			commitWorkingListChanges(suppressedDefaultOptions);
+
+			const QMap<QString, QString> worldAttributesBeforeApply = m_runtime->worldAttributes();
+			const QMap<QString, QString> worldMultilineBeforeApply  = m_runtime->worldMultilineAttributes();
+			const bool                   hadLogOpenBeforeApply      = m_runtime->isLogOpen();
+			const QString                previousAutoLogFileName =
+			    worldAttributesBeforeApply.value(QStringLiteral("auto_log_file_name"));
+
+			for (auto it = pendingAttributes.cbegin(); it != pendingAttributes.cend(); ++it)
+				m_runtime->setWorldAttribute(it.key(), it.value());
+			if (pendingAttributes.contains(QStringLiteral("default_world_sound_directory")))
+				m_runtime->updateWorldSoundDirectory();
+			for (auto it = pendingMultilineAttributes.cbegin(); it != pendingMultilineAttributes.cend(); ++it)
+				m_runtime->setWorldMultilineAttribute(it.key(), it.value());
+			if (pendingAttributes.contains(QStringLiteral("note_text_colour")))
+			{
+				const int notePublicIndex = QMudNoteColour::publicIndexFromWorldAttribute(
+				    pendingAttributes.value(QStringLiteral("note_text_colour")));
+				m_runtime->setNoteTextColour(notePublicIndex);
+			}
+
+			const QString updatedAutoLogFileName =
+			    m_runtime->worldAttributes().value(QStringLiteral("auto_log_file_name"));
+			const bool shouldReopenLogForUpdatedPath = hadLogOpenBeforeApply &&
+			                                           !updatedAutoLogFileName.trimmed().isEmpty() &&
+			                                           updatedAutoLogFileName != previousAutoLogFileName;
+			if (shouldReopenLogForUpdatedPath)
+			{
+				if (m_runtime->closeLog() != eOK)
+				{
+					notifications.append(QStringLiteral("Could not close the current log file."));
 				}
 				else
 				{
-					const QMap<QString, QString> &attrs     = m_runtime->worldAttributes();
-					const QMap<QString, QString> &multi     = m_runtime->worldMultilineAttributes();
-					const auto                    isEnabled = [](const QString &value)
+					(void)m_runtime->openLog(QString(), true);
+					if (!m_runtime->isLogOpen())
 					{
-						return value == QStringLiteral("1") ||
-						       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-						       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-					};
-
-					const bool      logHtml  = isEnabled(attrs.value(QStringLiteral("log_html")));
-					const QDateTime now      = QDateTime::currentDateTime();
-					QString         preamble = multi.value(QStringLiteral("log_file_preamble"));
-					if (preamble.isEmpty())
-						preamble = attrs.value(QStringLiteral("log_file_preamble"));
-
-					if (!preamble.isEmpty())
-					{
-						preamble.replace(QStringLiteral("%n"), QStringLiteral("\n"));
-						preamble = m_runtime->formatTime(now, preamble, logHtml);
-						preamble.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-						m_runtime->writeLog(preamble);
-						m_runtime->writeLog(QStringLiteral("\n"));
+						notifications.append(QStringLiteral("Could not open the new log file \"%1\".")
+						                         .arg(updatedAutoLogFileName));
 					}
-
-					if (const bool writeWorldName =
-					        isEnabled(attrs.value(QStringLiteral("write_world_name_to_log")));
-					    writeWorldName)
+					else
 					{
-						const QString strTime =
-						    m_runtime->formatTime(now, QStringLiteral("%A, %B %d, %Y, %#I:%M %p"), false);
-						QString strPreamble = attrs.value(QStringLiteral("name"));
-						strPreamble += QStringLiteral(" - ");
-						strPreamble += strTime;
-
-						if (logHtml)
+						const QMap<QString, QString> &attrs     = m_runtime->worldAttributes();
+						const QMap<QString, QString> &multi     = m_runtime->worldMultilineAttributes();
+						const auto                    isEnabled = [](const QString &value)
 						{
-							m_runtime->writeLog(QStringLiteral("<br>\n"));
-							m_runtime->writeLog(fixHtmlString(strPreamble));
-							m_runtime->writeLog(QStringLiteral("<br>\n"));
-						}
-						else
+							return value == QStringLiteral("1") ||
+							       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+							       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+						};
+
+						const bool      logHtml  = isEnabled(attrs.value(QStringLiteral("log_html")));
+						const QDateTime now      = QDateTime::currentDateTime();
+						QString         preamble = multi.value(QStringLiteral("log_file_preamble"));
+						if (preamble.isEmpty())
+							preamble = attrs.value(QStringLiteral("log_file_preamble"));
+
+						if (!preamble.isEmpty())
 						{
-							m_runtime->writeLog(QStringLiteral("\n"));
-							m_runtime->writeLog(strPreamble);
+							preamble.replace(QStringLiteral("%n"), QStringLiteral("\n"));
+							preamble = m_runtime->formatTime(now, preamble, logHtml);
+							preamble.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+							m_runtime->writeLog(preamble);
 							m_runtime->writeLog(QStringLiteral("\n"));
 						}
 
-						const QString strHyphens(strPreamble.length(), QLatin1Char('-'));
-						m_runtime->writeLog(strHyphens);
-						if (logHtml)
-							m_runtime->writeLog(QStringLiteral("<br><br>"));
-						else
-							m_runtime->writeLog(QStringLiteral("\n\n"));
+						if (const bool writeWorldName =
+						        isEnabled(attrs.value(QStringLiteral("write_world_name_to_log")));
+						    writeWorldName)
+						{
+							const QString strTime =
+							    m_runtime->formatTime(now, QStringLiteral("%A, %B %d, %Y, %#I:%M %p"), false);
+							QString strPreamble = attrs.value(QStringLiteral("name"));
+							strPreamble += QStringLiteral(" - ");
+							strPreamble += strTime;
+
+							if (logHtml)
+							{
+								m_runtime->writeLog(QStringLiteral("<br>\n"));
+								m_runtime->writeLog(fixHtmlString(strPreamble));
+								m_runtime->writeLog(QStringLiteral("<br>\n"));
+							}
+							else
+							{
+								m_runtime->writeLog(QStringLiteral("\n"));
+								m_runtime->writeLog(strPreamble);
+								m_runtime->writeLog(QStringLiteral("\n"));
+							}
+
+							const QString strHyphens(strPreamble.length(), QLatin1Char('-'));
+							m_runtime->writeLog(strHyphens);
+							if (logHtml)
+								m_runtime->writeLog(QStringLiteral("<br><br>"));
+							else
+								m_runtime->writeLog(QStringLiteral("\n\n"));
+						}
 					}
 				}
 			}
-		}
-		const QSet<QString> changedAuxiliaryDomains = applyListEdits(suppressedDefaultOptions);
-		if (!pendingAttributes.isEmpty() || !pendingMultilineAttributes.isEmpty() ||
-		    !changedAuxiliaryDomains.isEmpty() || workingListsChanged)
-		{
-			m_runtime->refreshCommandProcessorOptions();
-		}
-		if (pendingAttributes.contains(QStringLiteral("accept_chat_connections")) ||
-		    pendingAttributes.contains(QStringLiteral("chat_port")))
-		{
-			m_runtime->syncChatAcceptCallsWithPreferences();
-		}
-
-		if (m_view)
-		{
-			const QSet<QString> changedViewAttributeKeys = WorldView::changedRuntimeSettingsAttributeKeys(
-			    worldAttributesBeforeApply, m_runtime->worldAttributes());
-			const QSet<QString> changedViewMultilineKeys =
-			    WorldView::changedRuntimeSettingsMultilineAttributeKeys(
-			        worldMultilineBeforeApply, m_runtime->worldMultilineAttributes(),
-			        worldAttributesBeforeApply, m_runtime->worldAttributes());
-			if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
+			const QSet<QString> changedAuxiliaryDomains = applyListEdits(suppressedDefaultOptions);
+			if (!pendingAttributes.isEmpty() || !pendingMultilineAttributes.isEmpty() ||
+			    !changedAuxiliaryDomains.isEmpty() || workingListsChanged)
 			{
-				const bool needsFullRebuild = WorldView::runtimeSettingsNeedFullRebuild(
-				    changedViewAttributeKeys, changedViewMultilineKeys);
-				m_runtime->applyRuntimeSettingsToPresentationViews(needsFullRebuild);
+				m_runtime->refreshCommandProcessorOptions();
 			}
+			if (pendingAttributes.contains(QStringLiteral("accept_chat_connections")) ||
+			    pendingAttributes.contains(QStringLiteral("chat_port")))
+			{
+				m_runtime->syncChatAcceptCallsWithPreferences();
+			}
+
+			if (m_view)
+			{
+				const QSet<QString> changedViewAttributeKeys = WorldView::changedRuntimeSettingsAttributeKeys(
+				    worldAttributesBeforeApply, m_runtime->worldAttributes());
+				const QSet<QString> changedViewMultilineKeys =
+				    WorldView::changedRuntimeSettingsMultilineAttributeKeys(
+				        worldMultilineBeforeApply, m_runtime->worldMultilineAttributes(),
+				        worldAttributesBeforeApply, m_runtime->worldAttributes());
+				if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
+				{
+					const bool needsFullRebuild = WorldView::runtimeSettingsNeedFullRebuild(
+					    changedViewAttributeKeys, changedViewMultilineKeys);
+					m_runtime->applyRuntimeSettingsToPresentationViews(needsFullRebuild);
+				}
+			}
+			return true;
+		};
+		if (!apply())
+		{
+			co_await QMudPreferences::warning(this, QStringLiteral("World Configuration"), applyError);
+			co_return;
+		}
+		if (!notifications.isEmpty())
+		{
+			QDialog notification(this);
+			notification.setObjectName(QStringLiteral("preferencesApplyNotifications"));
+			notification.setWindowTitle(QStringLiteral("World Configuration"));
+			notification.resize(660, 360);
+			auto *layout = new QVBoxLayout(&notification);
+			auto *label  = new QLabel(
+			    QStringLiteral("Settings were applied with the following notifications:"), &notification);
+			label->setWordWrap(true);
+			layout->addWidget(label);
+			auto *messages = new QPlainTextEdit(&notification);
+			messages->setObjectName(QStringLiteral("preferencesApplyNotificationText"));
+			messages->setReadOnly(true);
+			messages->setPlainText(notifications.join(QStringLiteral("\n\n")));
+			layout->addWidget(messages);
+			auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &notification);
+			connect(buttons, &QDialogButtonBox::accepted, &notification, &QDialog::accept);
+			layout->addWidget(buttons);
+			co_await QMudPreferences::wait(notification);
 		}
 	}
 
 	accepted = true;
 	QDialog::accept();
+}
+void WorldPreferencesDialog::accept()
+{
+	if (m_accepting || !bindingValid())
+		return;
+	(void)acceptAsync();
 }
 
 bool WorldPreferencesDialog::eventFilter(QObject *obj, QEvent *event)
@@ -4081,10 +4608,11 @@ void WorldPreferencesDialog::setLineEditSwatch(QLineEdit *edit, const QColor &co
 	edit->setPalette(pal);
 }
 
-void WorldPreferencesDialog::openLineEditColourPicker(QLineEdit *edit, const QString &title)
+QMudPreferences::Operation<void> WorldPreferencesDialog::openLineEditColourPickerAsync(QLineEdit *edit,
+                                                                                       QString    title)
 {
 	if (!edit)
-		return;
+		co_return;
 	const QString stored  = edit->property("colour_value").toString();
 	QColor        current = parseColourValue(stored);
 	if (!current.isValid())
@@ -4094,12 +4622,16 @@ void WorldPreferencesDialog::openLineEditColourPicker(QLineEdit *edit, const QSt
 	dlg.setPickColour(true);
 	if (current.isValid())
 		dlg.setInitialColour(current);
-	if (dlg.exec() != QDialog::Accepted)
-		return;
+	if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+		co_return;
 	const QColor chosen = dlg.selectedColour();
 	if (!chosen.isValid())
-		return;
+		co_return;
 	setLineEditSwatch(edit, chosen);
+}
+void WorldPreferencesDialog::openLineEditColourPicker(QLineEdit *edit, const QString &title)
+{
+	(void)openLineEditColourPickerAsync(edit, title);
 }
 
 void WorldPreferencesDialog::updateAutoCopyHtmlState() const
@@ -4489,10 +5021,10 @@ void WorldPreferencesDialog::loadKeypadFields(const bool ctrlView)
 	}
 }
 
-void WorldPreferencesDialog::doNotesFind(const bool again)
+QMudPreferences::Operation<void> WorldPreferencesDialog::doNotesFindAsync(const bool again)
 {
 	if (!m_notes)
-		return;
+		co_return;
 
 	QString findText  = m_notesFindText;
 	bool    matchCase = m_notesFindMatchCase;
@@ -4526,19 +5058,20 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 		connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 		dialogLayout->addWidget(buttons);
-		if (dialog.exec() != QDialog::Accepted)
-			return;
+		if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+			co_return;
 		findText  = combo->currentText();
 		matchCase = matchCaseBox->isChecked();
 		forwards  = forwardsBox->isChecked();
 		if (regexBox->isChecked())
 		{
-			QMessageBox::information(this, QStringLiteral("Find notes"),
-			                         QStringLiteral("Regular expressions not supported here."));
-			return;
+			(co_await QMudPreferences::information(
+			    this, QStringLiteral("Find notes"),
+			    QStringLiteral("Regular expressions not supported here.")));
+			co_return;
 		}
 		if (findText.isEmpty())
-			return;
+			co_return;
 		m_notesFindHistory.removeAll(findText);
 		m_notesFindHistory.prepend(findText);
 		m_notesFindText      = findText;
@@ -4549,9 +5082,9 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 
 	const QString content = m_notes->toPlainText();
 	if (content.isEmpty() || findText.isEmpty())
-		return;
-	const Qt::CaseSensitivity cs         = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-	int                       startIndex = 0;
+		co_return;
+	const Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
+	int                       startIndex;
 	if (forwards)
 	{
 		startIndex = (again && m_notesFindIndex >= 0) ? (m_notesFindIndex + 1) : 0;
@@ -4574,9 +5107,9 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 		const QString message = QStringLiteral("The text \"%1\" was not found%2")
 		                            .arg(findText)
 		                            .arg(again ? QStringLiteral(" again.") : QStringLiteral("."));
-		QMessageBox::information(this, QStringLiteral("Find notes"), message);
+		(co_await QMudPreferences::information(this, QStringLiteral("Find notes"), message));
 		m_notesFindIndex = -1;
-		return;
+		co_return;
 	}
 
 	const int indexInt =
@@ -4590,6 +5123,10 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 	m_notes->setTextCursor(cursor);
 	m_notes->setFocus();
 	m_notesFindIndex = indexInt;
+}
+void WorldPreferencesDialog::doNotesFind(const bool again)
+{
+	(void)doNotesFindAsync(again);
 }
 
 QSet<QString> WorldPreferencesDialog::applyListEdits(const QSet<QString> &suppressedDefaultOptions) const
@@ -4807,38 +5344,17 @@ QSet<QString> WorldPreferencesDialog::applyListEdits(const QSet<QString> &suppre
 	return changedDomains;
 }
 
-void WorldPreferencesDialog::editColourCell(QTableWidget *table, const int row, const int column)
-{
-	if (!table)
-		return;
-	QTableWidgetItem *item = table->item(row, column);
-	if (!item)
-		return;
-	QColor current;
-	if (const QVariant stored = item->data(Qt::UserRole); stored.isValid())
-		current = QColor(stored.toString());
-	if (!current.isValid())
-		current = QColor(item->text());
-	const QColor chosen = QColorDialog::getColor(current.isValid() ? current : Qt::white, this,
-	                                             QStringLiteral("Select colour"));
-	if (!chosen.isValid())
-		return;
-	item->setText(QString());
-	item->setData(Qt::UserRole, chosen);
-	item->setBackground(chosen);
-}
-
-void WorldPreferencesDialog::editMacroAtRow(const int row)
+QMudPreferences::Operation<void> WorldPreferencesDialog::editMacroAtRowAsync(const int row)
 {
 	if (!m_macrosTable || row < 0 || row >= m_macrosTable->rowCount())
-		return;
+		co_return;
 	if (m_useDefaultMacros && m_useDefaultMacros->isChecked())
-		return;
+		co_return;
 	QTableWidgetItem *nameItem  = m_macrosTable->item(row, 0);
 	auto             *typeCombo = qobject_cast<QComboBox *>(m_macrosTable->cellWidget(row, 1));
 	QTableWidgetItem *sendItem  = m_macrosTable->item(row, 2);
 	if (!nameItem || !typeCombo || !sendItem)
-		return;
+		co_return;
 
 	QDialog dlg(this);
 	dlg.setWindowTitle(QStringLiteral("Edit macro"));
@@ -4875,8 +5391,8 @@ void WorldPreferencesDialog::editMacroAtRow(const int row)
 	connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 
-	if (dlg.exec() != QDialog::Accepted)
-		return;
+	if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+		co_return;
 
 	QString newType = QStringLiteral("replace");
 	if (sendNowRadio->isChecked())
@@ -4899,14 +5415,19 @@ void WorldPreferencesDialog::editMacroAtRow(const int row)
 		}
 	}
 }
+void WorldPreferencesDialog::editMacroAtRow(const int row)
+{
+	(void)editMacroAtRowAsync(row);
+}
 
-void WorldPreferencesDialog::findMacro(const QString &text, const bool continueFromCurrent)
+QMudPreferences::Operation<void> WorldPreferencesDialog::findMacroAsync(QString    text,
+                                                                        const bool continueFromCurrent)
 {
 	if (!m_macrosTable)
-		return;
+		co_return;
 	const int rowCount = m_macrosTable->rowCount();
 	if (rowCount == 0)
-		return;
+		co_return;
 
 	QString findText  = text;
 	bool    matchCase = m_macroFindMatchCase;
@@ -4941,14 +5462,14 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 		connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 		dialogLayout->addWidget(buttons);
-		if (dialog.exec() != QDialog::Accepted)
-			return;
+		if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+			co_return;
 		findText  = combo->currentText();
 		matchCase = matchCaseBox->isChecked();
 		forwards  = forwardsBox->isChecked();
 		useRegex  = regexBox->isChecked();
 		if (findText.isEmpty())
-			return;
+			co_return;
 		m_macroFindHistory.removeAll(findText);
 		m_macroFindHistory.prepend(findText);
 		m_macroFindText      = findText;
@@ -4968,8 +5489,8 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 		regex = QRegularExpression(findText, options);
 		if (!regex.isValid())
 		{
-			QMessageBox::information(this, QStringLiteral("Find macro"), regex.errorString());
-			return;
+			(co_await QMudPreferences::information(this, QStringLiteral("Find macro"), regex.errorString()));
+			co_return;
 		}
 	}
 
@@ -4990,7 +5511,7 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 		return haystack.contains(findText, matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive);
 	};
 
-	int startRow = 0;
+	int startRow;
 	if (continueFromCurrent && m_macroFindRow >= 0 && m_macroFindRow < rowCount)
 		startRow = forwards ? (m_macroFindRow + 1) : (m_macroFindRow - 1);
 	else if (!continueFromCurrent && m_macrosTable->currentRow() >= 0)
@@ -5006,7 +5527,7 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 			{
 				m_macrosTable->setCurrentCell(row, 0);
 				m_macroFindRow = row;
-				return;
+				co_return;
 			}
 		}
 		for (int row = 0; row < startRow; ++row)
@@ -5015,7 +5536,7 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 			{
 				m_macrosTable->setCurrentCell(row, 0);
 				m_macroFindRow = row;
-				return;
+				co_return;
 			}
 		}
 	}
@@ -5027,7 +5548,7 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 			{
 				m_macrosTable->setCurrentCell(row, 0);
 				m_macroFindRow = row;
-				return;
+				co_return;
 			}
 		}
 		for (int row = rowCount - 1; row > startRow; --row)
@@ -5036,26 +5557,32 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 			{
 				m_macrosTable->setCurrentCell(row, 0);
 				m_macroFindRow = row;
-				return;
+				co_return;
 			}
 		}
 	}
 
-	QMessageBox::information(this, QStringLiteral("Find macro"), QStringLiteral("No further matches found."));
+	(co_await QMudPreferences::information(this, QStringLiteral("Find macro"),
+	                                       QStringLiteral("No further matches found.")));
+}
+void WorldPreferencesDialog::findMacro(const QString &text, const bool continueFromCurrent)
+{
+	(void)findMacroAsync(text, continueFromCurrent);
 }
 
-bool WorldPreferencesDialog::saveMacrosToFile(const QString &fileName) const
+QMudPreferences::Operation<bool> WorldPreferencesDialog::saveMacrosToFile(QString fileName) const
 {
 	if (!m_runtime)
-		return false;
+		co_return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdm"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save macros"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(const_cast<WorldPreferencesDialog *>(this),
+		                                   QStringLiteral("Save macros"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
 	QTextStream out(&file);
@@ -5116,26 +5643,27 @@ bool WorldPreferencesDialog::saveMacrosToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save macros"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(const_cast<WorldPreferencesDialog *>(this),
+		                                   QStringLiteral("Save macros"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::loadMacrosFromFile(const QString &fileName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::loadMacrosFromFile(QString fileName)
 {
 	if (!m_runtime)
-		return false;
+		co_return false;
 
 	WorldDocument doc;
 	doc.setLoadMask(WorldDocument::XML_MACROS | WorldDocument::XML_NO_PLUGINS |
 	                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 	if (!doc.loadFromFile(fileName))
 	{
-		QMessageBox::warning(this, QStringLiteral("Load macros"), doc.errorString());
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Load macros"), doc.errorString()));
+		co_return false;
 	}
 
 	const QStringList          macroNames = macroDescriptionList();
@@ -5152,27 +5680,27 @@ bool WorldPreferencesDialog::loadMacrosFromFile(const QString &fileName)
 	}
 
 	if (!m_workingLists)
-		return false;
+		co_return false;
 	m_workingLists->macros            = std::move(macros);
 	m_workingLists->macrosInitialized = true;
 	m_workingLists->macrosStaged      = true;
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::saveTriggersToFile(QString fileName)
 {
 	if (!m_runtime)
-		return false;
-	if (!validateWorkingListNames(WorkingListValidationScope::Triggers))
-		return false;
+		co_return false;
+	if (!(co_await validateWorkingListNames(WorkingListValidationScope::Triggers)))
+		co_return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdt"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(this, QStringLiteral("Save triggers"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save triggers"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
 	QTextStream out(&file);
@@ -5222,26 +5750,27 @@ bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName)
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(this, QStringLiteral("Save triggers"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save triggers"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::loadTriggersFromFile(const QString &fileName, const bool replace)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::loadTriggersFromFile(QString    fileName,
+                                                                              const bool replace)
 {
 	if (!m_runtime)
-		return false;
+		co_return false;
 
 	WorldDocument doc;
 	doc.setLoadMask(WorldDocument::XML_TRIGGERS | WorldDocument::XML_NO_PLUGINS |
 	                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 	if (!doc.loadFromFile(fileName))
 	{
-		QMessageBox::warning(this, QStringLiteral("Load triggers"), doc.errorString());
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Load triggers"), doc.errorString()));
+		co_return false;
 	}
 
 	QList<WorldRuntime::Trigger> combined;
@@ -5263,23 +5792,23 @@ bool WorldPreferencesDialog::loadTriggersFromFile(const QString &fileName, const
 	}
 	m_workingLists->triggers       = std::move(combined);
 	m_workingLists->triggersStaged = true;
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::saveAliasesToFile(QString fileName)
 {
 	if (!m_runtime)
-		return false;
-	if (!validateWorkingListNames(WorkingListValidationScope::Aliases))
-		return false;
+		co_return false;
+	if (!(co_await validateWorkingListNames(WorkingListValidationScope::Aliases)))
+		co_return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qda"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(this, QStringLiteral("Save aliases"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save aliases"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
 	QTextStream out(&file);
@@ -5329,26 +5858,27 @@ bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName)
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(this, QStringLiteral("Save aliases"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save aliases"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::loadAliasesFromFile(const QString &fileName, const bool replace)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::loadAliasesFromFile(QString    fileName,
+                                                                             const bool replace)
 {
 	if (!m_runtime)
-		return false;
+		co_return false;
 
 	WorldDocument doc;
 	doc.setLoadMask(WorldDocument::XML_ALIASES | WorldDocument::XML_NO_PLUGINS |
 	                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 	if (!doc.loadFromFile(fileName))
 	{
-		QMessageBox::warning(this, QStringLiteral("Load aliases"), doc.errorString());
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Load aliases"), doc.errorString()));
+		co_return false;
 	}
 
 	QList<WorldRuntime::Alias> combined;
@@ -5370,23 +5900,23 @@ bool WorldPreferencesDialog::loadAliasesFromFile(const QString &fileName, const 
 	}
 	m_workingLists->aliases       = std::move(combined);
 	m_workingLists->aliasesStaged = true;
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::saveTimersToFile(QString fileName)
 {
 	if (!m_runtime)
-		return false;
-	if (!validateWorkingListNames(WorkingListValidationScope::Timers))
-		return false;
+		co_return false;
+	if (!(co_await validateWorkingListNames(WorkingListValidationScope::Timers)))
+		co_return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdi"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(this, QStringLiteral("Save timers"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save timers"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
 	QTextStream out(&file);
@@ -5435,26 +5965,27 @@ bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName)
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(this, QStringLiteral("Save timers"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save timers"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::loadTimersFromFile(const QString &fileName, const bool replace)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::loadTimersFromFile(QString    fileName,
+                                                                            const bool replace)
 {
 	if (!m_runtime)
-		return false;
+		co_return false;
 
 	WorldDocument doc;
 	doc.setLoadMask(WorldDocument::XML_TIMERS | WorldDocument::XML_NO_PLUGINS |
 	                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 	if (!doc.loadFromFile(fileName))
 	{
-		QMessageBox::warning(this, QStringLiteral("Load timers"), doc.errorString());
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Load timers"), doc.errorString()));
+		co_return false;
 	}
 
 	QList<WorldRuntime::Timer> combined;
@@ -5476,23 +6007,23 @@ bool WorldPreferencesDialog::loadTimersFromFile(const QString &fileName, const b
 	}
 	m_workingLists->timers       = std::move(combined);
 	m_workingLists->timersStaged = true;
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::saveVariablesToFile(QString fileName)
 {
 	if (!m_runtime)
-		return false;
-	if (!validateWorkingListNames(WorkingListValidationScope::Variables))
-		return false;
+		co_return false;
+	if (!(co_await validateWorkingListNames(WorkingListValidationScope::Variables)))
+		co_return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdv"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(this, QStringLiteral("Save variables"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save variables"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
 	QTextStream out(&file);
@@ -5524,26 +6055,26 @@ bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName)
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(this, QStringLiteral("Save variables"),
-		                     QStringLiteral("Unable to create the requested file."));
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Save variables"),
+		                                   QStringLiteral("Unable to create the requested file.")));
+		co_return false;
 	}
 
-	return true;
+	co_return true;
 }
 
-bool WorldPreferencesDialog::loadVariablesFromFile(const QString &fileName)
+QMudPreferences::Operation<bool> WorldPreferencesDialog::loadVariablesFromFile(QString fileName)
 {
 	if (!m_runtime)
-		return false;
+		co_return false;
 
 	WorldDocument doc;
 	doc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS |
 	                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 	if (!doc.loadFromFile(fileName))
 	{
-		QMessageBox::warning(this, QStringLiteral("Load variables"), doc.errorString());
-		return false;
+		(co_await QMudPreferences::warning(this, QStringLiteral("Load variables"), doc.errorString()));
+		co_return false;
 	}
 
 	QList<WorkingLists::Variable> vars;
@@ -5561,7 +6092,7 @@ bool WorldPreferencesDialog::loadVariablesFromFile(const QString &fileName)
 	}
 	m_workingLists->variables       = std::move(vars);
 	m_workingLists->variablesStaged = true;
-	return true;
+	co_return true;
 }
 
 void WorldPreferencesDialog::buildUi()
@@ -5570,6 +6101,8 @@ void WorldPreferencesDialog::buildUi()
 	auto *header = new GradientHeader(this);
 	header->setObjectName(QStringLiteral("worldPreferencesGradientHeader"));
 	header->setText(windowTitle());
+	connect(this, &QWidget::windowTitleChanged, header,
+	        [header](const QString &title) { header->setText(title); });
 	if (AppController *app = AppController::instance())
 		header->setGradientEnabled(app->getGlobalOption(QStringLiteral("ColourGradientConfig")).toInt() != 0);
 	layout->addWidget(header);
@@ -5605,6 +6138,7 @@ void WorldPreferencesDialog::buildUi()
 	auto *connectingPage    = new QWidget(this);
 	auto *mxpPage           = new QWidget(this);
 	auto *chatPage          = new QWidget(this);
+	auto *gmcpPage          = new QWidget(this);
 
 	auto  addPageItem = [this](QTreeWidgetItem *parent, const QString &label, const Page page)
 	{
@@ -5649,6 +6183,9 @@ void WorldPreferencesDialog::buildUi()
 	addPageItem(inputCategory, QStringLiteral("Macros"), PageMacros);
 	addPageItem(inputCategory, QStringLiteral("Auto Say"), PageAutoSay);
 
+	QTreeWidgetItem *protocolCategory = addCategory(QStringLiteral("Protocol Options"));
+	addPageItem(protocolCategory, QStringLiteral("GMCP"), PageGmcp);
+
 	QTreeWidgetItem *pasteCategory = addCategory(QStringLiteral("Paste/Send"));
 	addPageItem(pasteCategory, QStringLiteral("Paste"), PagePaste);
 	addPageItem(pasteCategory, QStringLiteral("Send"), PageSendToWorld);
@@ -5680,6 +6217,7 @@ void WorldPreferencesDialog::buildUi()
 	m_pages->addWidget(connectingPage);
 	m_pages->addWidget(mxpPage);
 	m_pages->addWidget(chatPage);
+	m_pages->addWidget(gmcpPage);
 
 	connect(m_pageTree, &QTreeWidget::currentItemChanged, this,
 	        [this](const QTreeWidgetItem *current, QTreeWidgetItem *)
@@ -5706,6 +6244,7 @@ void WorldPreferencesDialog::buildUi()
 	auto *generalForm       = new QHBoxLayout(generalFormWidget);
 	auto *worldLabel        = new QLabel(QStringLiteral("World"), generalFormWidget);
 	m_worldName             = new QLineEdit(generalFormWidget);
+	m_worldName->setObjectName(QStringLiteral("worldNameEdit"));
 	generalForm->addStretch();
 	generalForm->addWidget(worldLabel);
 	generalForm->addWidget(m_worldName, 1);
@@ -5715,7 +6254,9 @@ void WorldPreferencesDialog::buildUi()
 	auto *mudGroup  = new QGroupBox(QStringLiteral("MUD address and port"), generalPage);
 	auto *mudLayout = new QGridLayout(mudGroup);
 	m_host          = new QLineEdit(mudGroup);
-	m_port          = new QSpinBox(mudGroup);
+	m_host->setObjectName(QStringLiteral("worldHostEdit"));
+	m_port = new QSpinBox(mudGroup);
+	m_port->setObjectName(QStringLiteral("worldPortSpinBox"));
 	m_port->setRange(1, 65535);
 	m_clearCachedButton = new QPushButton(QStringLiteral("Clear Cached IP"), mudGroup);
 	m_tlsEncryption     = new QCheckBox(QStringLiteral("TLS Encryption"), mudGroup);
@@ -5938,7 +6479,7 @@ void WorldPreferencesDialog::buildUi()
 
 	if (m_proxyAuthButton)
 		connect(m_proxyAuthButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        QDialog dialog(this);
 			        dialog.setWindowTitle(QStringLiteral("Proxy authentication"));
@@ -5955,7 +6496,7 @@ void WorldPreferencesDialog::buildUi()
 			        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 			        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 			        form->addRow(buttons);
-			        if (dialog.exec() == QDialog::Accepted)
+			        if ((co_await QMudPreferences::wait(dialog)) == QDialog::Accepted)
 			        {
 				        m_proxyUsername = user->text();
 				        m_proxyPassword = pass->text();
@@ -6100,11 +6641,11 @@ void WorldPreferencesDialog::buildUi()
 			        m_standardPreamble->setEnabled(checked);
 	        });
 	connect(m_browseLogFile, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QString startDir = m_runtime ? m_runtime->defaultLogDirectory() : QString();
-		        const QString fileName = QFileDialog::getSaveFileName(
-		            this, QStringLiteral("Log file name"), startDir, QStringLiteral("Text files (*.txt)"));
+		        const QString fileName = (co_await QMudPreferences::getSaveFileName(
+		            this, QStringLiteral("Log file name"), startDir, QStringLiteral("Text files (*.txt)")));
 		        if (!fileName.isEmpty())
 		        {
 			        if (m_runtime)
@@ -6133,13 +6674,20 @@ void WorldPreferencesDialog::buildUi()
 		        m_logFilePreamble->setPlainText(preamble);
 		        m_logFilePostamble->setPlainText(postamble);
 	        });
-	connect(m_editPreamble, &QToolButton::clicked, this, [this]
-	        { editPlainTextWithDialog(this, m_logFilePreamble, QStringLiteral("Edit log file preamble")); });
-	connect(
-	    m_editPostamble, &QToolButton::clicked, this, [this]
-	    { editPlainTextWithDialog(this, m_logFilePostamble, QStringLiteral("Edit log file postamble")); });
+	connect(m_editPreamble, &QToolButton::clicked, this,
+	        [this]() -> QMudPreferences::Operation<void>
+	        {
+		        (co_await editPlainTextWithDialog(this, m_logFilePreamble,
+		                                          QStringLiteral("Edit log file preamble")));
+	        });
+	connect(m_editPostamble, &QToolButton::clicked, this,
+	        [this]() -> QMudPreferences::Operation<void>
+	        {
+		        (co_await editPlainTextWithDialog(this, m_logFilePostamble,
+		                                          QStringLiteral("Edit log file postamble")));
+	        });
 	connect(m_substitutionHelp, &QToolButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        QDialog dialog(this);
 		        dialog.setWindowTitle(QStringLiteral("Special characters"));
@@ -6160,7 +6708,7 @@ void WorldPreferencesDialog::buildUi()
 		        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
 		        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		        dialogLayout->addWidget(buttons);
-		        dialog.exec();
+		        (co_await QMudPreferences::wait(dialog));
 	        });
 
 	// ANSI colors
@@ -6277,7 +6825,7 @@ void WorldPreferencesDialog::buildUi()
 		if (!swatch)
 			return;
 		connect(swatch, &QPushButton::clicked, this,
-		        [this, swatch]
+		        [this, swatch]() -> QMudPreferences::Operation<void>
 		        {
 			        const QColor       current = swatchButtonColour(swatch);
 			        ColourPickerDialog dlg(this);
@@ -6285,11 +6833,11 @@ void WorldPreferencesDialog::buildUi()
 			        dlg.setPickColour(true);
 			        if (current.isValid())
 				        dlg.setInitialColour(current);
-			        if (dlg.exec() != QDialog::Accepted)
-				        return;
+			        if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+				        co_return;
 			        const QColor chosen = dlg.selectedColour();
 			        if (!chosen.isValid())
-				        return;
+				        co_return;
 			        setSwatchButtonColour(swatch, chosen);
 			        updateScriptNoteSwatches();
 		        });
@@ -6349,7 +6897,7 @@ void WorldPreferencesDialog::buildUi()
 		if (!swatch)
 			return;
 		connect(swatch, &QPushButton::clicked, this,
-		        [this, swatch, updateAnsiCompare]
+		        [this, swatch, updateAnsiCompare]() -> QMudPreferences::Operation<void>
 		        {
 			        const QColor       current = swatchButtonColour(swatch);
 			        ColourPickerDialog dlg(this);
@@ -6357,11 +6905,11 @@ void WorldPreferencesDialog::buildUi()
 			        dlg.setPickColour(true);
 			        if (current.isValid())
 				        dlg.setInitialColour(current);
-			        if (dlg.exec() != QDialog::Accepted)
-				        return;
+			        if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+				        co_return;
 			        const QColor chosen = dlg.selectedColour();
 			        if (!chosen.isValid())
-				        return;
+				        co_return;
 			        setSwatchButtonColour(swatch, chosen);
 			        updateAnsiCompare();
 		        });
@@ -6454,12 +7002,13 @@ void WorldPreferencesDialog::buildUi()
 	};
 	if (m_customDefaults)
 		connect(m_customDefaults, &QPushButton::clicked, this,
-		        [this, writeCustomColours]
+		        [this, writeCustomColours]() -> QMudPreferences::Operation<void>
 		        {
-			        if (QMessageBox::question(this, QStringLiteral("Custom colours"),
-			                                  QStringLiteral("Reset all custom colours to QMud defaults?"),
-			                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-				        return;
+			        if ((co_await QMudPreferences::question(
+			                this, QStringLiteral("Custom colours"),
+			                QStringLiteral("Reset all custom colours to QMud defaults?"),
+			                QMessageBox::Yes | QMessageBox::No)) != QMessageBox::Yes)
+				        co_return;
 			        unsigned long text[MAX_CUSTOM];
 			        unsigned long back[MAX_CUSTOM];
 			        setDefaultCustomColours(text, back);
@@ -6495,12 +7044,13 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_customRandom)
 		connect(m_customRandom, &QPushButton::clicked, this,
-		        [this, applyCustomRandom]
+		        [this, applyCustomRandom]() -> QMudPreferences::Operation<void>
 		        {
-			        if (QMessageBox::question(this, QStringLiteral("Custom colours"),
-			                                  QStringLiteral("Make all colours random?"),
-			                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-				        return;
+			        if ((co_await QMudPreferences::question(this, QStringLiteral("Custom colours"),
+			                                                QStringLiteral("Make all colours random?"),
+			                                                QMessageBox::Yes | QMessageBox::No)) !=
+			            QMessageBox::Yes)
+				        co_return;
 			        applyCustomRandom();
 		        });
 	auto *ansiButtons = new QGridLayout();
@@ -6566,10 +7116,10 @@ void WorldPreferencesDialog::buildUi()
 	auto *ansiOptions = new QVBoxLayout();
 	if (m_useDefaultColours)
 		connect(m_useDefaultColours, &QCheckBox::toggled, this,
-		        [this](const bool enabled)
+		        [this](const bool enabled) -> QMudPreferences::Operation<void>
 		        {
-			        handleDefaultOverrideToggle(QStringLiteral("use_default_colours"), m_useDefaultColours,
-			                                    enabled);
+			        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_colours"),
+			                                                   m_useDefaultColours, enabled));
 			        updateDefaultColoursState();
 		        });
 	ansiOptions->setContentsMargins(0, 0, 0, 0);
@@ -6588,25 +7138,26 @@ void WorldPreferencesDialog::buildUi()
 	ansiColoursLayout->addStretch(1);
 	ansiColoursLayout->addLayout(ansiContentLayout);
 	ansiColoursLayout->addStretch(1);
-	connect(m_ansiDefaults, &QPushButton::clicked, this,
-	        [this, writeAnsiColours]
-	        {
-		        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
-		                                  QStringLiteral("Reset all colours to the ANSI defaults?"),
-		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-			        return;
-		        unsigned long normal[8];
-		        unsigned long bold[8];
-		        setDefaultAnsiColours(normal, bold);
-		        QVector<QColor> normalColours(8);
-		        QVector<QColor> boldColours(8);
-		        for (int i = 0; i < 8; ++i)
-		        {
-			        normalColours[i] = fromColourRef(static_cast<long>(normal[i]));
-			        boldColours[i]   = fromColourRef(static_cast<long>(bold[i]));
-		        }
-		        writeAnsiColours(normalColours, boldColours);
-	        });
+	connect(
+	    m_ansiDefaults, &QPushButton::clicked, this,
+	    [this, writeAnsiColours]() -> QMudPreferences::Operation<void>
+	    {
+		    if ((co_await QMudPreferences::question(this, QStringLiteral("ANSI colours"),
+		                                            QStringLiteral("Reset all colours to the ANSI defaults?"),
+		                                            QMessageBox::Yes | QMessageBox::No)) != QMessageBox::Yes)
+			    co_return;
+		    unsigned long normal[8];
+		    unsigned long bold[8];
+		    setDefaultAnsiColours(normal, bold);
+		    QVector<QColor> normalColours(8);
+		    QVector<QColor> boldColours(8);
+		    for (int i = 0; i < 8; ++i)
+		    {
+			    normalColours[i] = fromColourRef(static_cast<long>(normal[i]));
+			    boldColours[i]   = fromColourRef(static_cast<long>(bold[i]));
+		    }
+		    writeAnsiColours(normalColours, boldColours);
+	    });
 	connect(m_ansiSwap, &QPushButton::clicked, this,
 	        [readAnsiColours, writeAnsiColours]
 	        {
@@ -6628,125 +7179,129 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_ansiLessColour, &QPushButton::clicked, this,
 	        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_LESS_COLOUR); });
 	connect(m_ansiRandom, &QPushButton::clicked, this,
-	        [this, applyAnsiRandom]
+	        [this, applyAnsiRandom]() -> QMudPreferences::Operation<void>
 	        {
-		        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
-		                                  QStringLiteral("Make all colours random?"),
-		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-			        return;
+		        if ((co_await QMudPreferences::question(
+		                this, QStringLiteral("ANSI colours"), QStringLiteral("Make all colours random?"),
+		                QMessageBox::Yes | QMessageBox::No)) != QMessageBox::Yes)
+			        co_return;
 		        applyAnsiRandom();
 	        });
-	connect(m_copyAnsiToCustom, &QPushButton::clicked, this,
-	        [this, readAnsiColours, readCustomColours, writeCustomColours]
-	        {
-		        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
-		                                  QStringLiteral("Copy all 16 colours to the custom colours?"),
-		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-			        return;
-		        ensurePagePopulated(PageCustomColours);
-		        QVector<QColor> normal(8);
-		        QVector<QColor> bold(8);
-		        readAnsiColours(normal, bold);
-		        QVector<QPair<QColor, QColor>> custom = readCustomColours();
-		        for (int i = 0; i < 8 && i < custom.size(); ++i)
-			        custom[i].first = normal[i];
-		        for (int i = 0; i < 8 && (i + 8) < custom.size(); ++i)
-			        custom[i + 8].first = bold[i];
-		        writeCustomColours(custom);
-	        });
-	connect(m_ansiLoad, &QPushButton::clicked, this,
-	        [this]
-	        {
-		        ensurePagePopulated(PageCustomColours);
-		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-		        const QString fileName = QFileDialog::getOpenFileName(
-		            this, QStringLiteral("Colour file name"), startDir,
-		            QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)"));
-		        if (fileName.isEmpty())
-			        return;
-		        if (m_runtime)
-			        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-		        WorldDocument doc;
-		        doc.setLoadMask(WorldDocument::XML_COLOURS | WorldDocument::XML_NO_PLUGINS |
-		                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		        if (!doc.loadFromFile(fileName))
-		        {
-			        QMessageBox::warning(this, QStringLiteral("Load colours"), doc.errorString());
-			        return;
-		        }
-		        if (m_workingLists)
-		        {
-			        QList<WorldRuntime::Colour> colours;
-			        for (const auto &c : doc.colours())
-			        {
-				        WorldRuntime::Colour rc;
-				        rc.group      = c.group;
-				        rc.attributes = c.attributes;
-				        bool      ok  = false;
-				        const int seq = rc.attributes.value(QStringLiteral("seq")).toInt(&ok);
-				        if (ok)
-					        rc.attributes.insert(QStringLiteral("seq_index"), QString::number(seq - 1));
-				        colours.push_back(rc);
-			        }
-			        m_workingLists->colours       = std::move(colours);
-			        m_workingLists->coloursStaged = true;
-		        }
-		        populateCustomColours();
-		        populateAnsiColours();
-	        });
-	connect(m_ansiSave, &QPushButton::clicked, this,
-	        [this, readCustomColours, readCustomNames, readAnsiColours]
-	        {
-		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-		        const QString fileName = QFileDialog::getSaveFileName(
-		            this, QStringLiteral("Colour file name"), startDir,
-		            QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)"));
-		        if (fileName.isEmpty())
-			        return;
-		        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdc"));
-		        if (m_runtime)
-			        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-		        QVector<QColor> normal(8);
-		        QVector<QColor> bold(8);
-		        readAnsiColours(normal, bold);
-		        const QVector<QPair<QColor, QColor>> custom = readCustomColours();
-		        const QVector<QString>               names  = readCustomNames();
-		        QSaveFile                            file(outputPath);
-		        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-		        {
-			        QMessageBox::warning(this, QStringLiteral("Save colours"),
-			                             QStringLiteral("Unable to write to %1").arg(outputPath));
-			        return;
-		        }
-		        QTextStream stream(&file);
-		        stream << "<colours>\n";
-		        stream << "\n <ansi>\n";
-		        stream << "\n  <normal>\n";
-		        for (int i = 0; i < normal.size(); ++i)
-			        stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\"" << formatColourValue(normal.at(i))
-			               << "\"/>\n";
-		        stream << "\n  </normal>\n";
-		        stream << "\n  <bold>\n";
-		        for (int i = 0; i < bold.size(); ++i)
-			        stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\"" << formatColourValue(bold.at(i))
-			               << "\"/>\n";
-		        stream << "\n  </bold>\n";
-		        stream << "\n </ansi>\n";
-		        stream << "\n <custom>\n";
-		        for (int i = 0; i < custom.size(); ++i)
-		        {
-			        stream << "  <colour seq=\"" << (i + 1) << "\"";
-			        if (!names.value(i).isEmpty())
-				        stream << " name=\"" << fixHtmlString(names.value(i)) << "\"";
-			        stream << " text=\"" << formatColourValue(custom.at(i).first) << "\""
-			               << " back=\"" << formatColourValue(custom.at(i).second) << "\"/>\n";
-		        }
-		        stream << "\n </custom>\n";
-		        stream << "</colours>\n";
-		        if (!file.commit())
-			        QMessageBox::warning(this, QStringLiteral("Save colours"),
-			                             QStringLiteral("Unable to write to %1").arg(outputPath));
-	        });
+	connect(
+	    m_copyAnsiToCustom, &QPushButton::clicked, this,
+	    [this, readAnsiColours, readCustomColours, writeCustomColours]() -> QMudPreferences::Operation<void>
+	    {
+		    if ((co_await QMudPreferences::question(
+		            this, QStringLiteral("ANSI colours"),
+		            QStringLiteral("Copy all 16 colours to the custom colours?"),
+		            QMessageBox::Yes | QMessageBox::No)) != QMessageBox::Yes)
+			    co_return;
+		    ensurePagePopulated(PageCustomColours);
+		    QVector<QColor> normal(8);
+		    QVector<QColor> bold(8);
+		    readAnsiColours(normal, bold);
+		    QVector<QPair<QColor, QColor>> custom = readCustomColours();
+		    for (int i = 0; i < 8 && i < custom.size(); ++i)
+			    custom[i].first = normal[i];
+		    for (int i = 0; i < 8 && (i + 8) < custom.size(); ++i)
+			    custom[i + 8].first = bold[i];
+		    writeCustomColours(custom);
+	    });
+	connect(
+	    m_ansiLoad, &QPushButton::clicked, this,
+	    [this]() -> QMudPreferences::Operation<void>
+	    {
+		    ensurePagePopulated(PageCustomColours);
+		    const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		    const QString fileName = (co_await QMudPreferences::getOpenFileName(
+		        this, QStringLiteral("Colour file name"), startDir,
+		        QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)")));
+		    if (fileName.isEmpty())
+			    co_return;
+		    if (m_runtime)
+			    m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+		    WorldDocument doc;
+		    doc.setLoadMask(WorldDocument::XML_COLOURS | WorldDocument::XML_NO_PLUGINS |
+		                    WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
+		    if (!doc.loadFromFile(fileName))
+		    {
+			    (co_await QMudPreferences::warning(this, QStringLiteral("Load colours"), doc.errorString()));
+			    co_return;
+		    }
+		    if (m_workingLists)
+		    {
+			    QList<WorldRuntime::Colour> colours;
+			    for (const auto &c : doc.colours())
+			    {
+				    WorldRuntime::Colour rc;
+				    rc.group      = c.group;
+				    rc.attributes = c.attributes;
+				    bool      ok  = false;
+				    const int seq = rc.attributes.value(QStringLiteral("seq")).toInt(&ok);
+				    if (ok)
+					    rc.attributes.insert(QStringLiteral("seq_index"), QString::number(seq - 1));
+				    colours.push_back(rc);
+			    }
+			    m_workingLists->colours       = std::move(colours);
+			    m_workingLists->coloursStaged = true;
+		    }
+		    populateCustomColours();
+		    populateAnsiColours();
+	    });
+	connect(
+	    m_ansiSave, &QPushButton::clicked, this,
+	    [this, readCustomColours, readCustomNames, readAnsiColours]() -> QMudPreferences::Operation<void>
+	    {
+		    const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		    const QString fileName = (co_await QMudPreferences::getSaveFileName(
+		        this, QStringLiteral("Colour file name"), startDir,
+		        QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)")));
+		    if (fileName.isEmpty())
+			    co_return;
+		    const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdc"));
+		    if (m_runtime)
+			    m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
+		    QVector<QColor> normal(8);
+		    QVector<QColor> bold(8);
+		    readAnsiColours(normal, bold);
+		    const QVector<QPair<QColor, QColor>> custom = readCustomColours();
+		    const QVector<QString>               names  = readCustomNames();
+		    QSaveFile                            file(outputPath);
+		    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+		    {
+			    (co_await QMudPreferences::warning(this, QStringLiteral("Save colours"),
+			                                       QStringLiteral("Unable to write to %1").arg(outputPath)));
+			    co_return;
+		    }
+		    QTextStream stream(&file);
+		    stream << "<colours>\n";
+		    stream << "\n <ansi>\n";
+		    stream << "\n  <normal>\n";
+		    for (int i = 0; i < normal.size(); ++i)
+			    stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\"" << formatColourValue(normal.at(i))
+			           << "\"/>\n";
+		    stream << "\n  </normal>\n";
+		    stream << "\n  <bold>\n";
+		    for (int i = 0; i < bold.size(); ++i)
+			    stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\"" << formatColourValue(bold.at(i))
+			           << "\"/>\n";
+		    stream << "\n  </bold>\n";
+		    stream << "\n </ansi>\n";
+		    stream << "\n <custom>\n";
+		    for (int i = 0; i < custom.size(); ++i)
+		    {
+			    stream << "  <colour seq=\"" << (i + 1) << "\"";
+			    if (!names.value(i).isEmpty())
+				    stream << " name=\"" << fixHtmlString(names.value(i)) << "\"";
+			    stream << " text=\"" << formatColourValue(custom.at(i).first) << "\""
+			           << " back=\"" << formatColourValue(custom.at(i).second) << "\"/>\n";
+		    }
+		    stream << "\n </custom>\n";
+		    stream << "</colours>\n";
+		    if (!file.commit())
+			    (co_await QMudPreferences::warning(this, QStringLiteral("Save colours"),
+			                                       QStringLiteral("Unable to write to %1").arg(outputPath)));
+	    });
 
 	// Macros
 	auto *macrosLayout = new QVBoxLayout(macrosPage);
@@ -6782,14 +7337,15 @@ void WorldPreferencesDialog::buildUi()
 	macroButtons->setColumnStretch(4, 1);
 	macrosLayout->addLayout(macroButtons);
 	connect(m_useDefaultMacros, &QCheckBox::toggled, this,
-	        [this](const bool enabled)
+	        [this](const bool enabled) -> QMudPreferences::Operation<void>
 	        {
-		        handleDefaultOverrideToggle(QStringLiteral("use_default_macros"), m_useDefaultMacros,
-		                                    enabled);
+		        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_macros"),
+		                                                   m_useDefaultMacros, enabled));
 		        updateMacroControls();
 	        });
 	connect(m_macrosTable, &QTableWidget::cellDoubleClicked, this,
-	        [this](const int row, int) { editMacroAtRow(row); });
+	        [this](const int row, int) -> QMudPreferences::Operation<void>
+	        { (co_await editMacroAtRowAsync(row)); });
 	connect(m_macrosTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
 	        [this](const QItemSelection &, const QItemSelection &) { updateMacroControls(); });
 	connect(m_macrosTable->horizontalHeader(), &QHeaderView::sectionClicked, this,
@@ -6805,51 +7361,52 @@ void WorldPreferencesDialog::buildUi()
 		        populateMacros();
 	        });
 	connect(m_editMacroButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_macrosTable)
-			        return;
+			        co_return;
 		        if (const int row = m_macrosTable->currentRow(); row >= 0)
-			        editMacroAtRow(row);
+			        (co_await editMacroAtRowAsync(row));
 	        });
-	connect(m_findMacroButton, &QPushButton::clicked, this, [this] { findMacro(m_macroFindText, false); });
+	connect(m_findMacroButton, &QPushButton::clicked, this, [this]() -> QMudPreferences::Operation<void>
+	        { (co_await findMacroAsync(m_macroFindText, false)); });
 	connect(m_findNextMacroButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        if (m_macroFindText.isEmpty())
-			        return;
-		        findMacro(m_macroFindText, true);
+			        co_return;
+		        (co_await findMacroAsync(m_macroFindText, true));
 	        });
 	connect(m_loadMacroButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-		        if (const QString fileName =
-		                QFileDialog::getOpenFileName(this, QStringLiteral("Macro file name"), startDir,
-		                                             QStringLiteral("QMud macros (*.qdm *.mcm)"));
+		        if (const QString fileName = (co_await QMudPreferences::getOpenFileName(
+		                this, QStringLiteral("Macro file name"), startDir,
+		                QStringLiteral("QMud macros (*.qdm *.mcm)")));
 		            !fileName.isEmpty())
 		        {
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadMacrosFromFile(fileName))
-				        return;
+			        if (!(co_await loadMacrosFromFile(fileName)))
+				        co_return;
 			        populateMacros();
 		        }
 	        });
 	connect(m_saveMacroButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-		        if (const QString fileName =
-		                QFileDialog::getSaveFileName(this, QStringLiteral("Macro file name"), startDir,
-		                                             QStringLiteral("QMud macros (*.qdm *.mcm)"));
+		        if (const QString fileName = (co_await QMudPreferences::getSaveFileName(
+		                this, QStringLiteral("Macro file name"), startDir,
+		                QStringLiteral("QMud macros (*.qdm *.mcm)")));
 		            !fileName.isEmpty())
 		        {
 			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdm"));
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveMacrosToFile(outputPath))
-				        return;
+			        if (!(co_await saveMacrosToFile(outputPath)))
+				        co_return;
 		        }
 	        });
 
@@ -6950,10 +7507,10 @@ void WorldPreferencesDialog::buildUi()
 	        });
 	if (m_useDefaultOutputFont)
 		connect(m_useDefaultOutputFont, &QCheckBox::toggled, this,
-		        [this](const bool enabled)
+		        [this](const bool enabled) -> QMudPreferences::Operation<void>
 		        {
-			        handleDefaultOverrideToggle(QStringLiteral("use_default_output_font"),
-			                                    m_useDefaultOutputFont, enabled);
+			        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_output_font"),
+			                                                   m_useDefaultOutputFont, enabled));
 			        updateOutputFontControls();
 		        });
 
@@ -6990,15 +7547,15 @@ void WorldPreferencesDialog::buildUi()
 	outputLeft->addWidget(worldSoundDirectoryGroup);
 	connect(
 	    m_browseDefaultWorldSoundDirectory, &QPushButton::clicked, this,
-	    [this]
+	    [this]() -> QMudPreferences::Operation<void>
 	    {
 		    if (!m_runtime || !m_defaultWorldSoundDirectory)
-			    return;
+			    co_return;
 		    WorldSoundDirectoryPaths soundsRoot;
 		    if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(),
 		                                    QString::fromLatin1(kDefaultWorldSoundDirectory), &soundsRoot))
 		    {
-			    return;
+			    co_return;
 		    }
 		    WorldSoundDirectoryPaths current;
 		    if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(),
@@ -7008,20 +7565,21 @@ void WorldPreferencesDialog::buildUi()
 			                                                 QString::fromLatin1(kDefaultWorldSoundDirectory),
 			                                                 &current));
 		    }
-		    const QString selected = QFileDialog::getExistingDirectory(
+		    const QString selected = (co_await QMudPreferences::getExistingDirectory(
 		        this, QStringLiteral("Select Default World Sound Directory"), current.absolutePath,
-		        QFileDialog::ShowDirsOnly);
+		        QFileDialog::ShowDirsOnly));
 		    if (selected.isEmpty())
-			    return;
+			    co_return;
 		    const QString canonicalSelection =
 		        QMudPluginPathUtils::normalizeSeparators(QFileInfo(selected).canonicalFilePath());
 		    const QString canonicalSounds = QMudPluginPathUtils::normalizeSeparators(
 		        QFileInfo(soundsRoot.absolutePath).canonicalFilePath());
 		    if (!QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonicalSelection, canonicalSounds))
 		    {
-			    QMessageBox::warning(this, QStringLiteral("Default world sound directory"),
-			                         QStringLiteral("The directory must be beneath ./sounds/."));
-			    return;
+			    (co_await QMudPreferences::warning(
+			        this, QStringLiteral("Default world sound directory"),
+			        QStringLiteral("The directory must be beneath ./sounds/.")));
+			    co_return;
 		    }
 		    const QString relative = QMudPluginPathUtils::qmudHomeRelativePath(m_runtime->startupDirectory(),
 		                                                                       canonicalSelection, true);
@@ -7029,14 +7587,15 @@ void WorldPreferencesDialog::buildUi()
 		    QString                  error;
 		    if (!resolveWorldSoundDirectory(m_runtime->startupDirectory(), relative, &chosen, &error))
 		    {
-			    QMessageBox::warning(this, QStringLiteral("Default world sound directory"), error);
-			    return;
+			    (co_await QMudPreferences::warning(this, QStringLiteral("Default world sound directory"),
+			                                       error));
+			    co_return;
 		    }
 		    m_defaultWorldSoundDirectory->setText(chosen.storedPath);
 	    });
 	if (m_browseBeepSound && m_beepSound)
-		connect(m_browseBeepSound, &QPushButton::clicked, this,
-		        [this] { browseSoundFile(m_runtime, this, m_beepSound); });
+		connect(m_browseBeepSound, &QPushButton::clicked, this, [this]() -> QMudPreferences::Operation<void>
+		        { (co_await browseSoundFile(m_runtime, this, m_beepSound)); });
 	if (m_testBeepSound)
 		connect(m_testBeepSound, &QPushButton::clicked, this,
 		        [this]
@@ -7050,7 +7609,8 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_browseActivitySound && m_newActivitySound)
 		connect(m_browseActivitySound, &QPushButton::clicked, this,
-		        [this] { browseSoundFile(m_runtime, this, m_newActivitySound); });
+		        [this]() -> QMudPreferences::Operation<void>
+		        { (co_await browseSoundFile(m_runtime, this, m_newActivitySound)); });
 	if (m_testActivitySound)
 		connect(m_testActivitySound, &QPushButton::clicked, this,
 		        [this]
@@ -7594,7 +8154,7 @@ void WorldPreferencesDialog::buildUi()
 		if (!swatch || !target)
 			return;
 		connect(swatch, &QPushButton::clicked, this,
-		        [this, swatch, target, title]
+		        [this, swatch, target, title]() -> QMudPreferences::Operation<void>
 		        {
 			        const QColor       current = parseColourValue(target->text());
 			        ColourPickerDialog dlg(this);
@@ -7602,11 +8162,11 @@ void WorldPreferencesDialog::buildUi()
 			        dlg.setPickColour(true);
 			        if (current.isValid())
 				        dlg.setInitialColour(current);
-			        if (dlg.exec() != QDialog::Accepted)
-				        return;
+			        if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+				        co_return;
 			        const QColor chosen = dlg.selectedColour();
 			        if (!chosen.isValid())
-				        return;
+				        co_return;
 			        setSwatchButtonColour(swatch, chosen);
 			        target->setText(formatColourValue(chosen));
 		        });
@@ -7651,10 +8211,10 @@ void WorldPreferencesDialog::buildUi()
 	        });
 	if (m_useDefaultInputFont)
 		connect(m_useDefaultInputFont, &QCheckBox::toggled, this,
-		        [this](const bool enabled)
+		        [this](const bool enabled) -> QMudPreferences::Operation<void>
 		        {
-			        handleDefaultOverrideToggle(QStringLiteral("use_default_input_font"),
-			                                    m_useDefaultInputFont, enabled);
+			        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_input_font"),
+			                                                   m_useDefaultInputFont, enabled));
 			        updateInputFontControls();
 		        });
 	if (m_autoResizeCommandWindow)
@@ -7677,7 +8237,7 @@ void WorldPreferencesDialog::buildUi()
 	}
 
 	connect(tabCompletionButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        QDialog dialog(this);
 		        dialog.setWindowTitle(QStringLiteral("Tab completion"));
@@ -7714,8 +8274,8 @@ void WorldPreferencesDialog::buildUi()
 		        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 		        dialogLayout->addWidget(buttons);
-		        if (dialog.exec() != QDialog::Accepted)
-			        return;
+		        if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+			        co_return;
 		        if (m_tabCompletionDefaults)
 			        m_tabCompletionDefaults->setPlainText(words->toPlainText());
 		        if (m_tabCompletionLines)
@@ -7726,7 +8286,7 @@ void WorldPreferencesDialog::buildUi()
 
 	connect(
 	    keyboardPrefsButton, &QPushButton::clicked, this,
-	    [this]
+	    [this]() -> QMudPreferences::Operation<void>
 	    {
 		    QDialog dialog(this);
 		    dialog.setWindowTitle(QStringLiteral("Keyboard preferences"));
@@ -7849,8 +8409,8 @@ void WorldPreferencesDialog::buildUi()
 		    dialogLayout->addWidget(buttons, 2, 1, Qt::AlignRight);
 		    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-		    if (dialog.exec() != QDialog::Accepted)
-			    return;
+		    if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+			    co_return;
 		    if (m_doubleClickInserts)
 			    m_doubleClickInserts->setChecked(doubleClickPaste->isChecked());
 		    if (m_doubleClickSends)
@@ -8057,7 +8617,7 @@ void WorldPreferencesDialog::buildUi()
 	callbackLayout->addWidget(mxpHint, 7, 2, Qt::AlignLeft);
 	callbackLayout->setColumnStretch(2, 1);
 	connect(mxpScriptsButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        QDialog dialog(this);
 		        dialog.setWindowTitle(QStringLiteral("MXP Script Handlers"));
@@ -8093,8 +8653,8 @@ void WorldPreferencesDialog::buildUi()
 		        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 		        dialogLayout->addWidget(buttons);
-		        if (dialog.exec() != QDialog::Accepted)
-			        return;
+		        if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+			        co_return;
 		        if (m_onMxpStart)
 			        m_onMxpStart->setText(onMxpStart->text());
 		        if (m_onMxpStop)
@@ -8125,12 +8685,12 @@ void WorldPreferencesDialog::buildUi()
 
 	if (m_browseScriptFile && m_scriptFile)
 		connect(m_browseScriptFile, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Script file name"), startDir,
-			                                         QStringLiteral("Lua files (*.lua);;All files (*.*)"));
+			        const QString fileName = (co_await QMudPreferences::getOpenFileName(
+			            this, QStringLiteral("Script file name"), startDir,
+			            QStringLiteral("Lua files (*.lua);;All files (*.*)")));
 			        if (!fileName.isEmpty())
 			        {
 				        m_scriptFile->setText(fileName);
@@ -8140,23 +8700,24 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_newScriptFile && m_scriptFile)
 		connect(m_newScriptFile, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("New script file"), startDir,
-			                                         QStringLiteral("Lua files (*.lua);;All files (*.*)"));
+			        const QString fileName = (co_await QMudPreferences::getSaveFileName(
+			            this, QStringLiteral("New script file"), startDir,
+			            QStringLiteral("Lua files (*.lua);;All files (*.*)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        QString finalName = fileName;
 			        if (QFileInfo(finalName).suffix().isEmpty())
 				        finalName += QStringLiteral(".lua");
 			        QSaveFile file(finalName);
 			        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 			        {
-				        QMessageBox::warning(this, QStringLiteral("New script file"),
-				                             QStringLiteral("Unable to create the requested file."));
-				        return;
+				        (co_await QMudPreferences::warning(
+				            this, QStringLiteral("New script file"),
+				            QStringLiteral("Unable to create the requested file.")));
+				        co_return;
 			        }
 			        file.commit();
 			        m_scriptFile->setText(finalName);
@@ -8164,73 +8725,75 @@ void WorldPreferencesDialog::buildUi()
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(finalName).absolutePath());
 		        });
 	if (m_editScriptFile && m_scriptFile)
-		connect(m_editScriptFile, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString fileName = m_scriptFile->text().trimmed();
-			        if (fileName.isEmpty())
-				        return;
-			        AppController *app              = AppController::instance();
-			        const QString  resolvedFileName = app ? app->makeAbsolutePath(fileName) : fileName;
-			        const QString  editorWindowName =
-			            m_editorWindowName ? m_editorWindowName->text().trimmed() : QString();
-			        const auto tryRaiseConfiguredEditorWindow = [&]
-			        {
-				        if (editorWindowName.isEmpty())
-					        return;
-				        bringOwnedWindowToFrontByTitle(editorWindowName);
-			        };
-			        if (m_editScriptWithNotepad && m_editScriptWithNotepad->isChecked())
-			        {
-				        if (!QFileInfo::exists(resolvedFileName))
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Edit script"),
-					                             QStringLiteral("Unable to open the requested file."));
-					        return;
-				        }
-				        if (app)
-				        {
-					        (void)app->openTextDocument(resolvedFileName, m_runtime);
-					        tryRaiseConfiguredEditorWindow();
-					        return;
-				        }
-			        }
-			        QString editorPath;
-			        if (m_scriptEditor)
-				        editorPath = m_scriptEditor->text().trimmed();
-			        QString editorArgs;
-			        if (m_runtime)
-				        editorArgs = m_runtime->worldAttributes()
-				                         .value(QStringLiteral("script_editor_argument"))
-				                         .trimmed();
-			        if (editorArgs.isEmpty())
-				        editorArgs = QStringLiteral("\"%file\"");
-			        editorArgs.replace(QStringLiteral("%file"), resolvedFileName);
-			        if (!editorPath.isEmpty())
-			        {
-				        if (const QStringList splitArgs = QProcess::splitCommand(editorArgs);
-				            QProcess::startDetached(editorPath, splitArgs))
-				        {
-					        tryRaiseConfiguredEditorWindow();
-					        return;
-				        }
-			        }
-			        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(resolvedFileName)))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Edit script"),
-				                             QStringLiteral("Unable to open the requested file."));
-			        }
-			        else
-				        tryRaiseConfiguredEditorWindow();
-		        });
+		connect(
+		    m_editScriptFile, &QPushButton::clicked, this,
+		    [this]() -> QMudPreferences::Operation<void>
+		    {
+			    const QString fileName = m_scriptFile->text().trimmed();
+			    if (fileName.isEmpty())
+				    co_return;
+			    AppController *app              = AppController::instance();
+			    const QString  resolvedFileName = app ? app->makeAbsolutePath(fileName) : fileName;
+			    const QString  editorWindowName =
+			        m_editorWindowName ? m_editorWindowName->text().trimmed() : QString();
+			    const auto tryRaiseConfiguredEditorWindow = [&]
+			    {
+				    if (editorWindowName.isEmpty())
+					    return;
+				    bringOwnedWindowToFrontByTitle(editorWindowName);
+			    };
+			    if (m_editScriptWithNotepad && m_editScriptWithNotepad->isChecked())
+			    {
+				    if (!QFileInfo::exists(resolvedFileName))
+				    {
+					    (co_await QMudPreferences::warning(
+					        this, QStringLiteral("Edit script"),
+					        QStringLiteral("Unable to open the requested file.")));
+					    co_return;
+				    }
+				    if (app)
+				    {
+					    (void)app->openTextDocument(resolvedFileName, m_runtime);
+					    tryRaiseConfiguredEditorWindow();
+					    co_return;
+				    }
+			    }
+			    QString editorPath;
+			    if (m_scriptEditor)
+				    editorPath = m_scriptEditor->text().trimmed();
+			    QString editorArgs;
+			    if (m_runtime)
+				    editorArgs = m_runtime->worldAttributes()
+				                     .value(QStringLiteral("script_editor_argument"))
+				                     .trimmed();
+			    if (editorArgs.isEmpty())
+				    editorArgs = QStringLiteral("\"%file\"");
+			    editorArgs.replace(QStringLiteral("%file"), resolvedFileName);
+			    if (!editorPath.isEmpty())
+			    {
+				    if (const QStringList splitArgs = QProcess::splitCommand(editorArgs);
+				        QProcess::startDetached(editorPath, splitArgs))
+				    {
+					    tryRaiseConfiguredEditorWindow();
+					    co_return;
+				    }
+			    }
+			    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(resolvedFileName)))
+			    {
+				    (co_await QMudPreferences::warning(this, QStringLiteral("Edit script"),
+				                                       QStringLiteral("Unable to open the requested file.")));
+			    }
+			    else
+				    tryRaiseConfiguredEditorWindow();
+		    });
 	if (m_chooseScriptEditor && m_scriptEditor)
 		connect(m_chooseScriptEditor, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        if (const QString fileName =
-			                QFileDialog::getOpenFileName(this, QStringLiteral("Choose script editor"),
-			                                             startDir, QStringLiteral("Programs (*.*)"));
+			        if (const QString fileName = (co_await QMudPreferences::getOpenFileName(
+			                this, QStringLiteral("Choose script editor"), startDir,
+			                QStringLiteral("Programs (*.*)")));
 			            !fileName.isEmpty())
 			        {
 				        if (m_runtime)
@@ -8280,68 +8843,70 @@ void WorldPreferencesDialog::buildUi()
 	notesButtons->addStretch();
 	notesLayout->addLayout(notesButtons);
 	m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
-	connect(m_notes, &QTextEdit::textChanged, this,
-	        [this]
-	        {
-		        if (m_notesUpdating || !m_notes)
-			        return;
-		        constexpr int maxLength = 32000;
-		        const QString text      = m_notes->toPlainText();
-		        if (text.size() > maxLength)
-		        {
-			        m_notesUpdating         = true;
-			        const QString trimmed   = text.left(maxLength);
-			        const int     cursorPos = m_notes->textCursor().position();
-			        m_notes->setPlainText(trimmed);
-			        QTextCursor cursor = m_notes->textCursor();
-			        cursor.setPosition(qMin(cursorPos, maxLength));
-			        m_notes->setTextCursor(cursor);
-			        m_notesUpdating = false;
-			        QMessageBox::warning(this, QStringLiteral("Notes"),
-			                             QStringLiteral("Notes are limited to 32000 characters."));
-		        }
-		        if (m_saveNotesButton)
-			        m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
-	        });
-	connect(m_loadNotesButton, &QPushButton::clicked, this,
-	        [this]
-	        {
-		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-		        if (const QString fileName =
-		                QFileDialog::getOpenFileName(this, QStringLiteral("File to load notes from"),
-		                                             startDir, QStringLiteral("Text files (*.txt)"));
-		            !fileName.isEmpty())
-		        {
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        QFile file(fileName);
-			        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Load notes"),
-				                             QStringLiteral("Unable to open the requested file."));
-				        return;
-			        }
-			        const qint64 length = file.size();
-			        if (length > 32000)
-			        {
-				        QMessageBox::warning(
-				            this, QStringLiteral("Load notes"),
-				            QStringLiteral("File exceeds 32000 bytes in length, cannot be loaded"));
-				        return;
-			        }
-			        if (length <= 0)
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Load notes"),
-				                             QStringLiteral("File is empty"));
-				        return;
-			        }
-			        QTextStream in(&file);
-			        in.setEncoding(QStringConverter::Utf8);
-			        m_notes->setPlainText(in.readAll());
-		        }
-	        });
+	connect(
+	    m_notes, &QTextEdit::textChanged, this,
+	    [this]() -> QMudPreferences::Operation<void>
+	    {
+		    if (m_notesUpdating || !m_notes)
+			    co_return;
+		    constexpr int maxLength = 32000;
+		    const QString text      = m_notes->toPlainText();
+		    if (text.size() > maxLength)
+		    {
+			    m_notesUpdating         = true;
+			    const QString trimmed   = text.left(maxLength);
+			    const int     cursorPos = m_notes->textCursor().position();
+			    m_notes->setPlainText(trimmed);
+			    QTextCursor cursor = m_notes->textCursor();
+			    cursor.setPosition(qMin(cursorPos, maxLength));
+			    m_notes->setTextCursor(cursor);
+			    m_notesUpdating = false;
+			    (co_await QMudPreferences::warning(this, QStringLiteral("Notes"),
+			                                       QStringLiteral("Notes are limited to 32000 characters.")));
+		    }
+		    if (m_saveNotesButton)
+			    m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
+	    });
+	connect(
+	    m_loadNotesButton, &QPushButton::clicked, this,
+	    [this]() -> QMudPreferences::Operation<void>
+	    {
+		    const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		    if (const QString fileName = (co_await QMudPreferences::getOpenFileName(
+		            this, QStringLiteral("File to load notes from"), startDir,
+		            QStringLiteral("Text files (*.txt)")));
+		        !fileName.isEmpty())
+		    {
+			    if (m_runtime)
+				    m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+			    QFile file(fileName);
+			    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+			    {
+				    (co_await QMudPreferences::warning(this, QStringLiteral("Load notes"),
+				                                       QStringLiteral("Unable to open the requested file.")));
+				    co_return;
+			    }
+			    const qint64 length = file.size();
+			    if (length > 32000)
+			    {
+				    (co_await QMudPreferences::warning(
+				        this, QStringLiteral("Load notes"),
+				        QStringLiteral("File exceeds 32000 bytes in length, cannot be loaded")));
+				    co_return;
+			    }
+			    if (length <= 0)
+			    {
+				    (co_await QMudPreferences::warning(this, QStringLiteral("Load notes"),
+				                                       QStringLiteral("File is empty")));
+				    co_return;
+			    }
+			    QTextStream in(&file);
+			    in.setEncoding(QStringConverter::Utf8);
+			    m_notes->setPlainText(in.readAll());
+		    }
+	    });
 	connect(m_saveNotesButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
 		        QString       suggestedName;
@@ -8352,9 +8917,9 @@ void WorldPreferencesDialog::buildUi()
 		        QString initialPath = startDir;
 		        if (!suggestedName.isEmpty())
 			        initialPath = startDir.isEmpty() ? suggestedName : QDir(startDir).filePath(suggestedName);
-		        if (const QString fileName =
-		                QFileDialog::getSaveFileName(this, QStringLiteral("File to save notes into"),
-		                                             initialPath, QStringLiteral("Text files (*.txt)"));
+		        if (const QString fileName = (co_await QMudPreferences::getSaveFileName(
+		                this, QStringLiteral("File to save notes into"), initialPath,
+		                QStringLiteral("Text files (*.txt)")));
 		            !fileName.isEmpty())
 		        {
 			        if (m_runtime)
@@ -8362,20 +8927,22 @@ void WorldPreferencesDialog::buildUi()
 			        QSaveFile file(fileName);
 			        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 			        {
-				        QMessageBox::warning(this, QStringLiteral("Save notes"),
-				                             QStringLiteral("Unable to create the requested file."));
-				        return;
+				        (co_await QMudPreferences::warning(
+				            this, QStringLiteral("Save notes"),
+				            QStringLiteral("Unable to create the requested file.")));
+				        co_return;
 			        }
 			        QTextStream out(&file);
 			        out.setEncoding(QStringConverter::Utf8);
 			        out << m_notes->toPlainText();
 			        if (!file.commit())
-				        QMessageBox::warning(this, QStringLiteral("Save notes"),
-				                             QStringLiteral("Unable to create the requested file."));
+				        (co_await QMudPreferences::warning(
+				            this, QStringLiteral("Save notes"),
+				            QStringLiteral("Unable to create the requested file.")));
 		        }
 	        });
 	connect(m_editNotesButton, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        QDialog dialog(this);
 		        dialog.setWindowTitle(QStringLiteral("Edit notes"));
@@ -8388,11 +8955,13 @@ void WorldPreferencesDialog::buildUi()
 		        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 		        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 		        dialogLayout->addWidget(buttons);
-		        if (dialog.exec() == QDialog::Accepted)
+		        if ((co_await QMudPreferences::wait(dialog)) == QDialog::Accepted)
 			        m_notes->setPlainText(edit->toPlainText());
 	        });
-	connect(m_findNotesButton, &QPushButton::clicked, this, [this] { doNotesFind(false); });
-	connect(m_findNextNotesButton, &QPushButton::clicked, this, [this] { doNotesFind(true); });
+	connect(m_findNotesButton, &QPushButton::clicked, this,
+	        [this]() -> QMudPreferences::Operation<void> { (co_await doNotesFindAsync(false)); });
+	connect(m_findNextNotesButton, &QPushButton::clicked, this,
+	        [this]() -> QMudPreferences::Operation<void> { (co_await doNotesFindAsync(true)); });
 
 	// Tables
 	auto makeTable = [](QWidget *parent, const QStringList &headers) -> QTableWidget *
@@ -8612,10 +9181,11 @@ void WorldPreferencesDialog::buildUi()
 	timerButtons->setColumnStretch(6, 1);
 	timersLayout->addLayout(timerButtons);
 	connect(m_editTriggersFilter, &QToolButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
-		        if (!editFilterDialog(this, m_triggerFilterText, QStringLiteral("Edit trigger filter")))
-			        return;
+		        if (!(co_await editFilterDialog(this, m_triggerFilterText,
+		                                        QStringLiteral("Edit trigger filter"))))
+			        co_return;
 		        if (m_filterTriggers)
 			        m_filterTriggers->setChecked(true);
 		        populateTriggers();
@@ -8627,32 +9197,34 @@ void WorldPreferencesDialog::buildUi()
 		        populateTriggers();
 		        updateTriggerControls();
 	        });
-	connect(m_editAliasesFilter, &QToolButton::clicked, this,
-	        [this]
-	        {
-		        if (!editFilterDialog(this, m_aliasFilterText, QStringLiteral("Edit alias filter")))
-			        return;
-		        if (m_filterAliases)
-			        m_filterAliases->setChecked(true);
-		        populateAliases();
-		        updateAliasControls();
-	        });
+	connect(
+	    m_editAliasesFilter, &QToolButton::clicked, this,
+	    [this]() -> QMudPreferences::Operation<void>
+	    {
+		    if (!(co_await editFilterDialog(this, m_aliasFilterText, QStringLiteral("Edit alias filter"))))
+			    co_return;
+		    if (m_filterAliases)
+			    m_filterAliases->setChecked(true);
+		    populateAliases();
+		    updateAliasControls();
+	    });
 	connect(m_filterAliases, &QCheckBox::toggled, this,
 	        [this]
 	        {
 		        populateAliases();
 		        updateAliasControls();
 	        });
-	connect(m_editTimersFilter, &QToolButton::clicked, this,
-	        [this]
-	        {
-		        if (!editFilterDialog(this, m_timerFilterText, QStringLiteral("Edit timer filter")))
-			        return;
-		        if (m_filterTimers)
-			        m_filterTimers->setChecked(true);
-		        populateTimers();
-		        updateTimerControls();
-	        });
+	connect(
+	    m_editTimersFilter, &QToolButton::clicked, this,
+	    [this]() -> QMudPreferences::Operation<void>
+	    {
+		    if (!(co_await editFilterDialog(this, m_timerFilterText, QStringLiteral("Edit timer filter"))))
+			    co_return;
+		    if (m_filterTimers)
+			    m_filterTimers->setChecked(true);
+		    populateTimers();
+		    updateTimerControls();
+	    });
 	connect(m_filterTimers, &QCheckBox::toggled, this,
 	        [this]
 	        {
@@ -9201,6 +9773,7 @@ void WorldPreferencesDialog::buildUi()
 	m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops = new QCheckBox(
 	    QStringLiteral("Automatically protect against Telnet option renegotiation loops"), connectingPage);
 	connectingLayout->addWidget(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops);
+
 	m_onlyNegotiateTelnetOptionsOnce =
 	    new QCheckBox(QStringLiteral("Only negotiate telnet options once"), connectingPage);
 	auto *onlyNegotiateLayout = new QHBoxLayout;
@@ -9210,6 +9783,89 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops, &QCheckBox::toggled,
 	        m_onlyNegotiateTelnetOptionsOnce, &QWidget::setDisabled);
 	connectingLayout->addStretch();
+
+	// GMCP
+	auto *gmcpLayout = new QVBoxLayout(gmcpPage);
+	m_nativeGmcp     = new QCheckBox(QStringLiteral("Native GMCP"), gmcpPage);
+	m_nativeGmcp->setObjectName(QStringLiteral("nativeGmcpCheckBox"));
+	m_nativeGmcp->setToolTip(QStringLiteral(
+	    "Changes apply on the next connection. Reload preserves the current connection's handler."));
+	auto *nativeGmcpRow = new QHBoxLayout;
+	nativeGmcpRow->addWidget(m_nativeGmcp);
+	nativeGmcpRow->addSpacing(12);
+	auto *gmcpBrowser = new QPushButton(QStringLiteral("GMCP Browser"), gmcpPage);
+	gmcpBrowser->setObjectName(QStringLiteral("gmcpBrowserButton"));
+	gmcpBrowser->setAutoDefault(false);
+	nativeGmcpRow->addWidget(gmcpBrowser);
+	nativeGmcpRow->addStretch();
+	gmcpLayout->addLayout(nativeGmcpRow);
+#ifdef NDEBUG
+	gmcpBrowser->setEnabled(m_runtime && m_runtime->nativeGmcpAvailable());
+	if (m_runtime)
+		connect(m_runtime, &WorldRuntime::nativeGmcpAvailabilityChanged, gmcpBrowser,
+		        [this, gmcpBrowser] { gmcpBrowser->setEnabled(m_runtime->nativeGmcpAvailable()); });
+#endif
+	connect(gmcpBrowser, &QPushButton::clicked, this,
+	        [this] { GmcpBrowserDialog::open(m_runtime, parentWidget()); });
+	gmcpLayout->addSpacing(12);
+	m_gmcpControls   = new QWidget(gmcpPage);
+	auto *coreLayout = new QVBoxLayout(m_gmcpControls);
+	coreLayout->setContentsMargins(20, 0, 0, 0);
+	auto *pingGroup  = new QGroupBox(m_gmcpControls);
+	auto *pingLayout = new QGridLayout(pingGroup);
+	m_gmcpPing       = new QCheckBox(QStringLiteral("Enable Core.Ping"), pingGroup);
+	m_gmcpPing->setObjectName(QStringLiteral("gmcpPingEnabled"));
+	m_gmcpRoundTripCaption = new QLabel(QStringLiteral("Last RTT:"), pingGroup);
+	m_gmcpRoundTrip        = new QLabel(QStringLiteral("0 ms"), pingGroup);
+	m_gmcpRoundTrip->setObjectName(QStringLiteral("gmcpRoundTripLabel"));
+	m_gmcpRoundTrip->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+	auto *roundTripRow = new QHBoxLayout;
+	roundTripRow->addWidget(m_gmcpRoundTripCaption);
+	roundTripRow->addStretch();
+	roundTripRow->addWidget(m_gmcpRoundTrip);
+	pingLayout->addWidget(m_gmcpPing, 0, 0);
+	pingLayout->addLayout(roundTripRow, 0, 1);
+	pingLayout->setColumnStretch(2, 1);
+	m_gmcpPingControls = new QWidget(pingGroup);
+	auto *pingOptions  = new QHBoxLayout(m_gmcpPingControls);
+	pingOptions->setContentsMargins(20, 0, 0, 0);
+	m_gmcpPingInterval = new QSpinBox(m_gmcpPingControls);
+	m_gmcpPingInterval->setObjectName(QStringLiteral("gmcpPingInterval"));
+	m_gmcpPingInterval->setRange(1, 120);
+	m_gmcpPingInterval->setSuffix(QStringLiteral(" minutes"));
+	m_gmcpSendRtt = new QCheckBox(QStringLiteral("Send RTT on reply"), pingGroup);
+	m_gmcpSendRtt->setObjectName(QStringLiteral("gmcpPingSendRtt"));
+	pingOptions->addWidget(new QLabel(QStringLiteral("Ping Interval"), m_gmcpPingControls));
+	pingOptions->addWidget(m_gmcpPingInterval);
+	pingLayout->addWidget(m_gmcpPingControls, 1, 0);
+	pingLayout->addWidget(m_gmcpSendRtt, 1, 1, Qt::AlignLeft);
+	coreLayout->addWidget(pingGroup);
+	auto *keepAliveGroup  = new QGroupBox(m_gmcpControls);
+	auto *keepAliveLayout = new QVBoxLayout(keepAliveGroup);
+	m_gmcpKeepAlive       = new QCheckBox(QStringLiteral("Enable Core.KeepAlive"), keepAliveGroup);
+	m_gmcpKeepAlive->setObjectName(QStringLiteral("gmcpKeepAliveEnabled"));
+	keepAliveLayout->addWidget(m_gmcpKeepAlive);
+	m_gmcpKeepAliveControls = new QWidget(keepAliveGroup);
+	auto *keepAliveOptions  = new QHBoxLayout(m_gmcpKeepAliveControls);
+	keepAliveOptions->setContentsMargins(20, 0, 0, 0);
+	m_gmcpKeepAliveInterval = new QSpinBox(m_gmcpKeepAliveControls);
+	m_gmcpKeepAliveInterval->setObjectName(QStringLiteral("gmcpKeepAliveInterval"));
+	m_gmcpKeepAliveInterval->setRange(1, 120);
+	m_gmcpKeepAliveInterval->setSuffix(QStringLiteral(" minutes"));
+	keepAliveOptions->addWidget(new QLabel(QStringLiteral("KeepAlive Interval"), m_gmcpKeepAliveControls));
+	keepAliveOptions->addWidget(m_gmcpKeepAliveInterval);
+	keepAliveOptions->addStretch();
+	keepAliveLayout->addWidget(m_gmcpKeepAliveControls);
+	coreLayout->addWidget(keepAliveGroup);
+	gmcpLayout->addWidget(m_gmcpControls);
+	gmcpLayout->addStretch();
+	connect(m_nativeGmcp, &QCheckBox::toggled, this, &WorldPreferencesDialog::updateGmcpControls);
+	connect(m_gmcpPing, &QCheckBox::toggled, this, &WorldPreferencesDialog::updateGmcpControls);
+	connect(m_gmcpKeepAlive, &QCheckBox::toggled, this, &WorldPreferencesDialog::updateGmcpControls);
+	if (m_runtime)
+		connect(m_runtime, &WorldRuntime::gmcpRoundTripChanged, this, [this](qint64 milliseconds)
+		        { m_gmcpRoundTrip->setText(QStringLiteral("%1 ms").arg(qMax<qint64>(0, milliseconds))); });
+	updateGmcpControls();
 
 	// MXP
 	auto *mxpLayout = new QVBoxLayout(mxpPage);
@@ -9359,11 +10015,11 @@ void WorldPreferencesDialog::buildUi()
 	filesLayout->addWidget(m_chatSaveDirectory, 1, 1);
 	filesLayout->addWidget(m_chatSaveBrowse, 2, 1, 1, 1, Qt::AlignLeft);
 	connect(m_chatSaveBrowse, &QPushButton::clicked, this,
-	        [this]
+	        [this]() -> QMudPreferences::Operation<void>
 	        {
 		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-		        const QString dirName  = QFileDialog::getExistingDirectory(
-		            this, QStringLiteral("Save chat files folder"), startDir);
+		        const QString dirName  = (co_await QMudPreferences::getExistingDirectory(
+		            this, QStringLiteral("Save chat files folder"), startDir));
 		        if (!dirName.isEmpty())
 		        {
 			        if (m_runtime)
@@ -9421,18 +10077,18 @@ void WorldPreferencesDialog::buildUi()
 		}
 		return availableIds;
 	};
-	auto removeSelectedRules = [this, availableWorkingRuleIds](
-	                               const QTableWidget *table, const QTreeWidget *tree,
-	                               const QStackedWidget *viewStack, auto &working,
-	                               const bool restoredFromPersistence, const QSet<quint64> &initialIds,
-	                               const auto &currentRuntimeRules, QSet<quint64> &deletedIds, bool &staged,
-	                               const QString &singular, const QString &plural, const auto &refreshView)
+	auto removeSelectedRules =
+	    [this, availableWorkingRuleIds](
+	        const QTableWidget *table, const QTreeWidget *tree, const QStackedWidget *viewStack,
+	        auto &working, const bool restoredFromPersistence, const QSet<quint64> &initialIds,
+	        const auto &currentRuntimeRules, QSet<quint64> &deletedIds, bool &staged, QString singular,
+	        QString plural, const auto &refreshView) -> QMudPreferences::Operation<void>
 	{
 		const bool     treeMode = viewStack && viewStack->currentWidget() == tree;
 		QList<quint64> selectedRuntimeIds =
 		    treeMode ? selectedRuleRuntimeIds(tree) : selectedRuleRuntimeIds(table);
 		if (selectedRuntimeIds.isEmpty())
-			return;
+			co_return;
 
 		QSet<quint64> selectedRuntimeIdSet;
 		selectedRuntimeIdSet.reserve(selectedRuntimeIds.size());
@@ -9446,9 +10102,9 @@ void WorldPreferencesDialog::buildUi()
 		selectedRuntimeIds.removeIf([&availableIds](const quint64 runtimeId)
 		                            { return !availableIds.contains(runtimeId); });
 		if (selectedRuntimeIds.isEmpty())
-			return;
-		if (!confirmRemoval(this, singular, selectedRuntimeIds.size(), plural))
-			return;
+			co_return;
+		if (!(co_await confirmRemoval(this, singular, selectedRuntimeIds.size(), plural)))
+			co_return;
 
 		availableIds =
 		    availableWorkingRuleIds(working, restoredFromPersistence, initialIds, currentRuntimeRules());
@@ -9460,7 +10116,7 @@ void WorldPreferencesDialog::buildUi()
 				remainingSelectedIds.insert(runtimeId);
 		}
 		if (remainingSelectedIds.isEmpty())
-			return;
+			co_return;
 		bool removedAny = false;
 		for (qsizetype index = working.size(); index > 0; --index)
 		{
@@ -9481,12 +10137,13 @@ void WorldPreferencesDialog::buildUi()
 		}
 	};
 
-	auto editAliasItem = [this, refreshAliasView](const quint64 runtimeId, const bool isNew) -> bool
+	auto editAliasItem = [this, refreshAliasView](const quint64 runtimeId,
+	                                              const bool    isNew) -> QMudPreferences::Operation<bool>
 	{
 		if (!m_runtime)
-			return false;
+			co_return false;
 		if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
-			return false;
+			co_return false;
 		QList<WorldRuntime::Alias> &workingAliases = m_workingLists->aliases;
 		WorldRuntime::Alias         alias;
 		int                         index = -1;
@@ -9499,7 +10156,7 @@ void WorldPreferencesDialog::buildUi()
 			if (index < 0 || index >= workingAliases.size())
 			{
 				refreshAliasView(selectedRuntimeId);
-				return false;
+				co_return false;
 			}
 			alias = workingAliases.at(index);
 		}
@@ -9533,8 +10190,8 @@ void WorldPreferencesDialog::buildUi()
 		}
 
 		WorldAliasDialog dlg(m_runtime, alias, isNew, this);
-		if (dlg.exec() != QDialog::Accepted)
-			return false;
+		if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+			co_return false;
 		WorldRuntime::Alias committedAlias = dlg.alias();
 		if (isNew)
 		{
@@ -9551,15 +10208,16 @@ void WorldPreferencesDialog::buildUi()
 		m_workingLists->aliasesStaged = true;
 		selectedRuntimeId             = committedAlias.runtimeId;
 		refreshAliasView(selectedRuntimeId);
-		return true;
+		co_return true;
 	};
 
-	auto editTriggerItem = [this, refreshTriggerView](const quint64 runtimeId, const bool isNew) -> bool
+	auto editTriggerItem = [this, refreshTriggerView](const quint64 runtimeId,
+	                                                  const bool    isNew) -> QMudPreferences::Operation<bool>
 	{
 		if (!m_runtime)
-			return false;
+			co_return false;
 		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
-			return false;
+			co_return false;
 		QList<WorldRuntime::Trigger> &workingTriggers = m_workingLists->triggers;
 		WorldRuntime::Trigger         trigger;
 		int                           index = -1;
@@ -9572,7 +10230,7 @@ void WorldPreferencesDialog::buildUi()
 			if (index < 0 || index >= workingTriggers.size())
 			{
 				refreshTriggerView(selectedRuntimeId);
-				return false;
+				co_return false;
 			}
 			trigger = workingTriggers.at(index);
 		}
@@ -9607,8 +10265,8 @@ void WorldPreferencesDialog::buildUi()
 		}
 
 		WorldTriggerDialog dlg(m_runtime, trigger, isNew, this);
-		if (dlg.exec() != QDialog::Accepted)
-			return false;
+		if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+			co_return false;
 		WorldRuntime::Trigger committedTrigger = dlg.trigger();
 		if (isNew)
 		{
@@ -9625,15 +10283,16 @@ void WorldPreferencesDialog::buildUi()
 		m_workingLists->triggersStaged = true;
 		selectedRuntimeId              = committedTrigger.runtimeId;
 		refreshTriggerView(selectedRuntimeId);
-		return true;
+		co_return true;
 	};
 
-	auto editTimerItem = [this, refreshTimerView](const quint64 runtimeId, const bool isNew) -> bool
+	auto editTimerItem = [this, refreshTimerView](const quint64 runtimeId,
+	                                              const bool    isNew) -> QMudPreferences::Operation<bool>
 	{
 		if (!m_runtime)
-			return false;
+			co_return false;
 		if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
-			return false;
+			co_return false;
 		QList<WorldRuntime::Timer> &workingTimers = m_workingLists->timers;
 		WorldRuntime::Timer         timer;
 		int                         index = -1;
@@ -9646,7 +10305,7 @@ void WorldPreferencesDialog::buildUi()
 			if (index < 0 || index >= workingTimers.size())
 			{
 				refreshTimerView(selectedRuntimeId);
-				return false;
+				co_return false;
 			}
 			timer = workingTimers.at(index);
 		}
@@ -9658,8 +10317,8 @@ void WorldPreferencesDialog::buildUi()
 		}
 
 		WorldTimerDialog dlg(m_runtime, timer, isNew, this);
-		if (dlg.exec() != QDialog::Accepted)
-			return false;
+		if ((co_await QMudPreferences::wait(dlg)) != QDialog::Accepted)
+			co_return false;
 		WorldRuntime::Timer committedTimer = dlg.timer();
 		if (isNew)
 		{
@@ -9676,7 +10335,7 @@ void WorldPreferencesDialog::buildUi()
 		m_workingLists->timersStaged = true;
 		selectedRuntimeId            = committedTimer.runtimeId;
 		refreshTimerView(selectedRuntimeId);
-		return true;
+		co_return true;
 	};
 
 	auto copyTriggersToClipboard = [this]
@@ -9847,25 +10506,25 @@ void WorldPreferencesDialog::buildUi()
 			clipboard->setText(output);
 	};
 
-	auto pasteTriggersFromClipboard = [this]
+	auto pasteTriggersFromClipboard = [this]() -> QMudPreferences::Operation<void>
 	{
 		if (!m_runtime)
-			return;
+			co_return;
 		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
-			return;
+			co_return;
 		QClipboard *clipboard = QGuiApplication::clipboard();
 		if (!clipboard)
-			return;
+			co_return;
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
-			return;
+			co_return;
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_TRIGGERS | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
-			QMessageBox::warning(this, QStringLiteral("Paste triggers"), doc.errorString());
-			return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("Paste triggers"), doc.errorString()));
+			co_return;
 		}
 		for (const auto &t : doc.triggers())
 		{
@@ -9881,25 +10540,25 @@ void WorldPreferencesDialog::buildUi()
 		updateTriggerControls();
 	};
 
-	auto pasteAliasesFromClipboard = [this]
+	auto pasteAliasesFromClipboard = [this]() -> QMudPreferences::Operation<void>
 	{
 		if (!m_runtime)
-			return;
+			co_return;
 		if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
-			return;
+			co_return;
 		QClipboard *clipboard = QGuiApplication::clipboard();
 		if (!clipboard)
-			return;
+			co_return;
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
-			return;
+			co_return;
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_ALIASES | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
-			QMessageBox::warning(this, QStringLiteral("Paste aliases"), doc.errorString());
-			return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("Paste aliases"), doc.errorString()));
+			co_return;
 		}
 		for (const auto &a : doc.aliases())
 		{
@@ -9915,25 +10574,25 @@ void WorldPreferencesDialog::buildUi()
 		updateAliasControls();
 	};
 
-	auto pasteTimersFromClipboard = [this]
+	auto pasteTimersFromClipboard = [this]() -> QMudPreferences::Operation<void>
 	{
 		if (!m_runtime)
-			return;
+			co_return;
 		if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
-			return;
+			co_return;
 		QClipboard *clipboard = QGuiApplication::clipboard();
 		if (!clipboard)
-			return;
+			co_return;
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
-			return;
+			co_return;
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_TIMERS | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
-			QMessageBox::warning(this, QStringLiteral("Paste timers"), doc.errorString());
-			return;
+			(co_await QMudPreferences::warning(this, QStringLiteral("Paste timers"), doc.errorString()));
+			co_return;
 		}
 		for (const auto &t : doc.timers())
 		{
@@ -9951,12 +10610,12 @@ void WorldPreferencesDialog::buildUi()
 
 	if (m_loadTriggersButton)
 		connect(m_loadTriggersButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
-				        return;
+				        co_return;
 			        bool replace = true;
 			        if (!m_workingLists->triggers.isEmpty())
 			        {
@@ -9964,46 +10623,46 @@ void WorldPreferencesDialog::buildUi()
 				            QStringLiteral("Replace existing triggers?\n"
 				                           "If you reply \"No\", then triggers from the file"
 				                           " will be added to existing triggers");
-				        replace =
-				            (QMessageBox::question(this, QStringLiteral("Load triggers"), message,
-				                                   QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes);
+				        replace = ((co_await QMudPreferences::question(
+				                       this, QStringLiteral("Load triggers"), message,
+				                       QMessageBox::Yes | QMessageBox::No)) == QMessageBox::Yes);
 			        }
 			        const QString startDir = m_runtime->fileBrowsingDirectory();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Trigger file name"), startDir,
-			                                         QStringLiteral("QMud triggers (*.qdt *.mct)"));
+			        const QString fileName = (co_await QMudPreferences::getOpenFileName(
+			            this, QStringLiteral("Trigger file name"), startDir,
+			            QStringLiteral("QMud triggers (*.qdt *.mct)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadTriggersFromFile(fileName, replace))
-				        return;
+			        if (!(co_await loadTriggersFromFile(fileName, replace)))
+				        co_return;
 			        populateTriggers();
 			        updateTriggerControls();
 		        });
 	if (m_saveTriggersButton)
 		connect(m_saveTriggersButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Trigger file name"), startDir,
-			                                         QStringLiteral("QMud triggers (*.qdt *.mct)"));
+			        const QString fileName = (co_await QMudPreferences::getSaveFileName(
+			            this, QStringLiteral("Trigger file name"), startDir,
+			            QStringLiteral("QMud triggers (*.qdt *.mct)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdt"));
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveTriggersToFile(outputPath))
-				        return;
+			        if (!(co_await saveTriggersToFile(outputPath)))
+				        co_return;
 		        });
 	if (m_loadAliasesButton)
 		connect(m_loadAliasesButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
-				        return;
+				        co_return;
 			        bool replace = true;
 			        if (!m_workingLists->aliases.isEmpty())
 			        {
@@ -10011,46 +10670,46 @@ void WorldPreferencesDialog::buildUi()
 				            QStringLiteral("Replace existing aliases?\n"
 				                           "If you reply \"No\", then aliases from the file"
 				                           " will be added to existing aliases");
-				        replace =
-				            (QMessageBox::question(this, QStringLiteral("Load aliases"), message,
-				                                   QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes);
+				        replace = ((co_await QMudPreferences::question(
+				                       this, QStringLiteral("Load aliases"), message,
+				                       QMessageBox::Yes | QMessageBox::No)) == QMessageBox::Yes);
 			        }
 			        const QString startDir = m_runtime->fileBrowsingDirectory();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Alias file name"), startDir,
-			                                         QStringLiteral("QMud aliases (*.qda *.mca)"));
+			        const QString fileName = (co_await QMudPreferences::getOpenFileName(
+			            this, QStringLiteral("Alias file name"), startDir,
+			            QStringLiteral("QMud aliases (*.qda *.mca)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadAliasesFromFile(fileName, replace))
-				        return;
+			        if (!(co_await loadAliasesFromFile(fileName, replace)))
+				        co_return;
 			        populateAliases();
 			        updateAliasControls();
 		        });
 	if (m_saveAliasesButton)
 		connect(m_saveAliasesButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Alias file name"), startDir,
-			                                         QStringLiteral("QMud aliases (*.qda *.mca)"));
+			        const QString fileName = (co_await QMudPreferences::getSaveFileName(
+			            this, QStringLiteral("Alias file name"), startDir,
+			            QStringLiteral("QMud aliases (*.qda *.mca)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qda"));
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveAliasesToFile(outputPath))
-				        return;
+			        if (!(co_await saveAliasesToFile(outputPath)))
+				        co_return;
 		        });
 	if (m_loadTimersButton)
 		connect(m_loadTimersButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
-				        return;
+				        co_return;
 			        bool replace = true;
 			        if (!m_workingLists->timers.isEmpty())
 			        {
@@ -10059,60 +10718,62 @@ void WorldPreferencesDialog::buildUi()
 				                           "If you reply \"No\", then timers from the file"
 				                           " will be added to existing timers");
 				        replace =
-				            (QMessageBox::question(this, QStringLiteral("Load timers"), message,
-				                                   QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes);
+				            ((co_await QMudPreferences::question(this, QStringLiteral("Load timers"), message,
+				                                                 QMessageBox::Yes | QMessageBox::No)) ==
+				             QMessageBox::Yes);
 			        }
 			        const QString startDir = m_runtime->fileBrowsingDirectory();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Timer file name"), startDir,
-			                                         QStringLiteral("QMud timers (*.qdi *.mci)"));
+			        const QString fileName = (co_await QMudPreferences::getOpenFileName(
+			            this, QStringLiteral("Timer file name"), startDir,
+			            QStringLiteral("QMud timers (*.qdi *.mci)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadTimersFromFile(fileName, replace))
-				        return;
+			        if (!(co_await loadTimersFromFile(fileName, replace)))
+				        co_return;
 			        populateTimers();
 			        updateTimerControls();
 		        });
 	if (m_saveTimersButton)
 		connect(m_saveTimersButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Timer file name"), startDir,
-			                                         QStringLiteral("QMud timers (*.qdi *.mci)"));
+			        const QString fileName = (co_await QMudPreferences::getSaveFileName(
+			            this, QStringLiteral("Timer file name"), startDir,
+			            QStringLiteral("QMud timers (*.qdi *.mci)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdi"));
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveTimersToFile(outputPath))
-				        return;
+			        if (!(co_await saveTimersToFile(outputPath)))
+				        co_return;
 		        });
 
-	connect(m_addAliasButton, &QPushButton::clicked, this, [editAliasItem] { editAliasItem(0, true); });
+	connect(m_addAliasButton, &QPushButton::clicked, this,
+	        [editAliasItem]() -> QMudPreferences::Operation<void> { (co_await editAliasItem(0, true)); });
 	connect(m_editAliasButton, &QPushButton::clicked, this,
-	        [this, editAliasItem]
+	        [this, editAliasItem]() -> QMudPreferences::Operation<void>
 	        {
 		        const QList<quint64> runtimeIds =
 		            activeSelectedRuleRuntimeIds(m_aliasesTable, m_aliasesTree, m_aliasesViewStack);
 		        if (runtimeIds.size() == 1)
-			        editAliasItem(runtimeIds.constFirst(), false);
+			        (co_await editAliasItem(runtimeIds.constFirst(), false));
 	        });
 	connect(m_deleteAliasButton, &QPushButton::clicked, this,
-	        [this, refreshAliasView, removeSelectedRules]
+	        [this, refreshAliasView, removeSelectedRules]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked())
-			        return;
-		        removeSelectedRules(
+			        co_return;
+		        (co_await removeSelectedRules(
 		            m_aliasesTable, m_aliasesTree, m_aliasesViewStack, m_workingLists->aliases,
 		            m_workingLists->aliasesRestoredFromPersistence, m_workingLists->initialAliasIds,
 		            [this] { return m_runtime->aliases(); }, m_workingLists->deletedAliasIds,
 		            m_workingLists->aliasesStaged, QStringLiteral("alias"), QStringLiteral("aliases"),
-		            refreshAliasView);
+		            refreshAliasView));
 	        });
 	connect(m_moveAliasUpButton, &QPushButton::clicked, this,
 	        [this, refreshAliasView]
@@ -10164,12 +10825,13 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_copyAliasButton, &QPushButton::clicked, this,
 	        [copyAliasesToClipboard] { copyAliasesToClipboard(); });
 	connect(m_pasteAliasButton, &QPushButton::clicked, this,
-	        [pasteAliasesFromClipboard] { pasteAliasesFromClipboard(); });
+	        [pasteAliasesFromClipboard]() -> QMudPreferences::Operation<void>
+	        { (co_await pasteAliasesFromClipboard()); });
 	connect(m_findAliasButton, &QPushButton::clicked, this,
-	        [this, selectFoundRuleInActiveView]
+	        [this, selectFoundRuleInActiveView]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
 		        auto                              rowText = [this, &aliases](const int row) -> QString
 		        {
@@ -10185,18 +10847,18 @@ void WorldPreferencesDialog::buildUi()
 			        result += QLatin1Char('\t') + al.attributes.value(QStringLiteral("script"));
 			        return result;
 		        };
-		        doFindAdvanced(this, m_aliasesTable, rowText, m_aliasFindText, m_aliasFindIndex,
-		                       m_aliasFindHistory, m_aliasFindMatchCase, m_aliasFindRegex,
-		                       m_aliasFindForwards, QStringLiteral("Find alias"), false);
+		        (co_await doFindAdvanced(this, m_aliasesTable, rowText, m_aliasFindText, m_aliasFindIndex,
+		                                 m_aliasFindHistory, m_aliasFindMatchCase, m_aliasFindRegex,
+		                                 m_aliasFindForwards, QStringLiteral("Find alias"), false));
 		        selectFoundRuleInActiveView(m_aliasesTable, m_aliasesTree, m_aliasesViewStack,
 		                                    m_aliasRuleViewItems.table, m_aliasRuleViewItems.tree);
 		        updateAliasControls();
 	        });
 	connect(m_findNextAliasButton, &QPushButton::clicked, this,
-	        [this, selectFoundRuleInActiveView]
+	        [this, selectFoundRuleInActiveView]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
 		        auto                              rowText = [this, &aliases](const int row) -> QString
 		        {
@@ -10212,36 +10874,37 @@ void WorldPreferencesDialog::buildUi()
 			        result += QLatin1Char('\t') + al.attributes.value(QStringLiteral("script"));
 			        return result;
 		        };
-		        doFindAdvanced(this, m_aliasesTable, rowText, m_aliasFindText, m_aliasFindIndex,
-		                       m_aliasFindHistory, m_aliasFindMatchCase, m_aliasFindRegex,
-		                       m_aliasFindForwards, QStringLiteral("Find alias"), true);
+		        (co_await doFindAdvanced(this, m_aliasesTable, rowText, m_aliasFindText, m_aliasFindIndex,
+		                                 m_aliasFindHistory, m_aliasFindMatchCase, m_aliasFindRegex,
+		                                 m_aliasFindForwards, QStringLiteral("Find alias"), true));
 		        selectFoundRuleInActiveView(m_aliasesTable, m_aliasesTree, m_aliasesViewStack,
 		                                    m_aliasRuleViewItems.table, m_aliasRuleViewItems.tree);
 		        updateAliasControls();
 	        });
 
-	connect(m_addTriggerButton, &QPushButton::clicked, this, [editTriggerItem] { editTriggerItem(0, true); });
+	connect(m_addTriggerButton, &QPushButton::clicked, this,
+	        [editTriggerItem]() -> QMudPreferences::Operation<void> { (co_await editTriggerItem(0, true)); });
 	connect(m_editTriggerButton, &QPushButton::clicked, this,
-	        [this, editTriggerItem]
+	        [this, editTriggerItem]() -> QMudPreferences::Operation<void>
 	        {
 		        const QList<quint64> runtimeIds =
 		            activeSelectedRuleRuntimeIds(m_triggersTable, m_triggersTree, m_triggersViewStack);
 		        if (runtimeIds.size() == 1)
-			        editTriggerItem(runtimeIds.constFirst(), false);
+			        (co_await editTriggerItem(runtimeIds.constFirst(), false));
 	        });
 	connect(m_deleteTriggerButton, &QPushButton::clicked, this,
-	        [this, refreshTriggerView, removeSelectedRules]
+	        [this, refreshTriggerView, removeSelectedRules]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked())
-			        return;
-		        removeSelectedRules(
+			        co_return;
+		        (co_await removeSelectedRules(
 		            m_triggersTable, m_triggersTree, m_triggersViewStack, m_workingLists->triggers,
 		            m_workingLists->triggersRestoredFromPersistence, m_workingLists->initialTriggerIds,
 		            [this] { return m_runtime->triggers(); }, m_workingLists->deletedTriggerIds,
 		            m_workingLists->triggersStaged, QStringLiteral("trigger"), QStringLiteral("triggers"),
-		            refreshTriggerView);
+		            refreshTriggerView));
 	        });
 	connect(m_moveTriggerUpButton, &QPushButton::clicked, this,
 	        [this, refreshTriggerView]
@@ -10293,94 +10956,97 @@ void WorldPreferencesDialog::buildUi()
 	connect(m_copyTriggerButton, &QPushButton::clicked, this,
 	        [copyTriggersToClipboard] { copyTriggersToClipboard(); });
 	connect(m_pasteTriggerButton, &QPushButton::clicked, this,
-	        [pasteTriggersFromClipboard] { pasteTriggersFromClipboard(); });
-	connect(m_findTriggerButton, &QPushButton::clicked, this,
-	        [this, selectFoundRuleInActiveView]
-	        {
-		        if (!m_runtime)
-			        return;
-		        const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
-		        auto                                rowText  = [this, &triggers](const int row) -> QString
-		        {
-			        const int index =
-			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
-			        if (index < 0 || index >= triggers.size())
-				        return {};
-			        const WorldRuntime::Trigger &tr     = triggers.at(index);
-			        QString                      result = tr.attributes.value(QStringLiteral("match"));
-			        result += QLatin1Char('\t') + tr.children.value(QStringLiteral("send"));
-			        result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("name"));
-			        result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("group"));
-			        result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("script"));
-			        return result;
-		        };
-		        doFindAdvanced(this, m_triggersTable, rowText, m_triggerFindText, m_triggerFindIndex,
-		                       m_triggerFindHistory, m_triggerFindMatchCase, m_triggerFindRegex,
-		                       m_triggerFindForwards, QStringLiteral("Find trigger"), false);
-		        selectFoundRuleInActiveView(m_triggersTable, m_triggersTree, m_triggersViewStack,
-		                                    m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree);
-		        updateTriggerControls();
-	        });
-	connect(m_findNextTriggerButton, &QPushButton::clicked, this,
-	        [this, selectFoundRuleInActiveView]
-	        {
-		        if (!m_runtime)
-			        return;
-		        const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
-		        auto                                rowText  = [this, &triggers](const int row) -> QString
-		        {
-			        const int index =
-			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
-			        if (index < 0 || index >= triggers.size())
-				        return {};
-			        const WorldRuntime::Trigger &tr     = triggers.at(index);
-			        QString                      result = tr.attributes.value(QStringLiteral("match"));
-			        result += QLatin1Char('\t') + tr.children.value(QStringLiteral("send"));
-			        result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("name"));
-			        result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("group"));
-			        result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("script"));
-			        return result;
-		        };
-		        doFindAdvanced(this, m_triggersTable, rowText, m_triggerFindText, m_triggerFindIndex,
-		                       m_triggerFindHistory, m_triggerFindMatchCase, m_triggerFindRegex,
-		                       m_triggerFindForwards, QStringLiteral("Find trigger"), true);
-		        selectFoundRuleInActiveView(m_triggersTable, m_triggersTree, m_triggersViewStack,
-		                                    m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree);
-		        updateTriggerControls();
-	        });
+	        [pasteTriggersFromClipboard]() -> QMudPreferences::Operation<void>
+	        { (co_await pasteTriggersFromClipboard()); });
+	connect(
+	    m_findTriggerButton, &QPushButton::clicked, this,
+	    [this, selectFoundRuleInActiveView]() -> QMudPreferences::Operation<void>
+	    {
+		    if (!m_runtime)
+			    co_return;
+		    const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		    auto                                rowText  = [this, &triggers](const int row) -> QString
+		    {
+			    const int index = ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
+			    if (index < 0 || index >= triggers.size())
+				    return {};
+			    const WorldRuntime::Trigger &tr     = triggers.at(index);
+			    QString                      result = tr.attributes.value(QStringLiteral("match"));
+			    result += QLatin1Char('\t') + tr.children.value(QStringLiteral("send"));
+			    result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("name"));
+			    result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("group"));
+			    result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("script"));
+			    return result;
+		    };
+		    (co_await doFindAdvanced(this, m_triggersTable, rowText, m_triggerFindText, m_triggerFindIndex,
+		                             m_triggerFindHistory, m_triggerFindMatchCase, m_triggerFindRegex,
+		                             m_triggerFindForwards, QStringLiteral("Find trigger"), false));
+		    selectFoundRuleInActiveView(m_triggersTable, m_triggersTree, m_triggersViewStack,
+		                                m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree);
+		    updateTriggerControls();
+	    });
+	connect(
+	    m_findNextTriggerButton, &QPushButton::clicked, this,
+	    [this, selectFoundRuleInActiveView]() -> QMudPreferences::Operation<void>
+	    {
+		    if (!m_runtime)
+			    co_return;
+		    const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		    auto                                rowText  = [this, &triggers](const int row) -> QString
+		    {
+			    const int index = ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
+			    if (index < 0 || index >= triggers.size())
+				    return {};
+			    const WorldRuntime::Trigger &tr     = triggers.at(index);
+			    QString                      result = tr.attributes.value(QStringLiteral("match"));
+			    result += QLatin1Char('\t') + tr.children.value(QStringLiteral("send"));
+			    result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("name"));
+			    result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("group"));
+			    result += QLatin1Char('\t') + tr.attributes.value(QStringLiteral("script"));
+			    return result;
+		    };
+		    (co_await doFindAdvanced(this, m_triggersTable, rowText, m_triggerFindText, m_triggerFindIndex,
+		                             m_triggerFindHistory, m_triggerFindMatchCase, m_triggerFindRegex,
+		                             m_triggerFindForwards, QStringLiteral("Find trigger"), true));
+		    selectFoundRuleInActiveView(m_triggersTable, m_triggersTree, m_triggersViewStack,
+		                                m_triggerRuleViewItems.table, m_triggerRuleViewItems.tree);
+		    updateTriggerControls();
+	    });
 
-	connect(m_addTimerButton, &QPushButton::clicked, this, [editTimerItem] { editTimerItem(0, true); });
+	connect(m_addTimerButton, &QPushButton::clicked, this,
+	        [editTimerItem]() -> QMudPreferences::Operation<void> { (co_await editTimerItem(0, true)); });
 	connect(m_editTimerButton, &QPushButton::clicked, this,
-	        [this, editTimerItem]
+	        [this, editTimerItem]() -> QMudPreferences::Operation<void>
 	        {
 		        const QList<quint64> runtimeIds =
 		            activeSelectedRuleRuntimeIds(m_timersTable, m_timersTree, m_timersViewStack);
 		        if (runtimeIds.size() == 1)
-			        editTimerItem(runtimeIds.constFirst(), false);
+			        (co_await editTimerItem(runtimeIds.constFirst(), false));
 	        });
 	connect(m_deleteTimerButton, &QPushButton::clicked, this,
-	        [this, refreshTimerView, removeSelectedRules]
+	        [this, refreshTimerView, removeSelectedRules]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        if (m_useDefaultTimers && m_useDefaultTimers->isChecked())
-			        return;
-		        removeSelectedRules(
+			        co_return;
+		        (co_await removeSelectedRules(
 		            m_timersTable, m_timersTree, m_timersViewStack, m_workingLists->timers,
 		            m_workingLists->timersRestoredFromPersistence, m_workingLists->initialTimerIds,
 		            [this] { return m_runtime->timers(); }, m_workingLists->deletedTimerIds,
 		            m_workingLists->timersStaged, QStringLiteral("timer"), QStringLiteral("timers"),
-		            refreshTimerView);
+		            refreshTimerView));
 	        });
 	connect(m_copyTimerButton, &QPushButton::clicked, this,
 	        [copyTimersToClipboard] { copyTimersToClipboard(); });
 	connect(m_pasteTimerButton, &QPushButton::clicked, this,
-	        [pasteTimersFromClipboard] { pasteTimersFromClipboard(); });
+	        [pasteTimersFromClipboard]() -> QMudPreferences::Operation<void>
+	        { (co_await pasteTimersFromClipboard()); });
 	connect(m_findTimerButton, &QPushButton::clicked, this,
-	        [this, selectFoundRuleInActiveView]
+	        [this, selectFoundRuleInActiveView]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        const QList<WorldRuntime::Timer> &timers  = m_workingLists->timers;
 		        auto                              rowText = [this, &timers](const int row) -> QString
 		        {
@@ -10394,18 +11060,18 @@ void WorldPreferencesDialog::buildUi()
 			        result += QLatin1Char('\t') + tm.attributes.value(QStringLiteral("script"));
 			        return result;
 		        };
-		        doFindAdvanced(this, m_timersTable, rowText, m_timerFindText, m_timerFindIndex,
-		                       m_timerFindHistory, m_timerFindMatchCase, m_timerFindRegex,
-		                       m_timerFindForwards, QStringLiteral("Find timer"), false);
+		        (co_await doFindAdvanced(this, m_timersTable, rowText, m_timerFindText, m_timerFindIndex,
+		                                 m_timerFindHistory, m_timerFindMatchCase, m_timerFindRegex,
+		                                 m_timerFindForwards, QStringLiteral("Find timer"), false));
 		        selectFoundRuleInActiveView(m_timersTable, m_timersTree, m_timersViewStack,
 		                                    m_timerRuleViewItems.table, m_timerRuleViewItems.tree);
 		        updateTimerControls();
 	        });
 	connect(m_findNextTimerButton, &QPushButton::clicked, this,
-	        [this, selectFoundRuleInActiveView]
+	        [this, selectFoundRuleInActiveView]() -> QMudPreferences::Operation<void>
 	        {
 		        if (!m_runtime)
-			        return;
+			        co_return;
 		        const QList<WorldRuntime::Timer> &timers  = m_workingLists->timers;
 		        auto                              rowText = [this, &timers](const int row) -> QString
 		        {
@@ -10419,9 +11085,9 @@ void WorldPreferencesDialog::buildUi()
 			        result += QLatin1Char('\t') + tm.attributes.value(QStringLiteral("script"));
 			        return result;
 		        };
-		        doFindAdvanced(this, m_timersTable, rowText, m_timerFindText, m_timerFindIndex,
-		                       m_timerFindHistory, m_timerFindMatchCase, m_timerFindRegex,
-		                       m_timerFindForwards, QStringLiteral("Find timer"), true);
+		        (co_await doFindAdvanced(this, m_timersTable, rowText, m_timerFindText, m_timerFindIndex,
+		                                 m_timerFindHistory, m_timerFindMatchCase, m_timerFindRegex,
+		                                 m_timerFindForwards, QStringLiteral("Find timer"), true));
 		        selectFoundRuleInActiveView(m_timersTable, m_timersTree, m_timersViewStack,
 		                                    m_timerRuleViewItems.table, m_timerRuleViewItems.tree);
 		        updateTimerControls();
@@ -10435,13 +11101,15 @@ void WorldPreferencesDialog::buildUi()
 		        populateTimers();
 	        });
 
-	connect(m_aliasesTable, &QTableWidget::cellDoubleClicked, this, [this, editAliasItem](const int row, int)
-	        { editAliasItem(ruleRuntimeIdForRow(m_aliasesTable, row), false); });
+	connect(m_aliasesTable, &QTableWidget::cellDoubleClicked, this,
+	        [this, editAliasItem](const int row, int) -> QMudPreferences::Operation<void>
+	        { (co_await editAliasItem(ruleRuntimeIdForRow(m_aliasesTable, row), false)); });
 	connect(m_triggersTable, &QTableWidget::cellDoubleClicked, this,
-	        [this, editTriggerItem](const int row, int)
-	        { editTriggerItem(ruleRuntimeIdForRow(m_triggersTable, row), false); });
-	connect(m_timersTable, &QTableWidget::cellDoubleClicked, this, [this, editTimerItem](const int row, int)
-	        { editTimerItem(ruleRuntimeIdForRow(m_timersTable, row), false); });
+	        [this, editTriggerItem](const int row, int) -> QMudPreferences::Operation<void>
+	        { (co_await editTriggerItem(ruleRuntimeIdForRow(m_triggersTable, row), false)); });
+	connect(m_timersTable, &QTableWidget::cellDoubleClicked, this,
+	        [this, editTimerItem](const int row, int) -> QMudPreferences::Operation<void>
+	        { (co_await editTimerItem(ruleRuntimeIdForRow(m_timersTable, row), false)); });
 	auto connectSingleGroupExpansion =
 	    [this](QTreeWidget *tree, const std::function<void(const QString &)> &save)
 	{
@@ -10494,24 +11162,24 @@ void WorldPreferencesDialog::buildUi()
 	};
 	if (m_aliasesTree)
 		connect(m_aliasesTree, &QTreeWidget::itemDoubleClicked, this,
-		        [editAliasItem](const QTreeWidgetItem *item, int)
+		        [editAliasItem](const QTreeWidgetItem *item, int) -> QMudPreferences::Operation<void>
 		        {
 			        if (item && item->parent())
-				        editAliasItem(item->data(0, Qt::UserRole).toULongLong(), false);
+				        (co_await editAliasItem(item->data(0, Qt::UserRole).toULongLong(), false));
 		        });
 	if (m_triggersTree)
 		connect(m_triggersTree, &QTreeWidget::itemDoubleClicked, this,
-		        [editTriggerItem](const QTreeWidgetItem *item, int)
+		        [editTriggerItem](const QTreeWidgetItem *item, int) -> QMudPreferences::Operation<void>
 		        {
 			        if (item && item->parent())
-				        editTriggerItem(item->data(0, Qt::UserRole).toULongLong(), false);
+				        (co_await editTriggerItem(item->data(0, Qt::UserRole).toULongLong(), false));
 		        });
 	if (m_timersTree)
 		connect(m_timersTree, &QTreeWidget::itemDoubleClicked, this,
-		        [editTimerItem](const QTreeWidgetItem *item, int)
+		        [editTimerItem](const QTreeWidgetItem *item, int) -> QMudPreferences::Operation<void>
 		        {
 			        if (item && item->parent())
-				        editTimerItem(item->data(0, Qt::UserRole).toULongLong(), false);
+				        (co_await editTimerItem(item->data(0, Qt::UserRole).toULongLong(), false));
 		        });
 	connectSingleGroupExpansion(m_triggersTree,
 	                            [this](const QString &group)
@@ -10533,26 +11201,26 @@ void WorldPreferencesDialog::buildUi()
 	                            });
 	if (m_useDefaultAliases)
 		connect(m_useDefaultAliases, &QCheckBox::toggled, this,
-		        [this](const bool enabled)
+		        [this](const bool enabled) -> QMudPreferences::Operation<void>
 		        {
-			        handleDefaultOverrideToggle(QStringLiteral("use_default_aliases"), m_useDefaultAliases,
-			                                    enabled);
+			        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_aliases"),
+			                                                   m_useDefaultAliases, enabled));
 			        updateAliasControls();
 		        });
 	if (m_useDefaultTriggers)
 		connect(m_useDefaultTriggers, &QCheckBox::toggled, this,
-		        [this](const bool enabled)
+		        [this](const bool enabled) -> QMudPreferences::Operation<void>
 		        {
-			        handleDefaultOverrideToggle(QStringLiteral("use_default_triggers"), m_useDefaultTriggers,
-			                                    enabled);
+			        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_triggers"),
+			                                                   m_useDefaultTriggers, enabled));
 			        updateTriggerControls();
 		        });
 	if (m_useDefaultTimers)
 		connect(m_useDefaultTimers, &QCheckBox::toggled, this,
-		        [this](const bool enabled)
+		        [this](const bool enabled) -> QMudPreferences::Operation<void>
 		        {
-			        handleDefaultOverrideToggle(QStringLiteral("use_default_timers"), m_useDefaultTimers,
-			                                    enabled);
+			        (co_await handleDefaultOverrideToggleAsync(QStringLiteral("use_default_timers"),
+			                                                   m_useDefaultTimers, enabled));
 			        updateTimerControls();
 		        });
 	if (m_aliasTreeView)
@@ -10580,7 +11248,8 @@ void WorldPreferencesDialog::buildUi()
 		connect(m_variablesTable, &QTableWidget::itemSelectionChanged, this,
 		        [this] { updateVariableControls(); });
 	auto editVariableDialogNow = [this](QString &name, QString &value, const bool allowRename,
-	                                    const std::function<QSet<QString>()> &currentDisallowedNames) -> bool
+	                                    const std::function<QSet<QString>()> &currentDisallowedNames)
+	    -> QMudPreferences::Operation<bool>
 	{
 		QDialog dialog(this);
 		dialog.setWindowTitle(QStringLiteral("Variable"));
@@ -10596,39 +11265,39 @@ void WorldPreferencesDialog::buildUi()
 		form->addRow(QStringLiteral("Contents"), valueEdit);
 		dialogLayout->addLayout(form);
 		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-		connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+		connect(buttons, &QDialogButtonBox::accepted, &dialog,
+		        [&dialog, nameEdit, &currentDisallowedNames]() -> QMudPreferences::Operation<void>
+		        {
+			        const QString candidateName = nameEdit->text().trimmed();
+			        if (candidateName.isEmpty())
+			        {
+				        co_await QMudPreferences::warning(&dialog, QStringLiteral("Variables"),
+				                                          QStringLiteral("Variable name cannot be blank."));
+				        co_return;
+			        }
+			        if (currentDisallowedNames().contains(QMudVariableMapUtils::Name(candidateName).key()))
+			        {
+				        co_await QMudPreferences::warning(
+				            &dialog, QStringLiteral("Variables"),
+				            QStringLiteral("That variable name is already in use."));
+				        co_return;
+			        }
+			        dialog.accept();
+		        });
 		connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 		dialogLayout->addWidget(buttons);
-		while (true)
-		{
-			if (dialog.exec() != QDialog::Accepted)
-				return false;
-
-			const QString candidateName = nameEdit->text().trimmed();
-			if (candidateName.isEmpty())
-			{
-				QMessageBox::warning(&dialog, QStringLiteral("Variables"),
-				                     QStringLiteral("Variable name cannot be blank."));
-				continue;
-			}
-			if (currentDisallowedNames().contains(QMudVariableMapUtils::Name(candidateName).key()))
-			{
-				QMessageBox::warning(&dialog, QStringLiteral("Variables"),
-				                     QStringLiteral("That variable name is already in use."));
-				continue;
-			}
-
-			name  = candidateName;
-			value = valueEdit->toPlainText();
-			return true;
-		}
+		if (co_await QMudPreferences::wait(dialog) != QDialog::Accepted)
+			co_return false;
+		name  = nameEdit->text().trimmed();
+		value = valueEdit->toPlainText();
+		co_return true;
 	};
 	if (m_addVariableButton)
 		connect(m_addVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialogNow]
+		        [this, editVariableDialogNow]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        QString name;
 			        QString value;
 			        auto    currentNamesInUse = [this]
@@ -10640,8 +11309,8 @@ void WorldPreferencesDialog::buildUi()
 					        names.insert(working.value.key);
 				        return names;
 			        };
-			        if (!editVariableDialogNow(name, value, true, currentNamesInUse))
-				        return;
+			        if (!(co_await editVariableDialogNow(name, value, true, currentNamesInUse)))
+				        co_return;
 			        WorldRuntime::Variable newVar(
 			            {
 			                {QStringLiteral("name"), name}
@@ -10657,16 +11326,16 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_editVariableButton)
 		connect(m_editVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialogNow]
+		        [this, editVariableDialogNow]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime || !m_variablesTable)
-				        return;
+				        co_return;
 			        const int row   = m_variablesTable->currentRow();
 			        const int index = rowToIndex(m_variablesTable, row);
 			        if (index < 0)
-				        return;
+				        co_return;
 			        if (index >= m_workingLists->variables.size())
-				        return;
+				        co_return;
 			        WorkingLists::Variable &working           = m_workingLists->variables[index];
 			        const QString           oldName           = working.value.label;
 			        QString                 name              = oldName;
@@ -10690,8 +11359,8 @@ void WorldPreferencesDialog::buildUi()
 				        }
 				        return names;
 			        };
-			        if (!editVariableDialogNow(name, value, true, currentNamesInUse))
-				        return;
+			        if (!(co_await editVariableDialogNow(name, value, true, currentNamesInUse)))
+				        co_return;
 
 			        WorldRuntime::Variable committed = working.value;
 			        committed.attributes.insert(QStringLiteral("name"), name);
@@ -10723,18 +11392,18 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_deleteVariableButton)
 		connect(m_deleteVariableButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime || !m_variablesTable)
-				        return;
+				        co_return;
 			        const int row   = m_variablesTable->currentRow();
 			        const int index = rowToIndex(m_variablesTable, row);
 			        if (index < 0)
-				        return;
-			        if (!confirmRemoval(this, QStringLiteral("variable")))
-				        return;
+				        co_return;
+			        if (!(co_await confirmRemoval(this, QStringLiteral("variable"))))
+				        co_return;
 			        if (index >= m_workingLists->variables.size())
-				        return;
+				        co_return;
 			        const WorkingLists::Variable &working = m_workingLists->variables.at(index);
 			        if (working.presentInRuntime)
 				        m_workingLists->deletedVariableNames.insert(working.runtimeKey);
@@ -10780,10 +11449,10 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_findVariableButton)
 		connect(m_findVariableButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        auto rowText = [this](const int row) -> QString
 			        {
 				        const int index = rowToIndex(m_variablesTable, row);
@@ -10793,17 +11462,18 @@ void WorldPreferencesDialog::buildUi()
 				        const QString                 name = var.attributes.value(QStringLiteral("name"));
 				        return var.content + QLatin1Char('\t') + name;
 			        };
-			        doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText, m_variableFindRow,
-			                       m_variableFindHistory, m_variableFindMatchCase, m_variableFindRegex,
-			                       m_variableFindForwards, QStringLiteral("Find variable"), false);
+			        (co_await doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText,
+			                                 m_variableFindRow, m_variableFindHistory,
+			                                 m_variableFindMatchCase, m_variableFindRegex,
+			                                 m_variableFindForwards, QStringLiteral("Find variable"), false));
 			        updateVariableControls();
 		        });
 	if (m_findNextVariableButton)
 		connect(m_findNextVariableButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        auto rowText = [this](const int row) -> QString
 			        {
 				        const int index = rowToIndex(m_variablesTable, row);
@@ -10813,43 +11483,44 @@ void WorldPreferencesDialog::buildUi()
 				        const QString                 name = var.attributes.value(QStringLiteral("name"));
 				        return var.content + QLatin1Char('\t') + name;
 			        };
-			        doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText, m_variableFindRow,
-			                       m_variableFindHistory, m_variableFindMatchCase, m_variableFindRegex,
-			                       m_variableFindForwards, QStringLiteral("Find variable"), true);
+			        (co_await doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText,
+			                                 m_variableFindRow, m_variableFindHistory,
+			                                 m_variableFindMatchCase, m_variableFindRegex,
+			                                 m_variableFindForwards, QStringLiteral("Find variable"), true));
 			        updateVariableControls();
 		        });
 	if (m_loadVariablesButton)
 		connect(m_loadVariablesButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Variable file name"), startDir,
-			                                         QStringLiteral("QMud variables (*.qdv *.mcv)"));
+			        const QString fileName = (co_await QMudPreferences::getOpenFileName(
+			            this, QStringLiteral("Variable file name"), startDir,
+			            QStringLiteral("QMud variables (*.qdv *.mcv)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadVariablesFromFile(fileName))
-				        return;
+			        if (!(co_await loadVariablesFromFile(fileName)))
+				        co_return;
 			        populateVariables();
 			        updateVariableControls();
 		        });
 	if (m_saveVariablesButton)
 		connect(m_saveVariablesButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Variable file name"), startDir,
-			                                         QStringLiteral("QMud variables (*.qdv *.mcv)"));
+			        const QString fileName = (co_await QMudPreferences::getSaveFileName(
+			            this, QStringLiteral("Variable file name"), startDir,
+			            QStringLiteral("QMud variables (*.qdv *.mcv)")));
 			        if (fileName.isEmpty())
-				        return;
+				        co_return;
 			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdv"));
 			        if (m_runtime)
 				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveVariablesToFile(outputPath))
-				        return;
+			        if (!(co_await saveVariablesToFile(outputPath)))
+				        co_return;
 			        updateVariableControls();
 		        });
 	if (m_copyVariableButton)
@@ -10878,10 +11549,10 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_pasteVariableButton)
 		connect(m_pasteVariableButton, &QPushButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        if (!m_runtime)
-				        return;
+				        co_return;
 			        const QString text = []() -> QString
 			        {
 				        if (QClipboard *clipboard = QGuiApplication::clipboard())
@@ -10889,14 +11560,15 @@ void WorldPreferencesDialog::buildUi()
 				        return {};
 			        }();
 			        if (text.trimmed().isEmpty())
-				        return;
+				        co_return;
 			        WorldDocument doc;
 			        doc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS |
 			                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
 			        if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 			        {
-				        QMessageBox::warning(this, QStringLiteral("Paste variables"), doc.errorString());
-				        return;
+				        (co_await QMudPreferences::warning(this, QStringLiteral("Paste variables"),
+				                                           doc.errorString()));
+				        co_return;
 			        }
 			        for (const auto &v : doc.variables())
 			        {
@@ -10914,7 +11586,7 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_editVariablesFilter)
 		connect(m_editVariablesFilter, &QToolButton::clicked, this,
-		        [this]
+		        [this]() -> QMudPreferences::Operation<void>
 		        {
 			        QDialog dialog(this);
 			        dialog.setWindowTitle(QStringLiteral("Edit variable filter"));
@@ -10927,8 +11599,8 @@ void WorldPreferencesDialog::buildUi()
 			        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 			        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 			        dialogLayout->addWidget(buttons);
-			        if (dialog.exec() != QDialog::Accepted)
-				        return;
+			        if ((co_await QMudPreferences::wait(dialog)) != QDialog::Accepted)
+				        co_return;
 			        m_variableFilterText = edit->toPlainText();
 			        if (m_filterVariables)
 				        m_filterVariables->setChecked(true);
@@ -11778,48 +12450,60 @@ void WorldPreferencesDialog::updateScriptNoteColourItems() const
 
 void WorldPreferencesDialog::calculateMemoryUsage(const bool allowProgress)
 {
+	(void)calculateMemoryUsageAsync(allowProgress);
+}
+
+QMudPreferences::Operation<void> WorldPreferencesDialog::calculateMemoryUsageAsync(const bool allowProgress)
+{
 	if (!m_runtime || !m_infoMemoryUsed || !m_infoBufferLines)
-		return;
+		co_return;
 
-	const auto      &lines     = m_runtime->lines();
-	const int        lineCount = saturatingToInt(lines.size());
-	const int        maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
-	QProgressDialog *progress  = nullptr;
-	if (allowProgress && lineCount > 1000)
+	const int lineCount   = saturatingToInt(m_runtime->lines().size());
+	const int maxLines    = worldMaxOutputLines(m_runtime->worldAttributes());
+	long long totalBytes  = 0;
+	int       styleCount  = 0;
+	auto      accountLine = [&](const WorldRuntime::LineEntry &entry)
 	{
-		progress = new QProgressDialog(QStringLiteral("Calculating memory usage..."),
-		                               QStringLiteral("Cancel"), 0, lineCount, this);
-		progress->setWindowTitle(QStringLiteral("Memory used by output buffer"));
-		progress->setMinimumDuration(0);
-		progress->setValue(0);
-	}
-
-	long long totalBytes = 0;
-	int       styleCount = 0;
-
-	for (int i = 0; i < lineCount; ++i)
-	{
-		const WorldRuntime::LineEntry &entry = lines.at(i);
 		totalBytes += static_cast<long long>(sizeof(WorldRuntime::LineEntry));
 		totalBytes += entry.text.capacity() * static_cast<long long>(sizeof(QChar));
 		totalBytes += entry.spans.capacity() * static_cast<long long>(sizeof(WorldRuntime::StyleSpan));
 		styleCount += saturatingToInt(entry.spans.size());
+	};
 
-		if (progress && (i & 63) == 0)
-		{
-			progress->setValue(i);
-			if (progress->wasCanceled())
-			{
-				progress->deleteLater();
-				return;
-			}
-		}
-	}
-
-	if (progress)
+	if (allowProgress && lineCount > 1000)
 	{
-		progress->setValue(lineCount);
-		progress->deleteLater();
+		// Retain a coherent buffer while the modeless calculation yields to normal input.
+		const auto      lines = m_runtime->lines();
+		QProgressDialog progress(QStringLiteral("Calculating memory usage..."), QStringLiteral("Cancel"), 0,
+		                         lineCount, this);
+		progress.setWindowTitle(QStringLiteral("Memory used by output buffer"));
+		progress.setMinimumDuration(0);
+		progress.setAutoClose(false);
+		progress.setAutoReset(false);
+		connect(&progress, &QProgressDialog::canceled, &progress, &QDialog::reject);
+		QTimer timer;
+		int    nextLine = 0;
+		connect(&timer, &QTimer::timeout, &progress,
+		        [&]
+		        {
+			        const int end = nextLine + qMin(4096, lineCount - nextLine);
+			        while (nextLine < end)
+				        accountLine(lines.at(nextLine++));
+			        progress.setValue(nextLine);
+			        if (nextLine == lineCount)
+			        {
+				        timer.stop();
+				        progress.accept();
+			        }
+		        });
+		timer.start(0);
+		if (co_await QMudPreferences::wait(progress) != QDialog::Accepted)
+			co_return;
+	}
+	else
+	{
+		for (const auto &entry : m_runtime->lines())
+			accountLine(entry);
 	}
 
 	QString bufferText;
@@ -13037,6 +13721,7 @@ void WorldPreferencesDialog::populateConnecting() const
 		m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->setChecked(qmudIsEnabledFlag(
 		    attrs.value(QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"))));
 	}
+
 	if (m_onlyNegotiateTelnetOptionsOnce)
 	{
 		m_onlyNegotiateTelnetOptionsOnce->setChecked(
@@ -13153,4 +13838,35 @@ void WorldPreferencesDialog::populateChat() const
 		m_autoAllowFiles->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("auto_allow_files"))));
 	applySwatch(m_chatTextColour, attrs.value(QStringLiteral("chat_foreground_colour")));
 	applySwatch(m_chatBackColour, attrs.value(QStringLiteral("chat_background_colour")));
+}
+
+void WorldPreferencesDialog::populateGmcp() const
+{
+	const auto &attrs = m_runtime->worldAttributes();
+	m_nativeGmcp->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("native_gmcp"))));
+	m_gmcpPing->setChecked(
+	    qmudIsEnabledFlag(attrs.value(QStringLiteral("gmcp_ping_enabled"), QStringLiteral("1"))));
+	m_gmcpPingInterval->setValue(
+	    attrs.value(QStringLiteral("gmcp_ping_interval"), QStringLiteral("5")).toInt());
+	m_gmcpSendRtt->setChecked(
+	    qmudIsEnabledFlag(attrs.value(QStringLiteral("gmcp_ping_send_rtt"), QStringLiteral("1"))));
+	m_gmcpKeepAlive->setChecked(
+	    qmudIsEnabledFlag(attrs.value(QStringLiteral("gmcp_keepalive_enabled"), QStringLiteral("1"))));
+	m_gmcpKeepAliveInterval->setValue(
+	    attrs.value(QStringLiteral("gmcp_keepalive_interval"), QStringLiteral("15")).toInt());
+	const auto   publication  = m_runtime->gmcpPublication();
+	const auto   snapshot     = publication ? publication->current.load() : nullptr;
+	const qint64 milliseconds = snapshot ? snapshot->roundTripMs : -1;
+	m_gmcpRoundTrip->setText(QStringLiteral("%1 ms").arg(qMax<qint64>(0, milliseconds)));
+	updateGmcpControls();
+}
+
+void WorldPreferencesDialog::updateGmcpControls() const
+{
+	m_gmcpControls->setEnabled(m_nativeGmcp->isChecked());
+	m_gmcpPingControls->setEnabled(m_gmcpPing->isChecked());
+	m_gmcpSendRtt->setEnabled(m_gmcpPing->isChecked());
+	m_gmcpRoundTripCaption->setEnabled(m_gmcpPing->isChecked());
+	m_gmcpRoundTrip->setEnabled(m_gmcpPing->isChecked());
+	m_gmcpKeepAliveControls->setEnabled(m_gmcpKeepAlive->isChecked());
 }
