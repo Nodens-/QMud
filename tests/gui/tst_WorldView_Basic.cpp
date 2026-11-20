@@ -810,7 +810,7 @@ end
 	 * @param name Unique miniwindow identifier.
 	 * @param rect Initial client-area geometry.
 	 * @param flags Additional miniwindow flags.
-	 * @param fill Backing-surface fill colour.
+	 * @param fill Backing-surface fill color.
 	 * @param useAbsoluteLocation Whether rect is an absolute client-area position.
 	 * @return The created production miniwindow.
 	 */
@@ -912,7 +912,7 @@ end
 	 *
 	 * @param runtime Runtime that owns the world Lua engine.
 	 * @param windowName Test-controlled miniwindow identifier to resize.
-	 * @param fill Backing-surface fill colour retained while resizing.
+	 * @param fill Backing-surface fill color retained while resizing.
 	 */
 	void installMiniWindowResizeCallbacks(WorldRuntime &runtime, const QString &windowName,
 	                                      const QColor &fill)
@@ -996,7 +996,7 @@ end
 	 * @param hotspotId Unique hotspot identifier.
 	 * @param rect Hotspot content rectangle.
 	 * @param mouseDown World-Lua mouse-down callback label.
-	 * @param cancelMouseDown World-Lua cancelled mouse-down callback label.
+	 * @param cancelMouseDown World-Lua canceled mouse-down callback label.
 	 * @param mouseUp World-Lua mouse-up callback label.
 	 * @param moveCallback World-Lua drag callback label.
 	 * @param releaseCallback World-Lua drag-release callback label.
@@ -1233,6 +1233,50 @@ class tst_WorldView_Basic : public QObject
 		Q_OBJECT
 
 	private:
+		/**
+		 * @brief Prepares visible synthetic output with room for scrolling in either direction.
+		 * @param view Output view under test.
+		 * @param observer Whether to use a passive observer instead of an interactive world view.
+		 * @return True when the test window has become exposed.
+		 */
+		[[nodiscard]] static bool prepareSelectionScrollView(WorldView &view, const bool observer = false)
+		{
+			view.resize(760, 460);
+			if (observer)
+			{
+				setTestRuntimeObserver(view, runtimeForTest());
+				view.setPassiveBufferView(true);
+			}
+			else
+				setTestRuntime(view, runtimeForTest());
+			view.show();
+			if (!QTest::qWaitForWindowExposed(&view))
+				return false;
+			for (int i = 0; i < 300; ++i)
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("selection-scroll-%1 abcdefghijklmnopqrstuvwxyz").arg(i), true);
+			QCoreApplication::processEvents();
+			view.scrollOutputToStart();
+			view.scrollOutputLines(100);
+			QCoreApplication::processEvents();
+			return true;
+		}
+
+		/**
+		 * @brief Moves a held selection pointer without waiting for a timer interval.
+		 * @param pane Pane receiving the drag event.
+		 * @param globalPos Pointer position in screen coordinates.
+		 */
+		static void moveSelectionScrollPointer(const QTextBrowser &pane, const QPoint &globalPos)
+		{
+			QWidget *const viewport = pane.viewport();
+			const QPoint   local    = viewport->mapFromGlobal(globalPos);
+			QCursor::setPos(globalPos);
+			QMouseEvent move(QEvent::MouseMove, QPointF(local), QPointF(globalPos), Qt::NoButton,
+			                 Qt::LeftButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(viewport, &move);
+		}
+
 		static QPoint findHyperlinkPoint(WorldView &view, QTextBrowser &browser, const QString &href)
 		{
 			if (!browser.viewport() || href.isEmpty())
@@ -1469,8 +1513,8 @@ class tst_WorldView_Basic : public QObject
 			    {
 				    QCOMPARE(&lines.last(), tail);
 				    QCOMPARE(lines.effectiveIndex(lines.size() - 1) -
-				                 view.m_nativeRenderModel->m_nativeRenderRuntimeIndexBase,
-				             qint64{2000});
+					             view.m_nativeRenderModel->m_nativeRenderRuntimeIndexBase,
+					         qint64{2000});
 				    QCOMPARE(view.m_outputProjectionState->selection.start.line, 2000);
 			    });
 			QCOMPARE(view.callbackOutputSelectionBounds()[0], 2001);
@@ -1533,11 +1577,11 @@ class tst_WorldView_Basic : public QObject
 						    {
 							    QCOMPARE(lines.at(i).text, expected.at(i).text);
 							    QCOMPARE(WorldView::nativeRuntimeLineNumbers(lines.at(i)),
-							             WorldView::nativeRuntimeLineNumbers(expected.at(i)));
+								         WorldView::nativeRuntimeLineNumbers(expected.at(i)));
 							    QCOMPARE(lines.effectiveIndex(i) -
-							                 view.m_nativeRenderModel->m_nativeRenderRuntimeIndexBase,
-							             expected.effectiveIndex(i) -
-							                 reference.m_nativeRenderModel->m_nativeRenderRuntimeIndexBase);
+								             view.m_nativeRenderModel->m_nativeRenderRuntimeIndexBase,
+								         expected.effectiveIndex(i) -
+								             reference.m_nativeRenderModel->m_nativeRenderRuntimeIndexBase);
 						    }
 					    });
 					QCOMPARE(view.m_nativeRenderModel->m_nativeRenderLineCacheRevision, revision);
@@ -1740,7 +1784,7 @@ class tst_WorldView_Basic : public QObject
 			finish.dismiss();
 			const QStringList final =
 			    clear ? QStringList{QStringLiteral("pending")}
-			          : QStringList{QStringLiteral("replacement"), QStringLiteral("pending")};
+				      : QStringList{QStringLiteral("replacement"), QStringLiteral("pending")};
 			QTRY_COMPARE(primary.outputLines(), final);
 			QTRY_COMPARE(observer.outputLines(), final);
 			QTRY_COMPARE(attached.outputLines(), final);
@@ -5158,7 +5202,7 @@ end
 
 			const QPoint outsideTextPoint = browser->viewport()->mapToGlobal(
 			    QPoint(browser->viewport()->width() - 2,
-			           characterRect.center().y() - browser->viewport()->mapToGlobal(QPoint(0, 0)).y()));
+				       characterRect.center().y() - browser->viewport()->mapToGlobal(QPoint(0, 0)).y()));
 			QCOMPARE(textInterface->offsetAtPoint(outsideTextPoint), -1);
 		}
 
@@ -7347,7 +7391,7 @@ end
 			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("1"));
 			runtimeForTest()->setMacros(
 			    {makeMacro(QStringLiteral("F2"), QStringLiteral("replace"), QStringLiteral("look")),
-			     makeMacro(QStringLiteral("F3"), QStringLiteral("replace"), QStringLiteral("say"))});
+				 makeMacro(QStringLiteral("F3"), QStringLiteral("replace"), QStringLiteral("say"))});
 
 			WorldView view;
 			view.resize(900, 640);
@@ -9060,118 +9104,454 @@ end
 			resetTestState();
 		}
 
-		void splitSelectionDragSpansTopAndLivePanes()
+		/**
+		 * @brief Covers both directions and speed limits for interactive and observer output.
+		 */
+		void nativeSelectionAutoScrollMovesOncePerTick_data()
+		{
+			QTest::addColumn<int>("distance");
+			QTest::addColumn<bool>("observer");
+			QTest::addColumn<int>("selectionChanges");
+			QTest::newRow("up-one") << -1 << false << 1;
+			QTest::newRow("up-ten") << -240 << false << 1;
+			QTest::newRow("down-one") << 1 << false << 1;
+			QTest::newRow("down-ten-past-live-tail") << 240 << false << 1;
+			QTest::newRow("observer") << -240 << true << 1;
+		}
+
+		/**
+		 * @brief Checks scrolling, stable anchors, selection publication and final review speech per tick.
+		 */
+		void nativeSelectionAutoScrollMovesOncePerTick()
+		{
+			QFETCH(int, distance);
+			QFETCH(bool, observer);
+			QFETCH(int, selectionChanges);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			setTestQtAccessibilitySpeechEnabled(true);
+			qmudInstallWorldOutputAccessibility();
+			WorldView view;
+			QVERIFY(prepareSelectionScrollView(view, observer));
+			const auto [top, live] = findSplitOutputBrowsers(view);
+			QVERIFY(top);
+			QVERIFY(live);
+			QWidget *const viewport        = top->viewport();
+			const QPoint   originalPointer = QCursor::pos();
+			const auto     release         = qScopeGuard(
+			    [viewport, originalPointer]
+			    {
+				    QTest::mouseRelease(viewport, Qt::LeftButton);
+				    QCursor::setPos(originalPointer);
+			    });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			const QPoint outside = viewport->mapToGlobal(
+			    QPoint(20, distance < 0 ? distance : viewport->height() - 1 + distance));
+			moveSelectionScrollPointer(*top, outside);
+			QVERIFY(view.m_selectionAutoScrollTimer->isActive());
+			const auto     anchor     = view.m_nativeOutputSelection.anchor;
+			const int      before     = view.outputScrollPosition();
+			const int      liveBefore = live->verticalScrollBar()->value();
+			const int      count      = qMin(10, 1 + qAbs(distance) / 20);
+			const int      delta      = count * view.outputScrollUnitsPerLine() * (distance < 0 ? -1 : 1);
+			QSignalSpy     scrolls(&view, &WorldView::outputScrollChanged);
+			QSignalSpy     selections(&view, &WorldView::outputSelectionChanged);
+			QWidget *const canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QVERIFY(QAccessible::queryAccessibleInterface(canvas));
+			ScopedAccessibleUpdateCapture capture;
+			view.nativeOutputSelectionAutoScrollTick();
+			QCOMPARE(view.outputScrollPosition(), before + delta);
+			QCOMPARE(scrolls.count(), 1);
+			QCOMPARE(selections.count(), selectionChanges);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.line, anchor.line);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.column, anchor.column);
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+			QVERIFY(view.hasOutputSelection());
+			QCOMPARE(live->verticalScrollBar()->value(), liveBefore);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), observer ? 0 : 1);
+			if (observer)
+			{
+				QVERIFY(!view.m_drawNotifyQueued);
+				QVERIFY(!view.m_drawViewportNotificationPending);
+			}
+		}
+
+		/**
+		 * @brief Checks split activation and collapse while retaining one drag and its anchor.
+		 */
+		void nativeSelectionAutoScrollCrossesSplitTransitions()
 		{
 			resetTestState();
-			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
-
-			WorldView view;
-			view.resize(760, 460);
-			view.show();
-			setTestRuntimeObserver(view, runtimeForTest());
-			view.applyRuntimeSettings();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view));
+			view.scrollOutputToEnd();
 			QCoreApplication::processEvents();
+			QVERIFY(!view.isScrollbackSplitActive());
+			const auto [top, live] = findSplitOutputBrowsers(view);
+			QVERIFY(top);
+			QVERIFY(live);
+			QWidget *const viewport = top->viewport();
+			const auto release = qScopeGuard([viewport] { QTest::mouseRelease(viewport, Qt::LeftButton); });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			moveSelectionScrollPointer(*top, viewport->mapToGlobal(QPoint(20, -30)));
+			const auto anchor = view.m_nativeOutputSelection.anchor;
+			view.nativeOutputSelectionAutoScrollTick();
+			QVERIFY(view.isScrollbackSplitActive());
+			WorldView::NativeOutputPosition expected;
+			QVERIFY(view.nativeOutputHitTest(view.m_output, QPoint(20, 0), expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QCOMPARE(live->verticalScrollBar()->value(), live->verticalScrollBar()->maximum());
+			const auto state = view.nativeOutputScrollState(view.m_output);
+			const int  seam  = view.nativeSplitTopScrollSeamValue(state.maximum);
+			QVERIFY(view.setSemanticOutputScrollPosition(top->verticalScrollBar(),
+			                                             seam - view.outputScrollUnitsPerLine()));
+			const QPoint collapsePointer = live->viewport()->mapToGlobal(live->viewport()->rect().center());
+			moveSelectionScrollPointer(*top, collapsePointer);
+			QVERIFY(view.m_selectionAutoScrollTimer->isActive());
+			view.nativeOutputSelectionAutoScrollTick();
+			QVERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(view.outputScrollPosition(), top->verticalScrollBar()->maximum());
+			QCOMPARE(view.m_nativeOutputSelection.anchor.line, anchor.line);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.column, anchor.column);
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+			QVERIFY(view.hasOutputSelection());
+			QVERIFY(!view.m_selectionAutoScrollTimer->isActive());
+			QVERIFY(
+			    view.nativeOutputHitTest(view.m_output, viewport->mapFromGlobal(collapsePointer), expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier, QPoint(90, 30));
+			QVERIFY(view.nativeOutputHitTest(view.m_output, QPoint(90, 30), expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QVERIFY(!view.m_nativeOutputSelection.dragging);
+		}
 
-			for (int i = 0; i < 280; ++i)
-				runtimeOutputForTest(view).appendOutputText(
-				    QStringLiteral("cross-pane-select-%1").arg(i, 3, 10, QLatin1Char('0')), true);
-			QCoreApplication::processEvents();
+		/**
+		 * @brief Covers stopping edge scrolling with and without ending or clearing the selection.
+		 */
+		void nativeSelectionAutoScrollStops_data()
+		{
+			QTest::addColumn<QString>("action");
+			for (const QString &action :
+			     {QStringLiteral("inside"), QStringLiteral("release"), QStringLiteral("lost-button"),
+			      QStringLiteral("clear"), QStringLiteral("hide"), QStringLiteral("unexposed"),
+			      QStringLiteral("minimize"), QStringLiteral("presentation")})
+				QTest::newRow(qPrintable(action)) << action;
+		}
 
-			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
-			QVERIFY(topBrowser);
-			const QPointF localPos(topBrowser->viewport()->rect().center());
-			const QPointF globalPos(topBrowser->viewport()->mapToGlobal(localPos.toPoint()));
-			QWheelEvent   wheelUp(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
-			                      Qt::NoModifier, Qt::NoScrollPhase, false);
-			QCoreApplication::sendEvent(topBrowser->viewport(), &wheelUp);
-			QCoreApplication::processEvents();
-			QTRY_VERIFY(view.isScrollbackSplitActive());
-
-			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
-			QVERIFY(splitTop);
-			QVERIFY(splitBottom);
-
-			auto findWordPoint = [&view](const QTextBrowser *target, const QVector<QPoint> &points)
-			{
-				for (const QPoint &point : points)
-				{
-					QTest::mouseDClick(target->viewport(), Qt::LeftButton, Qt::NoModifier, point);
-					QCoreApplication::processEvents();
-					const QString selected = view.outputSelectionText();
-					if (selected.startsWith(QStringLiteral("cross-pane-select-")))
-						return QPair<QString, QPoint>{selected, point};
-				}
-				return QPair<QString, QPoint>{};
-			};
-
-			const QVector<QPoint> topProbePoints{
-			    QPoint(24, qMax(8, splitTop->viewport()->rect().height() / 2)),
-			    QPoint(24, qMax(8, (splitTop->viewport()->rect().height() * 3) / 4)),
-			    splitTop->viewport()->rect().center(),
-			};
-			const QVector<QPoint> bottomProbePoints{
-			    QPoint(24, qMax(8, splitBottom->viewport()->rect().height() / 3)),
-			    splitBottom->viewport()->rect().center(),
-			    QPoint(24, qMax(8, splitBottom->viewport()->rect().height() - 12)),
-			};
-
-			const auto [topWord, topWordPoint]       = findWordPoint(splitTop, topProbePoints);
-			const auto [bottomWord, bottomWordPoint] = findWordPoint(splitBottom, bottomProbePoints);
-			QVERIFY(topWord.startsWith(QStringLiteral("cross-pane-select-")));
-			QVERIFY(bottomWord.startsWith(QStringLiteral("cross-pane-select-")));
-			QVERIFY(topWord != bottomWord);
-
-			const QPoint startPoint(1, topWordPoint.y());
-			const QPoint endPoint(qMax(1, splitBottom->viewport()->width() - 2), bottomWordPoint.y());
-			const QPoint endGlobal = splitBottom->viewport()->mapToGlobal(endPoint);
-			const QPoint endInTop  = splitTop->viewport()->mapFromGlobal(endGlobal);
-
-			QTest::mousePress(splitTop->viewport(), Qt::LeftButton, Qt::NoModifier, startPoint);
-			QCoreApplication::processEvents();
-			QMouseEvent moveEvent(QEvent::MouseMove, QPointF(endInTop), QPointF(endGlobal), Qt::NoButton,
-			                      Qt::LeftButton, Qt::NoModifier);
-			QCoreApplication::sendEvent(splitTop->viewport(), &moveEvent);
-			QCoreApplication::processEvents();
-			QMouseEvent releaseEvent(QEvent::MouseButtonRelease, QPointF(endInTop), QPointF(endGlobal),
-			                         Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-			QCoreApplication::sendEvent(splitTop->viewport(), &releaseEvent);
-			QCoreApplication::processEvents();
-
-			const QString selectedText = view.outputSelectionText();
-			QVERIFY(selectedText.contains(topWord));
-			QVERIFY(selectedText.contains(bottomWord));
-			QVERIFY(selectedText.contains(QLatin1Char('\n')));
-
-			view.copySelection();
-			QTRY_COMPARE(QGuiApplication::clipboard()->text(), selectedText);
-
-			const QPoint reverseStartPoint(qMax(1, splitBottom->viewport()->width() - 2),
-			                               bottomWordPoint.y());
-			const QPoint reverseEndPoint(1, topWordPoint.y());
-			const QPoint reverseEndGlobal   = splitTop->viewport()->mapToGlobal(reverseEndPoint);
-			const QPoint reverseEndInBottom = splitBottom->viewport()->mapFromGlobal(reverseEndGlobal);
-
-			QTest::mousePress(splitBottom->viewport(), Qt::LeftButton, Qt::NoModifier, reverseStartPoint);
-			QCoreApplication::processEvents();
-			QMouseEvent reverseMoveEvent(QEvent::MouseMove, QPointF(reverseEndInBottom),
-			                             QPointF(reverseEndGlobal), Qt::NoButton, Qt::LeftButton,
-			                             Qt::NoModifier);
-			QCoreApplication::sendEvent(splitBottom->viewport(), &reverseMoveEvent);
-			QCoreApplication::processEvents();
-			QMouseEvent reverseReleaseEvent(QEvent::MouseButtonRelease, QPointF(reverseEndInBottom),
-			                                QPointF(reverseEndGlobal), Qt::LeftButton, Qt::NoButton,
-			                                Qt::NoModifier);
-			QCoreApplication::sendEvent(splitBottom->viewport(), &reverseReleaseEvent);
-			QCoreApplication::processEvents();
-
-			const QString reverseSelectedText = view.outputSelectionText();
-			QVERIFY(reverseSelectedText.contains(topWord));
-			QVERIFY(reverseSelectedText.contains(bottomWord));
-			QVERIFY(reverseSelectedText.contains(QLatin1Char('\n')));
-
-			view.copySelection();
-			QTRY_COMPARE(QGuiApplication::clipboard()->text(), reverseSelectedText);
+		/**
+		 * @brief Checks that cancellation does not scroll or discard a completed selection.
+		 */
+		void nativeSelectionAutoScrollStops()
+		{
+			QFETCH(QString, action);
 			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view));
+			QTextBrowser *const top = findSplitOutputBrowsers(view).first;
+			QVERIFY(top);
+			QWidget *const viewport = top->viewport();
+			const auto release = qScopeGuard([viewport] { QTest::mouseRelease(viewport, Qt::LeftButton); });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			moveSelectionScrollPointer(*top, viewport->mapToGlobal(QPoint(20, -60)));
+			QVERIFY(view.m_selectionAutoScrollTimer->isActive());
+			const QString selected = view.outputSelectionText();
+			QVERIFY(!selected.isEmpty());
+			if (action == QStringLiteral("inside"))
+				moveSelectionScrollPointer(*top, viewport->mapToGlobal(viewport->rect().center()));
+			else if (action == QStringLiteral("release"))
+				QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier, QPoint(20, -60));
+			else if (action == QStringLiteral("lost-button"))
+			{
+				constexpr QPoint local(20, -60);
+				QMouseEvent lost(QEvent::MouseMove, QPointF(local), QPointF(viewport->mapToGlobal(local)),
+				                 Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+				QCoreApplication::sendEvent(viewport, &lost);
+			}
+			else if (action == QStringLiteral("clear"))
+				view.clearNativeOutputSelection();
+			else if (action == QStringLiteral("hide"))
+				view.hide();
+			else if (action == QStringLiteral("unexposed"))
+				view.windowHandle()->hide();
+			else if (action == QStringLiteral("minimize"))
+				view.showMinimized();
+			else
+				view.setOutputPresentationExposed(false);
+			const int before = view.outputScrollPosition();
+			view.nativeOutputSelectionAutoScrollTick();
+			QCOMPARE(view.outputScrollPosition(), before);
+			QVERIFY(!view.m_selectionAutoScrollTimer->isActive());
+			QCOMPARE(view.m_nativeOutputSelection.dragging, action == QStringLiteral("inside"));
+			if (action != QStringLiteral("clear") && action != QStringLiteral("inside"))
+				QCOMPARE(view.outputSelectionText(), selected);
+			view.showNormal();
+			view.setOutputPresentationExposed(true);
+			const int restored = view.outputScrollPosition();
+			view.nativeOutputSelectionAutoScrollTick();
+			QCOMPARE(view.outputScrollPosition(), restored);
+			QVERIFY(!view.m_selectionAutoScrollTimer->isActive());
+		}
+
+		/**
+		 * @brief Keeps live-pane drags from starting primary-pane auto-scroll.
+		 */
+		void nativeSelectionAutoScrollIgnoresLivePaneOrigin()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view));
+			const auto [top, live] = findSplitOutputBrowsers(view);
+			QVERIFY(top);
+			QVERIFY(live);
+			QVERIFY(view.isScrollbackSplitActive());
+			QWidget *const viewport = live->viewport();
+			const auto release = qScopeGuard([viewport] { QTest::mouseRelease(viewport, Qt::LeftButton); });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			moveSelectionScrollPointer(*live, top->viewport()->mapToGlobal(QPoint(20, -80)));
+			const int before = view.outputScrollPosition();
+			view.nativeOutputSelectionAutoScrollTick();
+			QCOMPARE(view.outputScrollPosition(), before);
+			QVERIFY(!view.m_selectionAutoScrollTimer->isActive());
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+			QVERIFY(view.hasOutputSelection());
+			QCOMPARE(live->verticalScrollBar()->value(), live->verticalScrollBar()->maximum());
+		}
+
+		/**
+		 * @brief Preserves the backing source anchor when incoming output trims older lines during a drag.
+		 */
+		void nativeSelectionAutoScrollRemapsIncomingHeadTrim()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("300"));
+			WorldView view;
+			QVERIFY(prepareSelectionScrollView(view));
+			QTextBrowser *const top = findSplitOutputBrowsers(view).first;
+			QVERIFY(top);
+			QWidget *const viewport = top->viewport();
+			const auto release = qScopeGuard([viewport] { QTest::mouseRelease(viewport, Qt::LeftButton); });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			moveSelectionScrollPointer(*top, viewport->mapToGlobal(QPoint(20, -30)));
+			const qint64 anchorLine = view.m_nativeOutputSelection.anchorIdentity.firstRuntimeLineNumber;
+			QVERIFY(anchorLine > 0);
+			const int anchorColumn = view.m_nativeOutputSelection.anchor.column;
+			for (int i = 0; i < 10; ++i)
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("incoming-scroll-%1").arg(i),
+				                                            true);
+			view.nativeOutputSelectionAutoScrollTick();
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+			QVERIFY(view.hasOutputSelection());
+			QCOMPARE(view.m_nativeOutputSelection.anchorIdentity.firstRuntimeLineNumber, anchorLine);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.column, anchorColumn);
+			QCOMPARE(runtimeForTest()->lines().size(), 300);
+			QTextBrowser *const live = findSplitOutputBrowsers(view).second;
+			QVERIFY(live);
+			QCOMPARE(live->verticalScrollBar()->value(), live->verticalScrollBar()->maximum());
+		}
+
+		/**
+		 * @brief Checks the connected timer continues scrolling when no more pointer events arrive.
+		 */
+		void nativeSelectionAutoScrollTimerContinuesWithoutMouseMovement()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view, true));
+			QTextBrowser *const top = findSplitOutputBrowsers(view).first;
+			QVERIFY(top);
+			QWidget *const viewport = top->viewport();
+			const auto   release = qScopeGuard([viewport] { QTest::mouseRelease(viewport, Qt::LeftButton); });
+			const QPoint outside = viewport->mapToGlobal(QPoint(20, -30));
+			QCursor::setPos(outside);
+			QCoreApplication::processEvents();
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			moveSelectionScrollPointer(*top, outside);
+			const int before = view.outputScrollPosition();
+			QTRY_VERIFY(view.outputScrollPosition() < before);
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+		}
+
+		/**
+		 * @brief Covers selection confinement for drags originating in either split pane.
+		 */
+		void splitSelectionDragStaysInOriginatingPane_data()
+		{
+			QTest::addColumn<bool>("liveOrigin");
+			QTest::newRow("upper-origin") << false;
+			QTest::newRow("live-origin") << true;
+		}
+
+		/**
+		 * @brief Checks source-pane endpoints on movement, auto-scroll ticks, release and copying.
+		 */
+		void splitSelectionDragStaysInOriginatingPane()
+		{
+			QFETCH(bool, liveOrigin);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view));
+			const auto [top, live] = findSplitOutputBrowsers(view);
+			QVERIFY(top);
+			QVERIFY(live);
+			QTextBrowser *const source          = liveOrigin ? live : top;
+			QTextBrowser *const other           = liveOrigin ? top : live;
+			QWidget *const      viewport        = source->viewport();
+			const QPoint        originalPointer = QCursor::pos();
+			const auto          release         = qScopeGuard(
+			    [viewport, originalPointer]
+			    {
+				    QTest::mouseRelease(viewport, Qt::LeftButton);
+				    QCursor::setPos(originalPointer);
+			    });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			const auto   anchor = view.m_nativeOutputSelection.anchor;
+			const QPoint destination =
+			    other->viewport()->mapToGlobal(QPoint(20, other->viewport()->height() / 2));
+			moveSelectionScrollPointer(*source, destination);
+			QCOMPARE(view.m_nativeOutputSelection.sourceView, liveOrigin ? view.m_liveOutput : view.m_output);
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+			WorldView::NativeOutputPosition expected;
+			const int edge = liveOrigin ? viewport->rect().top() : viewport->rect().bottom();
+			QVERIFY(view.nativeOutputHitTest(view.m_nativeOutputSelection.sourceView, QPoint(20, edge),
+			                                 expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QCOMPARE(view.m_selectionAutoScrollTimer->isActive(), !liveOrigin);
+			const int scrollBefore = view.outputScrollPosition();
+			view.nativeOutputSelectionAutoScrollTick();
+			if (liveOrigin)
+				QCOMPARE(view.outputScrollPosition(), scrollBefore);
+			else
+				QVERIFY(view.outputScrollPosition() > scrollBefore);
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.nativeOutputHitTest(view.m_nativeOutputSelection.sourceView, QPoint(20, edge),
+			                                 expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.line, anchor.line);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.column, anchor.column);
+			QCOMPARE(live->verticalScrollBar()->value(), live->verticalScrollBar()->maximum());
+
+			const QPoint releaseGlobal =
+			    other->viewport()->mapToGlobal(QPoint(90, other->viewport()->height() / 2));
+			const QPoint releaseLocal = viewport->mapFromGlobal(releaseGlobal);
+			QMouseEvent  releaseEvent(QEvent::MouseButtonRelease, QPointF(releaseLocal),
+			                          QPointF(releaseGlobal), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(viewport, &releaseEvent);
+			QVERIFY(view.nativeOutputHitTest(view.m_nativeOutputSelection.sourceView, QPoint(90, edge),
+			                                 expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QVERIFY(!view.m_nativeOutputSelection.dragging);
+			QVERIFY(!view.m_selectionAutoScrollTimer->isActive());
+			QVERIFY(view.hasOutputSelection());
+			const QString                   selected = view.outputSelectionText();
+			const auto                     &lines    = view.nativeOutputRenderLines();
+			WorldView::NativeOutputPosition otherPosition;
+			QVERIFY(view.nativeOutputHitTest(liveOrigin ? view.m_output : view.m_liveOutput,
+			                                 other->viewport()->rect().center(), otherPosition));
+			QVERIFY(!selected.contains(lines.at(otherPosition.line).text));
+			view.copySelection();
+			QCOMPARE(QGuiApplication::clipboard()->text(), selected);
+		}
+
+		/**
+		 * @brief Covers highlight ownership in both split panes, including shared selected buffer ranges.
+		 */
+		void splitSelectionHighlightStaysInOriginatingPane_data()
+		{
+			QTest::addColumn<bool>("liveOrigin");
+			QTest::newRow("upper-origin") << false;
+			QTest::newRow("live-origin") << true;
+		}
+
+		/**
+		 * @brief Confirms selected text changes pixels only in the pane that owns the selection.
+		 */
+		void splitSelectionHighlightStaysInOriginatingPane()
+		{
+			QFETCH(bool, liveOrigin);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view));
+			QWidget *const canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			const auto &lines    = view.nativeOutputRenderLines();
+			const int   lastLine = boundedSizeToInt(lines.size()) - 1;
+			view.setNativeOutputSelection(liveOrigin ? view.m_liveOutput : view.m_output, {0, 0},
+			                              {lastLine, boundedSizeToInt(lines.at(lastLine).text.size())},
+			                              false);
+			/**
+			 * @brief Paints current output synchronously without processing pending timer events.
+			 * @return Rendered output image.
+			 */
+			const auto render = [&view, canvas]
+			{
+				QImage image(canvas->size(), QImage::Format_ARGB32_Premultiplied);
+				image.fill(Qt::transparent);
+				{
+					QPainter painter(&image);
+					view.paintNativeOutputCanvas(&painter, QRegion(image.rect()));
+				}
+				return image;
+			};
+			const QImage selected = render();
+			view.clearNativeOutputSelection();
+			const QImage unselected = render();
+			const QRect  sourceRect =
+			    view.nativeOutputPaneRect(liveOrigin ? view.m_liveOutput : view.m_output);
+			const QRect otherRect = view.nativeOutputPaneRect(liveOrigin ? view.m_output : view.m_liveOutput);
+			QVERIFY(!sourceRect.isEmpty());
+			QVERIFY(!otherRect.isEmpty());
+			QVERIFY(selected.copy(sourceRect) != unselected.copy(sourceRect));
+			QCOMPARE(selected.copy(otherRect), unselected.copy(otherRect));
+		}
+
+		/**
+		 * @brief Preserves a live-pane drag when collapse transfers its selection to the expanded primary pane.
+		 */
+		void nativeSelectionDragFollowsLivePaneCollapse()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareSelectionScrollView(view));
+			const auto [top, live] = findSplitOutputBrowsers(view);
+			QVERIFY(top);
+			QVERIFY(live);
+			QWidget *const viewport = live->viewport();
+			const auto release = qScopeGuard([viewport] { QTest::mouseRelease(viewport, Qt::LeftButton); });
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+			moveSelectionScrollPointer(*live, viewport->mapToGlobal(QPoint(10, 10)));
+			const auto anchor = view.m_nativeOutputSelection.anchor;
+			view.scrollOutputToEnd();
+			QVERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(view.m_nativeOutputSelection.sourceView, view.m_output);
+			QVERIFY(view.m_nativeOutputSelection.dragging);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.line, anchor.line);
+			QCOMPARE(view.m_nativeOutputSelection.anchor.column, anchor.column);
+			moveSelectionScrollPointer(*top, top->viewport()->mapToGlobal(QPoint(20, 20)));
+			WorldView::NativeOutputPosition expected;
+			QVERIFY(view.nativeOutputHitTest(view.m_output, QPoint(20, 20), expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QTest::mouseRelease(top->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(90, 30));
+			QVERIFY(view.nativeOutputHitTest(view.m_output, QPoint(90, 30), expected));
+			QCOMPARE(view.m_nativeOutputSelection.cursor.line, expected.line);
+			QCOMPARE(view.m_nativeOutputSelection.cursor.column, expected.column);
+			QVERIFY(!view.m_nativeOutputSelection.dragging);
+			QVERIFY(view.hasOutputSelection());
 		}
 
 		void selectionTracksAcrossHeadTrimWhileVisibleThenPersistsOutOfViewport()
@@ -9842,7 +10222,7 @@ end
 			    makeRuntimeLine(QStringLiteral("C"), WorldRuntime::LineNote, false, 105),
 			    makeRuntimeLine(QString(), WorldRuntime::LineNote, true, 106),
 			    makeRuntimeLine(QStringLiteral("<1000aa 2000bb 3000cc>"), WorldRuntime::LineOutput, true,
-			                    107)};
+				                107)};
 			runtimeForTest()->replaceOutputLines(lines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
@@ -9993,9 +10373,9 @@ end
 			QVector<WorldRuntime::LineEntry> lines{
 			    makeRuntimeLine(QStringLiteral("room description"), WorldRuntime::LineOutput, true, 100),
 			    makeRuntimeLine(QStringLiteral("[fixture: alpha / beta text]"), WorldRuntime::LineNote, true,
-			                    300),
+				                300),
 			    makeRuntimeLine(QStringLiteral("<1000aa 2000bb 3000cc>"), WorldRuntime::LineOutput, true,
-			                    200)};
+				                200)};
 			runtimeForTest()->replaceOutputLines(lines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
@@ -10030,13 +10410,13 @@ end
 			runtimeOutputForTest(view).appendNoteTextStyled(
 			    QStringLiteral("colour-tell "),
 			    {makeFullSpan(QStringLiteral("colour-tell "), QColor(QStringLiteral("#00ff00")),
-			                  QColor(QStringLiteral("#000000")))},
+				              QColor(QStringLiteral("#000000")))},
 			    false);
 			appendRuntimeOutputText(view, QStringLiteral("note alpha beta gamma"), {}, true, true);
 			appendRuntimeOutputText(
 			    view, QStringLiteral("colour note delta epsilon"),
 			    {makeFullSpan(QStringLiteral("colour note delta epsilon"), QColor(QStringLiteral("#ff0000")),
-			                  QColor(QStringLiteral("#000000")))},
+				              QColor(QStringLiteral("#000000")))},
 			    true, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -10183,10 +10563,10 @@ end
 			QString                          plainText;
 			QVector<WorldRuntime::StyleSpan> spans = spansFromStyledChunks(
 			    qmudParseAnsiSgrChunks(bytes, streamState, QString(), QString(), colorResolver, colorResolver,
-			                           colorResolver, [](QByteArrayView data)
-			                           { return QString::fromUtf8(data); }, styleState,
-			                           {WorldRuntime::ActionNone, WorldRuntime::ActionSend,
-			                            WorldRuntime::ActionPrompt, WorldRuntime::ActionHyperlink}),
+				                       colorResolver, [](QByteArrayView data)
+				                       { return QString::fromUtf8(data); }, styleState,
+				                       {WorldRuntime::ActionNone, WorldRuntime::ActionSend,
+				                        WorldRuntime::ActionPrompt, WorldRuntime::ActionHyperlink}),
 			    plainText);
 
 			QCOMPARE(plainText, QStringLiteral("open portal"));
@@ -10700,7 +11080,7 @@ end
 
 			const QString multilineNoTrailingBlank =
 			    QStringLiteral("The automated test verifies command input auto-resize behavior with wrapped "
-			                   "multiline text content\n and a continuation line that starts with a space.");
+				               "multiline text content\n and a continuation line that starts with a space.");
 
 			QGuiApplication::clipboard()->setText(multilineNoTrailingBlank);
 			QTest::keySequence(input, QKeySequence::Paste);
@@ -10773,7 +11153,7 @@ end
 
 			const QString multilineNoTrailingBlank =
 			    QStringLiteral("The automated test verifies command input auto-resize behavior with wrapped "
-			                   "multiline text content\n and a continuation line that starts with a space.");
+				               "multiline text content\n and a continuation line that starts with a space.");
 
 			QGuiApplication::clipboard()->setText(multilineNoTrailingBlank);
 			for (int iteration = 0; iteration < 20; ++iteration)
@@ -12823,7 +13203,7 @@ end
 				const auto &spans = view.m_nativeRenderModel->m_nativeRenderLineCache.at(renderIndex).spans;
 				const auto  actionSpan =
 				    std::ranges::find_if(spans, [](const WorldRuntime::StyleSpan &span)
-				                         { return span.actionType == WorldRuntime::ActionSend; });
+					                     { return span.actionType == WorldRuntime::ActionSend; });
 				QVERIFY(actionSpan != spans.cend());
 				QCOMPARE(actionSpan->action, expectedAction);
 			}
@@ -15542,13 +15922,13 @@ end
 				    {
 					    const auto *messageBox = qobject_cast<const QMessageBox *>(dialog);
 					    return messageBox &&
-					           messageBox->text().contains(QStringLiteral("Replace your typing of"));
+						       messageBox->text().contains(QStringLiteral("Replace your typing of"));
 				    },
 				    [confirmationAcceptCount](const QDialog *dialog)
 				    {
 					    if (auto *const messageBox =
-					            qobject_cast<QMessageBox *>(const_cast<QDialog *>(dialog));
-					        messageBox)
+						        qobject_cast<QMessageBox *>(const_cast<QDialog *>(dialog));
+						    messageBox)
 					    {
 						    if (QAbstractButton *button = messageBox->button(QMessageBox::Ok))
 						    {
@@ -16645,7 +17025,7 @@ end
 				    const QPointF local(browser->viewport()->rect().center());
 				    const QPointF global(browser->viewport()->mapToGlobal(local.toPoint()));
 				    QWheelEvent   wheel(local, global, QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
-				                        Qt::NoScrollPhase, false);
+					                    Qt::NoScrollPhase, false);
 				    QCoreApplication::sendEvent(browser->viewport(), &wheel);
 				    QVERIFY(view.isScrollbackSplitActive());
 				    QVERIFY(view.m_nativePrimaryScrollState.maximum > 0);
@@ -16736,7 +17116,7 @@ end
 				QImage     image(140, 100,
 				                 surface == 11
 				                     ? QImage::Format_RGBA64_Premultiplied
-				                     : (alpha ? QImage::Format_ARGB32_Premultiplied : QImage::Format_RGB32));
+									 : (alpha ? QImage::Format_ARGB32_Premultiplied : QImage::Format_RGB32));
 				image.fill(QColor(0, 200, 40, surface == 6 ? 0 : (surface == 5 || surface == 8 ? 128 : 255)));
 				if (surface == 11)
 					image.fill(QColor::fromRgba64(QRgba64::fromRgba64(0, 50000, 5000, 65534)));
@@ -17123,7 +17503,7 @@ end
 			view.setRuntime(nullptr);
 		}
 
-		/** @brief Confirms hidden surfaces produce no repaint and source-alpha classification preserves colour. */
+		/** @brief Confirms hidden surfaces produce no repaint and source-alpha classification preserves color. */
 		void nativeOutputCompositionOccludesHiddenSurfaces()
 		{
 			WorldRuntime runtime;
@@ -17179,7 +17559,7 @@ end
 			QVERIFY(!nativeCanvas->size().isEmpty());
 			MiniWindow &window =
 			    appendTestMiniWindow(QStringLiteral("transparent-cache"), QRect(10, 10, 32, 24),
-			                         kMiniWindowTransparent, QColor(Qt::magenta));
+				                     kMiniWindowTransparent, QColor(Qt::magenta));
 			QCOMPARE(runtimeForTest()->windowSetPixel(QStringLiteral("transparent-cache"), 1, 1,
 			                                          MiniWindowUtils::colorToRef(QColor(Qt::green))),
 			         eOK);
@@ -17841,7 +18221,7 @@ end
 			    [runtime]
 			    {
 				    static_cast<void>(runtime->windowPosition(QStringLiteral("current-binding-candidate"), 60,
-				                                              245, 0, kMiniWindowAbsoluteLocation));
+					                                          245, 0, kMiniWindowAbsoluteLocation));
 			    },
 			    Qt::QueuedConnection);
 
