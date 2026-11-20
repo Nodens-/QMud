@@ -60,7 +60,9 @@
 #include <QStyleHints>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QTextBlock>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <QTimeZone>
 #include <QTimer>
 #include <QToolTip>
@@ -1275,6 +1277,47 @@ class tst_WorldView_Basic : public QObject
 			QMouseEvent move(QEvent::MouseMove, QPointF(local), QPointF(globalPos), Qt::NoButton,
 			                 Qt::LeftButton, Qt::NoModifier);
 			QCoreApplication::sendEvent(viewport, &move);
+		}
+
+		/**
+		 * @brief Prepares focused command input with deterministic history and wrapping options.
+		 * @param view View receiving the input events.
+		 * @param partialRecall Whether plain arrows recall matching prefixes.
+		 * @return True when the window is exposed and input has focus.
+		 */
+		[[nodiscard]] static bool prepareHistoryArrowView(WorldView &view, const bool partialRecall)
+		{
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"),
+			                      partialRecall ? QStringLiteral("1") : QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("arrow_keys_wrap"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("save_deleted_command"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			view.resize(520, 480);
+			setTestRuntime(view, runtimeForTest());
+			view.show();
+			if (!QTest::qWaitForWindowExposed(&view) || view.setCommandWindowHeight(160) != eOK)
+				return false;
+			view.inputEditor()->setFocus();
+			QCoreApplication::processEvents();
+			return view.inputEditor()->hasFocus();
+		}
+
+		/**
+		 * @brief Produces synthetic single-line, newline-separated or visually wrapped command text.
+		 * @param form Requested command layout.
+		 * @return Synthetic command text.
+		 */
+		[[nodiscard]] static QString historyArrowText(const QString &form)
+		{
+			if (form == QStringLiteral("newline"))
+				return QStringLiteral("entry first\nentry middle\nentry last");
+			if (form == QStringLiteral("wrapped"))
+				return QStringLiteral("entry ") + QStringLiteral("segment ").repeated(42);
+			return QStringLiteral("entry ");
 		}
 
 		static QPoint findHyperlinkPoint(WorldView &view, QTextBrowser &browser, const QString &href)
@@ -7598,6 +7641,332 @@ end
 			resetTestState();
 		}
 
+		/**
+		 * @brief Covers both recall directions at both document ends and existing single-line interior behavior.
+		 */
+		void historyArrowsRecallAtInputBoundaries_data()
+		{
+			QTest::addColumn<QString>("form");
+			QTest::addColumn<bool>("partialRecall");
+			QTest::addColumn<int>("position");
+			QTest::addColumn<int>("key");
+			for (const QString &form :
+			     {QStringLiteral("single"), QStringLiteral("newline"), QStringLiteral("wrapped")})
+				for (const bool partial : {false, true})
+					for (const int position : {0, -1, 3})
+					{
+						if (position == 3 && form != QStringLiteral("single"))
+							continue;
+						for (const int key : {Qt::Key_Up, Qt::Key_Down})
+							QTest::addRow("%s-%s-%d-%s", qPrintable(form), partial ? "partial" : "full",
+							              position, key == Qt::Key_Up ? "up" : "down")
+							    << form << partial << position << key;
+					}
+		}
+
+		/**
+		 * @brief Checks either arrow can recall from either end without changing recall matching or caret placement.
+		 */
+		void historyArrowsRecallAtInputBoundaries()
+		{
+			QFETCH(QString, form);
+			QFETCH(bool, partialRecall);
+			QFETCH(int, position);
+			QFETCH(int, key);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareHistoryArrowView(view, partialRecall));
+			const QString command = historyArrowText(form);
+			const QString older   = command + QStringLiteral("older");
+			const QString newest  = command + QStringLiteral("newest");
+			view.addToHistoryForced(older);
+			view.addToHistoryForced(newest);
+			view.setInputText(command, true);
+			QPlainTextEdit *const input = view.inputEditor();
+			QCoreApplication::processEvents();
+			if (form == QStringLiteral("wrapped"))
+			{
+				QCOMPARE(input->document()->blockCount(), 1);
+				QVERIFY(input->document()->firstBlock().layout()->lineCount() > 1);
+			}
+			QTextCursor cursor = input->textCursor();
+			cursor.setPosition(position < 0 ? boundedSizeToInt(command.size()) : position);
+			input->setTextCursor(cursor);
+			QTest::keyClick(input, static_cast<Qt::Key>(key));
+			QCOMPARE(view.inputText(), partialRecall || key == Qt::Key_Up ? newest : QString());
+			QVERIFY(input->textCursor().atEnd());
+			if (partialRecall)
+				QCOMPARE(view.m_partialCommand, command);
+		}
+
+		/**
+		 * @brief Covers interior movement in typed and recalled multiline and wrapped commands.
+		 */
+		void historyArrowsNavigateInputInterior_data()
+		{
+			QTest::addColumn<QString>("form");
+			QTest::addColumn<bool>("partialRecall");
+			QTest::addColumn<bool>("recalled");
+			QTest::addColumn<bool>("edgeRow");
+			QTest::addColumn<int>("key");
+			for (const QString &form : {QStringLiteral("newline"), QStringLiteral("wrapped")})
+				for (const bool partial : {false, true})
+					for (const bool recalled : {false, true})
+						for (const bool edgeRow : {false, true})
+							for (const int key : {Qt::Key_Up, Qt::Key_Down})
+								QTest::addRow("%s-%s-%s-%s-%s", qPrintable(form),
+								              partial ? "partial" : "full", recalled ? "recalled" : "typed",
+								              edgeRow ? "edge-row" : "middle-row",
+								              key == Qt::Key_Up ? "up" : "down")
+								    << form << partial << recalled << edgeRow << key;
+		}
+
+		/**
+		 * @brief Checks vertical navigation and edge-row fallback preserve text and all recall traversal state.
+		 */
+		void historyArrowsNavigateInputInterior()
+		{
+			QFETCH(QString, form);
+			QFETCH(bool, partialRecall);
+			QFETCH(bool, recalled);
+			QFETCH(bool, edgeRow);
+			QFETCH(int, key);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareHistoryArrowView(view, partialRecall));
+			const QString command = historyArrowText(form);
+			view.addToHistoryForced(QStringLiteral("entry older"));
+			view.addToHistoryForced(command);
+			QPlainTextEdit *const input = view.inputEditor();
+			if (recalled)
+			{
+				if (partialRecall)
+				{
+					view.setInputText(QStringLiteral("entry"), true);
+					QTest::keyClick(input, Qt::Key_Up);
+				}
+				else
+					view.recallPreviousCommand();
+			}
+			else
+				view.setInputText(command, true);
+			QCOMPARE(view.inputText(), command);
+			QCoreApplication::processEvents();
+			if (form == QStringLiteral("wrapped"))
+			{
+				QCOMPARE(input->document()->blockCount(), 1);
+				QVERIFY(input->document()->firstBlock().layout()->lineCount() > 2);
+			}
+			QTextCursor cursor(input->document());
+			if (edgeRow && key == Qt::Key_Down)
+			{
+				cursor.movePosition(QTextCursor::End);
+				cursor.movePosition(QTextCursor::Left, QTextCursor::MoveAnchor, 3);
+			}
+			else
+			{
+				if (!edgeRow)
+					QVERIFY(cursor.movePosition(QTextCursor::Down));
+				cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, 3);
+			}
+			QVERIFY(!cursor.atStart() && !cursor.atEnd());
+			input->setTextCursor(cursor);
+			QTextCursor expected = cursor;
+			if (edgeRow)
+				expected.movePosition(key == Qt::Key_Up ? QTextCursor::Start : QTextCursor::End);
+			else
+				QVERIFY(expected.movePosition(key == Qt::Key_Up ? QTextCursor::Up : QTextCursor::Down));
+			const int     historyIndex = view.m_historyIndex;
+			const int     partialIndex = view.m_partialIndex;
+			const QString prefix       = view.m_partialCommand;
+			const bool    inputChanged = view.m_inputChanged;
+			QSignalSpy    changes(input, &QPlainTextEdit::textChanged);
+			QTest::keyClick(input, static_cast<Qt::Key>(key));
+			QCOMPARE(view.inputText(), command);
+			QCOMPARE(input->textCursor().position(), expected.position());
+			QCOMPARE(view.m_historyIndex, historyIndex);
+			QCOMPARE(view.m_partialIndex, partialIndex);
+			QCOMPARE(view.m_partialCommand, prefix);
+			QCOMPARE(view.m_inputChanged, inputChanged);
+			QCOMPARE(changes.count(), 0);
+		}
+
+		/**
+		 * @brief Covers recall continuation after keyboard and mouse navigation within recalled input.
+		 */
+		void historyRecallContinuesAfterCaretNavigation_data()
+		{
+			QTest::addColumn<QString>("form");
+			QTest::addColumn<bool>("partialRecall");
+			QTest::addColumn<bool>("mouse");
+			for (const QString &form : {QStringLiteral("newline"), QStringLiteral("wrapped")})
+				for (const bool partial : {false, true})
+					for (const bool mouse : {false, true})
+						QTest::addRow("%s-%s-%s", qPrintable(form), partial ? "partial" : "full",
+						              mouse ? "mouse" : "keyboard")
+						    << form << partial << mouse;
+		}
+
+		/**
+		 * @brief Preserves full-history and prefix traversal through caret movement, direction reversal and exhaustion.
+		 */
+		void historyRecallContinuesAfterCaretNavigation()
+		{
+			QFETCH(QString, form);
+			QFETCH(bool, partialRecall);
+			QFETCH(bool, mouse);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareHistoryArrowView(view, partialRecall));
+			const QString suffix    = historyArrowText(form).mid(5);
+			const QString older     = QStringLiteral("entry older") + suffix;
+			const QString middle    = QStringLiteral("entry middle") + suffix;
+			const QString newest    = QStringLiteral("entry newest") + suffix;
+			const QString unrelated = QStringLiteral("unrelated command");
+			for (const QString &command : {older, unrelated, middle, newest})
+				view.addToHistoryForced(command);
+			QPlainTextEdit *const input = view.inputEditor();
+			view.setInputText(QStringLiteral("entry"), true);
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), newest);
+			QVERIFY(input->textCursor().atEnd());
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), middle);
+			QVERIFY(input->textCursor().atEnd());
+			QCoreApplication::processEvents();
+			const int     historyIndex = view.m_historyIndex;
+			const int     partialIndex = view.m_partialIndex;
+			const QString prefix       = view.m_partialCommand;
+			if (mouse)
+			{
+				QTextCursor target = input->textCursor();
+				target.movePosition(QTextCursor::Left, QTextCursor::MoveAnchor, 3);
+				const QPoint point = input->cursorRect(target).center();
+				QVERIFY(input->viewport()->rect().contains(point));
+				QTest::mouseClick(input->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+			}
+			else
+				QTest::keyClick(input, Qt::Key_Left);
+			QVERIFY(!input->textCursor().atStart() && !input->textCursor().atEnd());
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), middle);
+			QCOMPARE(view.m_historyIndex, historyIndex);
+			QCOMPARE(view.m_partialIndex, partialIndex);
+			QCOMPARE(view.m_partialCommand, prefix);
+			QTextCursor cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), partialRecall ? older : unrelated);
+			QVERIFY(input->textCursor().atEnd());
+			cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::Start);
+			input->setTextCursor(cursor);
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(view.inputText(), middle);
+			QVERIFY(input->textCursor().atEnd());
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(view.inputText(), newest);
+			if (partialRecall)
+				QCOMPARE(view.m_partialCommand, QStringLiteral("entry"));
+			QTest::keyClick(input, Qt::Key_Down);
+			QVERIFY(view.inputText().isEmpty());
+			QCOMPARE(view.m_historyIndex, -1);
+			QCOMPARE(view.m_partialIndex, -1);
+			QVERIFY(view.m_partialCommand.isEmpty());
+		}
+
+		/**
+		 * @brief Checks forwarded output-pane arrows use the same input caret and recall rules.
+		 */
+		void forwardedHistoryArrowsNavigateMultilineInput()
+		{
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareHistoryArrowView(view, false));
+			view.setAllTypingToCommandWindow(true);
+			view.addToHistoryForced(QStringLiteral("older command"));
+			view.addToHistoryForced(historyArrowText(QStringLiteral("newline")));
+			QPlainTextEdit *const input = view.inputEditor();
+			QTest::keyClick(input, Qt::Key_Up);
+			const QString recalled = view.inputText();
+			QTextCursor   cursor(input->document());
+			QVERIFY(cursor.movePosition(QTextCursor::Down));
+			cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, 3);
+			input->setTextCursor(cursor);
+			QTextBrowser *const output = findVisibleOutputBrowser(view);
+			QVERIFY(output);
+			output->setFocus();
+			QTest::keyClick(output->viewport(), Qt::Key_Up);
+			QCOMPARE(view.inputText(), recalled);
+			QCOMPARE(input->textCursor().blockNumber(), 0);
+			cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+			output->setFocus();
+			QTest::keyClick(output->viewport(), Qt::Key_Up);
+			QCOMPARE(view.inputText(), QStringLiteral("older command"));
+		}
+
+		/**
+		 * @brief Covers cancellation of replacement after multiline caret movement reaches a document end.
+		 */
+		void historyArrowReplacementCancellation_data()
+		{
+			QTest::addColumn<bool>("partialRecall");
+			QTest::newRow("full") << false;
+			QTest::newRow("partial") << true;
+		}
+
+		/**
+		 * @brief Leaves typing intact and resets traversal when replacement is canceled at the input boundary.
+		 */
+		void historyArrowReplacementCancellation()
+		{
+			QFETCH(bool, partialRecall);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareHistoryArrowView(view, partialRecall));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("1"));
+			view.applyRuntimeSettings();
+			const QString command = historyArrowText(QStringLiteral("newline"));
+			view.addToHistoryForced(command + QStringLiteral(" recalled"));
+			view.setInputText(command, true);
+			QPlainTextEdit *const input = view.inputEditor();
+			QTextCursor           cursor(input->document());
+			cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, 3);
+			input->setTextCursor(cursor);
+			const auto confirmations = std::make_shared<int>(0);
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    {
+				    const auto *messageBox = qobject_cast<const QMessageBox *>(dialog);
+				    return messageBox &&
+					       messageBox->text().contains(QStringLiteral("Replace your typing of"));
+			    },
+			    [confirmations](const QDialog *dialog)
+			    {
+				    auto *messageBox = qobject_cast<QMessageBox *>(const_cast<QDialog *>(dialog));
+				    ++*confirmations;
+				    messageBox->button(QMessageBox::Cancel)->click();
+			    });
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(*confirmations, 0);
+			QCOMPARE(view.inputText(), command);
+			QVERIFY(input->textCursor().atStart());
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(*confirmations, 1);
+			QCOMPARE(view.inputText(), command);
+			QCOMPARE(view.m_historyIndex, -1);
+			QCOMPARE(view.m_partialIndex, -1);
+			QVERIFY(view.m_partialCommand.isEmpty());
+		}
+
 		void commandHistoryShortcutsOverrideConflictingShortcutsWithInputFocus()
 		{
 			resetTestState();
@@ -10810,6 +11179,79 @@ end
 			QCOMPARE(input->wordWrapMode(), QTextOption::WrapAtWordBoundaryOrAnywhere);
 
 			resetTestState();
+		}
+
+		/**
+		 * @brief Covers capped sizing and caret navigation for explicit and wrapped command rows.
+		 */
+		void autoResizeCommandWindowBoundedCounting_data()
+		{
+			QTest::addColumn<QString>("command");
+			QTest::addColumn<int>("expectedLines");
+			QTest::addColumn<bool>("partialRecall");
+			for (const bool partial : {false, true})
+			{
+				const char *recall = partial ? "partial" : "full";
+				for (const int lines : {2, 3, 4, 1000})
+					QTest::addRow("%s-explicit-%d", recall, lines)
+					    << QStringLiteral("entry\n").repeated(lines - 1) + QStringLiteral("last")
+					    << qMin(lines, 3) << partial;
+				QTest::addRow("%s-wrapped-single", recall)
+				    << QStringLiteral("segment ").repeated(100) << 3 << partial;
+				QTest::addRow("%s-wrapped-multiple", recall)
+				    << QStringLiteral("segment ").repeated(100) + QStringLiteral("\nlast") << 3 << partial;
+				QTest::addRow("%s-trailing-blank", recall) << QStringLiteral("entry\n\n\n") << 3 << partial;
+			}
+		}
+
+		/**
+		 * @brief Preserves capped height, recall state and caret visibility through queued sizing updates.
+		 */
+		void autoResizeCommandWindowBoundedCounting()
+		{
+			QFETCH(QString, command);
+			QFETCH(int, expectedLines);
+			QFETCH(bool, partialRecall);
+			resetTestState();
+			const ScopedTestStateReset cleanup;
+			WorldView                  view;
+			QVERIFY(prepareHistoryArrowView(view, partialRecall));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("3"));
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+			QPlainTextEdit *const input        = view.inputEditor();
+			const int             singleHeight = input->height();
+			const int             expectedHeight =
+			    singleHeight + (expectedLines - 1) * input->fontMetrics().lineSpacing();
+			view.setInputText(command, true);
+			QTRY_COMPARE(input->height(), expectedHeight);
+			QTRY_VERIFY(input->viewport()->rect().intersects(input->cursorRect()));
+			const int   revision     = input->document()->revision();
+			const int   historyIndex = view.m_historyIndex;
+			const int   partialIndex = view.m_partialIndex;
+			QTextCursor cursor(input->document());
+			cursor.setPosition(1);
+			input->setTextCursor(cursor);
+			QTextCursor expected = cursor;
+			QVERIFY(expected.movePosition(QTextCursor::Down));
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(input->textCursor().position(), expected.position());
+			QCoreApplication::processEvents();
+			QCOMPARE(input->height(), expectedHeight);
+			QCOMPARE(input->document()->revision(), revision);
+			QCOMPARE(view.m_historyIndex, historyIndex);
+			QCOMPARE(view.m_partialIndex, partialIndex);
+			QCOMPARE(view.inputText(), command);
+			QTRY_VERIFY(input->viewport()->rect().intersects(input->cursorRect()));
+			QTest::keySequence(input, QKeySequence::MoveToEndOfDocument);
+			QTRY_VERIFY(input->textCursor().atEnd());
+			QTRY_VERIFY(input->viewport()->rect().intersects(input->cursorRect()));
+			QCOMPARE(input->height(), expectedHeight);
+			view.setInputText(QStringLiteral("short"), true);
+			QTRY_COMPARE(input->height(), singleHeight);
+			QCOMPARE(input->verticalScrollBar()->value(), input->verticalScrollBar()->minimum());
 		}
 
 		void autoResizeCommandWindowUsesWrappedVisualLines()

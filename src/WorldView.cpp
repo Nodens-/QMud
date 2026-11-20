@@ -18453,7 +18453,7 @@ void WorldView::updateInputHeight() const
 	    m_wrapInput == m_autoResizeLastWrapInput && m_wrapColumn == m_autoResizeLastWrapColumn &&
 	    m_inputPixelOffset == m_autoResizeLastInputPixelOffset;
 
-	int       lineCount     = 1;
+	qint64    lineCount     = 1;
 	int       docRevision   = -1;
 	int       docBlockCount = 1;
 	const int viewportWidth = m_input->viewport() ? m_input->viewport()->width() : -1;
@@ -18463,19 +18463,22 @@ void WorldView::updateInputHeight() const
 		docBlockCount = qMax(1, doc->blockCount());
 		lineCount     = docBlockCount;
 
-		if (m_input->lineWrapMode() == QPlainTextEdit::WidgetWidth)
+		if (docBlockCount <= maxLines && m_input->lineWrapMode() == QPlainTextEdit::WidgetWidth)
 		{
 			if (QAbstractTextDocumentLayout *layout = doc->documentLayout())
 				(void)layout->documentSize();
 
-			int visualLines = 0;
+			// Above the maximum, additional rows cannot change height or scrolling.
+			qint64 visualLines = 0;
 			for (QTextBlock block = doc->begin(); block.isValid(); block = block.next())
 			{
 				const QTextLayout *layout           = block.layout();
 				const int          blockVisualLines = layout ? qMax(1, layout->lineCount()) : 1;
 				visualLines += blockVisualLines;
+				if (visualLines > maxLines)
+					break;
 			}
-			lineCount = qMax(1, visualLines);
+			lineCount = qMax(qint64{1}, visualLines);
 
 			const QTextCursor cursor              = m_input->textCursor();
 			const int         documentEndPosition = qMax(0, doc->characterCount() - 1);
@@ -18500,7 +18503,7 @@ void WorldView::updateInputHeight() const
 
 		// Never collapse explicit multiline input below block count even if
 		// transient layout metrics under-report wrapped visual rows.
-		lineCount = qMax(lineCount, docBlockCount);
+		lineCount = qMax(lineCount, qint64{docBlockCount});
 	}
 
 	auto targetHeightForLines = [lineHeight, inputChrome](const int lines)
@@ -18515,7 +18518,7 @@ void WorldView::updateInputHeight() const
 		m_input->setMaximumHeight(targetHeight);
 	};
 
-	int targetLines = qBound(minLines, lineCount, maxLines);
+	int targetLines = static_cast<int>(qBound(qint64{minLines}, lineCount, qint64{maxLines}));
 	if (docRevision >= 0)
 	{
 		const bool docShapeUnchanged = docRevision == m_autoResizeInputDocRevision &&
@@ -19876,6 +19879,21 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		{
 			if (m_view->m_arrowsChangeHistory)
 			{
+				QTextCursor cursor = textCursor();
+				if (!cursor.atStart() && !cursor.atEnd())
+				{
+					QTextCursor probe(document());
+					if (probe.movePosition(QTextCursor::Down))
+					{
+						cursor.clearSelection();
+						if (!cursor.movePosition(direction < 0 ? QTextCursor::Up : QTextCursor::Down))
+							cursor.movePosition(direction < 0 ? QTextCursor::Start : QTextCursor::End);
+						setTextCursor(cursor);
+						ensureCursorVisible();
+						m_view->requestInputViewportSync();
+						return;
+					}
+				}
 				if (m_view->m_arrowRecallsPartial &&
 				    (m_view->m_inputChanged || !m_view->m_partialCommand.isEmpty()))
 					m_view->recallPartialHistory(direction);
