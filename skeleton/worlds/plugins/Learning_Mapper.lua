@@ -1158,7 +1158,6 @@ end -- toggle_learn_window
 function OnPluginInstall ()
 
   font_id = "f"
-  clear_command_response_state ()
 
   -- this table has the counters
   corpus = { }
@@ -1183,6 +1182,7 @@ function OnPluginInstall ()
     config [k] = config [k] or v
   end -- for
 
+  clear_command_response_state ()
 
   -- and rooms
   rooms = {}

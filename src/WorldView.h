@@ -1222,7 +1222,7 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] QRegion
 		     textRectangleChangeDirtyRegion(const WorldRuntime::TextRectangleSettings &previousSettings,
-		                                    const WorldRuntime::TextRectangleSettings &currentSettings) const;
+			                                const WorldRuntime::TextRectangleSettings &currentSettings) const;
 		/**
 		 * @brief Confirms replacing current typing for a specific replacement context.
 		 * @param replacement Replacement text candidate.
@@ -1601,7 +1601,7 @@ class WorldView : public QWidget
 		 * @return Paint state for @p view, or `nullptr` when the view is not native output.
 		 */
 		[[nodiscard]] NativeOutputPanePaintState                    *
-        nativeOutputPanePaintStateForView(const WrapTextBrowser *view) const;
+		nativeOutputPanePaintStateForView(const WrapTextBrowser *view) const;
 		/**
 		 * @brief Captures current pane geometry and visible-line anchors without changing durable paint state.
 		 * @param state Destination state.
@@ -1820,7 +1820,7 @@ class WorldView : public QWidget
 		[[nodiscard]] bool                             nativeRenderBaseCacheMatchesCurrentSource() const;
 		[[nodiscard]] bool
 		     nativePartialRenderLineOverlayCurrent(const QVector<WorldRuntime::StyleSpan> &partialSpans,
-		                                           bool appendToLastBaseLine) const;
+			                                       bool appendToLastBaseLine) const;
 		void removeNativePartialRenderLineOverlay() const;
 		void applyNativePartialRenderLineOverlay() const;
 		[[nodiscard]] const NativeOutputRenderLines &finalizeNativeOutputRenderLines() const;
@@ -1960,8 +1960,8 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] NativeSplitTopHeadTrimAdjustment
 		                  nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
-		                                                           NativeRowAdvance              defaultLineAdvance,
-		                                                           quint64                       targetRevision = 0) const;
+						                                           NativeRowAdvance              defaultLineAdvance,
+						                                           quint64                       targetRevision = 0) const;
 		/**
 		 * @brief Clears pending split-pane head-trim compensation.
 		 */
@@ -2381,7 +2381,7 @@ class WorldView : public QWidget
 		 * @return Logical lines with merged soft-returns and style spans.
 		 */
 		[[nodiscard]] const NativeOutputRenderLines      &
-        nativeOutputRenderLines(bool reconcileDuringRuntimeBatch = false) const;
+		nativeOutputRenderLines(bool reconcileDuringRuntimeBatch = false) const;
 		/**
 		 * @brief Rebuilds native render-line cache from provided runtime entries.
 		 * @param lines Source line entries.
@@ -2700,7 +2700,7 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] static NativeOutputEndpointDeltaTransform
 		     transformNativeOutputEndpointForDelta(NativeOutputPosition         &position,
-		                                           const NativeRenderCacheDelta &delta);
+			                                       const NativeRenderCacheDelta &delta);
 		/**
 		 * @brief Transforms active native output selection endpoints through a render-cache delta.
 		 * @param delta Render-cache delta to apply.
@@ -2764,6 +2764,15 @@ class WorldView : public QWidget
 		 * @brief Cancels the pending link activation, if any.
 		 */
 		void                  cancelPendingHyperlinkActivation();
+		/**
+		 * @brief Starts or stops edge scrolling for a drag originating in the primary output pane.
+		 * @param globalPos Pointer position in global coordinates.
+		 */
+		void                  updateNativeOutputSelectionAutoScroll(const QPoint &globalPos) const;
+		/**
+		 * @brief Scrolls exposed output once and extends the active drag selection to the pointer.
+		 */
+		void                  nativeOutputSelectionAutoScrollTick();
 		/**
 		 * @brief Hit-tests a point in an output viewport against native output lines.
 		 * @param view Source output view.
@@ -2839,7 +2848,7 @@ class WorldView : public QWidget
 		                                             bool  requireTextHit = false,
 		                                             bool *textHit        = nullptr) const;
 		/**
-		 * @brief Hit-tests a global drag point against visible native output panes, clamping to nearest pane.
+		 * @brief Hit-tests a global drag point in the selection's source pane, clamping to its viewport.
 		 * @param globalPos Global screen coordinate.
 		 * @param position Output line/column position.
 		 * @param href Optional hyperlink href at hit point.
@@ -2889,7 +2898,7 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] static NativeOutputPositionIdentity
 		                          nativeOutputIdentityForPosition(const NativeOutputRenderLines &lines,
-		                                                          const NativeOutputPosition    &position);
+								                                  const NativeOutputPosition    &position);
 		/**
 		 * @brief Remaps a native output position after render-cache mutation.
 		 * @param position Position to remap in-place.
@@ -3027,6 +3036,11 @@ class WorldView : public QWidget
 		 */
 		void syncOutputScrollbackReviewState(bool notifyReviewTarget      = true,
 		                                     bool forceReviewTargetNotify = false);
+		/**
+		 * @brief Scrolls synchronized output by visual lines and updates split and review state once.
+		 * @param lineCount Signed line count, negative for upward scrolling.
+		 */
+		void scrollOutputLines(int lineCount);
 		/**
 		 * @brief Enables/disables scrollback split mode.
 		 * @param active Activate split mode when `true`.
@@ -3466,7 +3480,7 @@ class WorldView : public QWidget
 		 * @param drawRect Unclipped drawing rectangle in output-stack coordinates.
 		 * @param scaled Whether drawing explicitly scales the source into drawRect.
 		 * @param tiled Whether drawing repeats the source across the client rectangle.
-		 * @param colourKey Optional RGB colour treated as transparent.
+		 * @param colourKey Optional RGB color treated as transparent.
 		 */
 		void updateNativeSurfaceCoverage(NativeSurfaceCoverageCache &cache, const QImage &source,
 		                                 const QRect &drawRect, bool scaled, bool tiled,
@@ -3765,6 +3779,7 @@ class WorldView : public QWidget
 		bool                                    m_anchorHoverActive{false};
 		QString                                 m_hoveredHyperlinkHref;
 		QTimer                                 *m_hyperlinkActivationTimer{nullptr};
+		QTimer                                 *m_selectionAutoScrollTimer{nullptr};
 		QString                                 m_pendingHyperlinkActivationHref;
 		mutable NativeOutputSelectionState      m_nativeOutputSelection;
 		NativeOutputWordSelectionCandidate      m_nativeOutputWordSelectionCandidate;

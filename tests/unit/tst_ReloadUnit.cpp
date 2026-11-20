@@ -48,8 +48,8 @@ namespace
 			{
 				const QStringList filtered = filterReloadStartupArguments(
 				    {QStringLiteral("QMud"), QStringLiteral("--reload-state=/tmp/state.json"),
-				     QStringLiteral("--reload-token=abc123"), QStringLiteral("--noauto"),
-				     QStringLiteral("worlds/test.qdl")});
+					 QStringLiteral("--reload-token=abc123"), QStringLiteral("--noauto"),
+					 QStringLiteral("worlds/test.qdl")});
 				const QStringList expected = {QStringLiteral("QMud"), QStringLiteral("--noauto"),
 				                              QStringLiteral("worlds/test.qdl")};
 				QCOMPARE(filtered, expected);
@@ -90,6 +90,7 @@ namespace
 				world.mxpDefaultSoundUrl        = QStringLiteral("https://mxp.example/media/");
 				world.utf8Enabled               = true;
 				world.notes                     = QStringLiteral("test");
+				world.telnetParserState         = QByteArray::fromHex("00ff6162");
 				snapshot.worlds.push_back(world);
 
 				QString error;
@@ -106,6 +107,7 @@ namespace
 				QCOMPARE(parsed.activeWorldSequence, 1);
 				QCOMPARE(parsed.arguments.size(), 2);
 				QCOMPARE(parsed.worlds.size(), 1);
+				QCOMPARE(parsed.worlds.at(0).telnetParserState, world.telnetParserState);
 				QCOMPARE(parsed.worlds.at(0).worldId, QStringLiteral("world-1"));
 				QCOMPARE(parsed.worlds.at(0).presentationCount, 3);
 				QCOMPARE(parsed.worlds.at(0).activePresentationOrdinal, 2);
@@ -129,6 +131,7 @@ namespace
 				QJsonObject legacyRoot   = legacyDocument.object();
 				QJsonArray  legacyWorlds = legacyRoot.value(QStringLiteral("worlds")).toArray();
 				QJsonObject legacyWorld  = legacyWorlds.at(0).toObject();
+				legacyWorld.remove(QStringLiteral("telnet_parser_state"));
 				legacyWorld.remove(QStringLiteral("naws_negotiated"));
 				legacyWorld.remove(QStringLiteral("msp_negotiated"));
 				legacyWorlds.replace(0, legacyWorld);
@@ -142,6 +145,7 @@ namespace
 				QVERIFY(readReloadStateSnapshot(path, &legacyParsed, &error));
 				QVERIFY2(error.isEmpty(), qPrintable(error));
 				QCOMPARE(legacyParsed.schemaVersion, 1);
+				QVERIFY(legacyParsed.worlds.at(0).telnetParserState.isEmpty());
 				QVERIFY(!legacyParsed.worlds.at(0).nawsNegotiated);
 				QVERIFY(!legacyParsed.worlds.at(0).mspNegotiated);
 			}

@@ -10,6 +10,7 @@
 #include "WorldRuntime.h"
 #include "PluginStatePersistence.h"
 #include "helpers/XmlEscapeUtils.h"
+#include <QDataStream>
 
 #include "AnsiSgrParseUtils.h"
 #include "AppController.h"
@@ -12334,8 +12335,6 @@ bool WorldRuntime::connectToWorld(const QString &host, quint16 port)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::connectToWorld");
 	if (m_initialConfigurationPending)
 		return false;
-	m_nativeGmcpRestorePrepared = false;
-	m_pendingNativeGmcpRestore.clear();
 	if (!m_socket)
 		return false;
 
@@ -12549,7 +12548,8 @@ int WorldRuntime::nativeSocketDescriptor() const
 
 bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
                                                   const bool mspNegotiated, const QString &mspDefaultSoundUrl,
-                                                  const QString &mxpDefaultSoundUrl, QString *errorMessage)
+                                                  const QString &mxpDefaultSoundUrl, QString *errorMessage,
+                                                  const QByteArray &telnetInputState)
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -12564,6 +12564,20 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 		if (errorMessage)
 			*errorMessage = QStringLiteral("Socket descriptor is invalid.");
 		return false;
+	}
+
+	QByteArray runtimeInput, transportInput;
+	if (!telnetInputState.isEmpty())
+	{
+		QDataStream stream(telnetInputState);
+		stream.setVersion(QDataStream::Qt_6_0);
+		stream >> runtimeInput >> transportInput;
+		if (stream.status() != QDataStream::Ok || !stream.atEnd())
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Invalid saved Telnet parser state.");
+			return false;
+		}
 	}
 
 	const QList<TelnetProcessor::CustomElementInfo> preservedCustomMxpElements =
@@ -12583,6 +12597,12 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 	m_disconnectOk        = false;
 	m_socketReadyForWorld = false;
 	m_telnet.resetConnectionState();
+	if (!m_telnet.restoreTelnetInputState(runtimeInput))
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Invalid saved runtime Telnet parser state.");
+		return false;
+	}
 	m_telnet.setStartTlsEnabled(false);
 	m_telnet.setCustomElementInfos(preservedCustomMxpElements);
 	m_telnet.setMxpSessionState(preservedMxpSessionState);
@@ -12599,8 +12619,8 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 	m_socket->setCompressionDisabled(
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("disable_compression"))));
 	m_socket->setGmcpCoreOptions(gmcpCoreOptions());
-	if (!m_socket->adoptNativeSocketDescriptor(static_cast<qintptr>(descriptor),
-	                                           std::exchange(m_pendingNativeGmcpRestore, {}), &adoptionError))
+	if (!m_socket->adoptConnectedSocketDescriptor(static_cast<qintptr>(descriptor), &adoptionError,
+	                                              transportInput))
 	{
 		if (errorMessage)
 			*errorMessage = adoptionError;
@@ -12609,7 +12629,6 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 		return false;
 	}
 
-	m_nativeGmcpRestorePrepared       = false;
 	m_connectViaProxy                 = false;
 	m_connectPhase                    = eConnectConnectedToMud;
 	m_tlsEncryptionEnabled            = false;
@@ -12642,8 +12661,6 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, const bo
 
 void WorldRuntime::closeSocketForReloadReconnect()
 {
-	m_nativeGmcpRestorePrepared = false;
-	m_pendingNativeGmcpRestore.clear();
 	if (!m_socket)
 		return;
 	cancelStartTlsFallbackTimer();
@@ -29112,7 +29129,8 @@ static QStringList keypadNameList()
 
 void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 {
-	const bool restoredMergePolicies = m_nativeGmcpRestorePrepared && !m_pendingNativeGmcpRestore.isEmpty();
+	const auto restoredState         = m_gmcpPublication ? m_gmcpPublication->current.load() : nullptr;
+	const bool restoredMergePolicies = restoredState && restoredState->restoring && restoredState->native;
 	m_loadingDocument                = true;
 	const QString workingDir         = resolveWorkingDir(m_startupDirectory);
 	m_worldAttributes                = doc.worldAttributes();
@@ -42221,23 +42239,28 @@ void WorldRuntime::refreshGmcpModules()
 		m_socket->setGmcpModules(effective);
 }
 
+QByteArray WorldRuntime::saveTelnetInputState() const
+{
+	const auto runtimeInput   = m_telnet.saveTelnetInputState();
+	const auto transportInput = m_socket ? m_socket->saveTelnetInputState() : QByteArray{};
+	if (runtimeInput.isEmpty() && transportInput.isEmpty())
+		return {};
+	QByteArray  state;
+	QDataStream stream(&state, QIODevice::WriteOnly);
+	stream.setVersion(QDataStream::Qt_6_0);
+	stream << runtimeInput << transportInput;
+	return state;
+}
+
 QByteArray WorldRuntime::saveNativeGmcpState() const
 {
-	if (!m_socket || !m_gmcpPublication || !m_gmcpPublication->current.load()->native)
-		return {};
-	if (m_activeRawIngressOperation || !m_pendingRawIngressPayloads.isEmpty())
-		return {};
-	return m_socket->saveNativeState();
+	return m_socket ? m_socket->saveNativeState() : QByteArray{};
 }
 
 bool WorldRuntime::prepareNativeGmcpRestore(const QByteArray &state)
 {
-	if (m_nativeGmcpRestorePrepared)
-		return state == m_pendingNativeGmcpRestore;
 	if (!m_socket || !m_socket->restoreNativeState(state))
 		return false;
-	m_pendingNativeGmcpRestore  = state;
-	m_nativeGmcpRestorePrepared = true;
 	if (!state.isEmpty())
 	{
 		m_gmcpMergeOverrides.clear();

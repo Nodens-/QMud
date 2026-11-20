@@ -36,6 +36,59 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			/**
+			 * @brief Restores every split point of Telnet tokens without replaying callbacks or packet transforms.
+			 */
+			static void incompleteInputState()
+			{
+				const QList<QByteArray> tokens = {bytes({IAC, SB, 200, 'a', IAC, IAC, 'b', IAC, SE}),
+				                                  bytes({IAC, 251, 200}),
+				                                  bytes({IAC, 252, 200}),
+				                                  bytes({IAC, 253, 200}),
+				                                  bytes({IAC, 254, 200}),
+				                                  bytes({IAC, 249}),
+				                                  bytes({IAC, IAC})};
+				for (const auto &token : tokens)
+					for (qsizetype split = 1; split < token.size(); ++split)
+					{
+						TelnetProcessor   baseline, original, restored;
+						TelnetCallbackSpy baselineSpy, originalSpy, restoredSpy;
+						baseline.setCallbacks(baselineSpy.callbacks());
+						original.setCallbacks(originalSpy.callbacks());
+						restored.setCallbacks(restoredSpy.callbacks());
+						QByteArray originalTransformed, restoredTransformed;
+						const auto prefix =
+						    original.processBytes(token.left(split), [&](const QByteArray &value)
+							                      { originalTransformed += value; });
+						const auto saved = original.saveTelnetInputState();
+						QVERIFY(!saved.isEmpty());
+						QVERIFY(restored.restoreTelnetInputState(saved));
+						QCOMPARE(restored.saveTelnetInputState(), saved);
+						QVERIFY(restoredSpy.subnegotiations.isEmpty());
+						QCOMPARE(restoredSpy.iacGaCount, 0);
+						const auto suffix =
+						    restored.processBytes(token.mid(split) + "tail", [&](const QByteArray &value)
+							                      { restoredTransformed += value; });
+						QCOMPARE(prefix + suffix, baseline.processBytes(token + "tail"));
+						QCOMPARE(originalTransformed + restoredTransformed, token + "tail");
+						QCOMPARE(restoredSpy.subnegotiations.size(), baselineSpy.subnegotiations.size());
+						if (!baselineSpy.subnegotiations.isEmpty())
+						{
+							QCOMPARE(restoredSpy.subnegotiations.front().option,
+							         baselineSpy.subnegotiations.front().option);
+							QCOMPARE(restoredSpy.subnegotiations.front().data,
+							         baselineSpy.subnegotiations.front().data);
+						}
+						QCOMPARE(restoredSpy.iacGaCount, baselineSpy.iacGaCount);
+						QCOMPARE(restored.takeOutboundData(), baseline.takeOutboundData());
+						QVERIFY(restored.saveTelnetInputState().isEmpty());
+						QVERIFY(!restored.restoreTelnetInputState(QByteArrayLiteral("invalid")));
+						QVERIFY(restored.saveTelnetInputState().isEmpty());
+						original.resetConnectionState();
+						QVERIFY(original.saveTelnetInputState().isEmpty());
+					}
+			}
+
 			void genericSubnegotiationCallback()
 			{
 				TelnetProcessor   processor;

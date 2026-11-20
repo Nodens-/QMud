@@ -47,45 +47,51 @@ class WorldSocketStream
 		 * @param option Telnet option number.
 		 * @param handler Complete-frame operations.
 		 */
-		void               setHandler(unsigned char option, const Handler &handler);
+		void                     setHandler(unsigned char option, const Handler &handler);
 		/**
 		 * @brief Removes protocol handlers before a connection is reconfigured.
 		 */
-		void               clearHandlers();
+		void                     clearHandlers();
 		/**
 		 * @brief Resets connection parser state while preserving lifetime byte totals.
 		 * @param disableCompression Whether to refuse future MCCP offers.
 		 */
-		void               reset(bool disableCompression);
+		void                     reset(bool disableCompression);
+		/**
+		 * @brief Captures the incomplete incoming Telnet token independently of protocol sessions.
+		 * @return Serialized token state, or empty at a token boundary.
+		 */
+		[[nodiscard]] QByteArray saveTelnetInputState() const;
+		/**
+		 * @brief Restores an incomplete incoming Telnet token without dispatching handlers.
+		 * @param state Serialized token state, or empty for a token boundary.
+		 * @return Whether the saved token state is valid.
+		 */
+		bool                     restoreTelnetInputState(const QByteArray &state);
 		/**
 		 * @brief Ends decoding and releases the inflater without clearing cumulative counts.
 		 */
-		void               close();
+		void                     close();
 		/**
 		 * @brief Stops the current decode loop without invalidating inflater accounting during a read.
 		 */
-		void               stopDecoding();
+		void                     stopDecoding();
 		/**
 		 * @brief Processes decrypted bytes and dispatches complete registered OOB frames.
 		 * @param input Socket bytes.
 		 * @return Bytes remaining for the runtime's Telnet/text processor.
 		 */
-		QByteArray         receive(const QByteArray &input);
+		QByteArray               receive(const QByteArray &input);
 		/**
 		 * @brief Observes accepted writes for complete outgoing protocol frames and START-TLS boundaries.
 		 * @param bytes Bytes accepted by the socket.
 		 */
-		void               observeSent(const QByteArray &bytes);
+		void                     observeSent(const QByteArray &bytes);
 		/**
 		 * @brief Changes future MCCP negotiation preference without interrupting an active stream.
 		 * @param disabled Whether to refuse offers.
 		 */
-		void               setCompressionDisabled(bool disabled);
-		/**
-		 * @brief Checks stream eligibility for descriptor preservation.
-		 * @return Whether neither direction has a partial frame and no inflater is active.
-		 */
-		[[nodiscard]] bool atBoundary() const;
+		void                     setCompressionDisabled(bool disabled);
 		/**
 		 * @brief Borrows statistics on the owning worker thread.
 		 * @return Current cumulative counters, compression type, and decoder ownership.
@@ -213,35 +219,37 @@ class WorldSocketTransport : public WorldSocketService
 		 * @brief Adopts an already-connected native descriptor.
 		 * @param descriptor Native descriptor to adopt.
 		 * @param errorMessage Optional output error text.
+		 * @param telnetInputState Incomplete incoming Telnet token from the preserved socket.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
-		bool               adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage) override;
+		bool                  adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage,
+		                                                     const QByteArray &telnetInputState) override;
 		/**
 		 * @brief Immediately aborts active transport socket.
 		 */
-		void               abortSocket() override;
+		void                  abortSocket() override;
 		/**
 		 * @brief Reports whether connection attempt is in progress.
 		 * @return `true` when socket is connecting.
 		 */
-		[[nodiscard]] bool isConnecting() const override;
+		[[nodiscard]] bool    isConnecting() const override;
 		/**
 		 * @brief Reports whether socket is connected.
 		 * @return `true` when socket is connected.
 		 */
-		[[nodiscard]] bool isConnected() const override;
+		[[nodiscard]] bool    isConnected() const override;
 
 		/**
 		 * @brief Installs a connection generation before starting transport.
 		 * @param generation New identity.
 		 * @param preserveRestoration Whether to retain prepared session state for descriptor adoption.
 		 */
-		void               prepareGeneration(quint64 generation, bool preserveRestoration = false);
+		void                  prepareGeneration(quint64 generation, bool preserveRestoration = false);
 		/**
 		 * @brief Returns the current generation.
 		 * @return Connection identity.
 		 */
-		[[nodiscard]] quint64                                           generation() const;
+		[[nodiscard]] quint64 generation() const;
 		/**
 		 * @brief Returns transport statistics independently of protocol publications.
 		 * @return Shared transport endpoint.
@@ -295,10 +303,15 @@ class WorldSocketTransport : public WorldSocketService
 		 */
 		void setIncomingPacketDebugEnabled(bool enabled) override;
 		/**
-		 * @brief Serializes a quiesced native connection.
-		 * @return Handoff data.
+		 * @brief Serializes the selected native GMCP session independently of socket state.
+		 * @return Saved GMCP data, or empty for legacy handling.
 		 */
 		[[nodiscard]] QByteArray saveNativeState() const override;
+		/**
+		 * @brief Captures incomplete worker Telnet input independently of GMCP state.
+		 * @return Serialized parser state, or empty at a token boundary.
+		 */
+		[[nodiscard]] QByteArray saveTelnetInputState() const override;
 		/**
 		 * @brief Restores native state.
 		 * @param state Handoff data.
@@ -488,23 +501,25 @@ class WorldSocket : public WorldSocketService
 		 * @brief Adopts an already-connected native descriptor.
 		 * @param descriptor Native descriptor to adopt.
 		 * @param errorMessage Optional output error text.
+		 * @param telnetInputState Incomplete incoming Telnet token from the preserved socket.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
-		bool               adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage) override;
+		bool                   adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage,
+		                                                      const QByteArray &telnetInputState) override;
 		/**
 		 * @brief Immediately aborts active transport socket.
 		 */
-		void               abortSocket() override;
+		void                   abortSocket() override;
 		/**
 		 * @brief Reports whether connection attempt is in progress.
 		 * @return `true` when socket is connecting.
 		 */
-		[[nodiscard]] bool isConnecting() const override;
+		[[nodiscard]] bool     isConnecting() const override;
 		/**
 		 * @brief Reports whether socket is connected.
 		 * @return `true` when socket is connected.
 		 */
-		[[nodiscard]] bool isConnected() const override;
+		[[nodiscard]] bool     isConnected() const override;
 
 		/**
 		 * @brief Stops and joins the transport worker.
@@ -564,10 +579,15 @@ class WorldSocket : public WorldSocketService
 		 */
 		void setIncomingPacketDebugEnabled(bool enabled) override;
 		/**
-		 * @brief Serializes a quiesced native connection.
-		 * @return Handoff data.
+		 * @brief Serializes the selected native GMCP session independently of socket state.
+		 * @return Saved GMCP data, or empty for legacy handling.
 		 */
 		[[nodiscard]] QByteArray saveNativeState() const override;
+		/**
+		 * @brief Captures incomplete worker Telnet input independently of GMCP state.
+		 * @return Serialized parser state, or empty at a token boundary.
+		 */
+		[[nodiscard]] QByteArray saveTelnetInputState() const override;
 		/**
 		 * @brief Restores native state.
 		 * @param state Handoff data.
@@ -593,16 +613,6 @@ class WorldSocket : public WorldSocketService
 		 * @return Whether all writes reached the kernel.
 		 */
 		bool                     flushForReload() override;
-
-		/**
-		 * @brief Atomically adopts and restores native framing before reading.
-		 * @param descriptor Socket descriptor.
-		 * @param state Serialized native state.
-		 * @param error Output diagnostic.
-		 * @return Whether adopted.
-		 */
-		bool                     adoptNativeSocketDescriptor(qintptr descriptor, const QByteArray &state,
-		                                                     QString *error) override;
 
 		/**
 		 * @brief Updates MCCP negotiation preference.

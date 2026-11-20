@@ -53,7 +53,7 @@ Do **NOT** use the issue tracker for general support requests.
 
 ## Contributions
 
-- Bug fix PRs are welcome.
+- Bug fix PRs are welcome. ALL commits must be SIGNED in order for a PR to be merged to this repository.
 - Feature PRs have to be discussed first either on Issue tracker or Discord.
 - You can also contribute with documentation or translations (once work on translations is started; but you can apply to
   help before that).
@@ -335,6 +335,7 @@ These are intentional design choices in QMud:
 
 - Abigail Brady ([Cryosphere](https://cryosphere.org/))
 - RunnerScrab
+- ShaeMyName
 
 ## License
 

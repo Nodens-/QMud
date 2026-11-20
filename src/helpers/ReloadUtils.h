@@ -71,10 +71,11 @@ struct ReloadWorldState
 		bool               nawsNegotiated{false};
 		bool               mspNegotiated{false};
 		QByteArray         nativeGmcpState;
-		QString            mspDefaultSoundUrl;
-		QString            mxpDefaultSoundUrl;
-		bool               utf8Enabled{false};
-		QString            notes;
+		QByteArray telnetParserState; ///< Optional incomplete Telnet input, separate from protocol sessions.
+		QString    mspDefaultSoundUrl;
+		QString    mxpDefaultSoundUrl;
+		bool       utf8Enabled{false};
+		QString    notes;
 };
 
 /**
@@ -179,17 +180,6 @@ struct ReloadMccpProbeIngressInput
 class ReloadSocketRecoveryOps
 {
 	public:
-		/**
-		 * @brief Prepares preserved GMCP state before adoption.
-		 * @param state Serialized GMCP state.
-		 * @return Whether the state is valid.
-		 */
-		virtual bool prepareNativeGmcpRestore(const QByteArray &state)
-		{
-			Q_UNUSED(state);
-			return true;
-		}
-
 		virtual ~ReloadSocketRecoveryOps() = default;
 		/**
 		 * @brief Adopts a preserved connected socket and its negotiated protocol state.
@@ -199,15 +189,15 @@ class ReloadSocketRecoveryOps
 		 * @param mspDefaultSoundUrl MSP default sound URL associated with the preserved connection.
 		 * @param mxpDefaultSoundUrl MXP default sound URL associated with the preserved connection.
 		 * @param errorMessage Optional output error text.
+		 * @param telnetInputState Incomplete Telnet input associated with the preserved descriptor.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
-		[[nodiscard]] virtual bool adoptConnectedSocketDescriptor(int descriptor, bool nawsNegotiated,
-		                                                          bool           mspNegotiated,
-		                                                          const QString &mspDefaultSoundUrl,
-		                                                          const QString &mxpDefaultSoundUrl,
-		                                                          QString       *errorMessage) = 0;
-		virtual void               markReloadReattachConnectActionsSuppressed()                = 0;
-		[[nodiscard]] virtual bool consumeReloadReattachConnectActionsSuppressed()             = 0;
+		[[nodiscard]] virtual bool
+		adoptConnectedSocketDescriptor(int descriptor, bool nawsNegotiated, bool mspNegotiated,
+		                               const QString &mspDefaultSoundUrl, const QString &mxpDefaultSoundUrl,
+		                               QString *errorMessage, const QByteArray &telnetInputState) = 0;
+		virtual void               markReloadReattachConnectActionsSuppressed()                   = 0;
+		[[nodiscard]] virtual bool consumeReloadReattachConnectActionsSuppressed()                = 0;
 };
 
 /**
@@ -286,7 +276,7 @@ class ReloadPostReattachOps
                                                  const ReloadStartupValidationInput &input,
                                                  QString                            *errorMessage = nullptr);
 /**
- * @brief Loads, validates, and consumes a startup reload-state snapshot.
+ * @brief Loads, validates, and optionally consumes a startup reload-state snapshot.
  *
  * On parse/validation failure this helper still attempts to remove the manifest,
  * matching startup fallback cleanup behavior.
@@ -296,13 +286,13 @@ class ReloadPostReattachOps
  * @param snapshot Output parsed snapshot on success.
  * @param errorMessage Optional output error text.
  * @param cleanupWarning Optional output warning when manifest cleanup fails.
+ * @param consume Whether to remove a valid manifest immediately or leave consumption to its caller.
  * @return `true` when load+validation succeeds; `false` otherwise.
  */
-[[nodiscard]] bool loadValidatedAndConsumeReloadStateSnapshot(const QString                      &filePath,
-                                                              const ReloadStartupValidationInput &input,
-                                                              ReloadStateSnapshot                *snapshot,
-                                                              QString *errorMessage   = nullptr,
-                                                              QString *cleanupWarning = nullptr);
+[[nodiscard]] bool
+loadValidatedAndConsumeReloadStateSnapshot(const QString &filePath, const ReloadStartupValidationInput &input,
+                                           ReloadStateSnapshot *snapshot, QString *errorMessage = nullptr,
+                                           QString *cleanupWarning = nullptr, bool consume = true);
 /**
  * @brief Removes reload-state file if it exists.
  * @param filePath Target JSON file path.

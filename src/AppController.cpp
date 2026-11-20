@@ -296,28 +296,21 @@ namespace
 			 * @param mspDefaultSoundUrl MSP default sound URL associated with the preserved connection.
 			 * @param mxpDefaultSoundUrl MXP default sound URL associated with the preserved connection.
 			 * @param errorMessage Optional output error text.
+			 * @param telnetInputState Incomplete Telnet input associated with the preserved descriptor.
 			 * @return `true` when descriptor adoption succeeds.
 			 */
 			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
-			                                                  const bool     mspNegotiated,
-			                                                  const QString &mspDefaultSoundUrl,
-			                                                  const QString &mxpDefaultSoundUrl,
-			                                                  QString       *errorMessage) override
+			                                                  const bool        mspNegotiated,
+			                                                  const QString    &mspDefaultSoundUrl,
+			                                                  const QString    &mxpDefaultSoundUrl,
+			                                                  QString          *errorMessage,
+			                                                  const QByteArray &telnetInputState) override
 			{
 				return m_runtime.adoptConnectedSocketDescriptor(descriptor, nawsNegotiated, mspNegotiated,
 				                                                mspDefaultSoundUrl, mxpDefaultSoundUrl,
-				                                                errorMessage);
+				                                                errorMessage, telnetInputState);
 			}
 
-			/**
-			 * @brief Prepares preserved GMCP state before descriptor adoption.
-			 * @param state Serialized GMCP state.
-			 * @return Whether preparation succeeded.
-			 */
-			bool prepareNativeGmcpRestore(const QByteArray &state) override
-			{
-				return m_runtime.prepareNativeGmcpRestore(state);
-			}
 			void markReloadReattachConnectActionsSuppressed() override
 			{
 				m_runtime.markReloadReattachConnectActionsSuppressed();
@@ -4105,7 +4098,7 @@ bool AppController::setupI18N()
 		luaL_openlibs(state.get()); // open all standard Lua libraries
 		QMudLuaSupport::applyLua51Compat(state.get());
 		qmudLogLua51CompatState(state.get(), "AppController translator");
-		QMudLuaSupport::callLuaCFunction(state.get(), luaopen_lsqlite3); // open SQlite library
+		QMudLuaSupport::callLuaCFunction(state.get(), luaopen_lsqlite3); // open SQLite library
 
 		const bool enablePackage = getGlobalOption(QStringLiteral("AllowLoadingDlls")).toInt() != 0;
 		QMudLuaSupport::applyLuaSecurityRestrictions(state.get(), enablePackage);
@@ -4341,36 +4334,36 @@ bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldStat
 	if (!m_mainWindow || !runtime)
 		return false;
 
-	const QVector<WorldRuntime *> existingRuntimes           = activeWorldRuntimes();
-	bool                          opened                     = false;
-	const int                     previousActivationOverride = m_nextNewWorldActivationOverride;
-	m_nextNewWorldActivationOverride                         = activateWindow ? 1 : 0;
+	QPointer<WorldRuntime> recoveredRuntime       = new WorldRuntime(m_mainWindow);
+	bool                   opened                 = false;
+	const auto             discardUnopenedRuntime = qScopeGuard(
+	    [&]
+	    {
+		    if (!opened && recoveredRuntime)
+			    delete recoveredRuntime.data();
+	    });
+	if (worldState.connectedAtReload &&
+	    !recoveredRuntime->prepareNativeGmcpRestore(worldState.nativeGmcpState))
+	{
+		qWarning() << kReloadLogTag << "Unable to restore saved GMCP state for"
+		           << reloadWorldIdentity(worldState);
+		return false;
+	}
+	const int previousActivationOverride = m_nextNewWorldActivationOverride;
+	m_nextNewWorldActivationOverride     = activateWindow ? 1 : 0;
 	const QString worldFilePath = dotRelativeStoragePath(m_workingDir, worldState.worldFilePath, false);
 	if (!worldFilePath.trimmed().isEmpty() && QFileInfo::exists(makeAbsolutePath(worldFilePath)))
 	{
 		opened = openWorldDocument(makeAbsolutePath(worldFilePath), InitialAutoConnectPolicy::Suppress,
-		                           &worldState);
+		                           recoveredRuntime);
 	}
 	if (!opened)
-		opened = openWorldDocument(QString(), InitialAutoConnectPolicy::Suppress, &worldState);
+		opened = openWorldDocument(QString(), InitialAutoConnectPolicy::Suppress, recoveredRuntime);
 	m_nextNewWorldActivationOverride = previousActivationOverride;
 	if (!opened)
 		return false;
 
-	WorldRuntime *worldRuntime = nullptr;
-	for (WorldRuntime *candidate : activeWorldRuntimes())
-	{
-		if (!existingRuntimes.contains(candidate))
-		{
-			worldRuntime = candidate;
-			break;
-		}
-	}
-	if (!worldRuntime && activateWindow)
-	{
-		if (WorldChildWindow *activeChild = m_mainWindow->activeWorldChildWindow(); activeChild)
-			worldRuntime = activeChild->runtime();
-	}
+	WorldRuntime *worldRuntime = recoveredRuntime.data();
 	if (!worldRuntime)
 		return false;
 
@@ -4458,17 +4451,12 @@ bool AppController::recoverReloadStartupState()
 	QString error;
 	QString cleanupWarning;
 	if (!loadValidatedAndConsumeReloadStateSnapshot(statePath, validationInput, &snapshot, &error,
-	                                                &cleanupWarning))
+	                                                &cleanupWarning, false))
 	{
 		qWarning() << kReloadLogTag << "Recovery skipped:" << error;
 		if (!cleanupWarning.isEmpty())
 			qWarning() << kReloadLogTag << "Reload state cleanup warning:" << cleanupWarning;
 		return false;
-	}
-	if (!cleanupWarning.isEmpty())
-	{
-		qWarning() << kReloadLogTag
-		           << "Unable to consume reload state file before recovery:" << cleanupWarning;
 	}
 	if (m_mainWindow)
 	{
@@ -4476,7 +4464,7 @@ bool AppController::recoverReloadStartupState()
 		    m_mainWindow->acquireStatusMessageOverride(QStringLiteral("Reload recovery: opening worlds..."));
 	}
 
-	QList<ReloadWorldState> worlds = snapshot.worlds;
+	QList<ReloadWorldState> worlds = std::move(snapshot.worlds);
 	std::ranges::sort(worlds,
 	                  [](const ReloadWorldState &lhs, const ReloadWorldState &rhs)
 	                  {
@@ -4499,7 +4487,7 @@ bool AppController::recoverReloadStartupState()
 	const bool                 previousSuppress  = m_suppressAutoConnect;
 	m_suppressAutoConnect                        = true;
 
-	for (const ReloadWorldState &worldState : worlds)
+	for (ReloadWorldState &worldState : worlds)
 	{
 		WorldRuntime *runtime               = nullptr;
 		WorldView    *view                  = nullptr;
@@ -4515,6 +4503,7 @@ bool AppController::recoverReloadStartupState()
 			                                                : worldState.displayName);
 			continue;
 		}
+		worldState.nativeGmcpState.clear();
 		WorldChildWindow *primaryWindow =
 		    m_mainWindow ? m_mainWindow->findWorldChildWindow(runtime) : nullptr;
 		WorldChildWindow *activePresentation = primaryWindow;
@@ -4538,6 +4527,12 @@ bool AppController::recoverReloadStartupState()
 	}
 
 	m_suppressAutoConnect = previousSuppress;
+	if (openFailures == 0)
+	{
+		QString consumeError;
+		if (!removeReloadStateFile(statePath, &consumeError) && !consumeError.isEmpty())
+			qWarning() << kReloadLogTag << "Unable to consume reload state file:" << consumeError;
+	}
 
 	struct ReloadRecoveryAsyncContext
 	{
@@ -4947,7 +4942,7 @@ void AppController::setupStartupBehavior()
 }
 
 bool AppController::openWorldDocument(const QString &path, const InitialAutoConnectPolicy autoConnectPolicy,
-                                      const ReloadWorldState *recoveryState)
+                                      WorldRuntime *recoveredRuntime)
 {
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
@@ -5061,9 +5056,7 @@ bool AppController::openWorldDocument(const QString &path, const InitialAutoConn
 			return false;
 		}
 
-		auto *runtime = new WorldRuntime(m_mainWindow);
-		if (recoveryState && recoveryState->connectedAtReload && recoveryState->socketDescriptor >= 0)
-			static_cast<void>(runtime->prepareNativeGmcpRestore(recoveryState->nativeGmcpState));
+		auto *runtime = recoveredRuntime ? recoveredRuntime : new WorldRuntime(m_mainWindow);
 		runtime->setSoundAvailable(m_soundAvailableForExecution);
 		runtime->setClientStartTime(m_whenClientStarted);
 		runtime->setStartupDirectory(m_workingDir);
@@ -5173,10 +5166,8 @@ bool AppController::openWorldDocument(const QString &path, const InitialAutoConn
 	}
 
 	const auto title   = path.isEmpty() ? QStringLiteral("World") : QFileInfo(path).fileName();
-	auto      *runtime = new WorldRuntime(m_mainWindow);
-	if (recoveryState && recoveryState->connectedAtReload && recoveryState->socketDescriptor >= 0)
-		static_cast<void>(runtime->prepareNativeGmcpRestore(recoveryState->nativeGmcpState));
-	if (recoveryState)
+	auto      *runtime = recoveredRuntime ? recoveredRuntime : new WorldRuntime(m_mainWindow);
+	if (recoveredRuntime)
 		initializeWorldRuntime(runtime);
 	else
 		initializeNewWorldRuntime(runtime);
@@ -15464,20 +15455,10 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences, const
 			                          world.mccpWasActive, world.mccpDisableSucceeded});
 		world.connectedAtReload = policyDecision.connectedAtReload;
 		world.policy            = policyDecision.policy;
-		if (world.connectedAtReload && world.policy == ReloadSocketPolicy::Reattach)
+		if (world.connectedAtReload)
 		{
-			const auto publication = ctx.runtime->gmcpPublication();
-			if (publication && publication->current.load()->native)
-			{
-				world.nativeGmcpState = ctx.runtime->saveNativeGmcpState();
-				if (world.nativeGmcpState.isEmpty())
-				{
-					world.policy           = ReloadSocketPolicy::ParkReconnect;
-					world.socketDescriptor = -1;
-					world.notes            = QStringLiteral(
-					    "Native protocol framing or compression requires reconnect after reload.");
-				}
-			}
+			world.nativeGmcpState   = ctx.runtime->saveNativeGmcpState();
+			world.telnetParserState = ctx.runtime->saveTelnetInputState();
 		}
 
 		if (world.connectedAtReload && tlsEnabled)

@@ -195,6 +195,9 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 		if (!world.nativeGmcpState.isEmpty())
 			entry.insert(QStringLiteral("native_gmcp_state"),
 			             QString::fromLatin1(world.nativeGmcpState.toBase64()));
+		if (!world.telnetParserState.isEmpty())
+			entry.insert(QStringLiteral("telnet_parser_state"),
+			             QString::fromLatin1(world.telnetParserState.toBase64()));
 		entry.insert(QStringLiteral("msp_default_sound_url"), world.mspDefaultSoundUrl);
 		entry.insert(QStringLiteral("mxp_default_sound_url"), world.mxpDefaultSoundUrl);
 		entry.insert(QStringLiteral("utf8_enabled"), world.utf8Enabled);
@@ -338,6 +341,26 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 			world.nativeGmcpState = result.decoded;
 		}
 
+		if (object.contains(QStringLiteral("telnet_parser_state")))
+		{
+			const auto encoded = object.value(QStringLiteral("telnet_parser_state"));
+			if (!encoded.isString())
+			{
+				if (errorMessage)
+					*errorMessage = QStringLiteral("Invalid Telnet parser state field.");
+				return false;
+			}
+			const auto result = QByteArray::fromBase64Encoding(encoded.toString().toLatin1(),
+			                                                   QByteArray::AbortOnBase64DecodingErrors);
+			if (!result)
+			{
+				if (errorMessage)
+					*errorMessage = QStringLiteral("Invalid Telnet parser state encoding.");
+				return false;
+			}
+			world.telnetParserState = result.decoded;
+		}
+
 		if (!parseIntField(object, "sequence", world.sequence) ||
 		    !parseIntField(object, "fd", world.socketDescriptor) || !parsePortField(object, world.port))
 		{
@@ -429,7 +452,7 @@ bool validateReloadStartupSnapshot(const ReloadStateSnapshot          &snapshot,
 bool loadValidatedAndConsumeReloadStateSnapshot(const QString                      &filePath,
                                                 const ReloadStartupValidationInput &input,
                                                 ReloadStateSnapshot *snapshot, QString *errorMessage,
-                                                QString *cleanupWarning)
+                                                QString *cleanupWarning, const bool consume)
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -463,7 +486,8 @@ bool loadValidatedAndConsumeReloadStateSnapshot(const QString                   
 	}
 
 	QString consumeError;
-	if (!removeReloadStateFile(filePath, &consumeError) && !consumeError.isEmpty() && cleanupWarning)
+	if (consume && !removeReloadStateFile(filePath, &consumeError) && !consumeError.isEmpty() &&
+	    cleanupWarning)
 		*cleanupWarning = consumeError;
 
 	*snapshot = parsed;
@@ -572,16 +596,10 @@ ReloadRecoverySocketDecision applyReloadSocketRecovery(ReloadSocketRecoveryOps &
 	{
 		runtime.markReloadReattachConnectActionsSuppressed();
 		QString adoptError;
-		if (!runtime.prepareNativeGmcpRestore(worldState.nativeGmcpState))
-		{
-			(void)runtime.consumeReloadReattachConnectActionsSuppressed();
-			decision.outcome = ReloadRecoverySocketOutcome::ReconnectQueued;
-			decision.error   = QStringLiteral("Invalid saved GMCP state.");
-			return decision;
-		}
 		if (!runtime.adoptConnectedSocketDescriptor(worldState.socketDescriptor, worldState.nawsNegotiated,
 		                                            worldState.mspNegotiated, worldState.mspDefaultSoundUrl,
-		                                            worldState.mxpDefaultSoundUrl, &adoptError))
+		                                            worldState.mxpDefaultSoundUrl, &adoptError,
+		                                            worldState.telnetParserState))
 		{
 			(void)runtime.consumeReloadReattachConnectActionsSuppressed();
 			decision.outcome          = ReloadRecoverySocketOutcome::ReconnectQueued;

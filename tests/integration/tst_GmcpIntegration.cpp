@@ -56,6 +56,7 @@
 #include <QTreeView>
 #include <QtTest/QTest>
 #include <algorithm>
+#include <memory>
 #include <zlib.h>
 #ifdef Q_OS_UNIX
 #include <unistd.h>
@@ -149,6 +150,29 @@ class AppControllerTestAccess final
 		{
 			controller.handleReloadQmud(false, true);
 		}
+		/**
+		 * @brief Starts the existing reconnect path for a recovered world.
+		 * @param runtime Runtime whose saved connection could not be retained.
+		 * @param state Reload connection policy and destination.
+		 */
+		static void reconnect(WorldRuntime &runtime, const ReloadWorldState &state)
+		{
+			AppController::reconnectRecoveredWorld(&runtime, state, false);
+		}
+		/**
+		 * @brief Runs startup recovery against one explicit saved snapshot.
+		 * @param controller Application controller.
+		 * @param path Snapshot file beneath the build directory.
+		 * @param token Snapshot validation token.
+		 * @return Whether startup recovery handled the request.
+		 */
+		static bool recover(AppController &controller, const QString &path, const QString &token)
+		{
+			controller.m_reloadLaunchRequested = true;
+			controller.m_reloadStatePathArg    = path;
+			controller.m_reloadTokenArg        = token;
+			return controller.recoverReloadStartupState();
+		}
 };
 
 namespace
@@ -228,14 +252,6 @@ namespace
 			{
 				stream.close();
 				QMudGmcp::Session::close();
-			}
-			/**
-			 * @brief Checks transport eligibility before serializing GMCP state.
-			 * @return GMCP state, or empty when transport needs reconnect.
-			 */
-			[[nodiscard]] QByteArray saveConnection() const
-			{
-				return stream.atBoundary() ? QMudGmcp::Session::save() : QByteArray{};
 			}
 			/**
 			 * @brief Restores GMCP state and prepares a fresh transport framing boundary.
@@ -793,6 +809,122 @@ namespace
 				QTest::newRow("mccp2") << QByteArray::fromHex("fffa56fff0");
 			}
 			/**
+			 * @brief Covers saved connection modes while a normal reload reconnect remains pending.
+			 */
+			static void recoveryKeepsStateUntilReconnect_data()
+			{
+				QTest::addColumn<bool>("native");
+				QTest::newRow("legacy") << false;
+				QTest::newRow("native") << true;
+			}
+
+			/**
+			 * @brief Reports invalid saved protocol data without consuming the snapshot or starting reconnects.
+			 */
+			static void invalidSavedStateDoesNotReconnect()
+			{
+				QTemporaryDir directory(QDir(QStringLiteral(QMUD_TEST_BUILD_DIR))
+				                            .filePath(QStringLiteral("worlds/gmcp-state-error-XXXXXX")));
+				QVERIFY(directory.isValid());
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+				ReloadStateSnapshot snapshot;
+				snapshot.schemaVersion    = 1;
+				snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
+				snapshot.reloadToken      = QStringLiteral("synthetic-state-token");
+				snapshot.targetExecutable = QCoreApplication::applicationFilePath();
+				ReloadWorldState state;
+				state.sequence          = 1;
+				state.displayName       = QStringLiteral("Synthetic state error");
+				state.connectedAtReload = true;
+				state.host              = QStringLiteral("127.0.0.1");
+				state.port              = server.serverPort();
+				state.policy            = ReloadSocketPolicy::ParkReconnect;
+				state.nativeGmcpState   = QByteArrayLiteral("invalid saved GMCP data");
+				snapshot.worlds.push_back(state);
+				const auto path = QDir(directory.path()).filePath(QStringLiteral("reload_state.json"));
+				QString    error;
+				QVERIFY2(writeReloadStateSnapshot(path, snapshot, &error), qPrintable(error));
+				AppController controller;
+				MainWindow    window;
+				controller.setMainWindow(&window);
+				AppControllerTestAccess::setHome(controller, directory.path());
+				QVERIFY(AppControllerTestAccess::recover(controller, path, snapshot.reloadToken));
+				QCoreApplication::processEvents();
+				QVERIFY(AppControllerTestAccess::worlds(controller).isEmpty());
+				QVERIFY(!server.hasPendingConnections());
+				ReloadStateSnapshot retained;
+				QVERIFY2(readReloadStateSnapshot(path, &retained, &error), qPrintable(error));
+				QCOMPARE(retained.worlds.size(), 1);
+				QCOMPARE(retained.worlds.front().nativeGmcpState, state.nativeGmcpState);
+			}
+
+			/**
+			 * @brief Loads connection state before startup and replaces it only when the new connection starts.
+			 */
+			static void recoveryKeepsStateUntilReconnect()
+			{
+				QFETCH(bool, native);
+				QTemporaryDir directory(QDir(QStringLiteral(QMUD_TEST_BUILD_DIR))
+				                            .filePath(QStringLiteral("worlds/gmcp-reconnect-XXXXXX")));
+				QVERIFY(directory.isValid());
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+				GmcpWireFixture savedSession;
+				savedSession.write = [](const QByteArray &bytes) -> qint64 { return bytes.size(); };
+				savedSession.reset(native, 1, false);
+				if (native)
+				{
+					savedSession.receive(QByteArray::fromHex("fffbc9"));
+					savedSession.receive(QMudGmcp::frame("Test.State {\"value\":11}"));
+				}
+				const auto worldPath = QDir(directory.path()).filePath(QStringLiteral("reconnect.qdl"));
+				QFile      world(worldPath);
+				QVERIFY(world.open(QIODevice::WriteOnly));
+				world.write(
+				    QStringLiteral("<qmud><world name=\"Synthetic Reconnect\" native_gmcp=\"%1\"/></qmud>")
+				        .arg(native ? 0 : 1)
+				        .toUtf8());
+				world.close();
+				AppController controller;
+				MainWindow    window;
+				controller.setMainWindow(&window);
+				AppControllerTestAccess::setHome(controller, directory.path());
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeClosingWorld"), 0);
+				controller.setGlobalOptionInt(QStringLiteral("ConfirmBeforeSavingVariables"), 0);
+				ReloadWorldState state;
+				state.connectedAtReload = true;
+				state.policy            = ReloadSocketPolicy::ParkReconnect;
+				state.worldFilePath     = worldPath;
+				state.host              = QStringLiteral("127.0.0.1");
+				state.port              = server.serverPort();
+				state.nativeGmcpState   = native ? savedSession.save() : QByteArray{};
+				WorldRuntime *runtime   = nullptr;
+				QVERIFY(AppControllerTestAccess::openRecovery(controller, state, &runtime));
+				QVERIFY(runtime);
+				const auto restored = runtime->gmcpPublication()->current.load();
+				QCOMPARE(restored->native, native);
+				QVERIFY(restored->restoring);
+				QCOMPARE(restored->negotiated, native);
+				if (native)
+					QCOMPARE(restored->messages.value(QStringLiteral("test.state"))
+					             ->state.toObject()
+					             .value(QStringLiteral("value"))
+					             .toInt(),
+					         11);
+				QVERIFY(!server.hasPendingConnections());
+				AppControllerTestAccess::reconnect(*runtime, state);
+				QTRY_VERIFY(runtime->isConnected() && server.hasPendingConnections());
+				server.nextPendingConnection();
+				const auto replacement = runtime->gmcpPublication()->current.load();
+				QCOMPARE(replacement->native, !native);
+				QVERIFY(!replacement->restoring);
+				QVERIFY(!replacement->negotiated);
+				QVERIFY(replacement->messages.isEmpty());
+				runtime->setWorldFileModified(false);
+			}
+
+			/**
 			 * @brief Keeps received compression decodable across preference changes, reload and reset.
 			 */
 			static void transportCompressionPreferenceTransitions()
@@ -841,10 +973,10 @@ namespace
 				activate(before);
 				before.receive(offer);
 				before.receive(start.left(2));
-				QVERIFY(before.saveConnection().isEmpty());
+				QVERIFY(!before.save().isEmpty());
 				before.setCompressionDisabled(true);
 				QCOMPARE(before.receive(start.mid(2) + zipped + "tail"), QByteArray("leftrighttail"));
-				QVERIFY(!before.saveConnection().isEmpty());
+				QVERIFY(!before.save().isEmpty());
 
 				session.reset(true, 3, false);
 				session.receive(offer);
@@ -1238,7 +1370,7 @@ namespace
 					        if (!std::exchange(froze, true))
 					        {
 						        socket.freezeForReload();
-						        QVERIFY(socket.saveNativeState().isEmpty());
+						        QVERIFY(!socket.saveNativeState().isEmpty());
 					        }
 				        });
 				const QByteArray input(10 * 16 * 1024, 'x');
@@ -1666,6 +1798,15 @@ end
 				QCOMPARE(firstStats.mccpType, version);
 				QCOMPARE(firstStats.totalCompressedBytes, firstEncoded.size());
 				QCOMPARE(firstStats.totalUncompressedBytes, first.size());
+				runtime.freezeForReload();
+				QTRY_VERIFY(runtime.reloadDrained());
+				QVERIFY(runtime.isCompressing());
+				const auto activeState = runtime.saveNativeGmcpState();
+				QVERIFY(!activeState.isEmpty());
+				GmcpWireFixture restoredActive;
+				QVERIFY(restoredActive.restoreConnection(activeState, 2));
+				QVERIFY(restoredActive.publication()->current.load()->negotiated);
+				runtime.resumeTransportAfterReload();
 				const QByteArray second("second\n");
 				const auto       secondEncoded = encode(second, Z_FINISH);
 				QVERIFY(!secondEncoded.isEmpty());
@@ -2089,7 +2230,6 @@ end
 				QByteArray received = peer->readAll();
 				received.clear();
 				connect(peer, &QTcpSocket::readyRead, this, [&] { received += peer->readAll(); });
-				QVERIFY(runtime->prepareNativeGmcpRestore(saved));
 				QString error;
 				QVERIFY2(runtime->adoptConnectedSocketDescriptor(descriptor, false, false, {}, {}, &error),
 				         qPrintable(error));
@@ -4449,7 +4589,7 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 				socket.freezeForReload();
 				QTRY_VERIFY(socket.reloadInputDrained());
 				QVERIFY(socket.flushForReload());
-				QVERIFY(socket.saveNativeState().isEmpty());
+				QVERIFY(!socket.saveNativeState().isEmpty());
 				peer->write(frame.mid(10) + "after");
 				peer->flush();
 				QVERIFY(socket.isConnected());
@@ -4459,6 +4599,278 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 			}
 
 #ifdef Q_OS_UNIX
+			/**
+			 * @brief Exercises worker and runtime parser boundaries on native and legacy inherited sockets.
+			 */
+			static void incompleteTelnetHandoff_data()
+			{
+				QTest::addColumn<bool>("native");
+				QTest::addColumn<bool>("gmcp");
+				QTest::addColumn<int>("split");
+				for (const bool native : {false, true})
+					for (const bool gmcp : {false, true})
+						for (const int split : {1, 2, 3, 5, 6, 7, gmcp ? 27 : 8})
+							QTest::addRow("%s-%s-%d", native ? "native" : "legacy", gmcp ? "gmcp" : "other",
+							              split)
+							    << native << gmcp << split;
+			}
+
+			/**
+			 * @brief Retains incomplete Telnet messages during inheritance and clears them on a fresh connection.
+			 */
+			void incompleteTelnetHandoff()
+			{
+				QFETCH(bool, native);
+				QFETCH(bool, gmcp);
+				QFETCH(int, split);
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+				auto original = std::make_unique<WorldRuntime>();
+				original->setWorldAttribute(QStringLiteral("native_gmcp"), QString::number(native));
+				QVERIFY(original->connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_VERIFY(original->isConnected() && server.hasPendingConnections());
+				auto *peer = server.nextPendingConnection();
+				QVERIFY(peer);
+				if (native)
+				{
+					peer->write(QByteArray::fromHex("fffbc9"));
+					peer->flush();
+					QTRY_VERIFY(original->gmcpPublication()->current.load()->negotiated);
+					QTRY_COMPARE(original->bytesIn(), 3);
+				}
+				const auto payload =
+				    gmcp ? QByteArrayLiteral("Test.Split {\"value\":17}") : QByteArray::fromHex("61ff62");
+				const auto frame =
+				    gmcp ? QMudGmcp::frame(payload) : QByteArray::fromHex("fffac861ffff62fff0");
+				peer->write(frame.left(split));
+				peer->flush();
+				QTRY_COMPARE(original->bytesIn(), (native ? 3 : 0) + split);
+				original->freezeForReload();
+				QTRY_VERIFY(original->reloadDrained());
+				const auto parserState = original->saveTelnetInputState();
+				QVERIFY(!parserState.isEmpty());
+				const auto gmcpState = original->saveNativeGmcpState();
+				int        inherited = ::dup(original->nativeSocketDescriptor());
+				QVERIFY(inherited >= 0);
+				const auto closeUnadopted = qScopeGuard(
+				    [&]
+				    {
+					    if (inherited >= 0)
+						    ::close(inherited);
+				    });
+				WorldRuntime restored;
+				restored.setWorldAttribute(QStringLiteral("native_gmcp"), QString::number(native));
+				QVERIFY(restored.prepareNativeGmcpRestore(gmcpState));
+				QStringList lines;
+				connect(&restored, &WorldRuntime::incomingStyledLineReceived, this,
+				        [&](const QString &line) { lines.push_back(line); });
+				QString error;
+				QVERIFY2(restored.adoptConnectedSocketDescriptor(inherited, false, false, {}, {}, &error,
+				                                                 parserState),
+				         qPrintable(error));
+				inherited = -1;
+				original.reset();
+				QCOMPARE(restored.saveTelnetInputState(), parserState);
+				peer->write(frame.mid(split) + "after\r\n");
+				peer->flush();
+				QTRY_COMPARE(lines, QStringList{QStringLiteral("after")});
+				if (native && gmcp)
+				{
+					QTRY_VERIFY(restored.gmcpPublication()->current.load()->messages.contains(
+					    QStringLiteral("test.split")));
+					const auto message = restored.gmcpPublication()->current.load()->messages.value(
+					    QStringLiteral("test.split"));
+					QCOMPARE(message->state.toObject().value(QStringLiteral("value")).toInt(), 17);
+					QCOMPARE(restored.gmcpPublication()->current.load()->messages.size(), 1);
+				}
+				else
+					QCOMPARE(restored.lastTelnetSubnegotiation(), QString::fromLatin1(payload));
+				QVERIFY(restored.saveTelnetInputState().isEmpty());
+				const auto receivedBytes = restored.bytesIn();
+				peer->write(frame.left(split));
+				peer->flush();
+				QTRY_COMPARE(restored.bytesIn(), receivedBytes + split);
+				QVERIFY(!restored.saveTelnetInputState().isEmpty());
+				restored.disconnectFromWorld();
+				QTRY_VERIFY(!restored.isConnected());
+				QVERIFY(restored.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_VERIFY(restored.isConnected() && server.hasPendingConnections());
+				QVERIFY(restored.saveTelnetInputState().isEmpty());
+				auto *replacement = server.nextPendingConnection();
+				QVERIFY(replacement);
+				lines.clear();
+				replacement->write("new connection\r\n");
+				replacement->flush();
+				QTRY_COMPARE(lines, QStringList{QStringLiteral("new connection")});
+			}
+
+			/**
+			 * @brief Covers repeated inheritance with restored native and legacy connection modes.
+			 */
+			static void repeatedSocketHandoffs_data()
+			{
+				QTest::addColumn<bool>("native");
+				QTest::addColumn<bool>("probeReconnect");
+				for (const bool native : {false, true})
+					for (const bool reconnect : {false, true})
+						QTest::addRow("%s-probe-%s", native ? "native" : "legacy",
+						              reconnect ? "reconnect" : "keep")
+						    << native << reconnect;
+			}
+
+			/**
+			 * @brief Keeps completed socket metadata and session state across successive handoffs and resets on reconnect.
+			 */
+			void repeatedSocketHandoffs()
+			{
+				QFETCH(bool, native);
+				QFETCH(bool, probeReconnect);
+				QTcpServer server;
+				QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+				auto current = std::make_unique<WorldRuntime>();
+				current->setWorldAttribute(QStringLiteral("native_gmcp"),
+				                           native ? QStringLiteral("1") : QStringLiteral("0"));
+				QVERIFY(current->connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_VERIFY(current->isConnected() && server.hasPendingConnections());
+				QTcpSocket *const peer = server.nextPendingConnection();
+				QVERIFY(peer);
+				if (native)
+				{
+					peer->write(QByteArray::fromHex("fffbc9") +
+					            QMudGmcp::frame("Test.Inherited {\"value\":19}"));
+					peer->flush();
+					QTRY_VERIFY(current->gmcpPublication()->current.load()->messages.contains(
+					    QStringLiteral("test.inherited")));
+				}
+				for (int handoff = 0; handoff < 3; ++handoff)
+				{
+					current->freezeForReload();
+					QTRY_VERIFY(current->reloadDrained());
+					QVERIFY(current->flushForReload());
+					const int originalDescriptor = current->nativeSocketDescriptor();
+					QVERIFY(originalDescriptor >= 0);
+					const auto decision =
+					    computeReloadWorldPolicy({current->isConnected(), current->isConnecting(),
+						                          originalDescriptor, false, false, true});
+					QCOMPARE(decision.policy, ReloadSocketPolicy::Reattach);
+					QVERIFY(decision.shouldAttemptDescriptorInheritance);
+					const auto saved = current->saveNativeGmcpState();
+					QCOMPARE(saved.isEmpty(), !native);
+					int inherited = ::dup(originalDescriptor);
+					QVERIFY(inherited >= 0);
+					const auto closeUnadopted = qScopeGuard(
+					    [&]
+					    {
+						    if (inherited >= 0)
+							    ::close(inherited);
+					    });
+					auto restored = std::make_unique<WorldRuntime>();
+					restored->setWorldAttribute(QStringLiteral("site"), QStringLiteral("127.0.0.1"));
+					restored->setWorldAttribute(QStringLiteral("port"), QString::number(server.serverPort()));
+					restored->setWorldAttribute(QStringLiteral("native_gmcp"),
+					                            native ? QStringLiteral("0") : QStringLiteral("1"));
+					QVERIFY(restored->prepareNativeGmcpRestore(saved));
+					restored->markReloadReattachConnectActionsSuppressed();
+					QString error;
+					QVERIFY2(
+					    restored->adoptConnectedSocketDescriptor(inherited, false, false, {}, {}, &error),
+					    qPrintable(error));
+					QCOMPARE(restored->nativeSocketDescriptor(), inherited);
+					inherited          = -1;
+					auto *const socket = restored->findChild<WorldSocket *>();
+					QVERIFY(socket);
+					QVERIFY(socket->isConnected());
+					QVERIFY(!socket->isConnecting());
+					QCOMPARE(socket->peerAddressV4(), QHostAddress(QHostAddress::LocalHost).toIPv4Address());
+					QCOMPARE(socket->peerAddressString(), QStringLiteral("127.0.0.1"));
+					const auto state = restored->gmcpPublication()->current.load();
+					QCOMPARE(state->native, native);
+					QVERIFY(!state->restoring);
+					QCOMPARE(state->negotiated, native);
+					if (native)
+						QCOMPARE(state->messages.value(QStringLiteral("test.inherited"))
+						             ->state.toObject()
+						             .value(QStringLiteral("value"))
+						             .toInt(),
+						         19);
+					current = std::move(restored);
+					QByteArray received;
+					const auto connection      = connect(socket, &WorldSocketService::rawDataReceived, this,
+					                                     [&](const QByteArray &bytes) { received += bytes; });
+					const auto disconnectInput = qScopeGuard([&] { disconnect(connection); });
+					const auto text = QByteArrayLiteral("handoff ") + QByteArray::number(handoff) + '\n';
+					peer->write(text);
+					peer->flush();
+					QTRY_COMPARE(received, text);
+					QVERIFY(!server.hasPendingConnections());
+				}
+				peer->readAll();
+				QByteArray request;
+				const auto readRequest =
+				    connect(peer, &QTcpSocket::readyRead, this, [&] { request += peer->readAll(); });
+				const auto disconnectPeer = qScopeGuard([&] { disconnect(readRequest); });
+				bool       probeKept      = false;
+				const auto lineReceived = connect(current.get(), &WorldRuntime::incomingStyledLineReceived,
+				                                  this, [&](const QString &line)
+				                                  { probeKept = line == QStringLiteral("probe response"); });
+				const auto disconnectLines = qScopeGuard([&] { disconnect(lineReceived); });
+				current->configureReloadMccpReattachProbe(true);
+				current->sendReloadReattachLookProbe();
+				QTRY_VERIFY(request.contains("look\r\n"));
+				const auto response = probeReconnect ? qCompress(QByteArray(1024, 'x'), 9).mid(4)
+				                                     : QByteArrayLiteral("probe response\r\n");
+				QCOMPARE(isLikelyResidualMccpPayload(response), probeReconnect);
+				peer->write(response);
+				peer->flush();
+				if (probeReconnect)
+				{
+					QTRY_VERIFY(current->isConnected() && server.hasPendingConnections());
+					server.nextPendingConnection();
+					const auto replaced = current->gmcpPublication()->current.load();
+					QCOMPARE(replaced->native, !native);
+					QVERIFY(replaced->messages.isEmpty());
+				}
+				else
+				{
+					QTRY_VERIFY(probeKept);
+					const auto retained = current->gmcpPublication()->current.load();
+					QCOMPARE(retained->native, native);
+					QCOMPARE(retained->negotiated, native);
+					if (native)
+						QVERIFY(retained->messages.contains(QStringLiteral("test.inherited")));
+					QVERIFY(!server.hasPendingConnections());
+				}
+				current->disconnectFromWorld();
+				QTRY_VERIFY(!current->isConnected());
+				QVERIFY(current->connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_VERIFY(current->isConnected() && server.hasPendingConnections());
+				server.nextPendingConnection();
+				const auto replacement = current->gmcpPublication()->current.load();
+				QCOMPARE(replacement->native, !native);
+				QVERIFY(!replacement->negotiated);
+				QVERIFY(replacement->messages.isEmpty());
+			}
+
+			/**
+			 * @brief Publishes final disconnected metadata after a failed descriptor adoption.
+			 */
+			static void failedSocketAdoptionPublishesStatus()
+			{
+				WorldSocket socket;
+				QTcpServer  server;
+				QVERIFY(connectNativeSocket(socket, server));
+				QTRY_VERIFY(socket.nativeSocketDescriptor() >= 0);
+				QTRY_VERIFY(!socket.peerAddressString().isEmpty());
+				QString error;
+				QVERIFY(!socket.adoptConnectedSocketDescriptor(-1, &error, {}));
+				QVERIFY(!error.isEmpty());
+				QVERIFY(!socket.isConnected());
+				QVERIFY(!socket.isConnecting());
+				QCOMPARE(socket.nativeSocketDescriptor(), qintptr{-1});
+				QVERIFY(socket.peerAddressString().isEmpty());
+				QCOMPARE(socket.peerAddressV4(), quint32{0});
+			}
+
 			/**
 			 * @brief Restores actual GMCP state on an inherited plain socket without another handshake.
 			 */
@@ -4496,7 +4908,8 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 				connect(&restored, &WorldSocketService::rawDataReceived, this,
 				        [&](const QByteArray &bytes) { after += bytes; });
 				QString error;
-				QVERIFY2(restored.adoptNativeSocketDescriptor(inherited, saved, &error), qPrintable(error));
+				QVERIFY(restored.restoreNativeState(saved));
+				QVERIFY2(restored.adoptConnectedSocketDescriptor(inherited, &error, {}), qPrintable(error));
 				QVERIFY(restored.gmcpPublication()->current.load()->negotiated);
 				peer->write("suffix");
 				peer->flush();
@@ -4840,7 +5253,7 @@ assert(branchCount==1)
 local fresh,freshCount=collectGmcpNamespace(liveNamespace)
 assert(freshCount==3 and fresh.branch.Value==2 and fresh.added==3)
 )lua")));
-				const auto saved = session.saveConnection();
+				const auto saved = session.save();
 				QVERIFY(!saved.isEmpty());
 				session.closeConnection();
 				QVERIFY(run(runtime, QStringLiteral(R"lua(
