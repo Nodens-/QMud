@@ -27,6 +27,7 @@ namespace
 			QString                adoptedMspDefaultSoundUrl;
 			QString                adoptedMxpDefaultSoundUrl;
 			int                    adoptedDescriptor{-1};
+			QByteArray             adoptedTelnetInputState;
 			int                    connectCalls{0};
 			int                    closeCalls{0};
 			QString                connectHost;
@@ -43,13 +44,15 @@ namespace
 			 * @param mspDefaultSoundUrl Preserved MSP download base URL.
 			 * @param mxpDefaultSoundUrl Preserved MXP download base URL.
 			 * @param errorMessage Optional output error text.
+			 * @param telnetInputState Incomplete parser state for the adopted connection.
 			 * @return Configured adoption result.
 			 */
 			bool adoptConnectedSocketDescriptor(const int descriptor, const bool nawsNegotiated,
 			                                    const bool mspNegotiated, const QString &mspDefaultSoundUrl,
-			                                    const QString &mxpDefaultSoundUrl,
-			                                    QString       *errorMessage) override
+			                                    const QString &mxpDefaultSoundUrl, QString *errorMessage,
+			                                    const QByteArray &telnetInputState) override
 			{
+				adoptedTelnetInputState   = telnetInputState;
 				adoptedDescriptor         = descriptor;
 				adoptedNawsNegotiated     = nawsNegotiated;
 				adoptedMspNegotiated      = mspNegotiated;
@@ -214,6 +217,7 @@ namespace
 				state.connectedAtReload  = true;
 				state.socketDescriptor   = 42;
 				state.policy             = ReloadSocketPolicy::Reattach;
+				state.telnetParserState  = QByteArrayLiteral("incomplete Telnet input");
 				state.nawsNegotiated     = true;
 				state.mspNegotiated      = true;
 				state.mspDefaultSoundUrl = QStringLiteral("https://msp.example/sounds/");
@@ -222,6 +226,7 @@ namespace
 				const ReloadRecoverySocketDecision decision = applyReloadSocketRecovery(runtime, state);
 				QCOMPARE(decision.outcome, ReloadRecoverySocketOutcome::Reattached);
 				QCOMPARE(runtime.adoptedDescriptor, 42);
+				QCOMPARE(runtime.adoptedTelnetInputState, state.telnetParserState);
 				QVERIFY(runtime.adoptedNawsNegotiated);
 				QVERIFY(runtime.adoptedMspNegotiated);
 				QCOMPARE(runtime.adoptedMspDefaultSoundUrl, state.mspDefaultSoundUrl);

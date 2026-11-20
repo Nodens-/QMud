@@ -115,7 +115,8 @@ class AcceptingWorldSocketService final : public WorldSocketService
 		 * @brief Accepts descriptor adoption as an in-memory connected state.
 		 * @return Always `true`.
 		 */
-		bool adoptConnectedSocketDescriptor(qintptr /*descriptor*/, QString * /*errorMessage*/) override
+		bool adoptConnectedSocketDescriptor(qintptr /*descriptor*/, QString * /*errorMessage*/,
+		                                    const QByteArray & /*telnetInputState*/) override
 		{
 			connected = true;
 			return true;

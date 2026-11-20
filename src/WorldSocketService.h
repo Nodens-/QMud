@@ -208,23 +208,25 @@ class WorldSocketService : public QObject
 		 * @brief Adopts an already-connected native socket descriptor.
 		 * @param descriptor Descriptor to adopt.
 		 * @param errorMessage Optional output error text.
+		 * @param telnetInputState Incomplete incoming Telnet token from the preserved socket.
 		 * @return `true` when adoption succeeds.
 		 */
-		virtual bool adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage) = 0;
+		virtual bool               adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage,
+		                                                          const QByteArray &telnetInputState) = 0;
 		/**
 		 * @brief Immediately aborts the underlying socket.
 		 */
-		virtual void abortSocket() = 0;
+		virtual void               abortSocket() = 0;
 		/**
 		 * @brief Reports whether socket is currently connecting.
 		 * @return `true` when connection attempt is in progress.
 		 */
-		[[nodiscard]] virtual bool                                              isConnecting() const = 0;
+		[[nodiscard]] virtual bool isConnecting() const = 0;
 		/**
 		 * @brief Reports whether socket is currently connected.
 		 * @return `true` when socket is connected.
 		 */
-		[[nodiscard]] virtual bool                                              isConnected() const = 0;
+		[[nodiscard]] virtual bool isConnected() const = 0;
 
 		/**
 		 * @brief Returns independently published transport statistics when supported.
@@ -304,8 +306,16 @@ class WorldSocketService : public QObject
 			Q_UNUSED(enabled);
 		}
 		/**
-		 * @brief Serializes a quiesced native connection.
-		 * @return Handoff data.
+		 * @brief Captures incomplete worker Telnet input for reload independently of GMCP state.
+		 * @return Serialized parser state, or empty at a token boundary.
+		 */
+		[[nodiscard]] virtual QByteArray saveTelnetInputState() const
+		{
+			return {};
+		}
+		/**
+		 * @brief Serializes the selected native GMCP session independently of socket state.
+		 * @return Saved GMCP data, or empty for legacy handling.
 		 */
 		[[nodiscard]] virtual QByteArray saveNativeState() const
 		{
@@ -350,24 +360,6 @@ class WorldSocketService : public QObject
 		virtual bool flushForReload()
 		{
 			return true;
-		}
-
-		/**
-		 * @brief Atomically adopts and restores native framing before reading.
-		 * @param descriptor Socket descriptor.
-		 * @param state Serialized native state.
-		 * @param error Output diagnostic.
-		 * @return Whether adopted.
-		 */
-		virtual bool adoptNativeSocketDescriptor(qintptr descriptor, const QByteArray &state, QString *error)
-		{
-			if (!state.isEmpty())
-			{
-				if (error)
-					*error = QStringLiteral("Native handoff is unavailable.");
-				return false;
-			}
-			return adoptConnectedSocketDescriptor(descriptor, error);
 		}
 
 		/**

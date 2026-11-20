@@ -16,6 +16,9 @@
 #include "WorldOptions.h"
 #include "helpers/EncodingUtils.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDataStream>
+#include <QIODevice>
 #include <QList>
 #include <QScopeGuard>
 #include <QSet>
@@ -573,6 +576,45 @@ void TelnetProcessor::setStartTlsActive(const bool active)
 		m_startTlsFollowsSent         = false;
 		m_startTlsNegotiationRejected = false;
 	}
+}
+
+QByteArray TelnetProcessor::saveTelnetInputState() const
+{
+	const auto phase = m_phase >= HAVE_IAC ? m_phase : NONE;
+	if (phase == NONE && m_pendingPacketTransformBytes.isEmpty())
+		return {};
+	QByteArray  state;
+	QDataStream stream(&state, QIODevice::WriteOnly);
+	stream.setVersion(QDataStream::Qt_6_0);
+	const auto option  = phase >= HAVE_SUBNEGOTIATION ? static_cast<quint8>(m_subnegotiationType) : quint8{0};
+	const auto payload = phase == HAVE_SUBNEGOTIATION || phase == HAVE_SUBNEGOTIATION_IAC
+	                         ? m_subnegotiationData
+	                         : QByteArray{};
+	stream << static_cast<quint8>(phase) << option << payload
+	       << (phase == HAVE_COMPRESS_WILL && m_seenCompressWillIac) << m_pendingPacketTransformBytes;
+	return state;
+}
+
+bool TelnetProcessor::restoreTelnetInputState(const QByteArray &state)
+{
+	quint8     phase = NONE, option = 0;
+	QByteArray payload, pending;
+	bool       seenCompressWillIac = false;
+	if (!state.isEmpty())
+	{
+		QDataStream stream(state);
+		stream.setVersion(QDataStream::Qt_6_0);
+		stream >> phase >> option >> payload >> seenCompressWillIac >> pending;
+		if (stream.status() != QDataStream::Ok || !stream.atEnd() ||
+		    (phase != NONE && (phase < HAVE_IAC || phase > HAVE_COMPRESS_WILL)))
+			return false;
+	}
+	m_phase                       = static_cast<Phase>(phase);
+	m_subnegotiationType          = option;
+	m_subnegotiationData          = payload;
+	m_seenCompressWillIac         = seenCompressWillIac;
+	m_pendingPacketTransformBytes = pending;
+	return true;
 }
 
 void TelnetProcessor::resetMxp()
@@ -1957,7 +1999,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 	{
 		const QString commandText =
 		    m_utf8 ? QString::fromUtf8(m_mspCandidate)
-		           : qmudDecodeWorldTextIsolated(m_mspCandidate, m_legacyEncodingName, nullptr);
+			       : qmudDecodeWorldTextIsolated(m_mspCandidate, m_legacyEncodingName, nullptr);
 		std::optional<QMudMspProtocol::Command> command = QMudMspProtocol::parseLine(commandText);
 		if (!command)
 		{
@@ -2156,8 +2198,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 		                      {
 			                      return QStringLiteral(
 			                                 "MXP %1 exceeded %2-byte limit; discarding partial token.")
-			                          .arg(QString::fromLatin1(phaseName))
-			                          .arg(kMaxMxpPendingBytes);
+								      .arg(QString::fromLatin1(phaseName))
+								      .arg(kMaxMxpPendingBytes);
 		                      });
 		m_mxpPhase = MXP_NONE;
 		m_mxpString.clear();
@@ -3111,7 +3153,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 		                      [this]
 		                      {
 			                      return QStringLiteral("Invalid MXP entity name \"%1\" supplied.")
-			                          .arg(QString::fromLocal8Bit(m_mxpString));
+								      .arg(QString::fromLocal8Bit(m_mxpString));
 		                      });
 		return {};
 	}
@@ -3133,7 +3175,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 					                      [this]
 					                      {
 						                      return QStringLiteral("Invalid hex number in MXP entity: &%1;")
-						                          .arg(QString::fromLocal8Bit(m_mxpString));
+											      .arg(QString::fromLocal8Bit(m_mxpString));
 					                      });
 					return {};
 				}
@@ -3145,7 +3187,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 					                      [this]
 					                      {
 						                      return QStringLiteral("Invalid hex number in MXP entity: &%1;")
-						                          .arg(QString::fromLocal8Bit(m_mxpString));
+											      .arg(QString::fromLocal8Bit(m_mxpString));
 					                      });
 					return {};
 				}
@@ -3157,7 +3199,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 					    {
 						    return QStringLiteral(
 						               "Invalid hex number in MXP entity: &%1; - maximum of 2 hex digits")
-						        .arg(QString::fromLocal8Bit(m_mxpString));
+							    .arg(QString::fromLocal8Bit(m_mxpString));
 					    });
 					return {};
 				}
@@ -3174,7 +3216,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 					                      [this]
 					                      {
 						                      return QStringLiteral("Invalid number in MXP entity: &%1;")
-						                          .arg(QString::fromLocal8Bit(m_mxpString));
+											      .arg(QString::fromLocal8Bit(m_mxpString));
 					                      });
 					return {};
 				}
@@ -3192,7 +3234,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 				                      [this]
 				                      {
 					                      return QStringLiteral("Disallowed number in MXP entity: &%1;")
-					                          .arg(QString::fromLocal8Bit(m_mxpString));
+										      .arg(QString::fromLocal8Bit(m_mxpString));
 				                      });
 				return {};
 			}
@@ -3241,8 +3283,8 @@ void TelnetProcessor::mxpUnterminatedElement(const char *reason)
 	                      [this, type, reason]
 	                      {
 		                      return QStringLiteral("Unterminated MXP %1: %2 (%3)")
-		                          .arg(QString::fromLatin1(type), QString::fromLocal8Bit(m_mxpString),
-		                               QString::fromLatin1(reason));
+							      .arg(QString::fromLatin1(type), QString::fromLocal8Bit(m_mxpString),
+							           QString::fromLatin1(reason));
 	                      });
 }
 
@@ -3445,7 +3487,7 @@ void TelnetProcessor::mxpDefinition(QByteArray definition)
 		                      {
 			                      return QStringLiteral(
 			                                 "MXP definition ignored when not in secure mode: <!%1>")
-			                          .arg(QString::fromLocal8Bit(definition));
+								      .arg(QString::fromLocal8Bit(definition));
 		                      });
 		return;
 	}
@@ -3461,7 +3503,7 @@ void TelnetProcessor::mxpDefinition(QByteArray definition)
 		                      [definition]
 		                      {
 			                      return QStringLiteral("Invalid MXP definition name: <!%1>")
-			                          .arg(QString::fromLocal8Bit(definition));
+								      .arg(QString::fromLocal8Bit(definition));
 		                      });
 		return;
 	}
@@ -3478,7 +3520,7 @@ void TelnetProcessor::mxpDefinition(QByteArray definition)
 		                      [strName]
 		                      {
 			                      return QStringLiteral("Invalid MXP element/entity name: \"%1\"")
-			                          .arg(QString::fromLocal8Bit(strName));
+								      .arg(QString::fromLocal8Bit(strName));
 		                      });
 		return;
 	}
@@ -3488,8 +3530,8 @@ void TelnetProcessor::mxpDefinition(QByteArray definition)
 	                      [strDefinition, strName, definition]
 	                      {
 		                      return QStringLiteral("Got Definition: !%1 %2 %3")
-		                          .arg(QString::fromLocal8Bit(strDefinition), QString::fromLocal8Bit(strName),
-		                               QString::fromLocal8Bit(definition));
+							      .arg(QString::fromLocal8Bit(strDefinition), QString::fromLocal8Bit(strName),
+							           QString::fromLocal8Bit(definition));
 	                      });
 
 	if (strDefinition == "element" || strDefinition == "el")
@@ -3512,7 +3554,7 @@ void TelnetProcessor::mxpDefinition(QByteArray definition)
 		                      [strDefinition]
 		                      {
 			                      return QStringLiteral("Unknown definition type: <!%1>")
-			                          .arg(QString::fromLocal8Bit(strDefinition));
+								      .arg(QString::fromLocal8Bit(strDefinition));
 		                      });
 	}
 }
@@ -3574,7 +3616,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 				                      {
 					                      return QStringLiteral(
 					                                 "No closing ';' in MXP entity argument \"%1\"")
-					                          .arg(QString::fromLocal8Bit(strEntityContents));
+										      .arg(QString::fromLocal8Bit(strEntityContents));
 				                      });
 				return;
 			}
@@ -3624,7 +3666,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 			    [strKeyword, lowerName]
 			    {
 				    return QStringLiteral("Unexpected word \"%1\" in entity definition for &%2; ignored")
-				        .arg(QString::fromLocal8Bit(strKeyword), QString::fromLocal8Bit(lowerName));
+					    .arg(QString::fromLocal8Bit(strKeyword), QString::fromLocal8Bit(lowerName));
 			    });
 			return;
 		}
@@ -3751,7 +3793,7 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 		                      [lowerName]
 		                      {
 			                      return QStringLiteral("Cannot redefine built-in MXP element: <%1>")
-			                          .arg(QString::fromLocal8Bit(lowerName));
+								      .arg(QString::fromLocal8Bit(lowerName));
 		                      });
 		return;
 	}
@@ -3865,7 +3907,7 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 		                      {
 			                      return QStringLiteral(
 			                                 "Cannot add attributes to undefined MXP element: <%1>")
-			                          .arg(QString::fromLocal8Bit(lowerName));
+								      .arg(QString::fromLocal8Bit(lowerName));
 		                      });
 		return;
 	} // end of no element matching
@@ -3882,8 +3924,8 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 		    {
 			    return QStringLiteral(
 			               "MXP ATTLIST for <%1> exceeded %2 bytes; ignoring additional attributes.")
-			        .arg(QString::fromLocal8Bit(lowerName))
-			        .arg(kMaxMxpAttlistBytes);
+				    .arg(QString::fromLocal8Bit(lowerName))
+				    .arg(kMaxMxpAttlistBytes);
 		    });
 		return;
 	}

@@ -7,6 +7,7 @@
  */
 #include "WorldSocket.h"
 #include "WorldOptions.h"
+#include <QDataStream>
 #include <QElapsedTimer>
 #include <QIODevice>
 #include <QMetaObject>
@@ -82,8 +83,8 @@ struct WorldSocket::Worker
 		{
 			status.store(std::make_shared<const Status>(
 			                 Status{transport->peerAddressString(), transport->peerAddressV4(),
-			                        transport->nativeSocketDescriptor(), transport->isConnecting(),
-			                        transport->isConnected()}),
+							        transport->nativeSocketDescriptor(), transport->isConnecting(),
+							        transport->isConnected()}),
 			             std::memory_order_release);
 		}
 
@@ -156,7 +157,7 @@ struct WorldSocket::Worker
 			    {
 				    pruneProtocolWrites();
 				    const ProtocolWrite observation{++nextProtocolWriteSequence, transport->generation(),
-				                                    write};
+					                                write};
 				    protocolWrites.enqueue(observation);
 				    ++notificationCount;
 				    QMetaObject::invokeMethod(
@@ -321,7 +322,7 @@ struct WorldSocket::Worker
 					        const QPointer<WorldSocket> guard(owner);
 					        if (identity == generation)
 						        std::apply([this, destination](const auto &...args)
-						                   { (owner->*destination)(args...); }, arguments);
+								           { (owner->*destination)(args...); }, arguments);
 					        if (guard)
 						        ++deliveredNotifications;
 				        },
@@ -364,14 +365,14 @@ WorldSocket::WorldSocket(QObject *parent) : WorldSocketService(parent), m_worker
 		        Qt::DirectConnection);
 		    m_worker->forward(&WorldSocketService::socketError, &WorldSocketService::socketError);
 		    m_worker->forward(&WorldSocketService::socketStateChanged,
-		                      &WorldSocketService::socketStateChanged);
+			                  &WorldSocketService::socketStateChanged);
 		    m_worker->forwardConnected();
 		    m_worker->forward(&WorldSocketService::disconnected, &WorldSocketService::disconnected);
 		    m_worker->forward(&WorldSocketService::tlsEncrypted, &WorldSocketService::tlsEncrypted);
 		    m_worker->forward(&WorldSocketService::gmcpStateChanged, &WorldSocketService::gmcpStateChanged);
 		    m_worker->forward(&WorldSocketService::gmcpObserved, &WorldSocketService::gmcpObserved);
 		    m_worker->forward(&WorldSocketService::gmcpRoundTripChanged,
-		                      &WorldSocketService::gmcpRoundTripChanged);
+			                  &WorldSocketService::gmcpRoundTripChanged);
 		    m_worker->forward(&WorldSocketService::gmcpGoodbye, &WorldSocketService::gmcpGoodbye);
 		    m_worker->forwardProtocolWrites();
 	    });
@@ -553,15 +554,25 @@ qintptr WorldSocket::nativeSocketDescriptor() const
 {
 	return m_worker->status.load(std::memory_order_acquire)->descriptor;
 }
-bool WorldSocket::adoptConnectedSocketDescriptor(qintptr descriptor, QString *error)
+bool WorldSocket::adoptConnectedSocketDescriptor(qintptr descriptor, QString *error,
+                                                 const QByteArray &telnetInputState)
 {
 	const quint64 generation       = ++m_worker->generation;
 	m_worker->inputReadyGeneration = 0;
 	const bool adopted             = m_worker->call(
 	    [&]
 	    {
-		    m_worker->transport->prepareGeneration(generation);
-		    return m_worker->transport->adoptConnectedSocketDescriptor(descriptor, error);
+		    const auto publishStatus = qScopeGuard([&] { m_worker->publishStatus(); });
+		    const bool restoring     = m_worker->transport->restorationPrepared();
+		    m_worker->transport->prepareGeneration(generation, restoring);
+		    if (!m_worker->transport->adoptConnectedSocketDescriptor(descriptor, error, telnetInputState))
+		    {
+			    m_worker->transport->abortSocket();
+			    return false;
+		    }
+		    if (restoring)
+			    m_worker->transport->activateRestoration();
+		    return true;
 	    });
 	if (adopted)
 	{
@@ -657,10 +668,12 @@ bool WorldSocket::flushForReload()
 {
 	return m_worker->call([&] { return m_worker->transport->flushForReload(); });
 }
+QByteArray WorldSocket::saveTelnetInputState() const
+{
+	return m_worker->call([&] { return m_worker->transport->saveTelnetInputState(); });
+}
 QByteArray WorldSocket::saveNativeState() const
 {
-	if (!reloadInputDrained())
-		return {};
 	return m_worker->call(
 	    [&]
 	    {
@@ -681,37 +694,6 @@ void WorldSocket::pauseTransport(bool paused)
 	m_worker->call([&] { m_worker->transport->pauseTransport(paused); });
 	if (!paused)
 		QMetaObject::invokeMethod(this, &WorldSocket::onReadyRead, Qt::QueuedConnection);
-}
-
-bool WorldSocket::adoptNativeSocketDescriptor(qintptr descriptor, const QByteArray &state, QString *error)
-{
-	const quint64 generation       = ++m_worker->generation;
-	m_worker->inputReadyGeneration = 0;
-	const bool adopted             = m_worker->call(
-	    [&]
-	    {
-		    if (!m_worker->transport->restorationPrepared() &&
-		        !m_worker->transport->restoreNativeState(state))
-		    {
-			    if (error)
-				    *error = QStringLiteral("Invalid native GMCP state.");
-			    return false;
-		    }
-		    m_worker->transport->prepareGeneration(generation, true);
-		    if (!m_worker->transport->adoptConnectedSocketDescriptor(descriptor, error))
-		    {
-			    m_worker->transport->abortSocket();
-			    return false;
-		    }
-		    m_worker->transport->activateRestoration();
-		    return true;
-	    });
-	if (adopted)
-	{
-		m_worker->inputReadyGeneration = generation;
-		QMetaObject::invokeMethod(this, &WorldSocket::onReadyRead, Qt::QueuedConnection);
-	}
-	return adopted;
 }
 
 void WorldSocket::setCompressionDisabled(bool disabled)
@@ -1084,7 +1066,8 @@ qintptr WorldSocketTransport::nativeSocketDescriptor() const
 	return m_socket->socketDescriptor();
 }
 
-bool WorldSocketTransport::adoptConnectedSocketDescriptor(const qintptr descriptor, QString *errorMessage)
+bool WorldSocketTransport::adoptConnectedSocketDescriptor(const qintptr descriptor, QString *errorMessage,
+                                                          const QByteArray &telnetInputState)
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -1103,6 +1086,13 @@ bool WorldSocketTransport::adoptConnectedSocketDescriptor(const qintptr descript
 
 	if (m_socket->state() != QAbstractSocket::UnconnectedState)
 		m_socket->abort();
+
+	if (!m_stream.restoreTelnetInputState(telnetInputState))
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Invalid saved worker Telnet parser state.");
+		return false;
+	}
 
 	if (!m_socket->setSocketDescriptor(descriptor, QAbstractSocket::ConnectedState, QIODevice::ReadWrite))
 	{
@@ -1271,17 +1261,13 @@ bool WorldSocketTransport::flushForReload()
 	m_socket->flush();
 	return m_socket->bytesToWrite() == 0;
 }
+QByteArray WorldSocketTransport::saveTelnetInputState() const
+{
+	return m_stream.saveTelnetInputState();
+}
 QByteArray WorldSocketTransport::saveNativeState() const
 {
-	if (!m_paused || !m_nativeGmcp || !isConnected())
-		return {};
-#if QT_CONFIG(ssl)
-	if (const auto *ssl = asSslSocket(m_socket); ssl && ssl->mode() != QSslSocket::UnencryptedMode)
-		return {};
-#endif
-	if (m_socket->bytesAvailable() != 0 || m_socket->bytesToWrite() != 0 || !m_stream.atBoundary())
-		return {};
-	return m_gmcp.save();
+	return m_gmcp.publication()->current.load()->native ? m_gmcp.save() : QByteArray{};
 }
 bool WorldSocketTransport::restoreNativeState(const QByteArray &state)
 {
@@ -1546,13 +1532,41 @@ void WorldSocketStream::close()
 	impl().endInflater();
 	impl().failed = true;
 }
+QByteArray WorldSocketStream::saveTelnetInputState() const
+{
+	const auto &data = impl();
+	if (data.phase == 0)
+		return {};
+	QByteArray  state;
+	QDataStream stream(&state, QIODevice::WriteOnly);
+	stream.setVersion(QDataStream::Qt_6_0);
+	stream << static_cast<quint8>(data.phase) << data.verb << data.option << data.pending << data.payload;
+	return state;
+}
+bool WorldSocketStream::restoreTelnetInputState(const QByteArray &state)
+{
+	quint8     phase = 0, verb = 0, option = 0;
+	QByteArray pending, payload;
+	if (!state.isEmpty())
+	{
+		QDataStream stream(state);
+		stream.setVersion(QDataStream::Qt_6_0);
+		stream >> phase >> verb >> option >> pending >> payload;
+		if (stream.status() != QDataStream::Ok || !stream.atEnd() || phase < 1 || phase > 5)
+			return false;
+	}
+	auto &data        = impl();
+	data.phase        = phase;
+	data.verb         = verb;
+	data.option       = option;
+	data.pending      = pending;
+	data.payload      = payload;
+	data.handledInput = data.handlers.contains(option) || option == Mccp1 || option == Mccp2;
+	return true;
+}
 void WorldSocketStream::setCompressionDisabled(bool disabled)
 {
 	impl().disableCompression = disabled;
-}
-bool WorldSocketStream::atBoundary() const
-{
-	return !impl().inflaterReady && impl().phase == 0 && impl().outgoingPhase == 0;
 }
 const WorldSocketTransportStatistics &WorldSocketStream::statistics() const
 {

@@ -117,47 +117,47 @@ class TelnetProcessor
 		 * @brief Enables or disables UTF-8 handling for incoming text decoding.
 		 * @param enabled Enable UTF-8 decode mode when `true`.
 		 */
-		void       setUseUtf8(bool enabled);
+		void                     setUseUtf8(bool enabled);
 		/**
 		 * @brief Sets the legacy world text encoding used for incoming MXP text decoding.
 		 * @param encodingName Canonical Qt encoding name.
 		 */
-		void       setLegacyEncodingName(const QString &encodingName);
+		void                     setLegacyEncodingName(const QString &encodingName);
 		/**
 		 * @brief Sets preferred CHARSET negotiation names in priority order.
 		 * @param names Accepted charset names.
 		 */
-		void       setPreferredCharsetNames(const QList<QByteArray> &names);
+		void                     setPreferredCharsetNames(const QList<QByteArray> &names);
 		/**
 		 * @brief Converts received GA commands into newline output when enabled.
 		 * @param enabled Convert GA to newline when `true`.
 		 */
-		void       setConvertGAtoNewline(bool enabled);
+		void                     setConvertGAtoNewline(bool enabled);
 		/**
 		 * @brief Controls whether NO_ECHO is turned off when server negotiation allows it.
 		 * @param enabled Turn off NO_ECHO when possible when `true`.
 		 */
-		void       setNoEchoOff(bool enabled);
+		void                     setNoEchoOff(bool enabled);
 		/**
 		 * @brief Sets MXP mode preference used during negotiation.
 		 * @param mode MXP preference/mode code.
 		 */
-		void       setUseMxp(int mode);
+		void                     setUseMxp(int mode);
 		/**
 		 * @brief Enables or disables NAWS support.
 		 * @param enabled Enable NAWS negotiation when `true`.
 		 */
-		void       setNawsEnabled(bool enabled);
+		void                     setNawsEnabled(bool enabled);
 		/**
 		 * @brief Configures MSP availability and queues DONT when disabling an active negotiation.
 		 * @param available Whether native sound playback is available.
 		 */
-		void       setMspAvailable(bool available);
+		void                     setMspAvailable(bool available);
 		/**
 		 * @brief Enables or disables MSP commands embedded within ordinary output lines.
 		 * @param enabled Allow embedded MSP commands when `true`; otherwise require a command-only line.
 		 */
-		void       setEmbeddedMspEnabled(bool enabled);
+		void                     setEmbeddedMspEnabled(bool enabled);
 		/**
 		 * @brief Restores the peer NAWS request state for an adopted live connection.
 		 * @param negotiated Restore an active peer NAWS request when `true`.
@@ -166,64 +166,64 @@ class TelnetProcessor
 		 * preserves the existing TCP session. An active restoration sends the
 		 * current cached dimensions once.
 		 */
-		void       restoreNawsNegotiatedState(bool negotiated);
+		void                     restoreNawsNegotiatedState(bool negotiated);
 		/**
 		 * @brief Restores MSP negotiation state or queues DONT when local sound support is unavailable.
 		 * @param negotiated Restore active MSP negotiation when `true`.
 		 */
-		void       restoreMspNegotiatedState(bool negotiated);
+		void                     restoreMspNegotiatedState(bool negotiated);
 		/**
 		 * @brief Enables/disables one-time telnet option negotiation mode.
 		 * @param enabled When `true`, repeated WILL/WONT and DO/DONT for an already
 		 * negotiated option are ignored.
 		 */
-		void       setNegotiateOptionsOnce(bool enabled);
+		void                     setNegotiateOptionsOnce(bool enabled);
 		/**
 		 * @brief Enables or disables automatic protection from telnet option renegotiation loops.
 		 * @param enabled Enable rate-based renegotiation suppression when `true`.
 		 */
-		void       setAutomaticRenegotiationLoopProtection(bool enabled);
+		void                     setAutomaticRenegotiationLoopProtection(bool enabled);
 		/**
 		 * @brief Updates terminal size values used for NAWS replies.
 		 * @param columns Terminal width in columns.
 		 * @param rows Terminal height in rows.
 		 */
-		void       setWindowSize(int columns, int rows);
+		void                     setWindowSize(int columns, int rows);
 		/**
 		 * @brief Sets terminal identification string returned to the server.
 		 * @param value Terminal-identification string.
 		 */
-		void       setTerminalIdentification(const QString &value);
+		void                     setTerminalIdentification(const QString &value);
 		/**
 		 * @brief Prevents compression startup when enabled.
 		 * @param enabled Disable compression when `true`.
 		 */
-		void       setDisableCompression(bool enabled);
+		void                     setDisableCompression(bool enabled);
 		/**
 		 * @brief Queues telnet negotiation bytes that request MCCP disable.
 		 *
 		 * Emits `IAC DONT` for the currently active MCCP option (v2 by default)
 		 * so the server can stop compressed output before reload handoff.
 		 */
-		void       queueDisableCompressionNegotiation();
+		void                     queueDisableCompressionNegotiation();
 		/**
 		 * @brief Queues telnet negotiation bytes that request MCCP v2 enable.
 		 *
 		 * Emits `IAC DO COMPRESS2` so servers that support MCCP v2 can restart
 		 * compression after reload socket reattach.
 		 */
-		void       queueEnableCompression2Negotiation();
+		void                     queueEnableCompression2Negotiation();
 		/**
 		 * @brief Enables START-TLS telnet negotiation support.
 		 * @param enabled Enable START-TLS handling when `true`.
 		 */
-		void       setStartTlsEnabled(bool enabled);
+		void                     setStartTlsEnabled(bool enabled);
 		/**
 		 * @brief Queues client START-TLS capability negotiation.
 		 *
 		 * Emits `IAC DO START_TLS` when START-TLS is enabled and not already active.
 		 */
-		void       queueStartTlsNegotiation();
+		void                     queueStartTlsNegotiation();
 		/**
 		 * @brief Returns whether START-TLS upgrade was requested by negotiation.
 		 *
@@ -231,7 +231,7 @@ class TelnetProcessor
 		 *
 		 * @return `true` when caller should start TLS client encryption now.
 		 */
-		bool       takeStartTlsUpgradeRequest();
+		bool                     takeStartTlsUpgradeRequest();
 		/**
 		 * @brief Returns whether START-TLS negotiation was rejected by peer.
 		 *
@@ -239,38 +239,49 @@ class TelnetProcessor
 		 *
 		 * @return `true` when peer rejected START-TLS negotiation.
 		 */
-		bool       takeStartTlsNegotiationRejected();
+		bool                     takeStartTlsNegotiationRejected();
 		/**
 		 * @brief Sets whether TLS is currently active for this connection.
 		 * @param active Set to `true` after socket encryption succeeds.
 		 */
-		void       setStartTlsActive(bool active);
+		void                     setStartTlsActive(bool active);
 		/**
 		 * @brief Installs callback targets used for telnet and MXP events.
 		 * @param callbacks Callback table.
 		 */
-		void       setCallbacks(const Callbacks &callbacks);
+		void                     setCallbacks(const Callbacks &callbacks);
 		/**
 		 * @brief Resets telnet state for a new connection.
 		 */
-		void       resetConnectionState();
+		void                     resetConnectionState();
+		/**
+		 * @brief Captures incomplete Telnet input without including rendering or compression state.
+		 * @return Serialized parser state, or empty at a Telnet message boundary.
+		 */
+		[[nodiscard]] QByteArray saveTelnetInputState() const;
+		/**
+		 * @brief Restores incomplete Telnet input without dispatching callbacks or consuming new bytes.
+		 * @param state Serialized parser state, or empty for a message boundary.
+		 * @return Whether the saved parser state is valid.
+		 */
+		bool                     restoreTelnetInputState(const QByteArray &state);
 		/**
 		 * @brief Queues initial option negotiation bytes for a new session.
 		 * @param requestSga Request SGA option when `true`.
 		 * @param requestEor Request EOR option when `true`.
 		 */
-		void       queueInitialNegotiation(bool requestSga, bool requestEor);
+		void                     queueInitialNegotiation(bool requestSga, bool requestEor);
 		/**
 		 * @brief Clears MXP state and custom definitions.
 		 */
-		void       resetMxp();
+		void                     resetMxp();
 
 		/**
 		 * @brief Processes incoming bytes and returns display/log payload bytes.
 		 * @param data Incoming raw bytes.
 		 * @return Processed/plain payload bytes for output.
 		 */
-		QByteArray processBytes(const QByteArray &data);
+		QByteArray               processBytes(const QByteArray &data);
 		/**
 		 * @brief Callback that can transform decompressed bytes before telnet/MXP parsing.
 		 */

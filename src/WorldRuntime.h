@@ -341,67 +341,72 @@ class WorldRuntime : public QObject
 		 * @param version Positive version, or zero to remove.
 		 * @param engineInstance Immutable owning engine identity.
 		 */
-		void                  registerGmcpModule(const QString &owner, const QString &module, int version,
-		                                         quint64 engineInstance = 0);
+		void                     registerGmcpModule(const QString &owner, const QString &module, int version,
+		                                            quint64 engineInstance = 0);
 		/**
 		 * @brief Releases stale module owners and advertises enabled owners' support while retaining disabled
 		 * owners' registrations.
 		 */
-		void                  refreshGmcpModules();
+		void                     refreshGmcpModules();
 		/**
 		 * @brief Reads automatic Core preferences without changing the active handler mode.
 		 * @return Validated Core settings with intervals in minutes.
 		 */
-		QMudGmcp::CoreOptions gmcpCoreOptions() const;
+		QMudGmcp::CoreOptions    gmcpCoreOptions() const;
 		/**
 		 * @brief Releases registrations after their Lua state is reset or detached.
 		 * @param engineInstance Immutable engine identity.
 		 */
-		void                  releaseGmcpModules(quint64 engineInstance);
+		void                     releaseGmcpModules(quint64 engineInstance);
 		/**
 		 * @brief Serializes GMCP session data after frozen input has drained.
-		 * @return Saved GMCP state, or empty when the connection cannot be reused.
+		 * @return Saved GMCP state, or empty for legacy handling.
 		 */
-		QByteArray            saveNativeGmcpState() const;
+		QByteArray               saveNativeGmcpState() const;
+		/**
+		 * @brief Captures incomplete Telnet input from the worker and runtime after reload draining.
+		 * @return Serialized parser state, or empty when neither parser has incomplete input.
+		 */
+		[[nodiscard]] QByteArray saveTelnetInputState() const;
 		/**
 		 * @brief Publishes preserved native or legacy state before startup Lua runs.
 		 * @param state Saved GMCP state, empty for legacy ownership.
 		 * @return Whether the state was prepared successfully.
 		 */
-		bool                  prepareNativeGmcpRestore(const QByteArray &state);
+		bool                     prepareNativeGmcpRestore(const QByteArray &state);
 		/**
 		 * @brief Freezes reception and begins draining already received work for reload.
 		 */
-		void                  freezeForReload();
+		void                     freezeForReload();
 		/**
 		 * @brief Checks reload preparation state.
 		 * @return Whether new periodic work is paused for reload.
 		 */
-		bool                  reloadPreparing() const;
+		bool                     reloadPreparing() const;
 		/**
 		 * @brief Checks complete input and causal callback delivery.
 		 * @return Whether frozen work has completed.
 		 */
-		bool                  reloadDrained() const;
+		bool                     reloadDrained() const;
 		/**
 		 * @brief Checks execution frames that must unwind before reload preparation.
 		 * @return Whether runtime execution is currently on the caller stack.
 		 */
-		bool                  reloadExecutionActive() const;
+		bool                     reloadExecutionActive() const;
 		/**
 		 * @brief Flushes frozen transport output.
 		 * @return Whether no writes remain buffered.
 		 */
-		bool                  flushForReload() const;
+		bool                     flushForReload() const;
 		/**
 		 * @brief Resumes reception after an unsuccessful reload attempt.
 		 */
-		void                  resumeTransportAfterReload();
+		void                     resumeTransportAfterReload();
 
-		static constexpr int  kAcceleratorFirstCommand = 12000;
-		static constexpr int  kAcceleratorCount        = 1000;
-		static constexpr int  kSameColour              = 65535;
-		static constexpr int  kMaxSoundBuffers         = 10;
+		static constexpr int     kAcceleratorFirstCommand = 12000;
+		static constexpr int     kAcceleratorCount        = 1000;
+		static constexpr int     kSameColour              = 65535;
+		static constexpr int     kMaxSoundBuffers         = 10;
 		/**
 		 * @brief Output metrics reported by @ref windowOutputText.
 		 */
@@ -3445,13 +3450,15 @@ class WorldRuntime : public QObject
 		 * @param mspDefaultSoundUrl MSP default sound URL associated with the preserved connection.
 		 * @param mxpDefaultSoundUrl MXP default sound URL associated with the preserved connection.
 		 * @param errorMessage Optional output error text.
+		 * @param telnetInputState Incomplete worker and runtime Telnet input from the preserved socket.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
 		[[nodiscard]] bool adoptConnectedSocketDescriptor(int descriptor, bool nawsNegotiated,
-		                                                  bool           mspNegotiated,
-		                                                  const QString &mspDefaultSoundUrl,
-		                                                  const QString &mxpDefaultSoundUrl,
-		                                                  QString       *errorMessage = nullptr);
+		                                                  bool              mspNegotiated,
+		                                                  const QString    &mspDefaultSoundUrl,
+		                                                  const QString    &mxpDefaultSoundUrl,
+		                                                  QString          *errorMessage     = nullptr,
+		                                                  const QByteArray &telnetInputState = {});
 		/**
 		 * @brief Closes active/adopted socket immediately for reload reconnect flow.
 		 */
@@ -9816,8 +9823,6 @@ class WorldRuntime : public QObject
 		 */
 		std::unique_ptr<ILuaExecutor>           m_luaExecutor;
 		std::shared_ptr<QMudGmcp::Publication>  m_gmcpPublication;
-		QByteArray                              m_pendingNativeGmcpRestore;
-		bool                                    m_nativeGmcpRestorePrepared{false};
 		bool                                    m_reloadPreparing{false};
 		QMudGmcp::History                       m_gmcpHistory;
 		QTimer                                 *m_gmcpHistoryTimer{nullptr};

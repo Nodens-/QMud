@@ -1230,11 +1230,11 @@ class AppController : public QObject
 		 * @brief Opens and initializes one world document.
 		 * @param path World-document path.
 		 * @param autoConnectPolicy Preference-driven automatic-connect policy for this open.
-		 * @param recoveryState Preserved connection state to prepare before world initialization, or null for normal opens.
+		 * @param recoveredRuntime Runtime with its connection state already restored, or null for normal opens.
 		 * @return `true` when world document opens successfully.
 		 */
 		bool               openWorldDocument(const QString &path, InitialAutoConnectPolicy autoConnectPolicy,
-		                                     const ReloadWorldState *recoveryState = nullptr);
+		                                     WorldRuntime *recoveredRuntime = nullptr);
 		/**
 		 * @brief Resolves world session-state directory under the data directory.
 		 * @return Absolute world session-state directory path.
