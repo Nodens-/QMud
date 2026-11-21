@@ -421,10 +421,9 @@ namespace
 					        &workerTarget, [] { qmudLuaBridgeClearCurrentThreadWaitWorkPump(); }));
 				    });
 
-				bool outerInvokeOk = false;
-				bool innerInvokeOk = false;
-				bool waitSucceeded = false;
-				outerInvokeOk      = qmudLuaBridgeInvokeOnObjectThread(
+				bool       innerInvokeOk = false;
+				bool       waitSucceeded = false;
+				const bool outerInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
 				    &workerTarget,
 				    [&]()
 				    {
@@ -445,7 +444,7 @@ namespace
 						        qmudLuaBridgeNotifyThreadWake(&workerThread);
 						        std::unique_lock waitLock(doneMutex);
 						        waitSucceeded = doneCv.wait_for(waitLock, std::chrono::milliseconds(1000),
-						                                        [&]() { return workDone; });
+								                                [&]() { return workDone; });
 					        });
 				    });
 
@@ -542,8 +541,8 @@ namespace
 					        [&]()
 					        {
 						        executor.dispatchBatchAsync(asyncRequest, nullptr,
-						                                    [&](const LuaBatchDispatchResult &)
-						                                    {
+								                            [&](const LuaBatchDispatchResult &)
+								                            {
 							                                    std::scoped_lock lock(orderMutex);
 							                                    order.push_back(1);
 						                                    });
@@ -782,37 +781,37 @@ namespace
 					executor.dispatchBatchAsync(
 					    request, &completionTarget,
 					    [snapshot = request.callbackSnapshotArg, &completed, &observedWindowName,
-					     &observedWidth, &observedLookup](const LuaBatchDispatchResult &)
+						 &observedWidth, &observedLookup](const LuaBatchDispatchResult &)
 					    {
 						    observedWindowName = snapshot->windowNames.value(0);
 						    observedWidth  = snapshot->windowInfoByWindow.value(QStringLiteral("Map")).width;
 						    observedLookup = snapshot->miniWindowIds.contains(QStringLiteral("Map")) &&
-						                     snapshot->miniWindowIds.contains(QStringLiteral("map")) &&
-						                     snapshot->miniWindowIds.contains(QStringLiteral("Map ")) &&
-						                     snapshot->miniWindowIds.contains(QStringLiteral("map|left")) &&
-						                     snapshot->miniWindowFontKeys.contains(
+							                 snapshot->miniWindowIds.contains(QStringLiteral("map")) &&
+							                 snapshot->miniWindowIds.contains(QStringLiteral("Map ")) &&
+							                 snapshot->miniWindowIds.contains(QStringLiteral("map|left")) &&
+							                 snapshot->miniWindowFontKeys.contains(
 						                         {QStringLiteral("Map"), QStringLiteral("Font")}) &&
-						                     snapshot->miniWindowFontKeys.contains(
+							                 snapshot->miniWindowFontKeys.contains(
 						                         {QStringLiteral("Map"), QStringLiteral("Font ")}) &&
-						                     snapshot->miniWindowFontKeys.contains(
+							                 snapshot->miniWindowFontKeys.contains(
 						                         {QStringLiteral("map"), QStringLiteral("left|font")}) &&
-						                     !snapshot->miniWindowFontKeys.contains(
+							                 !snapshot->miniWindowFontKeys.contains(
 						                         {QStringLiteral("map|left"), QStringLiteral("font")}) &&
-						                     snapshot->miniWindowImageKeys.contains(
+							                 snapshot->miniWindowImageKeys.contains(
 						                         {QStringLiteral("Map"), QStringLiteral("Image")}) &&
-						                     snapshot->miniWindowImageKeys.contains(
+							                 snapshot->miniWindowImageKeys.contains(
 						                         {QStringLiteral("Map"), QStringLiteral("Image ")}) &&
-						                     snapshot->miniWindowImageKeys.contains(
+							                 snapshot->miniWindowImageKeys.contains(
 						                         {QStringLiteral("map"), QStringLiteral("left|image")}) &&
-						                     !snapshot->miniWindowImageKeys.contains(
+							                 !snapshot->miniWindowImageKeys.contains(
 						                         {QStringLiteral("map|left"), QStringLiteral("image")}) &&
-						                     snapshot->miniWindowHotspotKeys.contains(
+							                 snapshot->miniWindowHotspotKeys.contains(
 						                         {QStringLiteral("Map"), QStringLiteral("Move")}) &&
-						                     snapshot->miniWindowHotspotKeys.contains(
+							                 snapshot->miniWindowHotspotKeys.contains(
 						                         {QStringLiteral("Map"), QStringLiteral("Move ")}) &&
-						                     snapshot->miniWindowHotspotKeys.contains(
+							                 snapshot->miniWindowHotspotKeys.contains(
 						                         {QStringLiteral("map"), QStringLiteral("left|drag")}) &&
-						                     !snapshot->miniWindowHotspotKeys.contains(
+							                 !snapshot->miniWindowHotspotKeys.contains(
 						                         {QStringLiteral("map|left"), QStringLiteral("drag")});
 						    completed.store(true);
 					    });
@@ -906,8 +905,8 @@ namespace
 				    [&]()
 				    {
 					    firstInvokeOk.store(qmudLuaBridgeInvokeOnObjectThread(target.data(),
-					                                                          [&]()
-					                                                          {
+						                                                      [&]()
+						                                                      {
 						                                                          {
 							                                                          std::lock_guard lock(
 							                                                              gateMutex);
@@ -1216,8 +1215,8 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("local f = assert(load(\"return test_value\"))\n"
-				                      "setfenv(f, { test_value = \"compat\" })\n"
-				                      "return tostring(getfenv(f).test_value) .. \":\" .. tostring(f())"));
+					                  "setfenv(f, { test_value = \"compat\" })\n"
+					                  "return tostring(getfenv(f).test_value) .. \":\" .. tostring(f())"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("compat:compat"));
 			}
@@ -1229,13 +1228,13 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("local tostring = tostring\n"
-				                                   "local package = package\n"
-				                                   "local globals = _G\n"
-				                                   "module(\"compat_mod\")\n"
-				                                   "value = 42\n"
-				                                   "return tostring(globals.compat_mod.value) .. \":\" .. "
-				                                   "tostring(package.loaded.compat_mod.value) .. \":\" .. "
-				                                   "tostring(value)"));
+					                               "local package = package\n"
+					                               "local globals = _G\n"
+					                               "module(\"compat_mod\")\n"
+					                               "value = 42\n"
+					                               "return tostring(globals.compat_mod.value) .. \":\" .. "
+					                               "tostring(package.loaded.compat_mod.value) .. \":\" .. "
+					                               "tostring(value)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("42:42:42"));
 			}
@@ -1248,11 +1247,11 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("local tostring = tostring\n"
-				                      "local package = package\n"
-				                      "module(\"compat.parent\")\n"
-				                      "return tostring(_NAME) .. \":\" .. "
-				                      "tostring(_M == package.loaded[\"compat.parent\"]) .. \":\" .. "
-				                      "tostring(_PACKAGE)"));
+					                  "local package = package\n"
+					                  "module(\"compat.parent\")\n"
+					                  "return tostring(_NAME) .. \":\" .. "
+					                  "tostring(_M == package.loaded[\"compat.parent\"]) .. \":\" .. "
+					                  "tostring(_PACKAGE)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("compat.parent:true:compat."));
 			}
@@ -1264,16 +1263,16 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("local tostring = tostring\n"
-				                                   "local type = type\n"
-				                                   "local package = package\n"
-				                                   "local globals = _G\n"
-				                                   "module(\"compat.path.deep\")\n"
-				                                   "value = 7\n"
-				                                   "return tostring(type(globals.compat)) .. \":\" .. "
-				                                   "tostring(type(globals.compat.path)) .. \":\" .. "
-				                                   "tostring(globals.compat.path.deep.value) .. \":\" .. "
-				                                   "tostring(package.loaded[\"compat.path.deep\"] == "
-				                                   "globals.compat.path.deep)"));
+					                               "local type = type\n"
+					                               "local package = package\n"
+					                               "local globals = _G\n"
+					                               "module(\"compat.path.deep\")\n"
+					                               "value = 7\n"
+					                               "return tostring(type(globals.compat)) .. \":\" .. "
+					                               "tostring(type(globals.compat.path)) .. \":\" .. "
+					                               "tostring(globals.compat.path.deep.value) .. \":\" .. "
+					                               "tostring(package.loaded[\"compat.path.deep\"] == "
+					                               "globals.compat.path.deep)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("table:table:7:true"));
 			}
@@ -1285,9 +1284,9 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("local tostring = tostring\n"
-				                                   "module(\"compat.seeall\", package.seeall)\n"
-				                                   "return tostring(type(print)) .. \":\" .. "
-				                                   "tostring(getmetatable(_M).__index == _G)"));
+					                               "module(\"compat.seeall\", package.seeall)\n"
+					                               "return tostring(type(print)) .. \":\" .. "
+					                               "tostring(getmetatable(_M).__index == _G)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("function:true"));
 			}
@@ -1299,7 +1298,7 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("local a, b, c = unpack({1, 2, 3})\n"
-				                                   "return string.format(\"%d,%d,%d\", a, b, c)"));
+					                               "return string.format(\"%d,%d,%d\", a, b, c)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("1,2,3"));
 			}
@@ -1311,7 +1310,7 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("local fn = loadstring(\"return 123\")\n"
-				                                   "return tostring(type(fn)) .. \":\" .. tostring(fn())"));
+					                               "return tostring(type(fn)) .. \":\" .. tostring(fn())"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("function:123"));
 			}
@@ -1518,11 +1517,11 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("package.preload[\"json\"] = function()\n"
-				                                   "  return { decode = function() return \"ok\" end }\n"
-				                                   "end\n"
-				                                   "local m = require(\"json\")\n"
-				                                   "return tostring(_G.json == m) .. \":\" .. "
-				                                   "tostring(type(json.decode))"));
+					                               "  return { decode = function() return \"ok\" end }\n"
+					                               "end\n"
+					                               "local m = require(\"json\")\n"
+					                               "return tostring(_G.json == m) .. \":\" .. "
+					                               "tostring(type(json.decode))"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("true:function"));
 			}
@@ -1534,11 +1533,11 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("package.preload[\"foo.bar\"] = function()\n"
-				                                   "  return { value = 7 }\n"
-				                                   "end\n"
-				                                   "local m = require(\"foo.bar\")\n"
-				                                   "return tostring(m.value) .. \":\" .. "
-				                                   "tostring(rawget(_G, \"foo.bar\") == nil)"));
+					                               "  return { value = 7 }\n"
+					                               "end\n"
+					                               "local m = require(\"foo.bar\")\n"
+					                               "return tostring(m.value) .. \":\" .. "
+					                               "tostring(rawget(_G, \"foo.bar\") == nil)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("7:true"));
 			}
@@ -1585,6 +1584,81 @@ namespace
 				QVERIFY(!result.ok);
 				QVERIFY(result.error.contains(QStringLiteral("number expected"), Qt::CaseInsensitive) ||
 				        result.error.contains(QStringLiteral("bad argument"), Qt::CaseInsensitive));
+			}
+
+			/**
+			 * @brief Preserves format arguments and validation across protected calls and integer retries.
+			 */
+			void stringFormatPreservesArgumentAndValidationBehavior()
+			{
+				LuaStateOwner state = makeCompatLuaState();
+				QVERIFY(state);
+
+				const auto result = evaluateLuaToString(state.get(), QByteArrayLiteral(R"lua(
+assert(string.format("%08d|%.2f|%s|%%", 12.9, 2.75, "text") == "00000012|2.75|text|%")
+assert(string.format("%s", nil) == "nil")
+assert(string.format("%d|%s|%d", 12.9, nil, 7) == "12|nil|7")
+assert(string.format("%d", "12") == "12")
+assert(string.format("%d", math.maxinteger) == tostring(math.maxinteger))
+assert(string.format("%d", math.mininteger) == tostring(math.mininteger))
+assert(string.format(42) == "42")
+
+for _, value in ipairs({"12.9", math.huge, 0 / 0, 2.0 ^ 63}) do
+  local ok, err = pcall(string.format, "%d", value)
+  assert(not ok and type(err) == "string")
+  assert(err:find("bad argument #2", 1, true))
+  assert(err:find("integer representation", 1, true))
+end
+
+local ok, err = pcall(string.format, "%c", 65.9)
+assert(not ok and err:find("integer representation", 1, true))
+ok, err = pcall(string.format, "%d|%s", 12.9, nil)
+assert(not ok and err:find("bad argument #3", 1, true))
+assert(err:find("no value", 1, true))
+ok, err = pcall(string.format, "%d|%z", 12.9, 7)
+assert(not ok and err:find("invalid conversion", 1, true))
+return "ok"
+)lua"));
+				QVERIFY2(result.ok, qPrintable(result.error));
+				QCOMPARE(result.value, QStringLiteral("ok"));
+			}
+
+			/**
+			 * @brief Preserves nested tostring calls, retry ordering, and original error objects.
+			 */
+			void stringFormatRetryPreservesNestedConversionsAndErrorObjects()
+			{
+				LuaStateOwner state = makeCompatLuaState();
+				QVERIFY(state);
+
+				const auto result = evaluateLuaToString(state.get(), QByteArrayLiteral(R"lua(
+local calls = 0
+local value = setmetatable({}, {
+  __tostring = function()
+    calls = calls + 1
+    return string.format("%d", 2.9)
+  end,
+})
+assert(string.format("%s|%d", value, 12.9) == "2|12")
+assert(calls == 2)
+calls = 0
+assert(string.format("%d|%s", 12.9, value) == "12|2")
+assert(calls == 1)
+
+local sentinel = {}
+local throwing = setmetatable({}, {
+  __tostring = function()
+    error(sentinel)
+  end,
+})
+local ok, err = pcall(string.format, "%s|%d", throwing, 12.9)
+assert(not ok and err == sentinel)
+ok, err = pcall(string.format, "%d|%s", 12.9, throwing)
+assert(not ok and err == sentinel)
+return "ok"
+)lua"));
+				QVERIFY2(result.ok, qPrintable(result.error));
+				QCOMPARE(result.value, QStringLiteral("ok"));
 			}
 
 			void stringSubCoercesFractionalIndicesLikeLua51()
@@ -1640,7 +1714,7 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("return (string.gsub(\"[CLAN Novice Adventurers] Friction: 'hax'\", "
-				                      "\"%[CLAN Novice Adventurers%]\", \"%[Novice%]\"))"));
+					                  "\"%[CLAN Novice Adventurers%]\", \"%[Novice%]\"))"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("[Novice] Friction: 'hax'"));
 			}
@@ -1676,31 +1750,31 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
-				                      "  return {\n"
-				                      "    request = function(reqt, body)\n"
-				                      "      return \"plain:\" .. tostring(reqt), 480, { src = "
-				                      "\"plain\" }\n"
-				                      "    end\n"
-				                      "  }\n"
-				                      "end\n"
-				                      "package.preload[\"ssl.https\"] = function()\n"
-				                      "  return {\n"
-				                      "    request = function(reqt, body)\n"
-				                      "      if type(reqt) == \"table\" then\n"
-				                      "        if reqt.sink then reqt.sink(\"secure:\" .. "
-				                      "tostring(reqt.url)) end\n"
-				                      "        return 1, 200, { src = \"ssl\" }\n"
-				                      "      end\n"
-				                      "      return \"secure:\" .. tostring(reqt), 200, { src = "
-				                      "\"ssl\" }\n"
-				                      "    end\n"
-				                      "  }\n"
-				                      "end\n"
-				                      "local http = require(\"socket.http\")\n"
-				                      "local page, code, headers = "
-				                      "http.request(\"https://example.invalid/path\")\n"
-				                      "return tostring(page) .. \"|\" .. tostring(code) .. \"|\" "
-				                      ".. tostring(headers and headers.src)"));
+					                  "  return {\n"
+					                  "    request = function(reqt, body)\n"
+					                  "      return \"plain:\" .. tostring(reqt), 480, { src = "
+					                  "\"plain\" }\n"
+					                  "    end\n"
+					                  "  }\n"
+					                  "end\n"
+					                  "package.preload[\"ssl.https\"] = function()\n"
+					                  "  return {\n"
+					                  "    request = function(reqt, body)\n"
+					                  "      if type(reqt) == \"table\" then\n"
+					                  "        if reqt.sink then reqt.sink(\"secure:\" .. "
+					                  "tostring(reqt.url)) end\n"
+					                  "        return 1, 200, { src = \"ssl\" }\n"
+					                  "      end\n"
+					                  "      return \"secure:\" .. tostring(reqt), 200, { src = "
+					                  "\"ssl\" }\n"
+					                  "    end\n"
+					                  "  }\n"
+					                  "end\n"
+					                  "local http = require(\"socket.http\")\n"
+					                  "local page, code, headers = "
+					                  "http.request(\"https://example.invalid/path\")\n"
+					                  "return tostring(page) .. \"|\" .. tostring(code) .. \"|\" "
+					                  ".. tostring(headers and headers.src)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("secure:https://example.invalid/path|200|ssl"));
 			}
@@ -1712,66 +1786,66 @@ namespace
 
 				const auto result = evaluateLuaToString(
 				    state.get(), QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
-				                                   "  return {\n"
-				                                   "    request = function(reqt, body)\n"
-				                                   "      return \"plain-fallback\", 599, { src = "
-				                                   "\"plain\" }\n"
-				                                   "    end\n"
-				                                   "  }\n"
-				                                   "end\n"
-				                                   "package.preload[\"ltn12\"] = function()\n"
-				                                   "  return {\n"
-				                                   "    source = {\n"
-				                                   "      string = function(value)\n"
-				                                   "        local emitted = false\n"
-				                                   "        return function()\n"
-				                                   "          if emitted then return nil end\n"
-				                                   "          emitted = true\n"
-				                                   "          return value\n"
-				                                   "        end\n"
-				                                   "      end\n"
-				                                   "    },\n"
-				                                   "    sink = {\n"
-				                                   "      table = function(target)\n"
-				                                   "        return function(chunk)\n"
-				                                   "          if chunk then target[#target + 1] = chunk "
-				                                   "end\n"
-				                                   "          return 1\n"
-				                                   "        end\n"
-				                                   "      end\n"
-				                                   "    }\n"
-				                                   "  }\n"
-				                                   "end\n"
-				                                   "package.preload[\"ssl.https\"] = function()\n"
-				                                   "  return {\n"
-				                                   "    request = function(req)\n"
-				                                   "      local body = \"\"\n"
-				                                   "      while true do\n"
-				                                   "        local chunk = req.source and req.source()\n"
-				                                   "        if chunk == nil then break end\n"
-				                                   "        body = body .. chunk\n"
-				                                   "      end\n"
-				                                   "      if req.sink then req.sink(\"atlas-ok\") end\n"
-				                                   "      return 1, 200, {\n"
-				                                   "        method = req.method,\n"
-				                                   "        ct = req.headers and "
-				                                   "req.headers[\"content-type\"],\n"
-				                                   "        cl = req.headers and "
-				                                   "req.headers[\"content-length\"],\n"
-				                                   "        body = body,\n"
-				                                   "      }, \"HTTP/1.1 200 OK\"\n"
-				                                   "    end\n"
-				                                   "  }\n"
-				                                   "end\n"
-				                                   "local http = require(\"socket.http\")\n"
-				                                   "local page, code, headers = "
-				                                   "http.request(\"https://example.invalid/path\", "
-				                                   "\"map=x\")\n"
-				                                   "return tostring(page) .. \"|\" .. tostring(code) .. "
-				                                   "\"|\" .. tostring(headers and headers.method) .. "
-				                                   "\"|\" .. tostring(headers and headers.ct) .. \"|\" .. "
-				                                   "tostring(headers and headers.cl) .. \"|\" .. "
-				                                   "tostring(headers and headers.body)"));
+					                               "  return {\n"
+					                               "    request = function(reqt, body)\n"
+					                               "      return \"plain-fallback\", 599, { src = "
+					                               "\"plain\" }\n"
+					                               "    end\n"
+					                               "  }\n"
+					                               "end\n"
+					                               "package.preload[\"ltn12\"] = function()\n"
+					                               "  return {\n"
+					                               "    source = {\n"
+					                               "      string = function(value)\n"
+					                               "        local emitted = false\n"
+					                               "        return function()\n"
+					                               "          if emitted then return nil end\n"
+					                               "          emitted = true\n"
+					                               "          return value\n"
+					                               "        end\n"
+					                               "      end\n"
+					                               "    },\n"
+					                               "    sink = {\n"
+					                               "      table = function(target)\n"
+					                               "        return function(chunk)\n"
+					                               "          if chunk then target[#target + 1] = chunk "
+					                               "end\n"
+					                               "          return 1\n"
+					                               "        end\n"
+					                               "      end\n"
+					                               "    }\n"
+					                               "  }\n"
+					                               "end\n"
+					                               "package.preload[\"ssl.https\"] = function()\n"
+					                               "  return {\n"
+					                               "    request = function(req)\n"
+					                               "      local body = \"\"\n"
+					                               "      while true do\n"
+					                               "        local chunk = req.source and req.source()\n"
+					                               "        if chunk == nil then break end\n"
+					                               "        body = body .. chunk\n"
+					                               "      end\n"
+					                               "      if req.sink then req.sink(\"atlas-ok\") end\n"
+					                               "      return 1, 200, {\n"
+					                               "        method = req.method,\n"
+					                               "        ct = req.headers and "
+					                               "req.headers[\"content-type\"],\n"
+					                               "        cl = req.headers and "
+					                               "req.headers[\"content-length\"],\n"
+					                               "        body = body,\n"
+					                               "      }, \"HTTP/1.1 200 OK\"\n"
+					                               "    end\n"
+					                               "  }\n"
+					                               "end\n"
+					                               "local http = require(\"socket.http\")\n"
+					                               "local page, code, headers = "
+					                               "http.request(\"https://example.invalid/path\", "
+					                               "\"map=x\")\n"
+					                               "return tostring(page) .. \"|\" .. tostring(code) .. "
+					                               "\"|\" .. tostring(headers and headers.method) .. "
+					                               "\"|\" .. tostring(headers and headers.ct) .. \"|\" .. "
+					                               "tostring(headers and headers.cl) .. \"|\" .. "
+					                               "tostring(headers and headers.body)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value,
 				         QStringLiteral("atlas-ok|200|POST|application/x-www-form-urlencoded|5|map=x"));
@@ -1785,22 +1859,22 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
-				                      "  return {\n"
-				                      "    request = function(reqt, body)\n"
-				                      "      return \"plain:\" .. tostring(reqt), 201, { src = "
-				                      "\"plain\" }\n"
-				                      "    end\n"
-				                      "  }\n"
-				                      "end\n"
-				                      "package.loaded[\"ssl.https\"] = nil\n"
-				                      "package.preload[\"ssl.https\"] = function()\n"
-				                      "  error(\"ssl disabled for test\")\n"
-				                      "end\n"
-				                      "local http = require(\"socket.http\")\n"
-				                      "local page, code, headers = "
-				                      "http.request(\"https://example.invalid/path\", \"map=x\")\n"
-				                      "return tostring(code) .. \"|\" .. "
-				                      "tostring(headers and headers.src)"));
+					                  "  return {\n"
+					                  "    request = function(reqt, body)\n"
+					                  "      return \"plain:\" .. tostring(reqt), 201, { src = "
+					                  "\"plain\" }\n"
+					                  "    end\n"
+					                  "  }\n"
+					                  "end\n"
+					                  "package.loaded[\"ssl.https\"] = nil\n"
+					                  "package.preload[\"ssl.https\"] = function()\n"
+					                  "  error(\"ssl disabled for test\")\n"
+					                  "end\n"
+					                  "local http = require(\"socket.http\")\n"
+					                  "local page, code, headers = "
+					                  "http.request(\"https://example.invalid/path\", \"map=x\")\n"
+					                  "return tostring(code) .. \"|\" .. "
+					                  "tostring(headers and headers.src)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("201|plain"));
 			}
@@ -1813,25 +1887,25 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
-				                      "  return {\n"
-				                      "    request = function(reqt, body)\n"
-				                      "      return \"raw:\" .. tostring(reqt), 206, { src = "
-				                      "\"raw\" }\n"
-				                      "    end\n"
-				                      "  }\n"
-				                      "end\n"
-				                      "package.preload[\"ssl.https\"] = function()\n"
-				                      "  return {\n"
-				                      "    request = function(reqt, body)\n"
-				                      "      return nil, \"create function not permitted\"\n"
-				                      "    end\n"
-				                      "  }\n"
-				                      "end\n"
-				                      "local http = require(\"socket.http\")\n"
-				                      "local page, code, headers = "
-				                      "http.request(\"https://example.invalid/path\", \"map=x\")\n"
-				                      "return tostring(page) .. \"|\" .. tostring(code) .. "
-				                      "\"|\" .. tostring(headers and headers.src)"));
+					                  "  return {\n"
+					                  "    request = function(reqt, body)\n"
+					                  "      return \"raw:\" .. tostring(reqt), 206, { src = "
+					                  "\"raw\" }\n"
+					                  "    end\n"
+					                  "  }\n"
+					                  "end\n"
+					                  "package.preload[\"ssl.https\"] = function()\n"
+					                  "  return {\n"
+					                  "    request = function(reqt, body)\n"
+					                  "      return nil, \"create function not permitted\"\n"
+					                  "    end\n"
+					                  "  }\n"
+					                  "end\n"
+					                  "local http = require(\"socket.http\")\n"
+					                  "local page, code, headers = "
+					                  "http.request(\"https://example.invalid/path\", \"map=x\")\n"
+					                  "return tostring(page) .. \"|\" .. tostring(code) .. "
+					                  "\"|\" .. tostring(headers and headers.src)"));
 				QVERIFY2(result.ok, qPrintable(result.error));
 				QCOMPARE(result.value, QStringLiteral("raw:https://example.invalid/path|206|raw"));
 			}
@@ -1844,37 +1918,37 @@ namespace
 				const auto result = evaluateLuaToString(
 				    state.get(),
 				    QByteArrayLiteral("local ok_http, http = pcall(require, \"socket.http\")\n"
-				                      "if not ok_http then\n"
-				                      "  return \"no-http\"\n"
-				                      "end\n"
-				                      "local ok_https, https = pcall(require, \"ssl.https\")\n"
-				                      "if not ok_https then\n"
-				                      "  return \"no-https\"\n"
-				                      "end\n"
-				                      "if type(http) ~= \"table\" or type(http.request) ~= "
-				                      "\"function\" then\n"
-				                      "  return \"bad-http\"\n"
-				                      "end\n"
-				                      "if type(https) ~= \"table\" or type(https.request) ~= "
-				                      "\"function\" then\n"
-				                      "  return \"bad-https\"\n"
-				                      "end\n"
-				                      "local called = false\n"
-				                      "local original = https.request\n"
-				                      "https.request = function(reqt, body)\n"
-				                      "  called = true\n"
-				                      "  if type(reqt) == \"table\" then\n"
-				                      "    if reqt.sink then reqt.sink(\"shim-ok\") end\n"
-				                      "    return 1, 299, { src = \"ssl-real\" }\n"
-				                      "  end\n"
-				                      "  return \"shim-ok\", 299, { src = \"ssl-real\" }\n"
-				                      "end\n"
-				                      "local page, code, headers = "
-				                      "http.request(\"https://example.invalid/path\")\n"
-				                      "https.request = original\n"
-				                      "return tostring(called) .. \"|\" .. tostring(page) .. \"|\" "
-				                      ".. tostring(code) .. \"|\" .. tostring(headers and "
-				                      "headers.src)"));
+					                  "if not ok_http then\n"
+					                  "  return \"no-http\"\n"
+					                  "end\n"
+					                  "local ok_https, https = pcall(require, \"ssl.https\")\n"
+					                  "if not ok_https then\n"
+					                  "  return \"no-https\"\n"
+					                  "end\n"
+					                  "if type(http) ~= \"table\" or type(http.request) ~= "
+					                  "\"function\" then\n"
+					                  "  return \"bad-http\"\n"
+					                  "end\n"
+					                  "if type(https) ~= \"table\" or type(https.request) ~= "
+					                  "\"function\" then\n"
+					                  "  return \"bad-https\"\n"
+					                  "end\n"
+					                  "local called = false\n"
+					                  "local original = https.request\n"
+					                  "https.request = function(reqt, body)\n"
+					                  "  called = true\n"
+					                  "  if type(reqt) == \"table\" then\n"
+					                  "    if reqt.sink then reqt.sink(\"shim-ok\") end\n"
+					                  "    return 1, 299, { src = \"ssl-real\" }\n"
+					                  "  end\n"
+					                  "  return \"shim-ok\", 299, { src = \"ssl-real\" }\n"
+					                  "end\n"
+					                  "local page, code, headers = "
+					                  "http.request(\"https://example.invalid/path\")\n"
+					                  "https.request = original\n"
+					                  "return tostring(called) .. \"|\" .. tostring(page) .. \"|\" "
+					                  ".. tostring(code) .. \"|\" .. tostring(headers and "
+					                  "headers.src)"));
 
 				QVERIFY2(result.ok, qPrintable(result.error));
 				if (result.value == QStringLiteral("no-http") || result.value == QStringLiteral("no-https"))
@@ -2160,7 +2234,7 @@ return 'ok'
 				const QString artifactDirectory =
 				    QDir(QCoreApplication::applicationDirPath())
 				        .filePath(QStringLiteral("test-artifacts/tst_LuaExecution/%1")
-				                      .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+						              .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
 				QVERIFY(QDir().mkpath(artifactDirectory));
 				const QString dbPath =
 				    QDir(artifactDirectory).filePath(QStringLiteral("plugin_state.sqlite"));
@@ -2173,11 +2247,11 @@ return 'ok'
 
 					const QByteArray script =
 					    QStringLiteral("local db = assert(sqlite3.open([[%1]]))\n"
-					                   "assert(db:execute([["
-					                   "CREATE TABLE plugin_state(k TEXT PRIMARY KEY, v TEXT);"
-					                   "INSERT INTO plugin_state(k, v) VALUES ('mini_rect', '44,55,64,40');"
-					                   "]]))\n"
-					                   "assert(db:close())\n")
+						               "assert(db:execute([["
+						               "CREATE TABLE plugin_state(k TEXT PRIMARY KEY, v TEXT);"
+						               "INSERT INTO plugin_state(k, v) VALUES ('mini_rect', '44,55,64,40');"
+						               "]]))\n"
+						               "assert(db:close())\n")
 					        .arg(dbPath)
 					        .toUtf8();
 					QString execError;
