@@ -29,8 +29,8 @@ use the issue tracker, with the appropriate template to report issues, request f
 ## Features
 
 - Cross-platform (Linux, Windows, macOS).
-- Unicode, NAWS, Terminal Type, CHARSET, EOR, ECHO, MXP, MSP, MCCP, MMCP, OSC8, xterm256 color, Truecolor, TLS (Direct &
-  Upgrade).
+- Unicode, NAWS, Terminal Type, CHARSET, EOR, ECHO, GMCP, MXP, MSP, MCCP, MMCP, OSC8, xterm256 color, Truecolor, TLS
+  (Direct & Upgrade).
 - Lua scripting. The FIRST and ONLY, currently, MUD client with a multithreaded Lua engine that allows ridiculously
   heavy Lua plugin workloads without lagging the client.
 - High performance sound engine offloaded from the main thread, reducing playback latency as much as possible for VI
