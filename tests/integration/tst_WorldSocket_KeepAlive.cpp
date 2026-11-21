@@ -3,12 +3,14 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: tst_WorldSocket_KeepAlive.cpp
- * Role: Integration coverage for world socket keepalive behavior and OS-level tuning.
+ * Role: Integration coverage for world socket keepalive, low-delay behavior, and OS-level tuning.
  */
 
 #include "WorldOptions.h"
 #include "WorldSocket.h"
 
+#include <QScopeGuard>
+#include <QScopedPointer>
 #include <QTcpServer>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
@@ -19,6 +21,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 namespace
@@ -51,7 +54,7 @@ namespace
 #endif
 	}
 	/**
-	 * @brief QTest fixture covering `WorldSocket` keepalive behavior.
+	 * @brief QTest fixture covering `WorldSocket` keepalive and low-delay behavior.
 	 */
 	class tst_WorldSocket_KeepAlive : public QObject
 	{
@@ -59,6 +62,86 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			/**
+			 * @brief Verifies new connections and reconnects disable Nagle independently of keepalive.
+			 */
+			void enablesLowDelayOnConnectionsAndReconnects()
+			{
+				QTcpServer server;
+				if (!server.listen(QHostAddress::LocalHost, 0))
+					QSKIP("Local TCP listen is unavailable in this environment.");
+
+				WorldSocket socket;
+				socket.setProxySettings(eProxyServerNone, QString(), 0, QString(), QString());
+				QSignalSpy connectedSpy(&socket, &WorldSocket::connected);
+				QVERIFY(connectedSpy.isValid());
+				for (const bool keepAlive : {false, true})
+				{
+					socket.setKeepAliveEnabled(keepAlive);
+					connectedSpy.clear();
+					QVERIFY(socket.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort()));
+					QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 5000);
+					QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 5000);
+					const QScopedPointer<QTcpSocket> peer(server.nextPendingConnection());
+					QVERIFY(peer);
+
+					const qintptr descriptor = socket.nativeSocketDescriptor();
+					QVERIFY(descriptor >= 0);
+					int lowDelay = 0;
+					QVERIFY(readSocketIntOption(descriptor, IPPROTO_TCP, TCP_NODELAY, lowDelay));
+					QCOMPARE(lowDelay, 1);
+
+					socket.setKeepAliveEnabled(!keepAlive);
+					lowDelay = 0;
+					QVERIFY(readSocketIntOption(descriptor, IPPROTO_TCP, TCP_NODELAY, lowDelay));
+					QCOMPARE(lowDelay, 1);
+					socket.abortSocket();
+				}
+			}
+
+			/**
+			 * @brief Verifies reload descriptor duplication and adoption retain the existing low-delay option.
+			 */
+			void retainsLowDelayThroughDescriptorAdoption()
+			{
+#if defined(Q_OS_UNIX)
+				QTcpServer server;
+				if (!server.listen(QHostAddress::LocalHost, 0))
+					QSKIP("Local TCP listen is unavailable in this environment.");
+
+				WorldSocket original;
+				original.setProxySettings(eProxyServerNone, QString(), 0, QString(), QString());
+				original.setKeepAliveEnabled(false);
+				QSignalSpy connectedSpy(&original, &WorldSocket::connected);
+				QVERIFY(connectedSpy.isValid());
+				QVERIFY(original.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 5000);
+				QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 5000);
+				const QScopedPointer<QTcpSocket> peer(server.nextPendingConnection());
+				QVERIFY(peer);
+
+				int descriptor = ::dup(static_cast<int>(original.nativeSocketDescriptor()));
+				QVERIFY(descriptor >= 0);
+				const auto closeDescriptor = qScopeGuard(
+				    [&]
+				    {
+					    if (descriptor >= 0)
+						    ::close(descriptor);
+				    });
+				WorldSocket adopted;
+				adopted.setKeepAliveEnabled(false);
+				QString error;
+				QVERIFY2(adopted.adoptConnectedSocketDescriptor(descriptor, &error, {}), qPrintable(error));
+				descriptor   = -1;
+				int lowDelay = 0;
+				QVERIFY(readSocketIntOption(adopted.nativeSocketDescriptor(), IPPROTO_TCP, TCP_NODELAY,
+				                            lowDelay));
+				QCOMPARE(lowDelay, 1);
+#else
+				QSKIP("Reload descriptor duplication is exercised on Unix.");
+#endif
+			}
+
 			/**
 			 * @brief Verifies keepalive enable/disable updates the live socket option.
 			 */
