@@ -8,18 +8,22 @@
 #include "GmcpBrowserDialog.h"
 #include "GmcpProtocol.h"
 #include "WorldRuntime.h"
+#include "helpers/StringUtils.h"
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QAbstractItemModel>
 #include <QAbstractListModel>
 #include <QAction>
 #include <QActionGroup>
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QFutureWatcher>
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -102,7 +106,7 @@ namespace
 			const auto bytes =
 			    QJsonDocument(QJsonObject{
 			                      {message->name, message->state.isUndefined() ? QJsonValue(QJsonValue::Null)
-			                                                                   : message->state}
+								                                               : message->state}
             })
 			        .toJson(QJsonDocument::Indented);
 			// Retain the member indentation while removing the singleton object framing.
@@ -191,6 +195,103 @@ namespace
 	{
 			QString     package;
 			QStringList fields;
+	};
+	/**
+	 * @brief Reads a namespace's nested message values only when explicitly copying that namespace.
+	 * @param messages Immutable message values belonging to the displayed version.
+	 * @param packages Namespace hierarchy belonging to that version.
+	 * @param path Canonical namespace path.
+	 * @return Message value when present, or an object containing the namespace's children.
+	 */
+	QJsonValue copiedNamespace(const LuaCallbackPersistentStringMap<QMudGmcp::Message> &messages,
+	                           const QMudGmcp::PackageIndex &packages, const QString &path)
+	{
+		if (const auto message = messages.value(path))
+			return message->state.isUndefined() ? QJsonValue(QJsonValue::Null) : message->state;
+		QJsonObject object;
+		if (const auto branch = packages.branches.value(path))
+			for (const auto &child : branch->children)
+				if (const auto entry = packages.branches.value(child))
+					object.insert(entry->label, copiedNamespace(messages, packages, child));
+		return object;
+	}
+	/**
+	 * @brief Copies a selected package and its child messages under separate relative dotted names.
+	 * @param messages Immutable message values belonging to the displayed version.
+	 * @param packages Namespace hierarchy belonging to that version.
+	 * @param path Canonical selected package path.
+	 * @param name Selected package's displayed name.
+	 * @return Object preserving each message value independently of overlapping package or field names.
+	 */
+	QJsonObject copiedMessages(const LuaCallbackPersistentStringMap<QMudGmcp::Message> &messages,
+	                           const QMudGmcp::PackageIndex &packages, const QString &path,
+	                           const QString &name)
+	{
+		QJsonObject                        object;
+		QList<std::pair<QString, QString>> pending{
+		    {path, name}
+        };
+		while (!pending.isEmpty())
+		{
+			const auto [key, label] = pending.takeLast();
+			if (const auto message = messages.value(key))
+				object.insert(label,
+				              message->state.isUndefined() ? QJsonValue(QJsonValue::Null) : message->state);
+			if (const auto branch = packages.branches.value(key))
+				for (const auto &child : branch->children)
+					if (const auto entry = packages.branches.value(child))
+						pending.emplaceBack(child, label + QLatin1Char('.') + entry->label);
+		}
+		return object;
+	}
+	/**
+	 * @brief Retains the selected value and optional namespace binding across live updates and menu use.
+	 */
+	struct GmcpCopySelection
+	{
+			QString                                           name;
+			QJsonValue                                        value;
+			QString                                           namespacePath;
+			QString                                           packagePath;
+			bool                                              hasChildMessages{false};
+			LuaCallbackPersistentStringMap<QMudGmcp::Message> messages;
+			QMudGmcp::PackageIndex                            packages;
+			/**
+			 * @brief Checks whether the selected node has a plain scalar value.
+			 * @return Whether Copy value is available and is the default action.
+			 */
+			[[nodiscard]] bool                                hasValue() const
+			{
+				return value.isString() || value.isBool() || value.isDouble();
+			}
+			/**
+			 * @brief Formats the captured selection after an explicit copy request.
+			 * @param asJson Whether to include the selected name and JSON syntax.
+			 * @param withChildren Whether to copy separate message values under dotted package names.
+			 * @return Plain scalar text or a complete named JSON value.
+			 */
+			[[nodiscard]] QString text(bool asJson, bool withChildren = false) const
+			{
+				if (withChildren)
+					return QString::fromUtf8(
+					    QJsonDocument(copiedMessages(messages, packages, packagePath, name))
+					        .toJson(QJsonDocument::Indented));
+				if (!asJson && hasValue())
+				{
+					if (value.isString())
+						return value.toString();
+					const auto wrapped = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
+					return QString::fromUtf8(wrapped.mid(1, wrapped.size() - 2));
+				}
+				const auto selected = !namespacePath.isEmpty()
+				                          ? copiedNamespace(messages, packages, namespacePath)
+				                      : value.isUndefined() ? QJsonValue(QJsonValue::Null)
+				                                            : value;
+				return QString::fromUtf8(QJsonDocument(QJsonObject{
+				                                           {name, selected}
+                })
+				                             .toJson(QJsonDocument::Indented));
+			}
 	};
 	/**
 	 * @brief Moves a semantic path to its immediate parent without reading JSON.
@@ -358,6 +459,32 @@ namespace
 				return static_cast<Location *>(index.internalPointer())->address;
 			}
 			/**
+			 * @brief Captures only the selected value or shared namespace binding without formatting JSON.
+			 * @param index Selected index from this model.
+			 * @return Immutable copy source for menu actions or the tree's Copy shortcut.
+			 */
+			GmcpCopySelection copySelection(const QModelIndex &index) const
+			{
+				const auto        location = address(index);
+				GmcpCopySelection selection;
+				selection.name  = data(index.siblingAtColumn(0), Qt::DisplayRole).toString();
+				selection.value = jsonValue(location);
+				if (location.fields.isEmpty())
+				{
+					const auto branch          = m_packages.branches.value(location.package);
+					selection.hasChildMessages = branch && !branch->children.isEmpty();
+					if (!m_messages.contains(location.package))
+						selection.namespacePath = location.package;
+					if (selection.hasChildMessages || !selection.namespacePath.isEmpty())
+					{
+						selection.packagePath = location.package;
+						selection.messages    = m_messages;
+						selection.packages    = m_packages;
+					}
+				}
+				return selection;
+			}
+			/**
 			 * @brief Resolves a saved view choice through direct key/index lookups.
 			 * @param wanted Package and typed field path.
 			 * @param nearest Whether a missing path falls back to its closest surviving ancestor.
@@ -507,7 +634,7 @@ namespace
 					for (const auto &field : location.fields)
 						path += QLatin1Char('.') + (field.startsWith(QLatin1String("a:"))
 						                                ? QString::number(field.mid(2).toInt() + 1)
-						                                : field.mid(2));
+														: field.mid(2));
 					return path;
 				}
 				if (index.column() == 3 && location.fields.isEmpty())
@@ -519,7 +646,7 @@ namespace
 						                              : QStringLiteral(" policy at ") + policy.path) +
 						       (policy.path != location.package && !policy.path.isEmpty()
 						            ? QStringLiteral(" (inherited)")
-						            : QString{});
+									: QString{});
 					if (role == Qt::DisplayRole)
 						return QMudGmcp::modeName(policy.mode) +
 						       (policy.force ? QStringLiteral(" (forced)") : QString{});
@@ -919,7 +1046,7 @@ namespace
 				}
 				return first < history.size() && identity(history.at(first)) == wanted
 				           ? static_cast<int>(history.size() - 1 - first)
-				           : -1;
+						   : -1;
 			}
 			/**
 			 * @brief Reads timestamp, identity, or diagnostic from an existing record.
@@ -997,75 +1124,133 @@ class GmcpBrowserDataView final : public QWidget
 			m_tree->header()->resizeSection(0, 300);
 			m_tree->header()->resizeSection(2, 100);
 			m_tree->header()->resizeSection(3, 150);
-			m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
-			connect(m_tree, &QTreeView::customContextMenuRequested, this,
-			        [this](const QPoint &position)
+			auto *copy = new QAction(m_tree);
+			copy->setObjectName(name + QStringLiteral("Copy"));
+			copy->setShortcuts(QKeySequence::Copy);
+			copy->setShortcutContext(Qt::WidgetShortcut);
+			m_tree->addAction(copy);
+			connect(copy, &QAction::triggered, this,
+			        [this]
 			        {
-				        const auto clicked = m_tree->indexAt(position);
-				        if (!m_runtime || m_runtime->runtimeDestructionStarted() ||
-				            m_runtime->worldSessionCloseStarted() || !clicked.isValid())
-					        return;
-				        const auto address = GmcpTreeModel::address(m_filter->mapToSource(clicked));
-				        if (!address.fields.isEmpty())
-					        return;
-				        m_tree->setCurrentIndex(clicked);
-				        const auto                   path  = address.package;
-				        const QPointer<WorldRuntime> world = m_runtime;
-				        const auto                   local = world->gmcpMergeOverrides().constFind(path);
-				        const bool explicitPolicy          = local != world->gmcpMergeOverrides().cend();
-				        auto      *menu                    = new QMenu(m_tree);
-				        menu->setObjectName(QStringLiteral("gmcpMergeMenu"));
-				        connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
-				        menu->addSection(QStringLiteral("World merge policy"));
-				        auto *group = new QActionGroup(menu);
-				        auto *force = new QAction(QStringLiteral("Force"), menu);
-				        force->setObjectName(QStringLiteral("gmcpMergeForce"));
-				        force->setCheckable(true);
-				        force->setChecked(explicitPolicy && local->second);
-				        for (const auto mode : {QMudGmcp::MergeMode::Replace, QMudGmcp::MergeMode::Shallow,
-				                                QMudGmcp::MergeMode::Recursive})
+				        if (m_copyMenu && m_copyMenu->isVisible())
 				        {
-					        auto *action = menu->addAction(QMudGmcp::modeName(mode));
-					        action->setObjectName(QStringLiteral("gmcpMerge_") + QMudGmcp::modeName(mode));
-					        action->setCheckable(true);
-					        action->setChecked(explicitPolicy && local->first == mode);
-					        group->addAction(action);
-					        connect(action, &QAction::triggered, menu,
-					                [world, path, mode, force]
-					                {
-						                if (world && !world->runtimeDestructionStarted() &&
-						                    !world->worldSessionCloseStarted())
-							                world->setGmcpMergePolicy(path, mode, force->isChecked());
-					                });
+					        m_copyMenu->defaultAction()->trigger();
+					        return;
 				        }
-				        menu->addAction(force);
-				        connect(force, &QAction::triggered, menu,
-				                [world, path](bool checked)
-				                {
-					                if (!world || world->runtimeDestructionStarted() ||
-					                    world->worldSessionCloseStarted())
-						                return;
-					                const auto publication = world->gmcpPublication();
-					                const auto snapshot = publication ? publication->current.load() : nullptr;
-					                const auto own      = world->gmcpMergeOverrides().constFind(path);
-					                const auto mode = own != world->gmcpMergeOverrides().cend() ? own->first
-					                                  : snapshot ? snapshot->effectiveMode(path)
-					                                             : QMudGmcp::MergeMode::Replace;
-					                world->setGmcpMergePolicy(path, mode, checked);
-				                });
-				        menu->addSeparator();
-				        auto *remove = menu->addAction(QStringLiteral("Remove local override"));
-				        remove->setObjectName(QStringLiteral("gmcpMergeRemove"));
-				        remove->setEnabled(explicitPolicy);
-				        connect(remove, &QAction::triggered, menu,
-				                [world, path]
-				                {
-					                if (world && !world->runtimeDestructionStarted() &&
-					                    !world->worldSessionCloseStarted())
-						                world->clearGmcpMergePolicy(path);
-				                });
-				        menu->popup(m_tree->viewport()->mapToGlobal(position));
+				        const auto selected = m_filter->mapToSource(m_tree->currentIndex());
+				        if (!selected.isValid())
+					        return;
+				        const auto selection = m_model->copySelection(selected);
+				        QApplication::clipboard()->setText(selection.text(!selection.hasValue()));
 			        });
+			m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+			connect(
+			    m_tree, &QTreeView::customContextMenuRequested, this,
+			    [this](const QPoint &position)
+			    {
+				    const auto clicked = m_tree->indexAt(position);
+				    if (!clicked.isValid())
+					    return;
+				    const auto address = GmcpTreeModel::address(m_filter->mapToSource(clicked));
+				    m_tree->setCurrentIndex(clicked);
+				    auto *menu = new QMenu(m_tree);
+				    m_copyMenu = menu;
+				    menu->setObjectName(QStringLiteral("gmcpMergeMenu"));
+				    connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
+				    const auto selection = m_model->copySelection(m_filter->mapToSource(clicked));
+				    QAction   *copyValue = nullptr;
+				    if (selection.namespacePath.isEmpty() && !selection.value.isObject() &&
+					    !selection.value.isArray())
+				    {
+					    copyValue = menu->addAction(QStringLiteral("Copy value"));
+					    copyValue->setObjectName(QStringLiteral("gmcpCopyValue"));
+					    copyValue->setEnabled(selection.hasValue());
+					    connect(copyValue, &QAction::triggered, menu,
+						        [selection] { QApplication::clipboard()->setText(selection.text(false)); });
+					    auto *copyPlainText = menu->addAction(QStringLiteral("Copy value as plain text"));
+					    copyPlainText->setObjectName(QStringLiteral("gmcpCopyValuePlainText"));
+					    copyPlainText->setEnabled(selection.hasValue());
+					    connect(copyPlainText, &QAction::triggered, menu,
+						        [selection]
+						        {
+						            QApplication::clipboard()->setText(
+						                qmudStripTerminalControlCodes(selection.text(false)));
+					            });
+				    }
+				    auto *copyJson = menu->addAction(QStringLiteral("Copy as JSON"));
+				    copyJson->setObjectName(QStringLiteral("gmcpCopyJson"));
+				    connect(copyJson, &QAction::triggered, menu,
+					        [selection] { QApplication::clipboard()->setText(selection.text(true)); });
+				    auto *defaultCopy = selection.hasValue() ? copyValue : copyJson;
+				    menu->setDefaultAction(defaultCopy);
+				    defaultCopy->setShortcuts(QKeySequence::Copy);
+				    defaultCopy->setShortcutContext(Qt::WidgetShortcut);
+				    if (selection.hasChildMessages)
+				    {
+					    auto *withChildren =
+					        menu->addAction(QStringLiteral("Copy as JSON with child messages"));
+					    withChildren->setObjectName(QStringLiteral("gmcpCopyJsonWithChildren"));
+					    connect(withChildren, &QAction::triggered, menu, [selection]
+						        { QApplication::clipboard()->setText(selection.text(true, true)); });
+				    }
+				    if (m_runtime && !m_runtime->runtimeDestructionStarted() &&
+					    !m_runtime->worldSessionCloseStarted() && address.fields.isEmpty())
+				    {
+					    const auto                   path  = address.package;
+					    const QPointer<WorldRuntime> world = m_runtime;
+					    const auto                   local = world->gmcpMergeOverrides().constFind(path);
+					    const bool explicitPolicy          = local != world->gmcpMergeOverrides().cend();
+					    menu->addSection(QStringLiteral("World merge policy"));
+					    auto *group = new QActionGroup(menu);
+					    auto *force = new QAction(QStringLiteral("Force"), menu);
+					    force->setObjectName(QStringLiteral("gmcpMergeForce"));
+					    force->setCheckable(true);
+					    force->setChecked(explicitPolicy && local->second);
+					    for (const auto mode : {QMudGmcp::MergeMode::Replace, QMudGmcp::MergeMode::Shallow,
+						                        QMudGmcp::MergeMode::Recursive})
+					    {
+						    auto *action = menu->addAction(QMudGmcp::modeName(mode));
+						    action->setObjectName(QStringLiteral("gmcpMerge_") + QMudGmcp::modeName(mode));
+						    action->setCheckable(true);
+						    action->setChecked(explicitPolicy && local->first == mode);
+						    group->addAction(action);
+						    connect(action, &QAction::triggered, menu,
+							        [world, path, mode, force]
+							        {
+							            if (world && !world->runtimeDestructionStarted() &&
+										    !world->worldSessionCloseStarted())
+								            world->setGmcpMergePolicy(path, mode, force->isChecked());
+						            });
+					    }
+					    menu->addAction(force);
+					    connect(force, &QAction::triggered, menu,
+						        [world, path](bool checked)
+						        {
+						            if (!world || world->runtimeDestructionStarted() ||
+									    world->worldSessionCloseStarted())
+							            return;
+						            const auto publication = world->gmcpPublication();
+						            const auto snapshot = publication ? publication->current.load() : nullptr;
+						            const auto own      = world->gmcpMergeOverrides().constFind(path);
+						            const auto mode = own != world->gmcpMergeOverrides().cend() ? own->first
+									                  : snapshot ? snapshot->effectiveMode(path)
+									                             : QMudGmcp::MergeMode::Replace;
+						            world->setGmcpMergePolicy(path, mode, checked);
+					            });
+					    menu->addSeparator();
+					    auto *remove = menu->addAction(QStringLiteral("Remove local override"));
+					    remove->setObjectName(QStringLiteral("gmcpMergeRemove"));
+					    remove->setEnabled(explicitPolicy);
+					    connect(remove, &QAction::triggered, menu,
+						        [world, path]
+						        {
+						            if (world && !world->runtimeDestructionStarted() &&
+									    !world->worldSessionCloseStarted())
+							            world->clearGmcpMergePolicy(path);
+					            });
+				    }
+				    menu->popup(m_tree->viewport()->mapToGlobal(position));
+			    });
 			m_stack->addWidget(m_tree);
 			m_raw = new QPlainTextEdit(m_stack);
 			m_raw->setObjectName(name + QStringLiteral("Raw"));
@@ -1081,7 +1266,7 @@ class GmcpBrowserDataView final : public QWidget
 				        if (batch.version == m_rawVersion)
 				        {
 					        if (batch.cancelled || m_rawCancellation->load(std::memory_order_relaxed) ||
-					            !m_toggle->isChecked() || !m_raw->isVisible())
+							    !m_toggle->isChecked() || !m_raw->isVisible())
 					        {
 						        m_rawNeedsFull |= batch.full;
 						        m_rawPending.merge(batch.keys);
@@ -1360,8 +1545,8 @@ class GmcpBrowserDataView final : public QWidget
 					queueSaved(entry);
 			const bool selectionAffected =
 			    m_selected && (!package || m_selected->package == *package ||
-			                   package->startsWith(m_selected->package + QLatin1Char('.')) ||
-			                   m_selected->package.startsWith(*package + QLatin1Char('.')));
+				               package->startsWith(m_selected->package + QLatin1Char('.')) ||
+				               m_selected->package.startsWith(*package + QLatin1Char('.')));
 			QModelIndex selected;
 			if (selectionAffected)
 			{
@@ -1535,7 +1720,7 @@ class GmcpBrowserDataView final : public QWidget
 						    m_rawRanges.emplace(
 						        part.name,
 						        GmcpRawRange{m_raw->document()->findBlock(part.start),
-						                     m_raw->document()->findBlock(
+								             m_raw->document()->findBlock(
 						                         part.start + static_cast<int>(part.text.size()) - 1)});
 						    m_rawNames.emplace(part.key, part.name);
 					    }
@@ -1578,7 +1763,7 @@ class GmcpBrowserDataView final : public QWidget
 			m_rawWatcher->setFuture(promise->future());
 			QThreadPool::globalInstance()->start(
 			    [messages = m_messages, keys = std::move(keys), full, version = m_rawVersion,
-			     cancelled = m_rawCancellation, promise]() mutable
+				 cancelled = m_rawCancellation, promise]() mutable
 			    {
 				    promise->start();
 				    promise->addResult(
@@ -1594,6 +1779,7 @@ class GmcpBrowserDataView final : public QWidget
 		QStackedWidget                                   *m_stack{nullptr};
 		QCheckBox                                        *m_toggle{nullptr};
 		QPointer<WorldRuntime>                            m_runtime;
+		QPointer<QMenu>                                   m_copyMenu;
 		QMudGmcp::MergePolicies                           m_policies;
 		quint64                                           m_policyRevision{0};
 		LuaCallbackPersistentStringMap<QMudGmcp::Message> m_messages;
@@ -1726,7 +1912,7 @@ GmcpBrowserDialog::GmcpBrowserDialog(WorldRuntime *runtime, QWidget *parent)
 			    const auto snapshot =
 			        publication ? publication->current.load(std::memory_order_acquire) : nullptr;
 			    if (!snapshot || snapshot->session != m_currentSession ||
-			        message->session != m_currentSession)
+				    message->session != m_currentSession)
 			    {
 				    scheduleRefresh();
 				    return;

@@ -225,6 +225,19 @@ QString qmudStripAnsiEscapeCodes(const QString &input)
 	return output;
 }
 
+QString qmudStripTerminalControlCodes(const QString &input)
+{
+	static const QRegularExpression controls(QStringLiteral(
+	    R"((?:\x1B\]|\x{009D})(?:[^\x07\x1B\x{009C}]|\x1B(?!\\))*(?:\x07|\x1B\\|\x{009C}|$))"
+	    R"(|(?:\x1B[PX^_]|[\x{0090}\x{0098}\x{009E}\x{009F}])(?:[^\x1B\x{009C}]|\x1B(?!\\))*(?:\x1B\\|\x{009C}|$))"
+	    R"(|(?:\x1B\[|\x{009B})[0-?]*[ -/]*(?:[@-~]|$))"
+	    R"(|\x1B[ -/]*(?:[0-~]|$))"
+	    R"(|[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x{009F}])"));
+	QString                         output = input;
+	output.remove(controls);
+	return output;
+}
+
 bool qmudIsEnabledFlag(const QString &value)
 {
 	if (value == QStringLiteral("1"))
