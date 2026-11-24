@@ -288,8 +288,8 @@ void MainWindow::setActiveShortcutAcceleratorRuntime(WorldRuntime *runtime)
 		        &MainWindow::onActiveWorldAcceleratorsChanged, Qt::UniqueConnection);
 		m_activeShortcutAcceleratorDestroyedConnection =
 		    connect(m_activeShortcutAcceleratorRuntime, &QObject::destroyed, this,
-		            [this]
-		            {
+			        [this]
+			        {
 			            m_activeShortcutAcceleratorRuntime             = nullptr;
 			            m_activeShortcutAcceleratorDestroyedConnection = {};
 			            m_activeWorldAcceleratorKeys.clear();
@@ -1422,7 +1422,7 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	    !activate ? QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(
 	                    m_mdiArea->activeSubWindow(), m_lastActiveSubWindow,
 	                    m_mdiArea->subWindowList(QMdiArea::CreationOrder), subWindow)
-	              : nullptr;
+		          : nullptr;
 
 	auto      *world      = qobject_cast<WorldChildWindow *>(subWindow);
 	auto      *textWindow = qobject_cast<TextChildWindow *>(subWindow);
@@ -1547,6 +1547,9 @@ void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
 		return;
 	m_lastKnownApplicationFocused              = focused;
 	m_taskbarFlashRequestedInBackgroundSession = false;
+	if (const auto *world = activeWorldPresentationWindow())
+		if (WorldRuntime *runtime = world->runtime())
+			runtime->notifyApplicationFocusChanged(focused);
 }
 
 WorldChildWindow *MainWindow::activeWorldChildWindow() const
@@ -1624,8 +1627,8 @@ void MainWindow::setTrayIconVisible(const bool visible)
 					        return;
 
 				        const bool shouldRestore = isMinimized() || !isVisible() ||
-				                                   windowState().testFlag(Qt::WindowMinimized) ||
-				                                   !isActiveWindow();
+						                           windowState().testFlag(Qt::WindowMinimized) ||
+						                           !isActiveWindow();
 
 				        if (shouldRestore)
 				        {
@@ -1722,7 +1725,7 @@ void MainWindow::setFlatToolbars(const bool flat) const
 	const auto flatStyle = QString();
 	const auto raisedStyle =
 	    QStringLiteral("QToolButton { border: 1px solid palette(mid); border-radius: 2px; padding: 1px; } "
-	                   "QToolButton:pressed { background: palette(button); }");
+		               "QToolButton:pressed { background: palette(button); }");
 
 	const QString style      = flat ? flatStyle : raisedStyle;
 	auto          applyStyle = [&style](QToolBar *toolbar)
@@ -2076,7 +2079,7 @@ void MainWindow::onActionTriggered()
 		    [this]
 		    {
 			    QMudMainFrameMdiUtils::tileSubWindows(m_mdiArea,
-			                                          QMudMainFrameMdiUtils::TileDirection::Horizontal);
+				                                      QMudMainFrameMdiUtils::TileDirection::Horizontal);
 		    });
 		return;
 	}
@@ -2086,7 +2089,7 @@ void MainWindow::onActionTriggered()
 		    [this]
 		    {
 			    QMudMainFrameMdiUtils::tileSubWindows(m_mdiArea,
-			                                          QMudMainFrameMdiUtils::TileDirection::Vertical);
+				                                      QMudMainFrameMdiUtils::TileDirection::Vertical);
 		    });
 		return;
 	}
@@ -2778,7 +2781,7 @@ void MainWindow::refreshActionState()
 	{
 		const QString scriptFile =
 		    runtime ? runtime->worldAttributes().value(QStringLiteral("script_filename")).trimmed()
-		            : QString();
+			        : QString();
 		m_actions.value(QStringLiteral("EditScriptFile"))->setEnabled(hasWorld && !scriptFile.isEmpty());
 	}
 	if (m_actions.contains(QStringLiteral("ReloadScriptFile")))
@@ -3242,7 +3245,7 @@ bool MainWindow::activateNotepad(const QString &title, WorldRuntime *relatedRunt
 		    if (hasOwner)
 		    {
 			    if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, ownerToken, ownerWorldId,
-			                                                             false))
+				                                                         false))
 				    return false;
 		    }
 		    else if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, 0, QString(), false))
@@ -3341,8 +3344,8 @@ bool MainWindow::appendToNotepad(const QString &title, const QString &text, cons
 
 		const bool matchesOwner =
 		    hasOwner ? QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(textWindow, ownerToken,
-		                                                                   ownerWorldId, false)
-		             : QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(textWindow, 0, QString(), false);
+			                                                               ownerWorldId, false)
+			         : QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(textWindow, 0, QString(), false);
 		if (!matchesOwner)
 			continue;
 

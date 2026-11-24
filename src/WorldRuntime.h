@@ -3593,6 +3593,11 @@ class WorldRuntime : public QObject
 		 */
 		void                         requestActiveState(bool active);
 		/**
+		 * @brief Queues application-switch focus callbacks without changing the world's active state.
+		 * @param focused Whether the application gained focus.
+		 */
+		void                         notifyApplicationFocusChanged(bool focused);
+		/**
 		 * @brief Returns active/inactive UI state.
 		 * @return `true` when runtime is active.
 		 */
@@ -8161,7 +8166,7 @@ class WorldRuntime : public QObject
 				LuaCallbackIncomingLineObservation m_previous;
 		};
 		/**
-		 * @brief Builds one no-argument focus callback command after an active-state transition.
+		 * @brief Builds one no-argument world or plugin focus callback command.
 		 * @param engines Target callback engines.
 		 * @param functionName Callback function name.
 		 * @param callbackEvent Actual callback event, or `LuaCallbackEvent::None` for a configured world routine.
@@ -8229,6 +8234,11 @@ class WorldRuntime : public QObject
 		 */
 		struct ActiveStateTransitionCommand;
 		void processActiveStateTransitionCommand(const ActiveStateTransitionCommand &command);
+		/**
+		 * @brief Prepends world then plugin focus callbacks without changing activation bookkeeping.
+		 * @param gained Whether to deliver focus-gained rather than focus-lost callbacks.
+		 */
+		void prependFocusCallbacks(bool gained);
 		/**
 		 * @brief Returns whether a queued lane item blocks input-critical insertion.
 		 * @param command Queued lane command.
@@ -9288,7 +9298,8 @@ class WorldRuntime : public QObject
 					CallbackDispatch,
 					RecipientContinuation,
 					ResultContinuation,
-					ActiveStateTransition
+					ActiveStateTransition,
+					ApplicationFocusNotification
 				};
 
 				Kind                                            kind{Kind::CallbackDispatch};
@@ -9296,6 +9307,7 @@ class WorldRuntime : public QObject
 				QSharedPointer<SuspendedPluginCallbackDispatch> recipientContinuation;
 				quint64                                         resultContinuationTicket{0};
 				ActiveStateTransitionCommand                    activeState;
+				bool                                            focusGained{false};
 		};
 		struct PluginCallbackMutationPlaybackContext
 		{

@@ -13329,6 +13329,24 @@ void WorldRuntime::requestActiveState(const bool active)
 	enqueueActiveStateTransition(active);
 }
 
+void WorldRuntime::notifyApplicationFocusChanged(const bool focused)
+{
+	if (QThread::currentThread() != thread())
+	{
+		qmudInvokeMethodQueued(this, [this, focused] { notifyApplicationFocusChanged(focused); });
+		return;
+	}
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::notifyApplicationFocusChanged");
+	if (m_runtimeDestructionStarted || m_pluginCallbackDispatchShuttingDown || worldSessionCloseStarted())
+		return;
+	PluginCallbackLaneCommand command;
+	command.kind        = PluginCallbackLaneCommand::Kind::ApplicationFocusNotification;
+	command.focusGained = focused;
+	// Keep later application notifications behind callbacks already queued for an earlier event.
+	static_cast<void>(m_pluginCallbackDispatchQueue.append(std::move(command), false));
+	queuePluginCallbackDispatchDrain();
+}
+
 bool WorldRuntime::isActive() const
 {
 	return m_active;
@@ -25739,7 +25757,7 @@ void WorldRuntime::enqueueActiveStateTransition(const bool active)
 	PluginCallbackLaneCommand laneCommand;
 	laneCommand.kind        = PluginCallbackLaneCommand::Kind::ActiveStateTransition;
 	laneCommand.activeState = command;
-	static_cast<void>(m_pluginCallbackDispatchQueue.insertBeforeFirstNonBlocking(std::move(laneCommand)));
+	static_cast<void>(m_pluginCallbackDispatchQueue.append(std::move(laneCommand), false));
 	++m_pendingActiveStateTransitionCount;
 	m_lastPendingActiveState = active;
 	queuePluginCallbackDispatchDrain();
@@ -25789,14 +25807,8 @@ void WorldRuntime::processActiveStateTransitionCommand(const ActiveStateTransiti
 	if (m_pendingActiveStateTransitionCount > 0)
 		--m_pendingActiveStateTransitionCount;
 
-	const QString worldCallbackName =
-	    command.active ? m_worldAttributes.value(QStringLiteral("on_world_get_focus")).trimmed()
-		               : m_worldAttributes.value(QStringLiteral("on_world_lose_focus")).trimmed();
-	const LuaCallbackEvent pluginCallbackEvent =
-	    command.active ? LuaCallbackEvent::GetFocus : LuaCallbackEvent::LoseFocus;
-	const QString pluginCallbackName = luaCallbackEventFunctionName(pluginCallbackEvent);
-	const bool    currentActive      = m_active;
-	m_active                         = command.active;
+	const bool currentActive = m_active;
+	m_active                 = command.active;
 	// The temporary focus-dispatch state is sampled in the dispatch-local counters.
 	const auto restoreActive = qScopeGuard(
 	    [this, currentActive]
@@ -25804,6 +25816,18 @@ void WorldRuntime::processActiveStateTransitionCommand(const ActiveStateTransiti
 		    m_active = currentActive;
 		    // Restored active state is sampled in the dispatch-local counters.
 	    });
+	prependFocusCallbacks(command.active);
+}
+
+void WorldRuntime::prependFocusCallbacks(const bool gained)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::prependFocusCallbacks");
+	const QString worldCallbackName =
+	    gained ? m_worldAttributes.value(QStringLiteral("on_world_get_focus")).trimmed()
+		       : m_worldAttributes.value(QStringLiteral("on_world_lose_focus")).trimmed();
+	const LuaCallbackEvent pluginCallbackEvent =
+	    gained ? LuaCallbackEvent::GetFocus : LuaCallbackEvent::LoseFocus;
+	const QString                 pluginCallbackName = luaCallbackEventFunctionName(pluginCallbackEvent);
 
 	PluginCallbackDispatchCommand worldCommand;
 	const bool                    hasWorldCommand =
@@ -25911,6 +25935,9 @@ void WorldRuntime::queuePluginCallbackDispatchDrain()
 bool WorldRuntime::pluginCallbackLaneCommandBlocksInputCriticalInsertion(
     const PluginCallbackLaneCommand &command)
 {
+	if (command.kind == PluginCallbackLaneCommand::Kind::ActiveStateTransition ||
+	    command.kind == PluginCallbackLaneCommand::Kind::ApplicationFocusNotification)
+		return false;
 	if (command.kind != PluginCallbackLaneCommand::Kind::CallbackDispatch)
 		return true;
 	return command.callback.orderingDomain == LuaCallbackOrderingDomain::InputCritical;
@@ -25951,6 +25978,13 @@ void WorldRuntime::processNextPluginCallbackDispatchCommand()
 			return;
 		}
 		processActiveStateTransitionCommand(command.activeState);
+		return;
+	}
+	if (command.kind == PluginCallbackLaneCommand::Kind::ApplicationFocusNotification)
+	{
+		if (!m_runtimeDestructionStarted && !m_pluginCallbackDispatchShuttingDown &&
+		    !worldSessionCloseStarted())
+			prependFocusCallbacks(command.focusGained);
 		return;
 	}
 	if (command.kind == PluginCallbackLaneCommand::Kind::RecipientContinuation)
