@@ -1028,12 +1028,14 @@ namespace
 	 * @param ownerKey Opaque calling-engine identity used only for teardown.
 	 * @param pitch Captured initial frequency offset in units of 100 Hz.
 	 * @param postState Optional immutable post-command state destination.
+	 * @param pluginMutes Live mute flags for the sound's originating plugin and native provider.
 	 * @return Internal one-based channel, or zero when the request fails.
 	 */
 	int playLuaAudioNativeBuffer(const WorldRuntime *runtime, const QString &fileName, const bool loop,
 	                             const double volume, const double pan, const int delayMs,
-	                             const void *ownerKey = nullptr, const double pitch = 0.0,
-	                             std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr)
+	                             const void *ownerKey, const double pitch,
+	                             std::shared_ptr<const SoundEngineSession::Snapshot> *postState,
+	                             QMudSoundPluginMutes                                 pluginMutes)
 	{
 		if (fileName.isEmpty() || !qIsFinite(volume) || !qIsFinite(pan) || !qIsFinite(pitch))
 			return 0;
@@ -1043,15 +1045,15 @@ namespace
 		if (delayMs > 0)
 		{
 			auto     *mutableRuntime = const_cast<WorldRuntime *>(runtime);
-			const int buffer = mutableRuntime->reserveSoundBufferForNativeAudio(fileName, generation, volume,
-			                                                                    pan, pitch, postState);
+			const int buffer         = mutableRuntime->reserveSoundBufferForNativeAudio(
+			    fileName, generation, volume, pan, pitch, postState, std::move(pluginMutes));
 			if (buffer < 1)
 				return 0;
 			auto cancelToken         = std::make_shared<std::atomic_bool>(false);
 			auto bufferState         = luaAudioInitialBufferState(loop, volume, pan, pitch, cancelToken);
 			bufferState.generation   = generation;
 			bufferState.ownerKey     = ownerKey;
-			bufferState.soundSession = runtime->soundSessionForNativeAudio();
+			bufferState.soundSession = runtime->soundPlaybackSession();
 			QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
 			mutableRuntime->confirmSoundBufferForNativeAudio(buffer, generation);
 			QPointer<WorldRuntime> runtimeGuard(const_cast<WorldRuntime *>(runtime));
@@ -1077,15 +1079,15 @@ namespace
 		}
 		auto     *mutableRuntime = const_cast<WorldRuntime *>(runtime);
 		int       buffer         = 0;
-		const int status =
-		    mutableRuntime->playSoundForNativeAudio(0, fileName, loop, luaAudioVolumeToQmudVolume(volume),
-		                                            pan, generation, false, &buffer, pitch, postState);
+		const int status         = mutableRuntime->playSoundForNativeAudio(
+		    0, fileName, loop, luaAudioVolumeToQmudVolume(volume), pan, generation, false, &buffer, pitch,
+		    postState, std::move(pluginMutes));
 		if (status != eOK)
 			return 0;
 		auto bufferState         = luaAudioInitialBufferState(loop, volume, pan, pitch);
 		bufferState.generation   = generation;
 		bufferState.ownerKey     = ownerKey;
-		bufferState.soundSession = runtime->soundSessionForNativeAudio();
+		bufferState.soundSession = runtime->soundPlaybackSession();
 		QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
 		mutableRuntime->confirmSoundBufferForNativeAudio(buffer, generation);
 		return buffer;
@@ -1345,10 +1347,18 @@ namespace
 			if (result.errorCode != eOK)
 				return result;
 			std::shared_ptr<const SoundEngineSession::Snapshot> postState;
-			const int buffer = execute ? playLuaAudioNativeBuffer(runtime, file, loop, gain, pan,
-			                                                      static_cast<int>(delay.count()),
-			                                                      context.ownerKey, master.pitch, &postState)
-			                           : 0;
+			int                                                 buffer = 0;
+			if (execute)
+			{
+				const auto providerMute = runtime && context.providedByShim
+				                              ? runtime->soundPluginMuteFlag(luaAudioPluginId())
+				                              : QMudSoundMuteFlag{};
+				buffer                  = playLuaAudioNativeBuffer(
+				    runtime, file, loop, gain, pan, static_cast<int>(delay.count()), context.ownerKey,
+				    master.pitch, &postState,
+				    {context.captureCallerMute ? context.captureCallerMute() : QMudSoundMuteFlag{},
+					 providerMute});
+			}
 			if (buffer > 0)
 				changed(buffer, postState);
 			result.returnValues.push_back(delayed ? QVariant{} : QVariant{buffer});
@@ -2041,7 +2051,9 @@ namespace QMudNativePluginRegistry
 		}
 		if (id == luaAudioPluginId())
 		{
-			return callLuaAudioRoutine(runtime, routine, arguments, executionMode);
+			LuaAudioCallContext audioContext;
+			audioContext.providedByShim = true;
+			return callLuaAudioRoutine(runtime, routine, arguments, executionMode, audioContext);
 		}
 		if (id != mushReaderPluginId())
 		{
@@ -2220,7 +2232,8 @@ namespace QMudNativePluginRegistry
 		return false;
 	}
 
-	bool handleLuaAudioPlaySound(const WorldRuntime *runtime, const QString &sound)
+	bool handleLuaAudioPlaySound(const WorldRuntime *runtime, const QString &sound,
+	                             QMudSoundMuteFlag callerMute)
 	{
 		if (!isLuaAudioShadowPluginEnabled(runtime))
 			return false;
@@ -2256,8 +2269,9 @@ namespace QMudNativePluginRegistry
 			if (key == QStringLiteral("loop"))
 			{
 				const LuaAudioRuntimeMasterState master = luaAudioRuntimeMasterState(runtime);
-				const int buffer = playLuaAudioNativeBuffer(runtime, value, true, master.volume, master.pan,
-				                                            0, nullptr, master.pitch);
+				const int                        buffer = playLuaAudioNativeBuffer(
+				    runtime, value, true, master.volume, master.pan, 0, nullptr, master.pitch, nullptr,
+				    {std::move(callerMute), runtime->soundPluginMuteFlag(luaAudioPluginId())});
 				if (buffer != 0)
 					markLuaAudioLoopBuffer(runtime, value, buffer);
 				return true;
@@ -2283,8 +2297,9 @@ namespace QMudNativePluginRegistry
 		}
 
 		const LuaAudioRuntimeMasterState master = luaAudioRuntimeMasterState(runtime);
-		static_cast<void>(playLuaAudioNativeBuffer(runtime, trimmed, false, master.volume, master.pan, 0,
-		                                           nullptr, master.pitch));
+		static_cast<void>(playLuaAudioNativeBuffer(
+		    runtime, trimmed, false, master.volume, master.pan, 0, nullptr, master.pitch, nullptr,
+		    {std::move(callerMute), runtime->soundPluginMuteFlag(luaAudioPluginId())}));
 		return true;
 	}
 

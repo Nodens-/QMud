@@ -238,7 +238,46 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 	if (!sub)
 		return;
 
-	QMenu    menu;
+	QMenu                               menu;
+	QPointer<WorldRuntime>              soundRuntime;
+	std::shared_ptr<SoundEngineSession> soundSession;
+	QAction                            *actMute        = nullptr;
+	QMenu                              *pluginMuteMenu = nullptr;
+	if (auto *world = qobject_cast<WorldChildWindow *>(sub.data()); world && world->runtime())
+	{
+		soundRuntime = world->runtime();
+		soundSession = soundRuntime->soundPlaybackSession();
+		actMute      = menu.addAction(QStringLiteral("Mute"));
+		actMute->setCheckable(true);
+		actMute->setEnabled(static_cast<bool>(soundSession));
+		actMute->setChecked(soundSession && soundSession->isMuted());
+
+		pluginMuteMenu = menu.addMenu(QStringLiteral("Mute Plugin"));
+		if (soundSession)
+		{
+			QHash<QString, QString> pluginNames;
+			for (const auto &plugin : soundRuntime->plugins())
+				pluginNames.insert(plugin.attributes.value(QStringLiteral("id")),
+				                   plugin.attributes.value(QStringLiteral("name")));
+
+			const QStringList pluginIds = soundRuntime->pluginIdList();
+			for (const QString &pluginId : pluginIds)
+			{
+				QString name = pluginNames.value(pluginId);
+				if (name.isEmpty())
+					name = soundRuntime->pluginInfo(pluginId, 1).toString();
+				if (name.isEmpty())
+					name = pluginId;
+				name.replace(QLatin1Char('&'), QStringLiteral("&&"));
+				QAction *action = pluginMuteMenu->addAction(name);
+				action->setCheckable(true);
+				action->setChecked(soundSession->isMuted(pluginId));
+				action->setData(pluginId);
+			}
+		}
+		pluginMuteMenu->setEnabled(!pluginMuteMenu->isEmpty());
+		menu.addSeparator();
+	}
 	QAction *actRestore = menu.addAction(QStringLiteral("Restore"));
 	QAction *actMove    = menu.addAction(QStringLiteral("Move"));
 	QAction *actSize    = menu.addAction(QStringLiteral("Size"));
@@ -258,6 +297,19 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 	if (storedIndex < 0 || storedIndex >= count())
 		return;
 	const int currentIndex = static_cast<int>(storedIndex);
+	if (chosen == actMute || (pluginMuteMenu && pluginMuteMenu->actions().contains(chosen)))
+	{
+		const auto *world = qobject_cast<WorldChildWindow *>(sub.data());
+		if (!soundRuntime || !world || world->runtime() != soundRuntime || !soundSession ||
+		    soundRuntime->soundPlaybackSession() != soundSession)
+			return;
+		if (chosen == actMute)
+			soundSession->setMuted(chosen->isChecked());
+		else if (const QString pluginId = chosen->data().toString();
+		         soundRuntime->pluginIdList().contains(pluginId))
+			soundSession->setMuted(chosen->isChecked(), pluginId);
+		return;
+	}
 	if (chosen == actRestore)
 	{
 		activateTabWindow(currentIndex, sub.data());

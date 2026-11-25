@@ -4533,9 +4533,11 @@ class WorldRuntime : public QObject
 		 * @param loop Loop playback when `true`.
 		 * @param volume Playback volume.
 		 * @param pan Stereo pan value.
+		 * @param callerMute Live mute flag for the originating plugin, if any.
 		 * @return API status code.
 		 */
-		int playSoundIntercepted(int buffer, const QString &fileName, bool loop, double volume, double pan);
+		int playSoundIntercepted(int buffer, const QString &fileName, bool loop, double volume, double pan,
+		                         QMudSoundMuteFlag callerMute = {});
 		/**
 		 * @brief Plays a sound and reports the final plugin/backend status after any suspension.
 		 * @param buffer Sound buffer slot index.
@@ -4544,10 +4546,12 @@ class WorldRuntime : public QObject
 		 * @param volume Finite playback volume.
 		 * @param pan Finite stereo pan value.
 		 * @param completion Final status consumer.
+		 * @param callerMute Live mute flag for the originating plugin, if any.
 		 * @return Immediate validation/dispatch status, with final status delivered to completion.
 		 */
 		int playSoundInterceptedWithCompletion(int buffer, const QString &fileName, bool loop, double volume,
-		                                       double pan, std::function<void(int)> completion);
+		                                       double pan, std::function<void(int)> completion,
+		                                       QMudSoundMuteFlag callerMute = {});
 		/**
 		 * @brief Immediately submits direct file playback without firing plugin sound callbacks.
 		 * @param buffer Sound buffer slot index.
@@ -4557,11 +4561,13 @@ class WorldRuntime : public QObject
 		 * @param pan Stereo pan value.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
 		 * @param postState Optional destination receiving the immutable post-command channel state.
+		 * @param callerMute Live mute flag for the originating plugin, if any.
 		 * @return API status code.
 		 */
 		int playSoundDirect(int buffer, const QString &fileName, bool loop, double volume, double pan,
 		                    int                                                 *selectedBuffer = nullptr,
-		                    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
+		                    std::shared_ptr<const SoundEngineSession::Snapshot> *postState      = nullptr,
+		                    QMudSoundMuteFlag                                    callerMute     = {}) const;
 		/**
 		 * @brief Selects and starts one LuaAudio-owned file play on the sound worker.
 		 * @param buffer Zero for atomic automatic selection, or a fixed reserved channel.
@@ -4574,12 +4580,14 @@ class WorldRuntime : public QObject
 		 * @param selectedBuffer Destination receiving the selected one-based channel on success.
 		 * @param pitch Initial LuaAudio frequency offset in units of 100 Hz.
 		 * @param postState Optional immutable post-command state destination.
+		 * @param pluginMutes Live mute flags for the LuaAudio sound's source plugins.
 		 * @return API status code.
 		 */
-		int playSoundForNativeAudio(
-		    int buffer, const QString &fileName, bool loop, double volume, double pan, quint64 generation,
-		    bool requireReservation, int *selectedBuffer, double pitch = 0.0,
-		    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
+		int playSoundForNativeAudio(int buffer, const QString &fileName, bool loop, double volume, double pan,
+		                            quint64 generation, bool requireReservation, int *selectedBuffer,
+		                            double                                               pitch     = 0.0,
+		                            std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr,
+		                            QMudSoundPluginMutes pluginMutes = {}) const;
 		/**
 		 * @brief Validates a delayed LuaAudio file and reserves one worker-owned channel.
 		 * @param fileName Legacy QMud-home-relative or absolute-safe sound path.
@@ -4588,12 +4596,13 @@ class WorldRuntime : public QObject
 		 * @param pan Captured initial balance.
 		 * @param pitch Captured initial frequency offset in units of 100 Hz.
 		 * @param postState Optional immutable post-command state destination.
+		 * @param pluginMutes Live mute flags retained for the delayed sound's source plugins.
 		 * @return Selected one-based channel, or zero when none is reusable.
 		 */
 		[[nodiscard]] int reserveSoundBufferForNativeAudio(
 		    const QString &fileName, quint64 generation, double volume = 100.0, double pan = 0.0,
-		    double                                               pitch     = 0.0,
-		    std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
+		    double pitch = 0.0, std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr,
+		    QMudSoundPluginMutes pluginMutes = {}) const;
 		/**
 		 * @brief Synchronously confirms or releases registry ownership after a LuaAudio play or reservation.
 		 * @param buffer One-based selected channel.
@@ -4635,10 +4644,16 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] double                              soundVolumeForNativeAudio(int buffer) const;
 		/**
-		 * @brief Captures the opaque sound session for owner cleanup without retaining a runtime QObject.
+		 * @brief Captures this world's opaque playback session without retaining the runtime QObject.
 		 * @return Current thread-safe sound session, or an empty pointer.
 		 */
-		[[nodiscard]] std::shared_ptr<SoundEngineSession> soundSessionForNativeAudio() const;
+		[[nodiscard]] std::shared_ptr<SoundEngineSession> soundPlaybackSession() const;
+		/**
+		 * @brief Captures the originating plugin's live mute flag without entering the runtime thread.
+		 * @param pluginId Canonical plugin ID, or empty for the world script.
+		 * @return Live read-only flag, or an empty pointer if the plugin ID or sound session is absent.
+		 */
+		[[nodiscard]] QMudSoundMuteFlag                   soundPluginMuteFlag(const QString &pluginId) const;
 		/**
 		 * @brief Initializes or frees this world's LuaAudio state through the sound command FIFO.
 		 * @param initialized Whether LuaAudio may accept playback.
@@ -4666,12 +4681,13 @@ class WorldRuntime : public QObject
 		 * @param pan Stereo pan value.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
 		 * @param postState Optional destination receiving the immutable post-command channel state.
+		 * @param callerMute Live mute flag for the originating plugin, if any.
 		 * @return API status code.
 		 */
-		int
-		playSoundMemoryDirect(int buffer, const QByteArray &data, bool loop, double volume, double pan,
-		                      int                                                 *selectedBuffer = nullptr,
-		                      std::shared_ptr<const SoundEngineSession::Snapshot> *postState = nullptr) const;
+		int playSoundMemoryDirect(int buffer, const QByteArray &data, bool loop, double volume, double pan,
+		                          int *selectedBuffer                                             = nullptr,
+		                          std::shared_ptr<const SoundEngineSession::Snapshot> *postState  = nullptr,
+		                          QMudSoundMuteFlag                                    callerMute = {}) const;
 		/**
 		 * @brief Immediately stops direct playback in one buffer or every buffer.
 		 * @param buffer Sound buffer slot index.
@@ -8071,6 +8087,7 @@ class WorldRuntime : public QObject
 				double                              pan{0.0};
 				quint64                             preparationToken{0};
 				std::shared_ptr<SoundEngineSession> soundSession;
+				QMudSoundMuteFlag                   callerMute;
 				std::function<void(int)>            completion;
 		};
 		struct PendingSoundPluginDecision;

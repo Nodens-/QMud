@@ -98,8 +98,9 @@ namespace
 } // namespace
 
 SoundPcmStream::SoundPcmStream(const QAudioFormat &outputFormat, const double volume, const double pan,
-                               const double pitch)
-    : m_outputFormat(outputFormat)
+                               const double pitch, QMudSoundMuteFlag worldMute,
+                               QMudSoundPluginMutes pluginMutes)
+    : m_outputFormat(outputFormat), m_worldMute(std::move(worldMute)), m_pluginMutes(std::move(pluginMutes))
 {
 	m_attributes[0].start = m_attributes[0].target = 1.0;
 	setAttributeLocked(QMudSoundAttribute::Volume, volume, {}, false, QMudSoundAttributeTarget::Absolute);
@@ -219,10 +220,18 @@ SoundPcmStream::State SoundPcmStream::state() const
 	return result;
 }
 
+bool SoundPcmStream::outputMuted() const noexcept
+{
+	return (m_worldMute && m_worldMute->load(std::memory_order_relaxed)) ||
+	       (m_pluginMutes.caller && m_pluginMutes.caller->load(std::memory_order_relaxed)) ||
+	       (m_pluginMutes.provider && m_pluginMutes.provider->load(std::memory_order_relaxed));
+}
+
 template <typename Sample> void SoundPcmStream::renderSamples(const QSpan<Sample> output)
 {
 	const std::lock_guard lock(m_mutex);
 	const int             channels = m_outputFormat.channelCount();
+	const bool            muted    = outputMuted();
 	for (qsizetype index = 0; index < output.size(); index += channels)
 	{
 		if (m_size > 0 && m_sourcePosition >= 1.0)
@@ -239,12 +248,15 @@ template <typename Sample> void SoundPcmStream::renderSamples(const QSpan<Sample
 			const auto &first = m_frames[static_cast<std::size_t>(m_head)];
 			const auto &second =
 			    m_frames[(static_cast<std::size_t>(m_head) + (m_size > 1 ? 1U : 0U)) % m_frames.size()];
-			const double gain = m_attributes[0].value(m_outputFrame);
-			const double pan  = std::clamp(m_attributes[1].value(m_outputFrame) / 100.0, -1.0, 1.0);
-			frame[0]          = static_cast<float>(std::lerp(first[0], second[0], m_sourcePosition) * gain *
-			                                       (pan > 0 ? 1.0 - pan : 1.0));
-			frame[1]          = static_cast<float>(std::lerp(first[1], second[1], m_sourcePosition) * gain *
-			                                       (pan < 0 ? 1.0 + pan : 1.0));
+			if (!muted)
+			{
+				const double gain = m_attributes[0].value(m_outputFrame);
+				const double pan  = std::clamp(m_attributes[1].value(m_outputFrame) / 100.0, -1.0, 1.0);
+				frame[0] = static_cast<float>(std::lerp(first[0], second[0], m_sourcePosition) * gain *
+				                              (pan > 0 ? 1.0 - pan : 1.0));
+				frame[1] = static_cast<float>(std::lerp(first[1], second[1], m_sourcePosition) * gain *
+				                              (pan < 0 ? 1.0 + pan : 1.0));
+			}
 			const double rate = std::clamp(
 			    (m_sourceRate + m_attributes[2].value(m_outputFrame) * 100.0) / m_sourceRate, 0.01, 16.0);
 			m_sourcePosition += rate * m_sourceRate / m_outputFormat.sampleRate();

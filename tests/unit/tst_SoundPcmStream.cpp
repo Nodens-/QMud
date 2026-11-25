@@ -51,6 +51,37 @@ namespace
 	{
 			Q_OBJECT
 		private slots:
+			/** @brief Mute silences PCM while playback and the volume envelope continue advancing. */
+			static void liveMutePreservesThePlaybackClock()
+			{
+				const auto     worldMute    = std::make_shared<std::atomic_bool>(false);
+				const auto     callerMute   = std::make_shared<std::atomic_bool>(false);
+				const auto     providerMute = std::make_shared<std::atomic_bool>(false);
+				SoundPcmStream stream(format(1000), 1.0, 0.0, 0.0, worldMute, {callerMute, providerMute});
+				SoundPcmStream reference(format(1000), 1.0, 0.0, 0.0);
+				for (SoundPcmStream *transport : {&stream, &reference})
+				{
+					QVERIFY(transport->append(constantBuffer(20, 1000)));
+					transport->setAttribute(QMudSoundAttribute::Volume, 0.0, std::chrono::milliseconds{16},
+					                        false);
+				}
+				std::array<float, 4> actual{}, expected{};
+				for (const auto &mute : {worldMute, callerMute, providerMute})
+				{
+					mute->store(true);
+					stream.render(QSpan<float>(actual));
+					QCOMPARE(actual, (std::array<float, 4>{}));
+					reference.render(QSpan<float>(expected));
+					mute->store(false);
+				}
+				stream.render(QSpan<float>(actual));
+				reference.render(QSpan<float>(expected));
+				QVERIFY(expected[0] > 0.0F);
+				QCOMPARE(actual, expected);
+				QCOMPARE(stream.state().renderedFrames, reference.state().renderedFrames);
+				QCOMPARE(stream.state().volume, reference.state().volume);
+			}
+
 			/** @brief Verifies invalid initial controls retain neutral defaults and cannot poison PCM rendering. */
 			static void nonFiniteControlsPreserveValidTransportState()
 			{

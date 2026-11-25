@@ -49,8 +49,16 @@ class SoundPcmStream final
 		 * @param volume Initial linear gain.
 		 * @param pan Initial balance from -100 through 100.
 		 * @param pitch Initial frequency offset in units of 100 Hz.
+		 * @param worldMute Live output mute flag for the destination sound session.
+		 * @param pluginMutes Live output mute flags for the plugin sources.
 		 */
-		SoundPcmStream(const QAudioFormat &outputFormat, double volume, double pan, double pitch);
+		SoundPcmStream(const QAudioFormat &outputFormat, double volume, double pan, double pitch,
+		               QMudSoundMuteFlag worldMute = {}, QMudSoundPluginMutes pluginMutes = {});
+		/**
+		 * @brief Samples the live output mute policy for this assignment.
+		 * @return Whether any applicable world or plugin flag silences the output.
+		 */
+		[[nodiscard]] bool outputMuted() const noexcept;
 		/**
 		 * @brief Appends one decoder buffer without allowing the transport to grow past its bound.
 		 * @param buffer Native-format PCM emitted by the decoder.
@@ -137,6 +145,8 @@ class SoundPcmStream final
 		template <typename Sample> void   renderSamples(QSpan<Sample> output);
 
 		QAudioFormat                      m_outputFormat;
+		QMudSoundMuteFlag                 m_worldMute;
+		QMudSoundPluginMutes              m_pluginMutes;
 		mutable std::mutex                m_mutex;
 		std::vector<std::array<float, 2>> m_frames;
 		std::array<Envelope, 3>           m_attributes;

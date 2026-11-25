@@ -19085,8 +19085,8 @@ int WorldRuntime::completeSoundPluginDecision(const PendingSoundOperation &opera
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::completeSoundPluginDecision");
 	const QString callbackArgument =
 	    operation.kind == PendingSoundOperation::Kind::Play ? operation.fileName : QString();
-	const bool handledByNative =
-	    !handled && QMudNativePluginRegistry::handleLuaAudioPlaySound(this, callbackArgument);
+	const bool handledByNative = !handled && QMudNativePluginRegistry::handleLuaAudioPlaySound(
+	                                             this, callbackArgument, operation.callerMute);
 
 	int result = eOK;
 	if (handled || handledByNative)
@@ -19099,12 +19099,13 @@ int WorldRuntime::completeSoundPluginDecision(const PendingSoundOperation &opera
 		if (operation.soundSession && operation.preparationToken != 0)
 		{
 			result = operation.soundSession->commitPrepared(operation.preparationToken, operation.buffer,
-			                                                operation.loop, operation.volume, operation.pan);
+			                                                operation.loop, operation.volume, operation.pan,
+			                                                {operation.callerMute, {}});
 		}
 		else
 		{
 			result = playSoundDirect(operation.buffer, operation.fileName, operation.loop, operation.volume,
-			                         operation.pan);
+			                         operation.pan, nullptr, nullptr, operation.callerMute);
 		}
 	}
 	else
@@ -19123,14 +19124,15 @@ void WorldRuntime::cancelSoundPluginDecision(const PendingSoundOperation &operat
 }
 
 int WorldRuntime::playSoundIntercepted(const int buffer, const QString &fileName, const bool loop,
-                                       const double volume, const double pan)
+                                       const double volume, const double pan, QMudSoundMuteFlag callerMute)
 {
-	return playSoundInterceptedWithCompletion(buffer, fileName, loop, volume, pan, {});
+	return playSoundInterceptedWithCompletion(buffer, fileName, loop, volume, pan, {}, std::move(callerMute));
 }
 
 int WorldRuntime::playSoundInterceptedWithCompletion(const int buffer, const QString &fileName,
                                                      const bool loop, const double volume, const double pan,
-                                                     std::function<void(int)> completion)
+                                                     std::function<void(int)> completion,
+                                                     QMudSoundMuteFlag        callerMute)
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()) ||
 	    !qIsFinite(volume) || !qIsFinite(pan))
@@ -19175,6 +19177,7 @@ int WorldRuntime::playSoundInterceptedWithCompletion(const int buffer, const QSt
 	operation.pan              = pan;
 	operation.preparationToken = preparationToken;
 	operation.soundSession     = std::move(session);
+	operation.callerMute       = std::move(callerMute);
 	operation.completion       = std::move(completion);
 
 	if (QThread::currentThread() == thread())
@@ -19222,7 +19225,8 @@ namespace
 
 int WorldRuntime::playSoundDirect(const int buffer, const QString &fileName, const bool loop,
                                   const double volume, const double pan, int *selectedBuffer,
-                                  std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
+                                  std::shared_ptr<const SoundEngineSession::Snapshot> *postState,
+                                  QMudSoundMuteFlag                                    callerMute) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || (buffer == 0 && fileName.isEmpty()))
 		return eBadParameter;
@@ -19256,7 +19260,8 @@ int WorldRuntime::playSoundDirect(const int buffer, const QString &fileName, con
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	if (!session)
 		return eCannotPlaySound;
-	return session->playFile(buffer, fileName, loop, volume, pan, 0, selectedBuffer, false, 0.0, postState);
+	return session->playFile(buffer, fileName, loop, volume, pan, 0, selectedBuffer, false, 0.0, postState,
+	                         {std::move(callerMute), {}});
 }
 
 void WorldRuntime::stopNativeMspPlayback() const
@@ -19393,7 +19398,8 @@ void WorldRuntime::executeNativeSoundRequest(const QMudNativeSoundRequest &reque
 
 int WorldRuntime::playSoundMemoryDirect(const int buffer, const QByteArray &data, const bool loop,
                                         const double volume, const double pan, int *selectedBuffer,
-                                        std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
+                                        std::shared_ptr<const SoundEngineSession::Snapshot> *postState,
+                                        QMudSoundMuteFlag                                    callerMute) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || data.isEmpty())
 		return eBadParameter;
@@ -19427,13 +19433,16 @@ int WorldRuntime::playSoundMemoryDirect(const int buffer, const QByteArray &data
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	if (!session)
 		return eCannotPlaySound;
-	return session->playMemory(buffer, data, loop, volume, pan, 0, selectedBuffer, postState);
+	return session->playMemory(buffer, data, loop, volume, pan, 0, selectedBuffer, postState,
+	                           {std::move(callerMute), {}});
 }
 
-int WorldRuntime::playSoundForNativeAudio(
-    const int buffer, const QString &fileName, const bool loop, const double volume, const double pan,
-    const quint64 generation, const bool requireReservation, int *selectedBuffer, const double pitch,
-    std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
+int WorldRuntime::playSoundForNativeAudio(const int buffer, const QString &fileName, const bool loop,
+                                          const double volume, const double pan, const quint64 generation,
+                                          const bool requireReservation, int *selectedBuffer,
+                                          const double                                         pitch,
+                                          std::shared_ptr<const SoundEngineSession::Snapshot> *postState,
+                                          QMudSoundPluginMutes pluginMutes) const
 {
 	if (buffer < 0 || buffer > kMaxSoundBuffers || fileName.isEmpty() || generation == 0 || !selectedBuffer)
 		return eBadParameter;
@@ -19476,13 +19485,14 @@ int WorldRuntime::playSoundForNativeAudio(
 	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
 	return session ? session->playFile(buffer, fileName, loop, volume, pan, generation, selectedBuffer,
-	                                   requireReservation, pitch, postState)
+	                                   requireReservation, pitch, postState, std::move(pluginMutes))
 	               : eCannotPlaySound;
 }
 
 int WorldRuntime::reserveSoundBufferForNativeAudio(
     const QString &fileName, const quint64 generation, const double volume, const double pan,
-    const double pitch, std::shared_ptr<const SoundEngineSession::Snapshot> *postState) const
+    const double pitch, std::shared_ptr<const SoundEngineSession::Snapshot> *postState,
+    QMudSoundPluginMutes pluginMutes) const
 {
 	if (fileName.isEmpty() || generation == 0)
 		return 0;
@@ -19512,7 +19522,9 @@ int WorldRuntime::reserveSoundBufferForNativeAudio(
 		return buffer;
 	}
 	const std::shared_ptr<SoundEngineSession> session = m_soundSession.load(std::memory_order_acquire);
-	return session ? session->reserveLuaAudioChannel(fileName, generation, volume, pan, pitch, postState) : 0;
+	return session ? session->reserveLuaAudioChannel(fileName, generation, volume, pan, pitch, postState,
+	                                                 std::move(pluginMutes))
+	               : 0;
 }
 
 void WorldRuntime::confirmSoundBufferForNativeAudio(const int buffer, const quint64 generation) const
@@ -19638,9 +19650,17 @@ double WorldRuntime::soundVolumeForNativeAudio(const int buffer) const
 	return snapshot ? snapshot->volume[static_cast<std::size_t>(buffer - 1)] : 0.0;
 }
 
-std::shared_ptr<SoundEngineSession> WorldRuntime::soundSessionForNativeAudio() const
+std::shared_ptr<SoundEngineSession> WorldRuntime::soundPlaybackSession() const
 {
 	return m_soundSession.load(std::memory_order_acquire);
+}
+
+QMudSoundMuteFlag WorldRuntime::soundPluginMuteFlag(const QString &pluginId) const
+{
+	if (pluginId.isEmpty())
+		return {};
+	const auto session = soundPlaybackSession();
+	return session ? session->pluginMuteFlag(pluginId) : QMudSoundMuteFlag{};
 }
 
 int WorldRuntime::setLuaAudioInitialized(const bool                                           initialized,

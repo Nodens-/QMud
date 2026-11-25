@@ -124,9 +124,11 @@ namespace QMudNativePluginRegistry
 	/** @brief Dispatch-local adapters around the single LuaAudio operation implementation. */
 	struct LuaAudioCallContext
 	{
-			const void                *ownerKey{nullptr};
-			std::function<int(int)>    status;
-			std::function<double(int)> volume;
+			const void                        *ownerKey{nullptr};
+			std::function<QMudSoundMuteFlag()> captureCallerMute;
+			bool                               providedByShim{false};
+			std::function<int(int)>            status;
+			std::function<double(int)>         volume;
 			std::function<void(int, const std::shared_ptr<const SoundEngineSession::Snapshot> &)> changed;
 			std::function<std::optional<QString>()> storedVolume;
 			std::function<bool(const QString &)>    storeVolume;
@@ -444,9 +446,11 @@ namespace QMudNativePluginRegistry
 	 * @brief Handles native LuaAudio `OnPluginPlaySound` interception.
 	 * @param runtime Owning runtime.
 	 * @param sound Sound path or LuaAudio control string.
+	 * @param callerMute Live mute flag for the originating plugin, if any.
 	 * @return `true` when LuaAudio consumed the sound event.
 	 */
-	bool               handleLuaAudioPlaySound(const WorldRuntime *runtime, const QString &sound);
+	bool               handleLuaAudioPlaySound(const WorldRuntime *runtime, const QString &sound,
+	                                           QMudSoundMuteFlag callerMute = {});
 	/**
 	 * @brief Handles native screen-draw speech for MushReader parity.
 	 * @param runtime Owning runtime.
