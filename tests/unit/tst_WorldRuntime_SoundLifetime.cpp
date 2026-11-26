@@ -1265,9 +1265,12 @@ namespace
 					QSKIP("Directory symlinks are unavailable on this platform");
 				}
 
-				SoundEngine engine;
-				engine.configureSoundDirectory(root.path());
-				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				{
+					SoundEngine engine;
+					engine.configureSoundDirectory(root.path());
+					QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+					// Orderly shutdown flushes the index after the in-memory catalog becomes ready.
+				}
 				QVERIFY(QFileInfo::exists(QDir(containedState).filePath(QStringLiteral("sound-index.qss"))));
 			}
 
