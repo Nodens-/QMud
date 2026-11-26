@@ -12,12 +12,16 @@
 #include "SoundEngine.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
-#include "WorldRuntimeTestAccess.h"
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
 #include <QContextMenuEvent>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
+#include <QFile>
 #include <QMenu>
 #include <QScopeGuard>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTemporaryDir>
 #include <QTimer>
 #endif
 #include <QMdiArea>
@@ -73,11 +77,20 @@ namespace
 				runtime.attachSoundEngine(&engine);
 				const auto session = runtime.soundPlaybackSession();
 				QVERIFY(session);
-				const QString        pluginId = QStringLiteral("abcdef1234567890abcdef12");
-				WorldRuntime::Plugin plugin;
-				plugin.attributes.insert(QStringLiteral("id"), pluginId);
-				plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Synthetic sound"));
-				WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
+				const QString pluginId = QStringLiteral("abcdef1234567890abcdef12");
+				QTemporaryDir fixture(QDir::current().filePath(QStringLiteral("mdi-mute-XXXXXX")));
+				QVERIFY(fixture.isValid());
+				runtime.setStartupDirectory(fixture.path());
+				QFile plugin(fixture.filePath(QStringLiteral("sound.xml")));
+				QVERIFY(plugin.open(QIODevice::WriteOnly));
+				const QByteArray xml =
+				    QStringLiteral("<qmud><plugin id=\"%1\" name=\"Synthetic_sound\"/></qmud>")
+				        .arg(pluginId)
+				        .toUtf8();
+				QCOMPARE(plugin.write(xml), xml.size());
+				plugin.close();
+				QString error;
+				QVERIFY2(runtime.loadPluginFile(plugin.fileName(), &error), qPrintable(error));
 				QWidget     host;
 				QVBoxLayout layout(&host);
 				QMdiArea    mdiArea;
@@ -96,6 +109,7 @@ namespace
 				tabs.updateTabs();
 				QCOMPARE(tabs.count(), 2);
 				QCOMPARE(tabs.currentIndex(), 1);
+				QVERIFY(!tabs.tabButton(0, QTabBar::RightSide));
 
 				const auto openMenu = [&](const int tabIndex, auto choose)
 				{
@@ -128,27 +142,86 @@ namespace
 					         QTest::keyClick(&menu, Qt::Key_Return);
 				         });
 				QVERIFY(session->isMuted());
-				openMenu(0,
-				         [&](QMenu &menu)
-				         {
-					         QVERIFY(menu.actions().front()->isChecked());
-					         QAction *submenuAction = menu.actions().at(1);
-					         QMenu   *submenu       = submenuAction->menu();
-					         QVERIFY(submenu);
-					         QAction *pluginAction = nullptr;
-					         for (QAction *action : submenu->actions())
-						         if (action->data().toString() == pluginId)
-							         pluginAction = action;
-					         QVERIFY(pluginAction && pluginAction->isCheckable());
-					         QCOMPARE(pluginAction->text(), QStringLiteral("Synthetic sound"));
-					         menu.setActiveAction(submenuAction);
-					         QTest::keyClick(&menu, Qt::Key_Right);
-					         QVERIFY(submenu->isVisible());
-					         submenu->setActiveAction(pluginAction);
-					         QTest::keyClick(submenu, Qt::Key_Return);
-				         });
+				QVERIFY(tabs.tabButton(0, QTabBar::RightSide));
+				QCOMPARE(tabs.tabToolTip(0), QStringLiteral("World muted"));
+				const auto choosePluginMute = [&](QMenu &menu)
+				{
+					QAction *submenuAction = menu.actions().at(1);
+					QMenu   *submenu       = submenuAction->menu();
+					QVERIFY(submenu);
+					QAction *pluginAction = nullptr;
+					for (QAction *action : submenu->actions())
+						if (action->data().toString() == pluginId)
+							pluginAction = action;
+					QVERIFY(pluginAction && pluginAction->isCheckable());
+					QCOMPARE(pluginAction->text(), QStringLiteral("Synthetic_sound"));
+					menu.setActiveAction(submenuAction);
+					QTest::keyClick(&menu, Qt::Key_Right);
+					QVERIFY(submenu->isVisible());
+					submenu->setActiveAction(pluginAction);
+					QTest::keyClick(submenu, Qt::Key_Return);
+				};
+				openMenu(0, choosePluginMute);
 				QVERIFY(session->isMuted());
 				QVERIFY(session->isMuted(pluginId));
+				QCOMPARE(tabs.tabToolTip(0), QStringLiteral("World muted"));
+				openMenu(0,
+				         [](QMenu &menu)
+				         {
+					         menu.setActiveAction(menu.actions().front());
+					         QTest::keyClick(&menu, Qt::Key_Return);
+				         });
+				QVERIFY(!session->isMuted());
+				QCOMPARE(tabs.tabToolTip(0), QStringLiteral("1 plugin muted"));
+				const QPointer<QWidget> badge(tabs.tabButton(0, QTabBar::RightSide));
+				QVERIFY(badge);
+				QSignalSpy activations(&tabs, &MdiTabs::windowActivationRequested);
+				runtime.setNewLines(3);
+				tabs.updateTabs();
+				QCOMPARE(tabs.tabText(0), QStringLiteral("Sound world (3)"));
+				QCOMPARE(tabs.tabButton(0, QTabBar::RightSide), badge.data());
+				QCOMPARE(tabs.tabToolTip(0), QStringLiteral("1 plugin muted"));
+				QCOMPARE(mdiArea.activeSubWindow(), other);
+				QCOMPARE(activations.count(), 0);
+
+				tabs.moveTab(0, 1);
+				auto *extra = addWindow(mdiArea, QStringLiteral("Extra tab"));
+				mdiArea.setActiveSubWindow(other);
+				tabs.updateTabs();
+				QCOMPARE(tabs.orderedWindows(), (QList<QMdiSubWindow *>{other, world, extra}));
+				QCOMPARE(tabs.tabButton(1, QTabBar::RightSide), badge.data());
+				mdiArea.removeSubWindow(extra);
+				delete extra;
+				tabs.updateTabs();
+				QCOMPARE(tabs.orderedWindows(), (QList<QMdiSubWindow *>{other, world}));
+				QCOMPARE(tabs.tabButton(1, QTabBar::RightSide), badge.data());
+				tabs.moveTab(1, 0);
+				QVERIFY2(runtime.unloadPlugin(pluginId, &error), qPrintable(error));
+				QTRY_VERIFY(tabs.tabToolTip(0).isEmpty());
+				QVERIFY(!tabs.tabButton(0, QTabBar::RightSide));
+				QVERIFY(session->isMuted(pluginId));
+				QVERIFY2(runtime.loadPluginFile(plugin.fileName(), &error), qPrintable(error));
+				QTRY_COMPARE(tabs.tabToolTip(0), QStringLiteral("1 plugin muted"));
+				openMenu(0,
+				         [](QMenu &menu)
+				         {
+					         menu.setActiveAction(menu.actions().front());
+					         QTest::keyClick(&menu, Qt::Key_Return);
+				         });
+				QVERIFY2(runtime.unloadPlugin(pluginId, &error), qPrintable(error));
+				QVERIFY2(runtime.loadPluginFile(plugin.fileName(), &error), qPrintable(error));
+				QCoreApplication::processEvents();
+				QCOMPARE(tabs.tabToolTip(0), QStringLiteral("World muted"));
+				openMenu(0,
+				         [](QMenu &menu)
+				         {
+					         menu.setActiveAction(menu.actions().front());
+					         QTest::keyClick(&menu, Qt::Key_Return);
+				         });
+				openMenu(0, choosePluginMute);
+				QVERIFY(!session->isMuted(pluginId));
+				QVERIFY(!tabs.tabButton(0, QTabBar::RightSide));
+				QVERIFY(tabs.tabToolTip(0).isEmpty());
 				openMenu(1, [](const QMenu &menu)
 				         { QCOMPARE(menu.actions().front()->text(), QStringLiteral("Restore")); });
 			}

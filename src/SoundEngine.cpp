@@ -8811,6 +8811,20 @@ bool SoundEngineSession::isMuted(const QString &pluginId) const
 	return mute && mute->load(std::memory_order_relaxed);
 }
 
+QSet<QString> SoundEngineSession::mutedPluginIds() const
+{
+	QSet<QString> ids;
+	if (!m_state || m_state->closed.load(std::memory_order_acquire))
+		return ids;
+	const QMutexLocker locker(&m_state->pluginMuteMutex);
+	for (auto it = m_state->pluginMutes.cbegin(); it != m_state->pluginMutes.cend(); ++it)
+	{
+		if (it.value()->load(std::memory_order_relaxed))
+			ids.insert(it.key());
+	}
+	return ids;
+}
+
 void SoundEngineSession::setMuted(const bool muted, const QString &pluginId) const
 {
 	if (!m_state || m_state->closed.load(std::memory_order_acquire))

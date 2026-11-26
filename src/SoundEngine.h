@@ -12,6 +12,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QByteArray>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <array>
@@ -510,6 +511,11 @@ class SoundEngineSession final
 		 * @return Whether the requested scope is muted.
 		 */
 		[[nodiscard]] bool              isMuted(const QString &pluginId = {}) const;
+		/**
+		 * @brief Reads the muted plugin scopes in this sound session.
+		 * @return IDs of muted plugins, including retained settings.
+		 */
+		[[nodiscard]] QSet<QString>     mutedPluginIds() const;
 		/**
 		 * @brief Changes a session output mute setting for current and future playback.
 		 * @param muted Whether to silence the requested scope.

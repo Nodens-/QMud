@@ -6105,6 +6105,10 @@ class WorldRuntime : public QObject
 		 */
 		void worldAttributeChanged(const QString &key);
 		/**
+		 * @brief Emitted after a plugin membership change has been committed.
+		 */
+		void pluginMembershipChanged();
+		/**
 		 * @brief Emitted when world Lua scripting becomes available or unavailable.
 		 * @param available New world Lua scripting availability.
 		 */

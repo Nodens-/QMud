@@ -29608,6 +29608,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	m_loadingDocument = false;
 	refreshCommandProcessorOptions();
 	installPendingPlugins();
+	emit pluginMembershipChanged();
 }
 
 const QMap<QString, QString> &WorldRuntime::worldAttributes() const
@@ -32390,6 +32391,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		invalidatePluginCallbackPresenceCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 		QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
+		emit pluginMembershipChanged();
 		callPluginCallbacksNoArgs(LuaCallbackEvent::ListChanged,
 		                          WorldRuntime::PluginCallbackCompletionPolicy::Queued);
 		return true;
@@ -32526,6 +32528,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	const int installedIndex = findPluginIndex(m_plugins, pluginId);
 	if (installedIndex >= 0)
 		queuePluginInstall(m_plugins[installedIndex]);
+	emit pluginMembershipChanged();
 	callPluginCallbacksNoArgs(LuaCallbackEvent::ListChanged,
 	                          WorldRuntime::PluginCallbackCompletionPolicy::Queued);
 	return true;
@@ -32739,6 +32742,7 @@ void WorldRuntime::finishUnloadPluginRemoval(const QSharedPointer<PendingPluginU
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 	callPluginCallbacksNoArgs(LuaCallbackEvent::ListChanged,
 	                          WorldRuntime::PluginCallbackCompletionPolicy::Queued);
+	emit pluginMembershipChanged();
 	completePluginUnload(operation, true);
 }
 
