@@ -278,6 +278,76 @@ namespace
 				QCOMPARE(cache.totalBytes, 0);
 			}
 
+			/** @brief Checks live scope updates, prepared and delayed plays, and assignment reuse. */
+			void playbackMuteFollowsEachAssignment()
+			{
+				SoundEngine engine;
+				configureTestSoundCatalog(engine);
+				WorldRuntime origin, destination;
+				origin.attachSoundEngine(&engine);
+				destination.attachSoundEngine(&engine);
+				const auto source = origin.soundPlaybackSession();
+				const auto target = destination.soundPlaybackSession();
+				QVERIFY(source && target);
+				const QString pluginId   = QStringLiteral("12345678901234567890abcd");
+				const QString providerId = QMudNativePluginRegistry::luaAudioPluginId();
+				auto          callerMute = source->pluginMuteFlag(pluginId);
+				auto          isMuted    = [&](const int buffer)
+				{ return SoundEngineTestAccess::activeOutputMuted(engine, target, buffer); };
+				const auto payload = QMudTestSoundData::silentPcmWave();
+				QCOMPARE(
+				    target->playMemory(1, payload, true, -25.0, 0.0, 0, nullptr, nullptr, {callerMute, {}}),
+				    eOK);
+				QCOMPARE(target->playMemory(2, payload, true, 0.0, 0.0), eOK);
+				const auto originalState = target->snapshot();
+				QCOMPARE(isMuted(1), std::optional(false));
+				source->setMuted(true, pluginId);
+				QCOMPARE(isMuted(1), std::optional(true));
+				QCOMPARE(isMuted(2), std::optional(false));
+				QCOMPARE(target->snapshot(), originalState);
+				target->setMuted(true);
+				QCOMPARE(isMuted(2), std::optional(true));
+				target->setMuted(false);
+				QCOMPARE(isMuted(1), std::optional(true));
+				QCOMPARE(isMuted(2), std::optional(false));
+
+				const quint64 token = target->prepareFile(testSoundFileName());
+				QVERIFY(token != 0);
+				QCOMPARE(target->commitPrepared(token, 3, true, 0.0, 0.0, {callerMute, {}}), eOK);
+				QCOMPARE(isMuted(3), std::optional(true));
+				QMudNativePluginRegistry::LuaAudioCallContext context;
+				context.captureCallerMute = [callerMute = std::move(callerMute)] { return callerMute; };
+				context.providedByShim    = true;
+				target->setMuted(true, providerId);
+				QCOMPARE(QMudNativePluginRegistry::callLuaAudio(&destination,
+				                                                QStringLiteral("playDelayLooped"),
+				                                                {testSoundFileName(), 1}, context)
+				             .errorCode,
+				         eOK);
+				const auto owned = QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&destination);
+				QCOMPARE(owned.size(), 1);
+				const int delayedBuffer = owned.front();
+				QTRY_COMPARE(isMuted(delayedBuffer), std::optional(true));
+				source->setMuted(false, pluginId);
+				QCOMPARE(isMuted(1), std::optional(false));
+				QCOMPARE(isMuted(3), std::optional(false));
+				QCOMPARE(isMuted(delayedBuffer), std::optional(true));
+				target->setMuted(false, providerId);
+				QCOMPARE(isMuted(delayedBuffer), std::optional(false));
+				source->setMuted(true, pluginId);
+				QCOMPARE(isMuted(delayedBuffer), std::optional(true));
+
+				QCOMPARE(target->playMemory(1, payload, true, -25.0, 0.0), eOK);
+				QCOMPARE(isMuted(1), std::optional(false));
+				target->setMuted(true);
+				target->setMuted(true, pluginId);
+				destination.detachSoundEngine();
+				destination.attachSoundEngine(&engine);
+				const auto reopened = destination.soundPlaybackSession();
+				QVERIFY(reopened && !reopened->isMuted() && !reopened->isMuted(pluginId));
+				QVERIFY(source->isMuted(pluginId));
+			}
+
 			/** @brief Verifies new, reused, and recreated sinks stay silent while real playback controls operate. */
 			void testOutputMuteSurvivesPlaybackControlsAndDeviceReset()
 			{
@@ -1195,9 +1265,12 @@ namespace
 					QSKIP("Directory symlinks are unavailable on this platform");
 				}
 
-				SoundEngine engine;
-				engine.configureSoundDirectory(root.path());
-				QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+				{
+					SoundEngine engine;
+					engine.configureSoundDirectory(root.path());
+					QTRY_VERIFY(SoundEngineTestAccess::fileCatalogState(engine).ready);
+					// Orderly shutdown flushes the index after the in-memory catalog becomes ready.
+				}
 				QVERIFY(QFileInfo::exists(QDir(containedState).filePath(QStringLiteral("sound-index.qss"))));
 			}
 

@@ -396,18 +396,14 @@ int QMudLuaSupport::callLuaWithTraceback(lua_State *L, const int arguments, cons
 {
 	const int base = lua_gettop(L) - arguments;
 	pushTracebackFunction(L);
-	int error = 0;
 	if (lua_isnil(L, -1))
 	{
 		lua_pop(L, 1);
-		error = callLuaProtected(L, arguments, returnsCount, 0);
+		return callLuaProtected(L, arguments, returnsCount, 0);
 	}
-	else
-	{
-		lua_insert(L, base);
-		error = callLuaProtected(L, arguments, returnsCount, base);
-		lua_remove(L, base);
-	}
+	lua_insert(L, base);
+	const int error = callLuaProtected(L, arguments, returnsCount, base);
+	lua_remove(L, base);
 	return error;
 }
 
@@ -827,8 +823,17 @@ if string and type(string.format) == "function" and
     return _format(fmt, table.unpack(args))
   end
 
+  --[[
+   @brief Calls the original formatter from a named Lua call site for error reporting.
+   @param ... Format string and arguments forwarded unchanged.
+   @return Formatted string.
+  ]]
+  local function try_format(...)
+    return _format(...)
+  end
+
   function string.format(fmt, ...)
-    local ok, result = pcall(_format, fmt, ...)
+    local ok, result = pcall(try_format, fmt, ...)
     if ok then
       return result
     end

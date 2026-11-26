@@ -23,7 +23,10 @@
 #include <QAbstractListModel>
 #include <QAbstractProxyModel>
 #include <QAction>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QDeadlineTimer>
 #include <QDialog>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -33,6 +36,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeySequence>
 #include <QLineEdit>
 #include <QMenu>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -3268,6 +3272,244 @@ function OnPluginGmcpStateChanged() SetVariable('world_state','unexpected') end
 				QCOMPARE(runtime.gmcpMergeOverrides().value(QStringLiteral("test.state.child")).first,
 				         QMudGmcp::MergeMode::Replace);
 				QVERIFY(!runtime.worldFileModified());
+			}
+
+			/**
+			 * @brief Copies scalar values, text without terminal controls, and named JSON without changing Copy defaults.
+			 */
+			static void browserClipboard()
+			{
+				auto           *clipboard        = QApplication::clipboard();
+				const auto      previous         = clipboard->text();
+				const auto      restoreClipboard = qScopeGuard([&] { clipboard->setText(previous); });
+				GmcpWireFixture session;
+				activate(session);
+				WorldRuntime runtime;
+				WorldRuntimeTestAccess::setGmcpPublication(runtime, session.publication());
+				session.observed = [&](const auto &record, const auto &message)
+				{ WorldRuntimeTestAccess::deliverGmcpRecord(runtime, record, message); };
+				const QJsonObject object{
+				    {QStringLiteral("text"),    QStringLiteral("line\n\"quoted\"\\value") },
+				    {QStringLiteral("styled"),
+					 QStringLiteral(" \x1b[1;38;2;10;20;30mcolored\x1b[0m\n\t\x1b]8;;https://"
+					                "example.invalid\x1b\\link\x1b]8;;\x1b\\ ")           },
+				    {QStringLiteral("number"),  -12.5                                     },
+				    {QStringLiteral("boolean"), false                                     },
+				    {QStringLiteral("empty"),   QString{}                                 },
+				    {QStringLiteral("null"),    QJsonValue::Null                          },
+				    {QStringLiteral("a.b"),     QJsonArray{1, true}                       },
+				    {QStringLiteral("object"),  QJsonObject{{QStringLiteral("nested"), 2}}}
+                };
+				session.receive(QMudGmcp::frame(QByteArray("Test.State ") +
+				                                QJsonDocument(object).toJson(QJsonDocument::Compact)));
+				session.receive(QMudGmcp::frame("Test.Empty"));
+				session.receive(QMudGmcp::frame("Test.State.Child {\"nested\":3}"));
+				session.receive(QMudGmcp::frame("Other.State 9"));
+				GmcpBrowserDialog browser(&runtime);
+				browser.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&browser));
+				browser.activateWindow();
+				auto *tree = browser.findChild<QTreeView *>(QStringLiteral("gmcpCurrentTree"));
+				QVERIFY(tree);
+				const QStringList state{QStringLiteral("Test"), QStringLiteral("State")};
+				const auto        openMenu = [&](const QStringList &path) -> QMenu *
+				{
+					tree->expandAll();
+					const auto index = treeIndex(tree, path).siblingAtColumn(1);
+					tree->scrollTo(index);
+					QMetaObject::invokeMethod(tree, "customContextMenuRequested", Qt::DirectConnection,
+					                          Q_ARG(QPoint, tree->visualRect(index).center()));
+					return tree->findChild<QMenu *>(QStringLiteral("gmcpMergeMenu"));
+				};
+				const auto dismiss = [](QMenu *menu)
+				{
+					menu->close();
+					QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+				};
+				for (const auto &field :
+				     {QStringLiteral("text"), QStringLiteral("styled"), QStringLiteral("number"),
+				      QStringLiteral("boolean"), QStringLiteral("empty")})
+				{
+					auto *menu = openMenu(state + QStringList{field});
+					QVERIFY(menu);
+					auto *value     = menu->findChild<QAction *>(QStringLiteral("gmcpCopyValue"));
+					auto *plainText = menu->findChild<QAction *>(QStringLiteral("gmcpCopyValuePlainText"));
+					auto *json      = menu->findChild<QAction *>(QStringLiteral("gmcpCopyJson"));
+					QVERIFY(value && value->isEnabled() && plainText && plainText->isEnabled() && json);
+					QCOMPARE(menu->defaultAction(), value);
+					QVERIFY(!menu->findChild<QAction *>(QStringLiteral("gmcpMergeForce")));
+					value->trigger();
+					const auto plain = object.value(field).isString()       ? object.value(field).toString()
+					                   : field == QStringLiteral("number")  ? QStringLiteral("-12.5")
+					                   : field == QStringLiteral("boolean") ? QStringLiteral("false")
+					                                                        : QString{};
+					QCOMPARE(clipboard->text(), plain);
+					plainText->trigger();
+					QCOMPARE(clipboard->text(),
+					         field == QStringLiteral("styled") ? QStringLiteral(" colored\n\tlink ") : plain);
+					json->trigger();
+					QCOMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(),
+					         QJsonObject({
+					             {field, object.value(field)}
+                    }));
+					dismiss(menu);
+					tree->setFocus();
+					clipboard->setText(QStringLiteral("unchanged"));
+					QTest::keySequence(tree, QKeySequence::Copy);
+					QTRY_COMPARE(clipboard->text(), plain);
+				}
+				for (const auto &field :
+				     {QStringLiteral("null"), QStringLiteral("a.b"), QStringLiteral("object")})
+				{
+					auto *menu = openMenu(state + QStringList{field});
+					QVERIFY(menu);
+					auto *json = menu->findChild<QAction *>(QStringLiteral("gmcpCopyJson"));
+					QCOMPARE(menu->defaultAction(), json);
+					if (auto *value = menu->findChild<QAction *>(QStringLiteral("gmcpCopyValue")))
+						QVERIFY(!value->isEnabled());
+					if (auto *plainText =
+					        menu->findChild<QAction *>(QStringLiteral("gmcpCopyValuePlainText")))
+						QVERIFY(!plainText->isEnabled());
+					json->trigger();
+					const auto expected = QJsonObject({
+					    {field, object.value(field)}
+                    });
+					QCOMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(), expected);
+					dismiss(menu);
+					tree->setFocus();
+					clipboard->setText(QStringLiteral("unchanged"));
+					QTest::keySequence(tree, QKeySequence::Copy);
+					QTRY_COMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(), expected);
+				}
+				auto *menu = openMenu(state);
+				QVERIFY(menu);
+				auto *json = menu->findChild<QAction *>(QStringLiteral("gmcpCopyJson"));
+				QVERIFY(json && menu->findChild<QAction *>(QStringLiteral("gmcpMergeForce")));
+				QCOMPARE(menu->actions().first(), json);
+				json->trigger();
+				QCOMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(),
+				         QJsonObject({
+				             {QStringLiteral("State"), object}
+                }));
+				dismiss(menu);
+				menu = openMenu(state);
+				QVERIFY(menu);
+				auto *withChildren = menu->findChild<QAction *>(QStringLiteral("gmcpCopyJsonWithChildren"));
+				QVERIFY(withChildren);
+				withChildren->trigger();
+				QCOMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(),
+				         QJsonObject({
+				             {QStringLiteral("State"),       object                                    },
+				             {QStringLiteral("State.Child"), QJsonObject{{QStringLiteral("nested"), 3}}}
+                }));
+				dismiss(menu);
+				menu = openMenu({QStringLiteral("Test")});
+				QVERIFY(menu);
+				menu->defaultAction()->trigger();
+				QCOMPARE(
+				    QJsonDocument::fromJson(clipboard->text().toUtf8()).object(),
+				    QJsonObject({
+				        {QStringLiteral("Test"), QJsonObject{{QStringLiteral("State"), object},
+						                                     {QStringLiteral("Empty"), QJsonValue::Null}}}
+                }));
+				dismiss(menu);
+				menu = openMenu({QStringLiteral("Test"), QStringLiteral("Empty")});
+				QVERIFY(menu);
+				QVERIFY(!menu->findChild<QAction *>(QStringLiteral("gmcpCopyValue"))->isEnabled());
+				menu->defaultAction()->trigger();
+				QCOMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(),
+				         QJsonObject({
+				             {QStringLiteral("Empty"), QJsonValue::Null}
+                }));
+				dismiss(menu);
+				tree->setCurrentIndex({});
+				tree->setFocus();
+				clipboard->setText(QStringLiteral("unchanged"));
+				QTest::keySequence(tree, QKeySequence::Copy);
+				QCOMPARE(clipboard->text(), QStringLiteral("unchanged"));
+				auto *toggle = browser.findChild<QCheckBox *>(QStringLiteral("gmcpCurrentRawToggle"));
+				auto *raw    = browser.findChild<QPlainTextEdit *>(QStringLiteral("gmcpCurrentRaw"));
+				QVERIFY(toggle && raw);
+				toggle->setChecked(true);
+				QTRY_VERIFY(!raw->toPlainText().isEmpty());
+				raw->selectAll();
+				raw->setFocus();
+				QTest::keySequence(raw, QKeySequence::Copy);
+				QTRY_COMPARE(clipboard->text(), raw->toPlainText());
+			}
+
+			/**
+			 * @brief Keeps copy actions bound to displayed versions through live changes, pause, and history.
+			 */
+			static void browserClipboardVersions()
+			{
+				auto           *clipboard        = QApplication::clipboard();
+				const auto      previous         = clipboard->text();
+				const auto      restoreClipboard = qScopeGuard([&] { clipboard->setText(previous); });
+				GmcpWireFixture session;
+				activate(session);
+				WorldRuntime runtime;
+				WorldRuntimeTestAccess::setGmcpPublication(runtime, session.publication());
+				session.observed = [&](const auto &record, const auto &message)
+				{ WorldRuntimeTestAccess::deliverGmcpRecord(runtime, record, message); };
+				session.receive(QMudGmcp::frame("Test.State 7"));
+				session.receive(QMudGmcp::frame("Test.State.Child {\"value\":1}"));
+				GmcpBrowserDialog browser(&runtime);
+				browser.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&browser));
+				browser.activateWindow();
+				auto *current = browser.findChild<QTreeView *>(QStringLiteral("gmcpCurrentTree"));
+				auto *past    = browser.findChild<QTreeView *>(QStringLiteral("gmcpHistoryTree"));
+				auto *tabs    = browser.findChild<QTabWidget *>(QStringLiteral("gmcpTabs"));
+				auto *pause   = browser.findChild<QCheckBox *>(QStringLiteral("gmcpPause"));
+				QVERIFY(current && past && tabs && pause);
+				const QStringList path{QStringLiteral("Test"), QStringLiteral("State")};
+				current->expandAll();
+				current->setCurrentIndex(treeIndex(current, path));
+				current->setFocus();
+				session.receive(QMudGmcp::frame("Test.State 8"));
+				QTest::keySequence(current, QKeySequence::Copy);
+				QTRY_COMPARE(clipboard->text(), QStringLiteral("7"));
+				pause->setChecked(false);
+				QCOMPARE(treeValue(treeIndex(current, path)), QStringLiteral("8"));
+				current->setCurrentIndex(treeIndex(current, path));
+				const auto index = current->currentIndex();
+				QMetaObject::invokeMethod(current, "customContextMenuRequested", Qt::DirectConnection,
+				                          Q_ARG(QPoint, current->visualRect(index).center()));
+				auto *menu = current->findChild<QMenu *>(QStringLiteral("gmcpMergeMenu"));
+				QVERIFY(menu);
+				QCOMPARE(menu->defaultAction()->objectName(), QStringLiteral("gmcpCopyValue"));
+				session.receive(QMudGmcp::frame("Test.State 9"));
+				menu->defaultAction()->trigger();
+				QCOMPARE(clipboard->text(), QStringLiteral("8"));
+				auto *withChildren = menu->findChild<QAction *>(QStringLiteral("gmcpCopyJsonWithChildren"));
+				QVERIFY(withChildren);
+				withChildren->trigger();
+				QCOMPARE(QJsonDocument::fromJson(clipboard->text().toUtf8()).object(),
+				         QJsonObject({
+				             {QStringLiteral("State"),       8                                        },
+				             {QStringLiteral("State.Child"), QJsonObject{{QStringLiteral("value"), 1}}}
+                }));
+				const QPointer<QMenu> menuGuard(menu);
+				QVERIFY(menu->isVisible());
+				clipboard->setText(QStringLiteral("unchanged"));
+				QTest::keySequence(menu, QKeySequence::Copy);
+				QTRY_COMPARE(clipboard->text(), QStringLiteral("8"));
+				if (menuGuard)
+					menuGuard->close();
+				QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+				tabs->setCurrentIndex(1);
+				past->expandAll();
+				past->setCurrentIndex(treeIndex(past, path));
+				past->setFocus();
+				session.receive(QMudGmcp::frame("Test.State 10"));
+				QTest::keySequence(past, QKeySequence::Copy);
+				QTRY_COMPARE(clipboard->text(), QStringLiteral("9"));
+				tabs->setCurrentIndex(0);
+				current->setCurrentIndex(treeIndex(current, path));
+				current->setFocus();
+				QTest::keySequence(current, QKeySequence::Copy);
+				QTRY_COMPARE(clipboard->text(), QStringLiteral("10"));
 			}
 
 			/**

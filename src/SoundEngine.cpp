@@ -110,6 +110,7 @@ namespace
 	{
 			QMudAtomicSharedPtr<const SoundEngineSession::Snapshot> snapshot{
 			    std::make_shared<SoundEngineSession::Snapshot>()};
+			const std::shared_ptr<std::atomic_bool> worldMute{std::make_shared<std::atomic_bool>(false)};
 	};
 
 	struct SoundCommandCompletion
@@ -264,6 +265,7 @@ namespace
 			quint64                                     ownershipGeneration{0};
 			SoundOwnershipKind                          ownershipKind{SoundOwnershipKind::None};
 			bool                                        requireReservation{false};
+			QMudSoundPluginMutes                        pluginMutes;
 			bool                                        success{false};
 			bool                                        directoryWatched{false};
 			int                                         watchedDirectoryCount{0};
@@ -331,9 +333,11 @@ struct SoundEngineSession::State
 		std::shared_ptr<SoundCommandIngress>        ingress;
 		std::shared_ptr<SoundSessionPublishedState> publishedState{
 		    std::make_shared<SoundSessionPublishedState>()};
-		std::atomic_bool     closed{false};
-		std::atomic<quint64> nextPreparationToken{1};
-		quint64              sessionId{0};
+		QMutex                                            pluginMuteMutex;
+		QHash<QString, std::shared_ptr<std::atomic_bool>> pluginMutes;
+		std::atomic_bool                                  closed{false};
+		std::atomic<quint64>                              nextPreparationToken{1};
+		quint64                                           sessionId{0};
 
 		/**
 		 * @brief Submits one value command through the session FIFO and optionally waits for its result.
@@ -346,6 +350,22 @@ struct SoundEngineSession::State
 		 */
 		bool submit(SoundCommand command, bool wait, int *result = nullptr, int *selectedBuffer = nullptr,
 		            std::shared_ptr<const Snapshot> *postState = nullptr) const;
+
+		/**
+		 * @brief Finds a plugin mute flag and optionally creates its unmuted default.
+		 * @param pluginId Canonical nonempty plugin ID.
+		 * @param create Whether to create the flag if it is missing.
+		 * @return Flag shared with playback assignments, or an empty pointer if missing.
+		 */
+		std::shared_ptr<std::atomic_bool> pluginMute(const QString &pluginId, bool create)
+		{
+			QMutexLocker locker(&pluginMuteMutex);
+			if (const auto it = pluginMutes.constFind(pluginId); it != pluginMutes.cend())
+				return it.value();
+			if (!create)
+				return {};
+			return pluginMutes.insert(pluginId, std::make_shared<std::atomic_bool>(false)).value();
+		}
 };
 
 #if QMUD_ENABLE_SOUND
@@ -447,32 +467,33 @@ namespace
 
 	struct SoundChannel
 	{
-			SoundBackend      *backend{nullptr};
-			quint64            assignmentGeneration{0};
-			quint64            ownershipGeneration{0};
-			SoundOwnershipKind ownershipKind{SoundOwnershipKind::None};
-			int                repeatCount{1};
-			int                remainingPlays{0};
-			QStringList        playbackFiles;
-			QString            nativeFilePattern;
-			QString            nativeDownloadUrl;
-			QString            nativeDownloadDestination;
-			QString            nativeSoundCatalogPrefix;
-			quint64            pendingMemoryOperationId{0};
-			quint64            pendingFileOperationId{0};
-			bool               allocated{false};
-			bool               playing{false};
-			bool               playbackStarted{false};
-			bool               looping{false};
-			bool               backendLooping{false};
-			bool               nativeMusic{false};
-			bool               nativeResolutionPending{false};
-			bool               luaAudioOwnershipConfirmed{false};
-			qint64             lastPlaybackProgressMsecs{0};
-			qint64             lastPlaybackPosition{-1};
-			double             volume{1.0};
-			double             pan{0.0};
-			double             pitch{0.0};
+			SoundBackend        *backend{nullptr};
+			QMudSoundPluginMutes pluginMutes;
+			quint64              assignmentGeneration{0};
+			quint64              ownershipGeneration{0};
+			SoundOwnershipKind   ownershipKind{SoundOwnershipKind::None};
+			int                  repeatCount{1};
+			int                  remainingPlays{0};
+			QStringList          playbackFiles;
+			QString              nativeFilePattern;
+			QString              nativeDownloadUrl;
+			QString              nativeDownloadDestination;
+			QString              nativeSoundCatalogPrefix;
+			quint64              pendingMemoryOperationId{0};
+			quint64              pendingFileOperationId{0};
+			bool                 allocated{false};
+			bool                 playing{false};
+			bool                 playbackStarted{false};
+			bool                 looping{false};
+			bool                 backendLooping{false};
+			bool                 nativeMusic{false};
+			bool                 nativeResolutionPending{false};
+			bool                 luaAudioOwnershipConfirmed{false};
+			qint64               lastPlaybackProgressMsecs{0};
+			qint64               lastPlaybackPosition{-1};
+			double               volume{1.0};
+			double               pan{0.0};
+			double               pitch{0.0};
 	};
 
 	/** @brief One supported regular file indexed below the configured sounds root. */
@@ -1229,7 +1250,7 @@ namespace
 					{
 						return;
 					}
-					bool       inserted = false;
+					bool       inserted;
 					const bool parentActive =
 					    m_activeScan && sameSoundFilesystemPath(m_activeScan->canonicalPath, parent);
 					bool parentKnown = parentActive;
@@ -3477,6 +3498,25 @@ namespace
 					return -1.0;
 				const auto *backend = session->channels[static_cast<std::size_t>(buffer - 1)].backend;
 				return backend && backend->sink ? backend->sink->volume() : -1.0;
+			}
+
+			/**
+			 * @brief Samples the actual PCM stream's live mute flags.
+			 * @param sessionId Worker session identity.
+			 * @param buffer One-based channel to inspect.
+			 * @return Effective mute, or no value when the stream is absent.
+			 */
+			[[nodiscard]] std::optional<bool> activeOutputMutedForTest(const quint64 sessionId,
+			                                                           const int     buffer) const
+			{
+				Q_ASSERT(QThread::currentThread() == thread());
+				const auto session = m_sessions.constFind(sessionId);
+				if (session == m_sessions.cend() || buffer < 1 || buffer > SoundEngineSession::kChannelCount)
+					return std::nullopt;
+				const auto *backend = session->channels[static_cast<std::size_t>(buffer - 1)].backend;
+				if (!backend || !backend->stream)
+					return std::nullopt;
+				return backend->stream->outputMuted();
 			}
 
 			/**
@@ -5752,9 +5792,10 @@ namespace
 				std::optional<SoundCommand> reservedCommand;
 				if (consumesReservation)
 				{
-					reservedCommand        = command;
-					reservedCommand->pan   = channel.pan;
-					reservedCommand->pitch = channel.pitch;
+					reservedCommand              = command;
+					reservedCommand->pan         = channel.pan;
+					reservedCommand->pitch       = channel.pitch;
+					reservedCommand->pluginMutes = channel.pluginMutes;
 				}
 				const SoundCommand &playbackCommand = reservedCommand ? *reservedCommand : command;
 				const double        playbackGain =
@@ -5860,6 +5901,7 @@ namespace
 				channel.ownershipGeneration      = command.ownershipGeneration;
 				channel.ownershipKind            = command.ownershipKind;
 				channel.pendingMemoryOperationId = operationId;
+				channel.pluginMutes              = command.pluginMutes;
 				assignChannelControls(channel, command.repeatCount, normalizeSoundVolume(command.volume),
 				                      command.pan);
 
@@ -6047,6 +6089,7 @@ namespace
 				play.pan                        = channel.pan;
 				play.pitch                      = channel.pitch;
 				play.ownershipKind              = channel.ownershipKind;
+				play.pluginMutes                = std::move(channel.pluginMutes);
 				const double gain               = channel.volume;
 				const bool   ownershipConfirmed = channel.luaAudioOwnershipConfirmed;
 				channel                         = {};
@@ -6090,6 +6133,7 @@ namespace
 					reserved.allocated           = true;
 					reserved.ownershipGeneration = command.ownershipGeneration;
 					reserved.ownershipKind       = SoundOwnershipKind::LuaAudio;
+					reserved.pluginMutes         = command.pluginMutes;
 					reserved.volume              = normalizeSoundVolume(command.volume);
 					reserved.pan                 = command.pan;
 					reserved.pitch               = command.pitch;
@@ -6593,6 +6637,7 @@ namespace
 				channel.assignmentGeneration       = session.nextAssignmentGeneration++;
 				channel.ownershipGeneration        = ownershipGeneration;
 				channel.ownershipKind              = command.ownershipKind;
+				channel.pluginMutes                = command.pluginMutes;
 				channel.luaAudioOwnershipConfirmed = luaAudioOwnershipConfirmed;
 				channel.allocated                  = true;
 				channel.playing                    = true;
@@ -6608,16 +6653,18 @@ namespace
 				backend.assignmentGeneration = channel.assignmentGeneration;
 				backend.preparationToken     = 0;
 				backend.started              = false;
-				startAssignedBackend(channel, backend);
+				startAssignedBackend(session, channel, backend);
 				publishSnapshotIfChanged(session);
 			}
 
 			/**
 			 * @brief Starts one assigned backend from its beginning and arms playback progress supervision.
+			 * @param session Sound session that owns the assignment's world mute flag.
 			 * @param channel Logical channel already assigned to the backend.
 			 * @param backend Cache-owned backend already assigned to the channel.
 			 */
-			void startAssignedBackend(SoundChannel &channel, SoundBackend &backend)
+			void startAssignedBackend(const WorkerSession &session, SoundChannel &channel,
+			                          SoundBackend &backend)
 			{
 				const qint64 now                  = currentTimeMsecs();
 				channel.lastPlaybackProgressMsecs = now;
@@ -6633,8 +6680,9 @@ namespace
 					backend.decodingFinished         = false;
 					backend.decoderEndBufferReceived = false;
 					backend.flowPaused               = false;
-					backend.stream = std::make_shared<SoundPcmStream>(backend.sink->format(), channel.volume,
-					                                                  channel.pan, channel.pitch);
+					backend.stream                   = std::make_shared<SoundPcmStream>(
+					    backend.sink->format(), channel.volume, channel.pan, channel.pitch,
+					    session.publishedState->worldMute, channel.pluginMutes);
 					const std::weak_ptr<SoundPcmStream> weak = backend.stream;
 					backend.stateConnection                  = connect(
 					    backend.player.get(), &QMediaPlayer::playbackStateChanged, backend.player.get(),
@@ -6867,7 +6915,7 @@ namespace
 					lease.backend->assignmentGeneration = channel.assignmentGeneration;
 					lease.backend->preparationToken     = 0;
 					lease.backend->started              = false;
-					startAssignedBackend(channel, *lease.backend);
+					startAssignedBackend(session, channel, *lease.backend);
 					return true;
 				}
 				if (!failureMessage.isEmpty())
@@ -8492,6 +8540,24 @@ double SoundEngine::activeOutputVolumeForTest(const std::shared_ptr<SoundEngineS
 #endif
 }
 
+std::optional<bool> SoundEngine::activeOutputMutedForTest(const std::shared_ptr<SoundEngineSession> &session,
+                                                          const int buffer) const
+{
+#if QMUD_ENABLE_SOUND
+	if (!session || !m_private->worker)
+		return std::nullopt;
+	std::optional<bool> value;
+	QMetaObject::invokeMethod(
+	    m_private->worker, [worker = m_private->worker, sessionId = session->id(), buffer, &value]
+	    { value = worker->activeOutputMutedForTest(sessionId, buffer); }, Qt::BlockingQueuedConnection);
+	return value;
+#else
+	Q_UNUSED(session);
+	Q_UNUSED(buffer);
+	return std::nullopt;
+#endif
+}
+
 SoundEngine::CacheStateForTest SoundEngine::cacheStateForTest() const
 {
 #if QMUD_ENABLE_SOUND
@@ -8736,10 +8802,51 @@ SoundEngineSession::SoundEngineSession(std::shared_ptr<State> state) : m_state(s
 {
 }
 
+bool SoundEngineSession::isMuted(const QString &pluginId) const
+{
+	if (!m_state || m_state->closed.load(std::memory_order_acquire))
+		return false;
+	const auto mute =
+	    pluginId.isEmpty() ? m_state->publishedState->worldMute : m_state->pluginMute(pluginId, false);
+	return mute && mute->load(std::memory_order_relaxed);
+}
+
+QSet<QString> SoundEngineSession::mutedPluginIds() const
+{
+	QSet<QString> ids;
+	if (!m_state || m_state->closed.load(std::memory_order_acquire))
+		return ids;
+	const QMutexLocker locker(&m_state->pluginMuteMutex);
+	for (auto it = m_state->pluginMutes.cbegin(); it != m_state->pluginMutes.cend(); ++it)
+	{
+		if (it.value()->load(std::memory_order_relaxed))
+			ids.insert(it.key());
+	}
+	return ids;
+}
+
+void SoundEngineSession::setMuted(const bool muted, const QString &pluginId) const
+{
+	if (!m_state || m_state->closed.load(std::memory_order_acquire))
+		return;
+	const auto mute =
+	    pluginId.isEmpty() ? m_state->publishedState->worldMute : m_state->pluginMute(pluginId, muted);
+	if (mute)
+		mute->store(muted, std::memory_order_relaxed);
+}
+
+QMudSoundMuteFlag SoundEngineSession::pluginMuteFlag(const QString &pluginId) const
+{
+	if (pluginId.isEmpty() || !m_state || m_state->closed.load(std::memory_order_acquire))
+		return {};
+	return m_state->pluginMute(pluginId, true);
+}
+
 int SoundEngineSession::playFile(const int buffer, const QString &fileName, const bool loop,
                                  const double volume, const double pan, const quint64 luaAudioGeneration,
                                  int *selectedBuffer, const bool requireReservation, const double pitch,
-                                 std::shared_ptr<const Snapshot> *postState) const
+                                 std::shared_ptr<const Snapshot> *postState,
+                                 QMudSoundPluginMutes             pluginMutes) const
 {
 	if (buffer < 0 || buffer > kChannelCount || (buffer == 0 && fileName.isEmpty()) ||
 	    !soundControlsAreFinite(volume, pan, pitch))
@@ -8755,6 +8862,7 @@ int SoundEngineSession::playFile(const int buffer, const QString &fileName, cons
 	command.ownershipGeneration = luaAudioGeneration;
 	command.ownershipKind = luaAudioGeneration == 0 ? SoundOwnershipKind::None : SoundOwnershipKind::LuaAudio;
 	command.requireReservation = requireReservation;
+	command.pluginMutes        = std::move(pluginMutes);
 	command.pitch              = pitch;
 	int result                 = eCannotPlaySound;
 	return m_state && m_state->submit(std::move(command), true, &result, selectedBuffer, postState)
@@ -8764,12 +8872,14 @@ int SoundEngineSession::playFile(const int buffer, const QString &fileName, cons
 
 int SoundEngineSession::reserveLuaAudioChannel(const QString &fileName, const quint64 luaAudioGeneration,
                                                const double volume, const double pan, const double pitch,
-                                               std::shared_ptr<const Snapshot> *postState) const
+                                               std::shared_ptr<const Snapshot> *postState,
+                                               QMudSoundPluginMutes             pluginMutes) const
 {
 	if (fileName.isEmpty() || luaAudioGeneration == 0 || !soundControlsAreFinite(volume, pan, pitch))
 		return 0;
 	SoundCommand command;
 	command.kind                = SoundCommandKind::ReserveLuaAudioChannel;
+	command.pluginMutes         = std::move(pluginMutes);
 	command.text                = fileName;
 	command.ownershipGeneration = luaAudioGeneration;
 	command.ownershipKind       = SoundOwnershipKind::LuaAudio;
@@ -8863,12 +8973,14 @@ void SoundEngineSession::updateWorldSoundDirectory(const QString &worldSoundDire
 
 int SoundEngineSession::playMemory(const int buffer, const QByteArray &data, const bool loop,
                                    const double volume, const double pan, const quint64 luaAudioGeneration,
-                                   int *selectedBuffer, std::shared_ptr<const Snapshot> *postState) const
+                                   int *selectedBuffer, std::shared_ptr<const Snapshot> *postState,
+                                   QMudSoundPluginMutes pluginMutes) const
 {
 	if (buffer < 0 || buffer > kChannelCount || data.isEmpty() || !soundControlsAreFinite(volume, pan))
 		return eBadParameter;
 	SoundCommand command;
 	command.kind                = SoundCommandKind::PlayMemory;
+	command.pluginMutes         = std::move(pluginMutes);
 	command.buffer              = buffer;
 	command.bytes               = data;
 	command.loop                = loop;
@@ -8931,12 +9043,14 @@ quint64 SoundEngineSession::prepareFile(const QString &fileName) const
 }
 
 int SoundEngineSession::commitPrepared(const quint64 token, const int buffer, const bool loop,
-                                       const double volume, const double pan) const
+                                       const double volume, const double pan,
+                                       QMudSoundPluginMutes pluginMutes) const
 {
 	if (token == 0 || buffer < 0 || buffer > kChannelCount || !soundControlsAreFinite(volume, pan))
 		return eBadParameter;
 	SoundCommand command;
 	command.kind        = SoundCommandKind::CommitPrepared;
+	command.pluginMutes = std::move(pluginMutes);
 	command.token       = token;
 	command.buffer      = buffer;
 	command.loop        = loop;

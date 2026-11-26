@@ -286,6 +286,20 @@ class SoundEngineTestAccess final
 		}
 
 		/**
+		 * @brief Samples the mute applied to the current PCM assignment.
+		 * @param engine Engine owning the sound worker.
+		 * @param session Session owning the channel.
+		 * @param buffer One-based channel to inspect.
+		 * @return Effective mute, or no value when the stream is absent.
+		 */
+		[[nodiscard]] static std::optional<bool>
+		activeOutputMuted(const SoundEngine &engine, const std::shared_ptr<SoundEngineSession> &session,
+		                  int buffer)
+		{
+			return engine.activeOutputMutedForTest(session, buffer);
+		}
+
+		/**
 		 * @brief Fails a prepared occurrence through the sound worker's production error transition.
 		 * @param engine Sound engine whose worker owns the session.
 		 * @param session Session receiving the prepared occurrence.

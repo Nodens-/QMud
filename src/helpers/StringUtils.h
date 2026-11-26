@@ -44,6 +44,12 @@ QString                   qmudFixUpGerman(const QString &message);
  */
 QString                   qmudStripAnsiEscapeCodes(const QString &input);
 /**
+ * @brief Removes terminal escape sequences and non-text controls while preserving tabs and line breaks.
+ * @param input Source text that may include terminal formatting and control sequences.
+ * @return Text without terminal control sequences or their metadata.
+ */
+QString                   qmudStripTerminalControlCodes(const QString &input);
+/**
  * @brief Parses enabled flag strings (y/n/true/false).
  * @param value Flag text.
  * @return Parsed boolean flag value.

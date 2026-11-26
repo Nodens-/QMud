@@ -515,10 +515,6 @@ static int enqueueRuntimeThreadAsyncStatusResult(lua_State *L, const LuaCallback
                                                  WorldRuntime *runtime, const QString &apiName,
                                                  int acceptedCode, int enqueueFailureCode, Func &&func,
                                                  OkFunc &&okFunc);
-static int enqueueRuntimeThreadAsyncPlaySoundResult(lua_State *L, const LuaCallbackEngine *engine,
-                                                    WorldRuntime *runtime, const QString &apiName, int buffer,
-                                                    const QString &fileName, bool loop, double volume,
-                                                    double pan);
 template <typename Func>
 static int  enqueueRuntimeThreadAsyncOkStatusResult(lua_State *L, const LuaCallbackEngine *engine,
                                                     WorldRuntime *runtime, const QString &apiName,
@@ -13287,6 +13283,7 @@ void LuaCallbackEngine::setWorldRuntime(WorldRuntime *runtime)
 		m_gmcpPublication.reset();
 	}
 	m_worldRuntime                  = runtime;
+	m_soundOriginRuntime            = runtime;
 	m_worldBindingsReady            = false;
 	m_reportedRuntimeThreadMismatch = false;
 }
@@ -13338,6 +13335,12 @@ WorldRuntime *LuaCallbackEngine::callbackDispatchRuntime() const
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::callbackDispatchRuntime");
 	return m_worldRuntime;
+}
+
+QMudSoundMuteFlag LuaCallbackEngine::captureSoundCallerMute() const
+{
+	bindOrAssertExecutionThread("LuaCallbackEngine::captureSoundCallerMute");
+	return m_soundOriginRuntime ? m_soundOriginRuntime->soundPluginMuteFlag(m_pluginId) : QMudSoundMuteFlag{};
 }
 
 void LuaCallbackEngine::pushScriptExecutionDepth()
@@ -18990,10 +18993,25 @@ static int enqueueRuntimeThreadAsyncOkStatusResult(lua_State *L, const LuaCallba
 	                                             [](const int status) { return status == eOK; });
 }
 
+/**
+ * @brief Dispatches an interceptable sound and reports its eventual status.
+ * @param L Calling Lua state.
+ * @param engine Calling Lua engine.
+ * @param runtime Destination sound runtime.
+ * @param apiName API name used for async result delivery.
+ * @param buffer Fixed channel, or zero for automatic selection.
+ * @param fileName Requested sound file.
+ * @param loop Whether to loop playback.
+ * @param volume Requested sound volume.
+ * @param pan Requested stereo pan.
+ * @param callerMute Live mute flag captured for the originating plugin.
+ * @return Number of Lua results.
+ */
 static int enqueueRuntimeThreadAsyncPlaySoundResult(lua_State *L, const LuaCallbackEngine *engine,
                                                     WorldRuntime *runtime, const QString &apiName,
                                                     const int buffer, const QString &fileName,
-                                                    const bool loop, const double volume, const double pan)
+                                                    const bool loop, const double volume, const double pan,
+                                                    QMudSoundMuteFlag callerMute)
 {
 	const LuaPluginAsyncResultRequest requestId = nextPluginAsyncResultRequest(engine);
 	const QPointer<WorldRuntime>      runtimeGuard(runtime);
@@ -19014,7 +19032,8 @@ static int enqueueRuntimeThreadAsyncPlaySoundResult(lua_State *L, const LuaCallb
 		    else
 			    static_cast<void>(
 			        QMetaObject::invokeMethod(runtimeGuard.data(), deliver, Qt::QueuedConnection));
-	    });
+	    },
+	    std::move(callerMute));
 	lua_pushnumber(L, acceptedStatus);
 	if (acceptedStatus == eOK && requestId.isValid())
 	{
@@ -26224,7 +26243,8 @@ static int luaPlaySound(lua_State *L)
 	int           selectedBuffer = 0;
 	std::shared_ptr<const SoundEngineSession::Snapshot> postState;
 	const int                                           result =
-	    runtime->playSoundDirect(buffer, fileName, loop, volume, pan, &selectedBuffer, &postState);
+	    runtime->playSoundDirect(buffer, fileName, loop, volume, pan, &selectedBuffer, &postState,
+		                         fileName.isEmpty() ? QMudSoundMuteFlag{} : engine->captureSoundCallerMute());
 	if (result == eOK && selectedBuffer > 0)
 		cacheCallbackSoundMutationResult(engine, selectedBuffer, postState);
 	lua_pushnumber(L, result);
@@ -26254,8 +26274,8 @@ static int luaPlaySoundMemory(lua_State *L)
 	const QByteArray                                    payload(data, static_cast<int>(length));
 	int                                                 selectedBuffer = 0;
 	std::shared_ptr<const SoundEngineSession::Snapshot> postState;
-	const int                                           result =
-	    runtime->playSoundMemoryDirect(buffer, payload, loop, volume, pan, &selectedBuffer, &postState);
+	const int result = runtime->playSoundMemoryDirect(buffer, payload, loop, volume, pan, &selectedBuffer,
+	                                                  &postState, engine->captureSoundCallerMute());
 	if (result == eOK && selectedBuffer > 0)
 		cacheCallbackSoundMutationResult(engine, selectedBuffer, postState);
 	lua_pushnumber(L, result);
@@ -26289,14 +26309,17 @@ static int luaStopSound(lua_State *L)
  * @brief Supplies immutable callback reads and local write visibility to common LuaAudio operations.
  * @param engine Calling Lua engine.
  * @param runtime Owning sound runtime.
+ * @param providedByShim Whether the call targets the native LuaAudio plugin.
  * @return Dispatch adapters without runtime-thread access from a callback.
  */
-static QMudNativePluginRegistry::LuaAudioCallContext luaAudioCallContext(const LuaCallbackEngine *engine,
-                                                                         WorldRuntime            *runtime)
+static QMudNativePluginRegistry::LuaAudioCallContext
+luaAudioCallContext(const LuaCallbackEngine *engine, WorldRuntime *runtime, const bool providedByShim = false)
 {
 	QMudNativePluginRegistry::LuaAudioCallContext context;
-	context.ownerKey = engine;
-	context.status   = [engine, runtime](const int buffer)
+	context.ownerKey          = engine;
+	context.captureCallerMute = [engine] { return engine->captureSoundCallerMute(); };
+	context.providedByShim    = providedByShim;
+	context.status            = [engine, runtime](const int buffer)
 	{
 		int status = -3;
 		if (!activeCallbackContextConst(engine))
@@ -26537,7 +26560,7 @@ static std::optional<int> tryHandleLuaAudioCallPluginInCallback(lua_State *L, co
 	if (const auto error = luaCallPluginArgumentsToVariants(L, arguments))
 		return error;
 	const auto result = QMudNativePluginRegistry::callLuaAudio(runtime, routine, arguments,
-	                                                           luaAudioCallContext(engine, runtime));
+	                                                           luaAudioCallContext(engine, runtime, true));
 	lua_pushnumber(L, result.errorCode);
 	if (result.errorCode != eOK)
 	{
@@ -26589,7 +26612,7 @@ static std::optional<int> tryHandleLuaAudioPpiCall(lua_State *L, const LuaCallba
 		if (argument.typeId() == QMetaType::LongLong)
 			argument = argument.toDouble();
 	const auto result = QMudNativePluginRegistry::callLuaAudio(runtime, targetRoutine, arguments,
-	                                                           luaAudioCallContext(engine, runtime));
+	                                                           luaAudioCallContext(engine, runtime, true));
 	if (result.errorCode != eOK)
 	{
 		lua_pushnumber(L, result.errorCode);
@@ -28440,12 +28463,13 @@ static int luaSound(lua_State *L)
 	if (const auto *context = activeCallbackContextConst(engine); context)
 	{
 #if QMUD_ENABLE_SOUND
+		const auto callerMute = engine->captureSoundCallerMute();
 		if (context->insidePlaySoundCallback)
 		{
 			int                                                 selectedBuffer = 0;
 			std::shared_ptr<const SoundEngineSession::Snapshot> postState;
-			const int                                           result =
-			    runtime->playSoundDirect(0, fileName, false, 0.0, 0.0, &selectedBuffer, &postState);
+			const int result = runtime->playSoundDirect(0, fileName, false, 0.0, 0.0, &selectedBuffer,
+			                                            &postState, callerMute);
 			if (result == eOK && selectedBuffer > 0)
 				cacheCallbackSoundMutationResult(engine, selectedBuffer, postState);
 			lua_pushnumber(L, result);
@@ -28454,19 +28478,22 @@ static int luaSound(lua_State *L)
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			return enqueueRuntimeThreadAsyncPlaySoundResult(L, engine, runtime, QStringLiteral("Sound"), 0,
-			                                                fileName, false, 0.0, 0.0);
+			                                                fileName, false, 0.0, 0.0, callerMute);
 		}
 		const int result = runOnRuntimeThreadDeferredMutation(
-		    engine, runtime, [fileName](WorldRuntime &targetRuntime) -> int
-		    { return targetRuntime.playSoundIntercepted(0, fileName, false, 0.0, 0.0); }, eCannotPlaySound);
+		    engine, runtime, [fileName, callerMute](WorldRuntime &targetRuntime) -> int
+		    { return targetRuntime.playSoundIntercepted(0, fileName, false, 0.0, 0.0, callerMute); },
+		    eCannotPlaySound);
 		lua_pushnumber(L, result);
 #else
 		lua_pushnumber(L, eCannotPlaySound);
 #endif
 		return 1;
 	}
-	const int result = runOnRuntimeThreadDeferredMutation(
-	    engine, runtime, [=]() -> int { return runtime->playSoundIntercepted(0, fileName, false, 0.0, 0.0); },
+	const auto callerMute = engine->captureSoundCallerMute();
+	const int  result     = runOnRuntimeThreadDeferredMutation(
+	    engine, runtime, [runtime, fileName, callerMute]() -> int
+	    { return runtime->playSoundIntercepted(0, fileName, false, 0.0, 0.0, callerMute); },
 	    eCannotPlaySound);
 	lua_pushnumber(L, result);
 	return 1;

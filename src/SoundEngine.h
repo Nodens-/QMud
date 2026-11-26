@@ -12,15 +12,28 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QByteArray>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 
 class SoundEngineSession;
 class SoundEngineTestAccess;
+
+/** @brief Live, read-only output mute flag retained by a playback assignment. */
+using QMudSoundMuteFlag = std::shared_ptr<const std::atomic_bool>;
+
+/** @brief Mute scopes for a sound's plugin caller and optional native playback provider. */
+struct QMudSoundPluginMutes
+{
+		QMudSoundMuteFlag caller;
+		QMudSoundMuteFlag provider;
+};
 
 /** @brief Independently controlled LuaAudio playback attribute. */
 enum class QMudSoundAttribute : quint8
@@ -370,6 +383,14 @@ class SoundEngine final : public QObject
 		[[nodiscard]] double    activeOutputVolumeForTest(const std::shared_ptr<SoundEngineSession> &session,
 		                                                  int buffer) const;
 		/**
+		 * @brief Samples the mute flags of one live PCM assignment on the worker.
+		 * @param session Session whose channel to inspect.
+		 * @param buffer One-based channel to inspect.
+		 * @return Effective mute, or no value when the channel has no PCM stream.
+		 */
+		[[nodiscard]] std::optional<bool>
+		activeOutputMutedForTest(const std::shared_ptr<SoundEngineSession> &session, int buffer) const;
+		/**
 		 * @brief Creates a prepared occurrence and fails it through the production backend-error transition.
 		 * @param session Session receiving the prepared occurrence.
 		 * @param message Diagnostic supplied to the backend-error transition.
@@ -482,7 +503,31 @@ class SoundEngine final : public QObject
 class SoundEngineSession final
 {
 	public:
-		static constexpr int kChannelCount = 10;
+		static constexpr int            kChannelCount = 10;
+
+		/**
+		 * @brief Reads a session output mute setting.
+		 * @param pluginId Canonical plugin ID, or empty for the entire world.
+		 * @return Whether the requested scope is muted.
+		 */
+		[[nodiscard]] bool              isMuted(const QString &pluginId = {}) const;
+		/**
+		 * @brief Reads the muted plugin scopes in this sound session.
+		 * @return IDs of muted plugins, including retained settings.
+		 */
+		[[nodiscard]] QSet<QString>     mutedPluginIds() const;
+		/**
+		 * @brief Changes a session output mute setting for current and future playback.
+		 * @param muted Whether to silence the requested scope.
+		 * @param pluginId Canonical plugin ID, or empty for the entire world.
+		 */
+		void                            setMuted(bool muted, const QString &pluginId = {}) const;
+		/**
+		 * @brief Captures the live mute flag associated with a plugin playback source.
+		 * @param pluginId Canonical plugin ID, or empty when playback has no plugin source.
+		 * @return Live read-only flag, or an empty pointer for playback without a plugin source.
+		 */
+		[[nodiscard]] QMudSoundMuteFlag pluginMuteFlag(const QString &pluginId) const;
 
 		/** @brief Immutable callback-visible state for all channels in one sound session. */
 		struct Snapshot
@@ -517,12 +562,14 @@ class SoundEngineSession final
 		 * @param requireReservation Require a matching delayed-play reservation on the fixed channel.
 		 * @param pitch Finite initial LuaAudio frequency offset in units of 100 Hz.
 		 * @param postState Optional destination receiving the immutable post-command channel state.
+		 * @param pluginMutes Live mute flags for a new assignment's plugin sources.
 		 * @return MUSHclient-compatible status code after the worker accepts or rejects the operation.
 		 */
 		int               playFile(int buffer, const QString &fileName, bool loop, double volume, double pan,
 		                           quint64 luaAudioGeneration = 0, int *selectedBuffer = nullptr,
 		                           bool requireReservation = false, double pitch = 0.0,
-		                           std::shared_ptr<const Snapshot> *postState = nullptr) const;
+		                           std::shared_ptr<const Snapshot> *postState   = nullptr,
+		                           QMudSoundPluginMutes             pluginMutes = {}) const;
 		/**
 		 * @brief Plays encoded sound bytes without plugin interception.
 		 * @param buffer Fixed channel, or zero for automatic selection.
@@ -533,11 +580,13 @@ class SoundEngineSession final
 		 * @param luaAudioGeneration Optional LuaAudio owner generation released on natural completion.
 		 * @param selectedBuffer Optional destination receiving the selected one-based channel on success.
 		 * @param postState Optional destination receiving the immutable post-command channel state.
+		 * @param pluginMutes Live mute flags for the memory sound's plugin sources.
 		 * @return MUSHclient-compatible status code after the worker accepts or rejects the operation.
 		 */
 		int               playMemory(int buffer, const QByteArray &data, bool loop, double volume, double pan,
 		                             quint64 luaAudioGeneration = 0, int *selectedBuffer = nullptr,
-		                             std::shared_ptr<const Snapshot> *postState = nullptr) const;
+		                             std::shared_ptr<const Snapshot> *postState   = nullptr,
+		                             QMudSoundPluginMutes             pluginMutes = {}) const;
 		/**
 		 * @brief Validates a delayed LuaAudio file and reserves the first reusable channel.
 		 * @param fileName Relative sound-tree path or an absolute path beneath QMud home sounds.
@@ -546,11 +595,13 @@ class SoundEngineSession final
 		 * @param pan Finite captured initial balance.
 		 * @param pitch Finite captured initial frequency offset in units of 100 Hz.
 		 * @param postState Optional immutable post-command state destination.
+		 * @param pluginMutes Live mute flags retained for the delayed sound's plugin sources.
 		 * @return Selected one-based channel, or zero when none is reusable.
 		 */
 		[[nodiscard]] int reserveLuaAudioChannel(const QString &fileName, quint64 luaAudioGeneration,
 		                                         double volume = 100.0, double pan = 0.0, double pitch = 0.0,
-		                                         std::shared_ptr<const Snapshot> *postState = nullptr) const;
+		                                         std::shared_ptr<const Snapshot> *postState   = nullptr,
+		                                         QMudSoundPluginMutes             pluginMutes = {}) const;
 		/**
 		 * @brief Synchronously confirms that runtime ownership exists for a submitted LuaAudio generation.
 		 * @param buffer One-based channel returned by play or reservation.
@@ -618,10 +669,11 @@ class SoundEngineSession final
 		 * @param loop Whether playback repeats indefinitely.
 		 * @param volume Finite MUSHclient volume in the range -100 through 0.
 		 * @param pan Finite compatibility pan value retained for callers.
+		 * @param pluginMutes Live mute flags for the prepared sound's plugin sources.
 		 * @return MUSHclient-compatible status code.
 		 */
-		[[nodiscard]] int     commitPrepared(quint64 token, int buffer, bool loop, double volume,
-		                                     double pan) const;
+		[[nodiscard]] int     commitPrepared(quint64 token, int buffer, bool loop, double volume, double pan,
+		                                     QMudSoundPluginMutes pluginMutes = {}) const;
 		/**
 		 * @brief Cancels one prepared occurrence while retaining its loaded backend for reuse.
 		 * @param token Preparation token returned by prepareFile().

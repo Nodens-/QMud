@@ -137,6 +137,11 @@ class LuaCallbackEngine
 		 */
 		[[nodiscard]] class WorldRuntime *callbackDispatchRuntime() const;
 		/**
+		 * @brief Captures this plugin's live mute flag from the sound session of its owning world.
+		 * @return Read-only flag, or an empty pointer for world scripts and unavailable sessions.
+		 */
+		[[nodiscard]] QMudSoundMuteFlag   captureSoundCallerMute() const;
+		/**
 		 * @brief Sets plugin identity metadata used by callback context.
 		 * @param id Canonical plugin id copied unchanged by this internal metadata sink.
 		 * @param name Plugin display name.
@@ -772,6 +777,7 @@ class LuaCallbackEngine
 		bool                                               m_gmcpGlobalsAvailable{false};
 		bool                                               m_allowPackage{true};
 		class WorldRuntime                                *m_worldRuntime{nullptr};
+		QPointer<WorldRuntime>                             m_soundOriginRuntime;
 		std::shared_ptr<QMudGmcp::Publication>             m_gmcpPublication;
 		QSet<QString>                                      m_gmcpRegisteredModules;
 		const quint64                                      m_instanceId;

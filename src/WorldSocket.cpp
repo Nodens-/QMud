@@ -1169,7 +1169,10 @@ void WorldSocketTransport::onReadyRead()
 void WorldSocketTransport::onConnected()
 {
 	if (m_socket)
+	{
+		m_socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
 		applyMushclientKeepAliveSettings(m_socket, m_keepAliveEnabled);
+	}
 	emit connected();
 }
 

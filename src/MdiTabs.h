@@ -15,6 +15,7 @@
 
 class QMdiArea;
 class QMdiSubWindow;
+class WorldRuntime;
 
 // Styles for customizing the appearance of MdiTabs.
 enum MdiTabStyle
@@ -97,6 +98,17 @@ class MdiTabs : public QTabBar
 		 * @param subWindow Child represented by the tab.
 		 */
 		void                             closeTabWindow(QMdiSubWindow *subWindow);
+		/**
+		 * @brief Updates the display-only mute indicator for one tab.
+		 * @param index Tab index.
+		 * @param subWindow Window represented by the tab.
+		 */
+		void                             updateMuteIndicator(int index, QMdiSubWindow *subWindow);
+		/**
+		 * @brief Updates mute indicators in all tabs presenting a runtime.
+		 * @param runtime Runtime whose indicators need refreshing.
+		 */
+		void                             refreshMuteIndicators(const WorldRuntime *runtime);
 
 	protected:
 		/**
@@ -127,6 +139,14 @@ class MdiTabs : public QTabBar
 		 * @param to Destination tab index.
 		 */
 		void onTabMoved(int from, int to);
+		/**
+		 * @brief Queues a mute indicator refresh after plugin membership commits.
+		 */
+		void onPluginMembershipChanged();
+		/**
+		 * @brief Updates the indicator when a displayed window changes runtime.
+		 */
+		void onWorldRuntimeBindingChanged();
 };
 
 #endif // QMUD_MDITABS_H

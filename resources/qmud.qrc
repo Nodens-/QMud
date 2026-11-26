@@ -11,6 +11,8 @@
     <file>qmud/res/splash.png</file>
     <file>qmud/res/Wrench.ico</file>
     <file>qmud/res/QMud.png</file>
+    <file>qmud/res/world_muted.png</file>
+    <file>qmud/res/plugins_muted.png</file>
     <file>qmud/res/toolbar/main_new.png</file>
     <file>qmud/res/toolbar/main_open.png</file>
     <file>qmud/res/toolbar/main_save.png</file>

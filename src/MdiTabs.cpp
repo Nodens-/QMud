@@ -12,7 +12,54 @@
 #include "WorldRuntime.h"
 #include <QMdiArea>
 #include <QMenu>
+#include <QPainter>
+#include <QSet>
 #include <QSignalBlocker>
+#include <QStyle>
+
+namespace
+{
+	/** @brief Display-only tab badge that paints at the current device pixel ratio. */
+	class MuteIndicator final : public QWidget
+	{
+		public:
+			/**
+			 * @brief Creates a mouse-transparent mute badge.
+			 * @param parent Owning tab bar.
+			 */
+			explicit MuteIndicator(QWidget *parent) : QWidget(parent)
+			{
+				setAttribute(Qt::WA_TransparentForMouseEvents);
+			}
+
+			/**
+			 * @brief Selects the icon to paint.
+			 * @param icon Icon representing the current mute status.
+			 */
+			void setIcon(const QIcon &icon)
+			{
+				if (m_icon.cacheKey() == icon.cacheKey())
+					return;
+				m_icon = icon;
+				update();
+			}
+
+		protected:
+			/**
+			 * @brief Paints the icon using the current paint device.
+			 * @param event Widget paint event.
+			 */
+			void paintEvent(QPaintEvent *event) override
+			{
+				Q_UNUSED(event);
+				QPainter painter(this);
+				m_icon.paint(&painter, rect());
+			}
+
+		private:
+			QIcon m_icon;
+	};
+} // namespace
 
 MdiTabs::MdiTabs()
 {
@@ -46,43 +93,33 @@ void MdiTabs::updateTabs()
 	if (previousCurrentIndex >= 0 && previousCurrentIndex < m_orderedWindows.size())
 		previousCurrentWindow = m_orderedWindows[previousCurrentIndex];
 
-	setUpdatesEnabled(false);
 	const QSignalBlocker         blockSignals(this);
-
 	QMdiSubWindow               *activeWindow = m_mdiArea->activeSubWindow();
 	const QList<QMdiSubWindow *> windows      = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+	QSet<QMdiSubWindow *>        remaining(windows.cbegin(), windows.cend());
 
-	if (!m_userOrdered)
+	for (int index = count(); index-- > 0;)
 	{
-		// Keep tab positions stable by default. Activation-history ordering causes
-		// tabs to appear to swap when the active subwindow changes.
-		m_orderedWindows.clear();
-		for (QMdiSubWindow *sub : windows)
-			m_orderedWindows.push_back(sub);
-	}
-	else
-	{
-		for (qsizetype i = m_orderedWindows.size(); i-- > 0;)
+		if (!remaining.contains(m_orderedWindows.at(index).data()))
 		{
-			QPointer<QMdiSubWindow> sub = m_orderedWindows[i];
-			if (!sub)
-			{
-				m_orderedWindows.removeAt(i);
-				continue;
-			}
-			if (!windows.contains(sub))
-				m_orderedWindows.removeAt(i);
-		}
-
-		for (QMdiSubWindow *sub : windows)
-		{
-			if (!m_orderedWindows.contains(sub))
-				m_orderedWindows.push_back(sub);
+			m_orderedWindows.removeAt(index);
+			removeTab(index);
 		}
 	}
 
-	while (count() > 0)
-		removeTab(0);
+	QList<QMdiSubWindow *> desiredOrder = windows;
+	if (m_userOrdered)
+	{
+		desiredOrder.clear();
+		for (const auto &window : std::as_const(m_orderedWindows))
+		{
+			desiredOrder.append(window.data());
+			remaining.remove(window.data());
+		}
+		for (auto *window : windows)
+			if (remaining.contains(window))
+				desiredOrder.append(window);
+	}
 
 	auto tabTextForWindow = [](QMdiSubWindow *sub) -> QString
 	{
@@ -123,22 +160,47 @@ void MdiTabs::updateTabs()
 		return text;
 	};
 
-	int         activeTabIndex   = -1;
-	int         previousTabIndex = -1;
-	const auto &orderedWindows   = m_orderedWindows;
-	for (QMdiSubWindow *sub : orderedWindows)
+	int activeTabIndex   = -1;
+	int previousTabIndex = -1;
+	for (int index = 0; index < desiredOrder.size(); ++index)
 	{
-		if (!sub)
-			continue;
-
+		auto   *sub  = desiredOrder.at(index);
 		QString text = tabTextForWindow(sub);
 		if (text.isEmpty())
 			text = QStringLiteral("(untitled)");
+		const QIcon icon = m_showTabIcons ? sub->windowIcon() : QIcon{};
 
-		const int index = m_showTabIcons ? addTab(sub->windowIcon(), text) : addTab(text);
+		bool        inserted = false;
+		if (index >= m_orderedWindows.size() || m_orderedWindows.at(index) != sub)
+		{
+			const qsizetype oldIndex =
+			    index < m_orderedWindows.size() ? m_orderedWindows.indexOf(sub, index + 1) : -1;
+			if (oldIndex >= 0)
+			{
+				m_orderedWindows.move(oldIndex, index);
+				moveTab(static_cast<int>(oldIndex), index);
+			}
+			else
+			{
+				m_orderedWindows.insert(index, sub);
+				insertTab(index, icon, text);
+				inserted = true;
+				if (auto *world = qobject_cast<WorldChildWindow *>(sub))
+					connect(world, &WorldChildWindow::runtimeBindingChanged, this,
+					        &MdiTabs::onWorldRuntimeBindingChanged, Qt::UniqueConnection);
+				updateMuteIndicator(index, sub);
+			}
+		}
+		if (!inserted)
+		{
+			if (tabText(index) != text)
+				setTabText(index, text);
+			if (tabIcon(index).cacheKey() != icon.cacheKey())
+				setTabIcon(index, icon);
+		}
 		if (sub == activeWindow)
 			activeTabIndex = index;
-		if (previousCurrentWindow && sub == previousCurrentWindow)
+		if (sub == previousCurrentWindow)
 			previousTabIndex = index;
 	}
 
@@ -155,9 +217,6 @@ void MdiTabs::updateTabs()
 		setVisible(false);
 	else if (showTabs && !isVisible())
 		setVisible(true);
-
-	setUpdatesEnabled(true);
-	update();
 }
 
 QList<QMdiSubWindow *> MdiTabs::orderedWindows() const
@@ -222,6 +281,84 @@ void MdiTabs::onTabMoved(int from, int to)
 	emit windowOrderChanged();
 }
 
+void MdiTabs::updateMuteIndicator(const int index, QMdiSubWindow *subWindow)
+{
+	const auto *world   = qobject_cast<WorldChildWindow *>(subWindow);
+	const auto *runtime = world ? world->runtime() : nullptr;
+
+	const auto  session = runtime ? runtime->soundPlaybackSession() : nullptr;
+	if (runtime)
+		connect(runtime, &WorldRuntime::pluginMembershipChanged, this, &MdiTabs::onPluginMembershipChanged,
+		        Qt::UniqueConnection);
+
+	const bool worldMuted   = session && session->isMuted();
+	const auto mutedIds     = session && !worldMuted ? session->mutedPluginIds() : QSet<QString>{};
+	qsizetype  mutedPlugins = 0;
+	if (!mutedIds.isEmpty())
+	{
+		const QStringList pluginIds = runtime->pluginIdList();
+		for (const QString &id : pluginIds)
+			mutedPlugins += mutedIds.contains(id);
+	}
+	auto *indicator = dynamic_cast<MuteIndicator *>(tabButton(index, QTabBar::RightSide));
+	if (!worldMuted && mutedPlugins == 0)
+	{
+		if (indicator)
+		{
+			setTabButton(index, QTabBar::RightSide, nullptr);
+			indicator->deleteLater();
+			setTabToolTip(index, {});
+		}
+		return;
+	}
+
+	static const QIcon worldIcon(QStringLiteral(":/qmud/res/world_muted.png"));
+	static const QIcon pluginsIcon(QStringLiteral(":/qmud/res/plugins_muted.png"));
+	const int          extent = style()->pixelMetric(QStyle::PM_SmallIconSize, nullptr, this);
+	const QSize        size(extent, extent);
+	if (!indicator)
+	{
+		indicator = new MuteIndicator(this);
+		indicator->setFixedSize(size);
+		setTabButton(index, QTabBar::RightSide, indicator);
+	}
+	indicator->setIcon(worldMuted ? worldIcon : pluginsIcon);
+	setTabToolTip(index, worldMuted          ? tr("World muted")
+	                     : mutedPlugins == 1 ? tr("1 plugin muted")
+	                                         : tr("%1 plugins muted").arg(mutedPlugins));
+}
+
+void MdiTabs::refreshMuteIndicators(const WorldRuntime *runtime)
+{
+	for (int index = 0; index < m_orderedWindows.size(); ++index)
+	{
+		auto *view = qobject_cast<WorldChildWindow *>(m_orderedWindows.at(index).data());
+		if (view && view->runtime() == runtime)
+			updateMuteIndicator(index, view);
+	}
+}
+
+void MdiTabs::onPluginMembershipChanged()
+{
+	const QPointer<WorldRuntime> runtime(qobject_cast<WorldRuntime *>(sender()));
+	QMetaObject::invokeMethod(
+	    this,
+	    [this, runtime]
+	    {
+		    if (runtime)
+			    refreshMuteIndicators(runtime.data());
+	    },
+	    Qt::QueuedConnection);
+}
+
+void MdiTabs::onWorldRuntimeBindingChanged()
+{
+	auto           *window = qobject_cast<WorldChildWindow *>(sender());
+	const qsizetype index  = m_orderedWindows.indexOf(window);
+	if (window && index >= 0 && index < count())
+		updateMuteIndicator(static_cast<int>(index), window);
+}
+
 void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 {
 	if (!m_mdiArea)
@@ -238,7 +375,46 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 	if (!sub)
 		return;
 
-	QMenu    menu;
+	QMenu                               menu;
+	QPointer<WorldRuntime>              soundRuntime;
+	std::shared_ptr<SoundEngineSession> soundSession;
+	QAction                            *actMute        = nullptr;
+	QMenu                              *pluginMuteMenu = nullptr;
+	if (auto *world = qobject_cast<WorldChildWindow *>(sub.data()); world && world->runtime())
+	{
+		soundRuntime = world->runtime();
+		soundSession = soundRuntime->soundPlaybackSession();
+		actMute      = menu.addAction(QStringLiteral("Mute"));
+		actMute->setCheckable(true);
+		actMute->setEnabled(static_cast<bool>(soundSession));
+		actMute->setChecked(soundSession && soundSession->isMuted());
+
+		pluginMuteMenu = menu.addMenu(QStringLiteral("Mute Plugin"));
+		if (soundSession)
+		{
+			QHash<QString, QString> pluginNames;
+			for (const auto &plugin : soundRuntime->plugins())
+				pluginNames.insert(plugin.attributes.value(QStringLiteral("id")),
+				                   plugin.attributes.value(QStringLiteral("name")));
+
+			const QStringList pluginIds = soundRuntime->pluginIdList();
+			for (const QString &pluginId : pluginIds)
+			{
+				QString name = pluginNames.value(pluginId);
+				if (name.isEmpty())
+					name = soundRuntime->pluginInfo(pluginId, 1).toString();
+				if (name.isEmpty())
+					name = pluginId;
+				name.replace(QLatin1Char('&'), QStringLiteral("&&"));
+				QAction *action = pluginMuteMenu->addAction(name);
+				action->setCheckable(true);
+				action->setChecked(soundSession->isMuted(pluginId));
+				action->setData(pluginId);
+			}
+		}
+		pluginMuteMenu->setEnabled(!pluginMuteMenu->isEmpty());
+		menu.addSeparator();
+	}
 	QAction *actRestore = menu.addAction(QStringLiteral("Restore"));
 	QAction *actMove    = menu.addAction(QStringLiteral("Move"));
 	QAction *actSize    = menu.addAction(QStringLiteral("Size"));
@@ -258,6 +434,20 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 	if (storedIndex < 0 || storedIndex >= count())
 		return;
 	const int currentIndex = static_cast<int>(storedIndex);
+	if (chosen == actMute || (pluginMuteMenu && pluginMuteMenu->actions().contains(chosen)))
+	{
+		const auto *world = qobject_cast<WorldChildWindow *>(sub.data());
+		if (!soundRuntime || !world || world->runtime() != soundRuntime || !soundSession ||
+		    soundRuntime->soundPlaybackSession() != soundSession)
+			return;
+		if (chosen == actMute)
+			soundSession->setMuted(chosen->isChecked());
+		else if (const QString pluginId = chosen->data().toString();
+		         soundRuntime->pluginIdList().contains(pluginId))
+			soundSession->setMuted(chosen->isChecked(), pluginId);
+		refreshMuteIndicators(soundRuntime);
+		return;
+	}
 	if (chosen == actRestore)
 	{
 		activateTabWindow(currentIndex, sub.data());

@@ -130,6 +130,50 @@ namespace
 				         QStringLiteral("plain text"));
 			}
 
+			/**
+			 * @brief Supplies terminal formatting, metadata, and ordinary text for plain-text copying.
+			 */
+			static void stripTerminalControlCodes_data()
+			{
+				QTest::addColumn<QString>("input");
+				QTest::addColumn<QString>("expected");
+				QTest::newRow("plain")
+				    << QStringLiteral(" αβ\tline\r\nnext ") << QStringLiteral(" αβ\tline\r\nnext ");
+				QTest::newRow("sgr") << QStringLiteral("\x1b[1;31mred\x1b[0m\x1b[38;5;42mgreen\x1b[0m")
+				                     << QStringLiteral("redgreen");
+				QTest::newRow("rgb") << QStringLiteral("\x1b[38;2;1;2;3mone\x1b[48:2::4:5:6mtwo\x1b[m")
+				                     << QStringLiteral("onetwo");
+				QTest::newRow("csi") << QStringLiteral("\x1b[2J\x1b[?25ltext\x1b[?25h")
+				                     << QStringLiteral("text");
+				QTest::newRow("osc")
+				    << QStringLiteral(
+				           "\x1b]0;title\x07\x1b]8;;https://example.invalid\x1b\\link\x1b]8;;\x1b\\")
+				    << QStringLiteral("link");
+				QTest::newRow("c1")
+				    << QStringLiteral(
+				           "\u009b31mred\u009b0m\u009d8;;https://example.invalid\u009clink\u009d8;;\u009c")
+				    << QStringLiteral("redlink");
+				QTest::newRow("control-strings")
+				    << QStringLiteral("\x1bPmetadata\x1b\\\x1b_hidden\x1b\\text") << QStringLiteral("text");
+				QTest::newRow("other-controls") << QStringLiteral("\x1b(Btext\x07\x1b"
+				                                                  "7\n\tnext")
+				                                << QStringLiteral("text\n\tnext");
+				QTest::newRow("unfinished-csi") << QStringLiteral("text\x1b[38;2;") << QStringLiteral("text");
+				QTest::newRow("unfinished-osc")
+				    << QStringLiteral("text\x1b]0;title") << QStringLiteral("text");
+				QTest::newRow("formatting-only") << QStringLiteral("\x1b[0m") << QString{};
+			}
+
+			/**
+			 * @brief Removes terminal controls without altering the remaining text or whitespace.
+			 */
+			static void stripTerminalControlCodes()
+			{
+				QFETCH(QString, input);
+				QFETCH(QString, expected);
+				QCOMPARE(qmudStripTerminalControlCodes(input), expected);
+			}
+
 			void enabledFlag_data()
 			{
 				QTest::addColumn<QString>("value");
